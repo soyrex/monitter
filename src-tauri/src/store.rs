@@ -1,4 +1,7 @@
-use crate::model::{default_snapshot, now, Host, Snapshot};
+use crate::{
+    attachments::StoredAttachment,
+    model::{default_snapshot, now, Host, Snapshot},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -13,6 +16,8 @@ struct DiskState {
     snapshot: Snapshot,
     #[serde(rename = "_taskHosts", default)]
     task_hosts: HashMap<String, Host>,
+    #[serde(rename = "_attachments", default)]
+    attachments: HashMap<String, StoredAttachment>,
 }
 
 pub struct Store {
@@ -20,19 +25,29 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(dir: PathBuf) -> Result<(Self, Snapshot, HashMap<String, Host>), String> {
+    pub fn open(
+        dir: PathBuf,
+    ) -> Result<
+        (
+            Self,
+            Snapshot,
+            HashMap<String, Host>,
+            HashMap<String, StoredAttachment>,
+        ),
+        String,
+    > {
         fs::create_dir_all(&dir).map_err(|e| format!("Cannot create Monitter data folder: {e}"))?;
         private_dir(&dir)?;
         let path = dir.join("state.json");
         let existed = path.exists();
-        let (mut snapshot, mut task_hosts) = if existed {
+        let (mut snapshot, mut task_hosts, attachments) = if existed {
             let raw = fs::read_to_string(&path)
                 .map_err(|e| format!("Cannot read Monitter state: {e}"))?;
             let data: DiskState = serde_json::from_str(&raw)
                 .map_err(|e| format!("Monitter state is corrupt; it was not overwritten: {e}"))?;
-            (data.snapshot, data.task_hosts)
+            (data.snapshot, data.task_hosts, data.attachments)
         } else {
-            (default_snapshot(), HashMap::new())
+            (default_snapshot(), HashMap::new(), HashMap::new())
         };
 
         // Old state files did not contain immutable task host snapshots. Migrate
@@ -61,15 +76,16 @@ impl Store {
         recovered |= had_running_deliveries;
         let store = Self { path };
         if !existed || recovered {
-            store.save(&snapshot, &task_hosts)?;
+            store.save(&snapshot, &task_hosts, &attachments)?;
         }
-        Ok((store, snapshot, task_hosts))
+        Ok((store, snapshot, task_hosts, attachments))
     }
 
     pub fn save(
         &self,
         snapshot: &Snapshot,
         task_hosts: &HashMap<String, Host>,
+        attachments: &HashMap<String, StoredAttachment>,
     ) -> Result<(), String> {
         let temp = self
             .path
@@ -77,6 +93,7 @@ impl Store {
         let json = serde_json::to_vec_pretty(&DiskState {
             snapshot: snapshot.clone(),
             task_hosts: task_hosts.clone(),
+            attachments: attachments.clone(),
         })
         .map_err(|e| format!("Cannot encode Monitter state: {e}"))?;
         let mut file = private_create(&temp)?;
@@ -166,11 +183,28 @@ mod tests {
     #[test]
     fn save_is_private_and_preserves_task_hosts() {
         let dir = temp_dir("private");
-        let (store, snapshot, mut task_hosts) = Store::open(dir.clone()).unwrap();
+        let (store, snapshot, mut task_hosts, mut attachments) = Store::open(dir.clone()).unwrap();
         task_hosts.insert("task".into(), snapshot.hosts[0].clone());
-        store.save(&snapshot, &task_hosts).unwrap();
-        let (_, _, loaded) = Store::open(dir.clone()).unwrap();
+        attachments.insert(
+            "attachment".into(),
+            StoredAttachment {
+                attachment: crate::attachments::Attachment {
+                    id: "attachment".into(),
+                    name: "x.txt".into(),
+                    mime_type: "text/plain".into(),
+                    size: 1,
+                    path: "/tmp/x".into(),
+                    preview_data_url: None,
+                    source_id: None,
+                },
+                host_id: snapshot.hosts[0].id.clone(),
+                cwd: "/tmp".into(),
+            },
+        );
+        store.save(&snapshot, &task_hosts, &attachments).unwrap();
+        let (_, _, loaded, loaded_attachments) = Store::open(dir.clone()).unwrap();
         assert_eq!(loaded.get("task"), task_hosts.get("task"));
+        assert_eq!(loaded_attachments, attachments);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -12,7 +12,8 @@ import uuid
 parser = argparse.ArgumentParser()
 parser.add_argument("--peer", choices=["local", "mira"], required=True)
 parser.add_argument("--coordinator", choices=["local", "mira"], default="local")
-parser.add_argument("--model", default="gpt-5.5", help="Use a model supported by both installed Codex versions")
+parser.add_argument("--model", default="gpt-5.6-luna", help="Coordinator model supported by its installed Codex version")
+parser.add_argument("--peer-model", help="Optional peer model when hosts support different versions")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 binary = root / "src-tauri/target/debug/monitter-smoke"
@@ -50,14 +51,15 @@ def agent(name, host, cwd):
 
 coordinator = agent("Proof coordinator", coordinator_host, coordinator_cwd)
 reviewer = agent("Proof reviewer", peer_host, str(workspace) if args.peer == "local" else peer_host["defaultCwd"])
+reviewer["model"] = args.peer_model or args.model
 state = dict(hosts=hosts, agents=[coordinator, reviewer], tasks=[], messages=[], events=[], channels=[], projects=[], collaborations=[],
              settings=dict(accent="#3f9d6a", theme="system", interfaceScale=125, showToolActivity=True, showReasoningSummaries=True, sendWithEnter=False, sidebarView="standard"))
 state_path = state_dir / "state.json"
 state_path.write_text(json.dumps(state))
 os.chmod(state_path, 0o600)
 marker = "MONITTER_PROOF_" + uuid.uuid4().hex[:16]
-request_id = "proof-" + uuid.uuid4().hex
-inbox_request_id = "proof-inbox-" + uuid.uuid4().hex
+request_id = "proof-" + uuid.uuid4().hex[:12]
+inbox_request_id = "inbox-" + uuid.uuid4().hex[:12]
 inbox_marker = f"INBOX_ACK {marker}"
 prompt = f"""Perform a small Monitter integration proof using only Monitter's collaboration tools. Do not emit interim assistant messages; only the exact final answer.
 Call list_agents with query 'protocol proof' and find the agent named 'Proof reviewer'.
@@ -125,7 +127,8 @@ assert len(inbox_records) == 1 and inbox_records[0]["taskId"] == parent["id"] an
 parent_outputs = [m["text"] for m in snapshot["messages"] if m["taskId"] == parent["id"] and m["role"] == "assistant"]
 child_outputs = [m["text"] for m in snapshot["messages"] if m["taskId"] == child["id"] and m["role"] == "assistant"]
 assert len(parent_outputs) == 2 and parent_outputs.count(f"HANDOFF_OK {marker}") == 1 and parent_outputs.count(f"RESUME_OK {marker}") == 1, "Coordinator did not complete exactly the handoff and resume turns"
-assert len(child_outputs) == 1 and child_outputs.count(f"PEER_OK {marker}") == 1, "Reviewer did not complete exactly one acknowledgement turn"
+assert child_outputs and child_outputs[-1] == f"PEER_OK {marker}" and child_outputs.count(f"PEER_OK {marker}") == 1, "Reviewer did not finish with exactly one acknowledgement"
+assert sum(e["taskId"] == child["id"] and e["title"] == "turn.started" for e in snapshot["events"]) == 1, "Reviewer ran more than one native turn"
 assert any(m["taskId"] == parent["id"] and m["role"] == "assistant" and f"RESUME_OK {marker}" in m["text"] for m in snapshot["messages"]), "Resumed coordinator did not consume the persisted peer result"
 result = dict(ok=True, peer=args.peer, coordinator=args.coordinator, parentTaskId=parent["id"], childTaskId=child["id"], parentNativeSessionId=parent["nativeSessionId"], childNativeSessionId=child["nativeSessionId"], collaborationId=delivery["id"], inboxCollaborationId=peer_message["id"], marker=marker, inboxMarker=inbox_marker, artifact=str(run))
 (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")

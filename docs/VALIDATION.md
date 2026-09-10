@@ -286,3 +286,50 @@ Claude/OpenCode outbound tool injection is implemented and structurally checked;
 through those harnesses remains unclaimed. Hermes receives delegated tasks through its existing
 adapter, but outbound callable collaboration awaits its ephemeral tool interface. Multiplayer and
 iOS remain outside this version.
+
+
+## 2026-09-10: desktop workspace update
+
+The macOS build at 08:12 UTC adds independent split panes and draggable tabs/dividers, the compact
+sidebar and narrow-screen detail blade, seamless active tabs, archive-first chat management, Git
+status/diffs, startup/Stop state, centered jump-to-latest, and file/image drop/paste/picker support.
+Resume now starts a real continuation using the existing native session ID and streams into the same
+chat. It preserves unsent text and attachments. A fake executable integration test verifies the actual
+Codex resume arguments, native ID, prompt and streamed response; rejection tests preserve history.
+
+`cargo test --all-targets -j4`: 81 passed. `npm run check`: zero errors/warnings. Production build,
+ad-hoc codesign verification, DMG checksum and installed-bundle verification passed. The new local and
+embedded remote attachment fixtures verify bytes, limits, permissions and symlink rejection before
+child creation. Git/deletion fixtures cover nested roots, literal paths, renames, binary/truncated
+output, transport errors, exact session metadata and pre-unlink checks. No user session files were
+removed during validation.
+
+Installed `/Applications/Monitter.app` from `debug-evMt5c/Monitter.app`, build
+`2026-09-10T08:12:30.197Z`, executable SHA-256
+`056ed4b19a87fd54015dd8daddce1975c93b818edb0e5392ececc4fe61d79553`.
+The previous app and state are backed up. All existing agent, host, chat and message IDs/content were
+preserved; messages migrate with empty attachment arrays. The user has resumed using the app, so later
+state hashes reflect new activity. Native screenshot confirms the updated app with two independently
+scrolling panes, seamless tabs, Resume and attachment controls. See `verification/ui-install-evidence.json`.
+
+The old iCloud blocker is resolved: both exact offloaded skill files were read successfully. A real
+Mac-to-Mira run passed discovery, one delegation, one peer inbox message, exact result markers and native
+session resume with the persisted result. Evidence:
+`artifacts/collaboration-live-local-to-mira-1789027824209059000/result.json`.
+This proof used GPT-5.6 Luna locally and GPT-5.5 on Mira, preserving saved user agent models and native
+configuration. Local GPT-5.5 now returned HTTP 404 despite appearing in the cached catalog; no fallback
+was made in the product. The proof script accepts separate coordinator/peer models for host versions.
+
+
+Local Mac-to-Mac discovery/delegation/inbox/resume also passed with two separate native sessions:
+`artifacts/collaboration-live-local-to-local-1789028167705582000/result.json`. The native smoke result
+reported persisted completion through a service restart. The verifier now checks exactly one child
+`turn.started` and exactly one final PEER_OK acknowledgement, while allowing ordinary commentary
+before that final response. An earlier assertion incorrectly treated that commentary as an extra turn;
+rechecking the completed artifact with the corrected assertion passed. Local native IDs:
+`01a08a63-733d-7402-8f85-7826bd5a963c` and `01a08a63-c43a-7b32-8623-8288c0827663`.
+
+Browser fixtures passed Projects (7), scrolling (8), collaboration (5), controls (12), new attachments
+(4), split panes (4), Resume (3), composer startup/Stop (7), and sidebar/Git (5). They exercise real
+frontend state transitions with a labelled test-only IPC fixture; they do not claim live model responses.
+Native harness proofs are recorded separately above.

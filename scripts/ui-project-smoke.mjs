@@ -16,7 +16,9 @@ try {
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.goto(url);
-  await expect(page.getByRole('button', { name: 'Projects', exact: true })).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 30000 });
+  const setView=async name=>{await page.getByRole('button',{name:/^Sidebar view:/}).click();await page.getByRole('menuitemradio',{name,exact:true}).click()};
+  const newChat=async()=>{await page.keyboard.press('Meta+p');await page.getByRole('dialog').getByText('New chat',{exact:true}).click()};
   const openDraftOptions = async () => {
     const options = page.locator('details.draft-advanced');
     await expect(options).toBeVisible();
@@ -45,7 +47,7 @@ try {
   const taskByTitle = title => page.evaluate(title => window.__MONITTER_QA__.snapshot().tasks.find(task => task.title === title), title);
 
   // Project creation records an explicit workspace for each available host.
-  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  await setView('Projects');
   await page.getByRole('button', { name: 'New project', exact: true }).click();
   let dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: 'New project', exact: true })).toBeVisible();
@@ -65,14 +67,14 @@ try {
   passed.push('create project with local and SSH workspaces');
 
   const createProjectTask = async ({ title, agentId, expectedHost, expectedCwd }) => {
-    await page.getByRole('button', { name: 'New task', exact: true }).first().click();
+    await newChat();
     await openDraftOptions();
     await page.getByLabel('Task title', { exact: true }).fill(title);
     await page.getByLabel('Agent', { exact: true }).selectOption(agentId);
     await page.getByLabel('Project', { exact: true }).selectOption(await projectId());
     await page.getByLabel('Task message', { exact: true }).fill(`Create ${title} through the draft-first composer.`);
     const createsBefore = await page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'createTask').length);
-    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await page.getByRole('button', { name: 'Send task message', exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'createTask').length)).toBe(createsBefore + 1);
     await expect.poll(() => taskByTitle(title)).toMatchObject({ projectId: await projectId(), hostId: expectedHost, cwd: expectedCwd });
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
@@ -106,11 +108,11 @@ try {
   await page.getByRole('button', { name: /Local project chat/ }).first().click();
   await page.getByLabel('Task message', { exact: true }).fill('Draft survives sidebar views');
   for (const view of ['Standard', 'Activity', 'Projects']) {
-    await page.getByRole('button', { name: view, exact: true }).click();
+    await setView(view);
     await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.sidebarView)).toBe(view.toLowerCase());
     await expect(page.getByLabel('Task message', { exact: true })).toHaveValue('Draft survives sidebar views');
   }
-  await page.getByRole('button', { name: 'Activity', exact: true }).click();
+  await setView('Activity');
   await page.evaluate(() => {
     const qa = window.__MONITTER_QA__, state = qa.snapshot();
     const local = state.tasks.find(task => task.title === 'Local project chat');
@@ -140,7 +142,7 @@ try {
   passed.push('projects appear in Cmd-K and project/sidebar commands appear in Cmd-P');
 
   // Rename through the UI, then deleting the project unassigns chats without deleting their records.
-  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  await setView('Projects');
   await page.getByRole('button', { name: 'Open project Release QA', exact: true }).click();
   await page.getByRole('button', { name: 'Edit project Release QA', exact: true }).first().click();
   dialog = page.getByRole('dialog');

@@ -20,15 +20,15 @@ No fake conversations, progress, token counts, host connections or model replies
 - `rename_task { id: string, title: string }` -> Snapshot
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
-- `delete_task { id: string }` -> Snapshot (reject running; preserve native CLI history)
-- `send_message { taskId: string, text: string }` -> Snapshot (starts asynchronously)
+- `delete_task { id: string }` -> Snapshot (archived only; reject running; preserve native CLI history)
+- `send_message { taskId: string, text: string, attachmentIds?: string[] }` -> Snapshot (starts asynchronously)
 - `cancel_task { taskId: string }` -> Snapshot
 - `save_settings { settings: Settings }` -> Snapshot
 - `save_channel { channel: Channel }` -> Snapshot (empty id creates; preserve existing messages)
-- `send_channel_message { channelId: string, text: string, agentIds: string[] }` -> Snapshot
+- `send_channel_message { channelId: string, text: string, agentIds: string[], attachmentIds?: string[] }` -> Snapshot
   Explicit selected/mentioned recipients only. Each recipient has a dedicated task under channelId;
   initial/follow-up prompt includes recent channel context. Final replies mirror into channel messages.
-- `get_resume_command { taskId: string }` -> string (safe quoted local/SSH CLI resume command for clipboard)
+- `resume_task { taskId: string }` -> Snapshot (continue the existing native session asynchronously in this chat)
 
 Event `monitter:changed` payload `{ taskId?: string }` tells UI to reload snapshot (debounce <=150ms).
 The backend is authoritative; listen before initial snapshot. Errors reject with a readable string.
@@ -105,7 +105,7 @@ explicit denial of interactive requests, and owned child cleanup. Never silently
 Host.claudePath defaults to an empty string for older stored host snapshots. Task.archived defaults
 false; archiving preserves messages/events/native IDs and hides the chat from ordinary navigation.
 Cmd-K explicitly restores archived chats. Channel sends start a new task instead of reusing an
-archived one. Deletion confirmation is a UI step; deleting a Monitter chat preserves CLI history.
+archived one. Permanent deletion is available only after archiving. The confirmation preserves CLI history by default; an optional switch requests verified native session file cleanup as described below.
 
 Persist configuration and transcript in the Tauri app data directory, private permissions, atomic writes.
 Recover formerly running tasks as interrupted after restart. One active turn per task and provider/host/native-session key.
@@ -151,7 +151,7 @@ fabricated objective/status/token metrics. OpenCode plans are not presented as n
 
 Typing `/` opens a filtered, keyboard-accessible menu labelled Monitter commands. These are app
 actions: `/new` opens an independent draft, `/settings` opens preferences, `/project` selects the
-chat's project, `/stop` cancels a running task, `/resume` copies the native terminal command, and
+chat's project, `/stop` cancels a running task, `/resume` continues the saved native session in this chat, and
 `/goal` reads the available Codex goal. Task-specific actions only appear in applicable contexts.
 Selection supports arrows, Enter, Escape and clicking. IME composition does not select an action.
 
@@ -217,3 +217,86 @@ SSH uses an owned reverse forward bound to remote loopback and a private tempora
 credentials travel over SSH stdin into the remote environment; they never enter command arguments,
 persisted state, command previews or logs. No public listener or persistent remote service is installed.
 The broker rejects browser-origin requests, invalid/revoked grants, oversized input and unknown tools.
+
+## Task Git viewer
+
+`get_task_git_status(taskId)` and `get_task_git_diff(taskId, path, scope)` inspect only the saved
+folder and saved host of that task. They never accept a command, repository root or arbitrary
+working directory from the UI. Both commands derive repository membership again for each request.
+A non-repository folder returns `{ repository: false }`; it is not an error.
+
+A repository status returns `{ repository: true, root, branch, files, truncated }`. `branch` is
+null for detached HEAD. Each file has its repository-relative `path`, nullable `originalPath` for
+a rename/copy, `indexStatus`, `worktreeStatus`, and `untracked`; a file can carry both index and
+worktree changes. Status comes from NUL-delimited porcelain output and is bounded; `truncated`
+means the returned list is incomplete.
+
+A diff requires one exact path returned by current status and an explicit `staged`, `unstaged`, or
+`untracked` scope. The response is `{ repository, path, scope, text, truncated, binary }`.
+Untracked previews use a read-only no-index diff. Binary and oversized results are labelled rather
+than expanded indefinitely. Git runs with optional locks disabled and external diff/textconv
+disabled. Local and SSH execution use argument-safe invocation; the backend never stages, writes,
+reverts, commits, fetches, changes authentication or runs a shell built from UI input.
+
+## Archived permanent deletion
+
+`preview_task_deletion(taskId)` returns `{ supported, reason, files }`. It is a read-only preview of
+verified native session files. `delete_archived_task(taskId, removeNativeFiles)` permanently removes
+Monitter's archived chat only after it repeats archived/not-running and pending-collaboration guards.
+When native cleanup is requested, it repeats the preview checks before removing any file. Native cleanup
+never removes a directory, auth, configuration, index, cache, symlink or non-regular file. It preserves
+Monitter history if native cleanup cannot complete. Codex local and SSH JSONL sessions are eligible only when a
+valid native UUID is uniquely owned by this host/provider/task and a bounded scan verifies matching
+session metadata below canonical `sessions` or `archived_sessions`; other providers report a clear unsupported reason.
+
+
+## Resume in Monitter
+
+Resume and `/resume` start a continuation turn through the existing native CLI adapter with the
+chat's saved native session ID, host, working folder and permissions. Output streams into the same
+chat and Stop controls that owned run. The visible continuation asks the agent to continue where it
+left off, or acknowledge completion and wait if the previous request is already complete. Unsent
+composer text and attachments are preserved. Invalid, archived and already-running tasks are rejected
+before transcript changes. Errors stay visible. Resume does not create another chat, copy a terminal
+command, or take over an independently running Desktop/TUI process.
+
+## Pane layouts and navigation
+
+The main workspace offers one pane, two columns or a 2 × 2 grid. Each pane owns its tabs, selected
+chat/channel, drafts and right sidebar. Dividers resize with pointer dragging or arrow keys. Tabs move
+between panes; dropping toward a pane edge previews and creates a split, up to four panes. Collapsing
+the layout merges tabs and preserves drafts and uploaded references. Layout changes wait while a send
+acknowledgement or attachment upload is pending. Pane layout and unsent drafts are window-local.
+
+The main sidebar can collapse to agent avatars with chat popovers. Its single view menu selects
+Standard, Activity or Projects; nonstandard chat rows include the owning agent's avatar. Chat archive
+buttons appear on hover or focus. The monitter menu contains Preferences, Hosts, Agent directory and
+Archived chats. Cmd+, opens Preferences on macOS; Ctrl+, is available on Windows/Linux, alongside the
+platform equivalents for the other shortcuts. The right sidebar uses a dismissible blade when its chat
+pane is narrow. Menus use the browser top layer so pane overflow cannot crop them. Jump-to-latest is
+centered immediately above the composer. Send is an icon, startup uses a spinner, and current-turn
+activity shows Stop; both startup and stepping can be cancelled once a task exists.
+
+## Attachments
+
+`store_attachment { target, filename, mimeType, dataBase64, previewDataUrl?, sourceId? }` stores a
+regular file up to 20 MiB under the destination cwd's `.monitter/attachments`. `target` is either a
+saved `taskId` or a new draft's `agentId` plus optional `projectId`; the backend derives host/folder.
+The returned Attachment includes id, name, mimeType, size, path, previewDataUrl and optional sourceId.
+`read_attachment_file { sourcePath }` reads a native file drop with the same size limit. Browser paste
+and file picker supply bytes directly. New attachment directories are private 0700 and files 0600;
+symlinked storage directories are rejected before creating children. SSH writes use bounded transport
+and native host configuration. Original files are never moved or deleted.
+
+A private persisted registry binds attachment IDs to their exact host and folder. Sends accept only
+registered IDs for that destination and append JSON-quoted paths to the harness prompt while keeping
+ordinary message text unchanged. Attachment-only messages are valid. New drafts upload without creating
+a task or starting a harness. Channels store one copy per distinct recipient host/folder, route only the
+matching references to each recipient, and group copies by sourceId for display. Changing a draft's
+folder or channel recipients clears mismatched queued references with a visible explanation. Removing
+a queued attachment does not delete stored files. Files remain under `.monitter` after chat deletion.
+
+Persisted chat/channel messages show a file type icon or bounded embedded image thumbnail. Queue state
+and unsent text survive navigation and tab movement within the window. Failed uploads/sends remain
+visible and preserve successfully queued files. Thumbnails are at most 192 pixels and 256 KiB; missing
+image previews fall back to a file icon.

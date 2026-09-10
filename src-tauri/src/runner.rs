@@ -1756,7 +1756,14 @@ mod tests {
         let existing = r#"{"model":"remote/model","nested":{"keep":"value"},"mcp":{"existing":{"type":"remote","url":"https://example.test/mcp"}}}"#;
         let mut command = Command::new("python3");
         command
-            .args(["-c", REMOTE_SUPERVISOR, "/tmp", "/usr/bin/env"])
+            .args([
+                "-c",
+                REMOTE_SUPERVISOR,
+                "/tmp",
+                "/bin/sh",
+                "-c",
+                "cat >/dev/null; /usr/bin/env",
+            ])
             .env("OPENCODE_CONFIG_CONTENT", existing)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -87,6 +87,8 @@ pub struct Message {
     pub sender_agent_id: Option<String>,
     #[serde(default)]
     pub collaboration_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<crate::attachments::Attachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -402,6 +404,15 @@ mod task_migration_tests {
         .unwrap();
         assert!(snapshot.projects.is_empty());
         assert_eq!(snapshot.settings.sidebar_view, "standard");
+    }
+
+    #[test]
+    fn old_messages_default_to_no_attachments() {
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id":"m", "taskId":"t", "role":"user", "text":"hello", "createdAt":1
+        }))
+        .unwrap();
+        assert!(message.attachments.is_empty());
     }
 
     #[test]

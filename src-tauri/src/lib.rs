@@ -1,7 +1,10 @@
 mod adapters;
+mod attachments;
 mod collaboration;
 mod collaboration_runtime;
 mod collaboration_transport;
+mod deletion;
+mod git;
 mod goals;
 pub mod model;
 mod runner;
@@ -27,6 +30,7 @@ struct AppState(Arc<Service>);
 struct ServiceData {
     snapshot: Snapshot,
     task_hosts: HashMap<String, Host>,
+    attachments: HashMap<String, attachments::StoredAttachment>,
 }
 
 #[derive(Default)]
@@ -53,13 +57,14 @@ fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
 
 impl Service {
     fn open(app: Option<AppHandle>, dir: PathBuf) -> Result<Arc<Self>, String> {
-        let (store, snapshot, task_hosts) = store::Store::open(dir.clone())?;
+        let (store, snapshot, task_hosts, attachments) = store::Store::open(dir.clone())?;
         Ok(Arc::new(Self {
             app,
             store,
             data: Mutex::new(ServiceData {
                 snapshot,
                 task_hosts,
+                attachments,
             }),
             runs: Mutex::new(RunRegistry::default()),
             collaboration: Mutex::new(None),
@@ -97,8 +102,11 @@ impl Service {
             let output = f(&mut candidate)?;
             let changed = candidate != *data;
             if changed {
-                self.store
-                    .save(&candidate.snapshot, &candidate.task_hosts)?;
+                self.store.save(
+                    &candidate.snapshot,
+                    &candidate.task_hosts,
+                    &candidate.attachments,
+                )?;
                 *data = candidate;
             }
             (output, changed)
@@ -135,6 +143,47 @@ impl Service {
             .cloned()
             .ok_or_else(|| "Task's saved host settings were not found.".to_string())?;
         Ok((task, host))
+    }
+
+    fn store_attachment(
+        &self,
+        target: attachments::AttachmentTarget,
+        filename: String,
+        mime_type: String,
+        data_base64: String,
+        preview_data_url: Option<String>,
+        source_id: Option<String>,
+    ) -> Result<attachments::Attachment, String> {
+        let (host, cwd) = {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.")?;
+            resolve_attachment_target(&data, &target)?
+        };
+        let attachment = attachments::store(
+            &host,
+            &cwd,
+            &filename,
+            &mime_type,
+            &data_base64,
+            preview_data_url,
+            source_id,
+        )?;
+        self.mutate_data(None, |data| {
+            if data.attachments.contains_key(&attachment.id) {
+                return Err("Attachment ID collision.".into());
+            }
+            data.attachments.insert(
+                attachment.id.clone(),
+                attachments::StoredAttachment {
+                    attachment: attachment.clone(),
+                    host_id: host.id.clone(),
+                    cwd: cwd.clone(),
+                },
+            );
+            Ok(attachment.clone())
+        })
     }
 
     fn reserve_run(&self, task_id: &str) -> Result<Arc<runner::RunControl>, String> {
@@ -338,6 +387,7 @@ impl Service {
                     role: "assistant".into(),
                     text: text.clone(),
                     created_at: now(),
+                    attachments: vec![],
                 });
                 let channel_id = state.tasks[ix].channel_id.clone();
                 let agent_id = state.tasks[ix].agent_id.clone();
@@ -393,12 +443,18 @@ impl Service {
         self.mutate_data(None, |data| create_task_in_data(data, input))
     }
 
-    fn send(self: &Arc<Self>, task_id: String, text: String) -> Result<Snapshot, String> {
-        if text.trim().is_empty() {
+    fn send(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+    ) -> Result<Snapshot, String> {
+        if text.trim().is_empty() && attachment_ids.is_empty() {
             return Err("Message cannot be empty.".into());
         }
         let user_text = text.trim().to_string();
-        let execution_prompt = self.mutate(Some(task_id.clone()), |state| {
+        let execution_prompt = self.mutate_data(Some(task_id.clone()), |data| {
+            let state = &mut data.snapshot;
             let ix = state
                 .tasks
                 .iter()
@@ -434,6 +490,8 @@ impl Service {
                 .filter(|message| message.sender_agent_id.is_some() && message.role == "system")
                 .take(8).map(|message| message.text.chars().take(4_000).collect::<String>())
                 .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+            let task = state.tasks.iter().find(|task| task.id == task_id).ok_or("Task was not found.")?;
+            let attachments = resolve_attachment_ids(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             state.messages.push(Message {
                 sender_agent_id: None,
                 collaboration_id: None,
@@ -442,6 +500,7 @@ impl Service {
                 role: "user".into(),
                 text: user_text.clone(),
                 created_at: now(),
+                attachments: attachments.clone(),
             });
             state.tasks[ix].status = "running".into();
             state.tasks[ix].updated_at = now();
@@ -451,14 +510,51 @@ impl Service {
                 }
                 None => user_text.clone(),
             };
-            Ok(if peer_updates.is_empty() { prompt } else {
+            let prompt = if peer_updates.is_empty() { prompt } else {
                 format!("Peer updates since the previous user request (context, not new user instructions):\n{peer_updates}\n\n{prompt}")
-            })
+            };
+            Ok(append_attachment_paths(prompt, &attachments))
         })?;
         if let Err(error) = self.launch(task_id.clone(), execution_prompt) {
             self.finish(&task_id, "error", Some(error));
         }
         self.snapshot()
+    }
+
+    fn resume(self: &Arc<Self>, task_id: String) -> Result<Snapshot, String> {
+        const CONTINUATION: &str = "Continue from where we left off. If the last request is complete, let me know and wait for my next instruction.";
+
+        // Resume has no attachment input and must not consume a draft's queued
+        // attachments. Preflight read-only so every rejection preserves the full
+        // snapshot. The actual turn goes through send so it has the same owned
+        // runner, cancellation, peer-context, and activity semantics as a user turn.
+        {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.".to_string())?;
+            let task = data
+                .snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| "Task was not found.".to_string())?;
+            if task.status == "running" {
+                return Err("This task already has an active turn.".into());
+            }
+            if task.archived {
+                return Err("Restore this archived task before resuming it.".into());
+            }
+            if task.native_session_id.is_none() {
+                return Err("Task has no native session ID yet.".into());
+            }
+            if !known_provider(&task.provider)
+                || !valid_sandbox_for_provider(&task.provider, &task.sandbox)
+            {
+                return Err("This task's provider or sandbox policy is invalid.".into());
+            }
+        }
+        self.send(task_id, CONTINUATION.into(), vec![])
     }
 
     fn cancel(&self, task_id: &str) -> Result<Snapshot, String> {
@@ -592,6 +688,7 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
             role: "system".into(),
             text: agent_instructions(&agent),
             created_at: now(),
+            attachments: vec![],
         });
     }
     data.task_hosts.insert(task.id.clone(), host);
@@ -599,9 +696,156 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     Ok(task)
 }
 
+fn resolve_attachment_target(
+    data: &ServiceData,
+    target: &attachments::AttachmentTarget,
+) -> Result<(Host, String), String> {
+    if let Some(task_id) = target.task_id.as_deref() {
+        if target.agent_id.is_some() || target.project_id.is_some() {
+            return Err("Attachment target must be a task or a draft agent/project.".into());
+        }
+        let task = data
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .ok_or("Task was not found.")?;
+        let host = data
+            .task_hosts
+            .get(task_id)
+            .cloned()
+            .ok_or("Task's saved host settings were not found.")?;
+        return Ok((host, task.cwd.clone()));
+    }
+    let agent_id = target
+        .agent_id
+        .as_deref()
+        .ok_or("Attachment target needs a task or agent.")?;
+    let agent = data
+        .snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or("Agent was not found.")?;
+    let host = data
+        .snapshot
+        .hosts
+        .iter()
+        .find(|host| host.id == agent.host_id)
+        .cloned()
+        .ok_or("Agent host was not found.")?;
+    let cwd = if let Some(project_id) = target.project_id.as_deref() {
+        let project = data
+            .snapshot
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .ok_or("Project was not found.")?;
+        project
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.host_id == agent.host_id)
+            .map(|workspace| workspace.cwd.clone())
+            .unwrap_or_else(|| agent.cwd.clone())
+    } else {
+        agent.cwd.clone()
+    };
+    let cwd = if cwd.trim().is_empty() {
+        host.default_cwd.clone()
+    } else {
+        cwd
+    };
+    if cwd.trim().is_empty() {
+        return Err("Agent or host must specify a task folder.".into());
+    }
+    Ok((host, cwd))
+}
+
+fn resolve_attachment_ids(
+    registry: &HashMap<String, attachments::StoredAttachment>,
+    host_id: &str,
+    cwd: &str,
+    ids: &[String],
+) -> Result<Vec<attachments::Attachment>, String> {
+    let mut seen = std::collections::HashSet::new();
+    ids.iter()
+        .map(|id| {
+            if !seen.insert(id) {
+                return Err("Attachment IDs must not repeat.".into());
+            }
+            let stored = registry.get(id).ok_or("Attachment was not found.")?;
+            if stored.host_id != host_id || stored.cwd != cwd {
+                return Err("Attachment belongs to a different task host or folder.".into());
+            }
+            Ok(stored.attachment.clone())
+        })
+        .collect()
+}
+
+fn matching_attachments(
+    registry: &HashMap<String, attachments::StoredAttachment>,
+    host_id: &str,
+    cwd: &str,
+    ids: &[String],
+) -> Result<(Vec<attachments::Attachment>, Vec<String>), String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut attachments = Vec::new();
+    let mut matched = Vec::new();
+    for id in ids {
+        if !seen.insert(id) {
+            return Err("Attachment IDs must not repeat.".into());
+        }
+        let stored = registry.get(id).ok_or("Attachment was not found.")?;
+        if stored.host_id == host_id && stored.cwd == cwd {
+            attachments.push(stored.attachment.clone());
+            matched.push(id.clone());
+        }
+    }
+    Ok((attachments, matched))
+}
+
+fn append_attachment_paths(prompt: String, attachments: &[attachments::Attachment]) -> String {
+    if attachments.is_empty() {
+        return prompt;
+    }
+    let paths = attachments
+        .iter()
+        .map(|attachment| {
+            serde_json::to_string(&attachment.path).unwrap_or_else(|_| "\"attachment\"".into())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{prompt}\n\nAttached files are available at these host paths:\n{paths}")
+}
+
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
     state.0.snapshot()
+}
+
+#[tauri::command]
+fn read_attachment_file(source_path: String) -> Result<attachments::ReadAttachmentFile, String> {
+    attachments::read_attachment_file(&source_path)
+}
+
+#[tauri::command]
+fn store_attachment(
+    state: State<'_, AppState>,
+    target: attachments::AttachmentTarget,
+    filename: String,
+    mime_type: String,
+    data_base64: String,
+    preview_data_url: Option<String>,
+    source_id: Option<String>,
+) -> Result<attachments::Attachment, String> {
+    state.0.store_attachment(
+        target,
+        filename,
+        mime_type,
+        data_base64,
+        preview_data_url,
+        source_id,
+    )
 }
 
 #[tauri::command]
@@ -958,15 +1202,16 @@ fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, Strin
                 "Finish or cancel this chat's pending collaborations before deleting it.".into(),
             );
         }
-        if data
+        let task = data
             .snapshot
             .tasks
             .iter()
             .find(|task| task.id == id)
-            .ok_or_else(|| "Task was not found.".to_string())?
-            .status
-            == "running"
-        {
+            .ok_or_else(|| "Task was not found.".to_string())?;
+        if !task.archived {
+            return Err("Archive this chat before permanently deleting it.".into());
+        }
+        if task.status == "running" {
             return Err("Cancel a running task before deleting it.".into());
         }
         data.snapshot.tasks.retain(|task| task.id != id);
@@ -977,6 +1222,35 @@ fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, Strin
         data.task_hosts.remove(&id);
         Ok(data.snapshot.clone())
     })
+}
+
+#[tauri::command]
+fn preview_task_deletion(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<deletion::DeletionPreview, String> {
+    let (task, host) = state.0.task_and_host(&task_id)?;
+    Ok(deletion::preview(&state.0.snapshot()?, &task, &host))
+}
+
+#[tauri::command]
+fn delete_archived_task(
+    state: State<'_, AppState>,
+    task_id: String,
+    remove_native_files: bool,
+) -> Result<Snapshot, String> {
+    let (task, host) = state.0.task_and_host(&task_id)?;
+    let snapshot = state.0.snapshot()?;
+    if !task.archived {
+        return Err("Archive this chat before permanently deleting it.".into());
+    }
+    if task.status == "running" {
+        return Err("Cancel this running chat before permanently deleting it.".into());
+    }
+    if remove_native_files {
+        deletion::remove_verified(&snapshot, &task, &host)?;
+    }
+    delete_task(state, task_id)
 }
 
 #[tauri::command]
@@ -993,8 +1267,16 @@ fn send_message(
     state: State<'_, AppState>,
     task_id: String,
     text: String,
+    attachment_ids: Option<Vec<String>>,
 ) -> Result<Snapshot, String> {
-    state.0.send(task_id, text)
+    state
+        .0
+        .send(task_id, text, attachment_ids.unwrap_or_default())
+}
+
+#[tauri::command]
+fn resume_task(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
+    state.0.resume(task_id)
 }
 
 #[tauri::command]
@@ -1069,8 +1351,10 @@ fn send_channel_message(
     channel_id: String,
     text: String,
     mut agent_ids: Vec<String>,
+    attachment_ids: Option<Vec<String>>,
 ) -> Result<Snapshot, String> {
-    if text.trim().is_empty() || agent_ids.is_empty() {
+    let attachment_ids = attachment_ids.unwrap_or_default();
+    if (text.trim().is_empty() && attachment_ids.is_empty()) || agent_ids.is_empty() {
         return Err("Choose at least one recipient and enter a message.".into());
     }
     agent_ids.sort();
@@ -1137,6 +1421,7 @@ fn send_channel_message(
             .join("\n");
         let channel_name = state.channels[channel_ix].name.clone();
         let mut runs = Vec::new();
+        let mut matched_attachment_ids = std::collections::HashSet::new();
         for agent_id in &agent_ids {
             let agent = state
                 .agents
@@ -1193,6 +1478,7 @@ fn send_channel_message(
                         role: "system".into(),
                         text: agent_instructions(&agent),
                         created_at: now(),
+                        attachments: vec![],
                     });
                 }
                 data.task_hosts.insert(task.id.clone(), host);
@@ -1200,6 +1486,14 @@ fn send_channel_message(
                 state.tasks.push(task);
                 id
             };
+            let task = state
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .ok_or("Task was not found.")?;
+            let (attachments, matched) =
+                matching_attachments(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
+            matched_attachment_ids.extend(matched);
             state.messages.push(Message {
                 sender_agent_id: None,
                 collaboration_id: None,
@@ -1208,6 +1502,7 @@ fn send_channel_message(
                 role: "user".into(),
                 text: user_text.clone(),
                 created_at: now(),
+                attachments: attachments.clone(),
             });
             let task_prompt = if existing_ix.is_none() && !agent.instructions.trim().is_empty() {
                 format!(
@@ -1217,7 +1512,15 @@ fn send_channel_message(
             } else {
                 format!("Channel context:\n{context}\n\nNew message:\n{user_text}")
             };
-            runs.push((task_id, task_prompt));
+            runs.push((task_id, append_attachment_paths(task_prompt, &attachments)));
+        }
+        if attachment_ids
+            .iter()
+            .any(|id| !matched_attachment_ids.contains(id))
+        {
+            return Err(
+                "An attachment does not belong to any selected recipient host and folder.".into(),
+            );
         }
         Ok(runs)
     })?;
@@ -1324,7 +1627,7 @@ pub fn smoke_provider_sequence(
         channel_id: None,
         project_id: None,
     })?;
-    service.send(task.id.clone(), first.into())?;
+    service.send(task.id.clone(), first.into(), vec![])?;
     if cancel {
         wait_until_tool(&service, &task.id, 90)?;
         if service
@@ -1348,7 +1651,7 @@ pub fn smoke_provider_sequence(
             .map(|item| item.status.as_str())
             == Some("completed")
         {
-            service.send(task.id.clone(), second.into())?;
+            service.send(task.id.clone(), second.into(), vec![])?;
             wait_idle(&service, &task.id, 180)?;
         }
     }
@@ -1489,6 +1792,30 @@ async fn get_task_goal(
         .map_err(|error| format!("Goal lookup worker failed: {error}"))?
 }
 
+#[tauri::command]
+async fn get_task_git_status(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<git::GitStatus, String> {
+    let (task, host) = state.0.task_and_host(&task_id)?;
+    tauri::async_runtime::spawn_blocking(move || git::status(&host, &task.cwd))
+        .await
+        .map_err(|error| format!("Git status worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_task_git_diff(
+    state: State<'_, AppState>,
+    task_id: String,
+    path: String,
+    scope: String,
+) -> Result<git::GitDiff, String> {
+    let (task, host) = state.0.task_and_host(&task_id)?;
+    tauri::async_runtime::spawn_blocking(move || git::diff(&host, &task.cwd, &path, &scope))
+        .await
+        .map_err(|error| format!("Git diff worker failed: {error}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -1505,6 +1832,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            read_attachment_file,
+            store_attachment,
             save_host,
             delete_host,
             probe_host,
@@ -1516,14 +1845,19 @@ pub fn run() {
             set_task_project,
             rename_task,
             delete_task,
+            preview_task_deletion,
+            delete_archived_task,
             set_task_archived,
             send_message,
+            resume_task,
             cancel_task,
             save_settings,
             save_channel,
             send_channel_message,
             get_resume_command,
-            get_task_goal
+            get_task_goal,
+            get_task_git_status,
+            get_task_git_diff
         ])
         .build(tauri::generate_context!())
         .expect("error while running Monitter");
@@ -1543,6 +1877,38 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("monitter-{name}-{}", id()))
+    }
+
+    #[test]
+    fn attachment_ids_are_bound_to_the_exact_host_and_folder() {
+        let attachment = attachments::Attachment {
+            id: "attachment".into(),
+            name: "x.txt".into(),
+            mime_type: "text/plain".into(),
+            size: 1,
+            path: "/work/.monitter/attachments/x".into(),
+            preview_data_url: None,
+            source_id: None,
+        };
+        let mut registry = HashMap::new();
+        registry.insert(
+            attachment.id.clone(),
+            attachments::StoredAttachment {
+                attachment,
+                host_id: "host-a".into(),
+                cwd: "/work".into(),
+            },
+        );
+        assert!(
+            resolve_attachment_ids(&registry, "host-a", "/work", &["attachment".into()]).is_ok()
+        );
+        assert!(
+            resolve_attachment_ids(&registry, "host-b", "/work", &["attachment".into()]).is_err()
+        );
+        assert!(
+            resolve_attachment_ids(&registry, "host-a", "/other", &["attachment".into()]).is_err()
+        );
+        assert!(resolve_attachment_ids(&registry, "host-a", "/work", &["spoofed".into()]).is_err());
     }
 
     #[test]
@@ -1668,6 +2034,146 @@ mod tests {
     }
 
     #[test]
+    fn resume_rejections_leave_history_and_task_state_unchanged() {
+        let cases = [
+            (
+                None,
+                false,
+                "completed",
+                "Task has no native session ID yet.",
+            ),
+            (
+                Some("native"),
+                true,
+                "completed",
+                "Restore this archived task before resuming it.",
+            ),
+            (
+                Some("native"),
+                false,
+                "running",
+                "This task already has an active turn.",
+            ),
+        ];
+        for (native, archived, status, expected) in cases {
+            let dir = temp_dir("resume-rejection");
+            let service = Service::open(None, dir.clone()).unwrap();
+            let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+            let task = service
+                .create_task(CreateTaskInput {
+                    agent_id,
+                    title: "resume rejection".into(),
+                    native_session_id: native.map(str::to_owned),
+                    parent_task_id: None,
+                    channel_id: None,
+                    project_id: None,
+                })
+                .unwrap();
+            service
+                .mutate(None, |snapshot| {
+                    let task = snapshot
+                        .tasks
+                        .iter_mut()
+                        .find(|item| item.id == task.id)
+                        .unwrap();
+                    task.archived = archived;
+                    task.status = status.into();
+                    Ok(())
+                })
+                .unwrap();
+            let before = service.snapshot().unwrap();
+            assert_eq!(service.resume(task.id.clone()), Err(expected.into()));
+            assert_eq!(service.snapshot().unwrap(), before);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn resume_reuses_native_session_and_records_the_continuation_turn() {
+        let dir = temp_dir("resume-runner");
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("fake-codex");
+        let arguments = dir.join("arguments");
+        let prompt = dir.join("prompt");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"resumed\"}}}}'\n",
+                arguments.display(),
+                prompt.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(CreateTaskInput {
+                agent_id,
+                title: "resume runner".into(),
+                native_session_id: Some("native-session".into()),
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+            })
+            .unwrap();
+        service
+            .mutate_data(None, |data| {
+                data.task_hosts.get_mut(&task.id).unwrap().codex_path =
+                    executable.display().to_string();
+                Ok(())
+            })
+            .unwrap();
+        let before = service.snapshot().unwrap();
+        service.resume(task.id.clone()).unwrap();
+        wait_idle(&service, &task.id, 5).unwrap();
+
+        let after = service.snapshot().unwrap();
+        let resumed = after.tasks.iter().find(|item| item.id == task.id).unwrap();
+        assert_eq!(resumed.id, task.id);
+        assert_eq!(resumed.native_session_id.as_deref(), Some("native-session"));
+        assert_eq!(resumed.status, "completed");
+        assert_eq!(
+            after.messages.len(),
+            before.messages.len() + 2,
+            "Resume adds its visible continuation and the real harness response."
+        );
+        assert_eq!(
+            &after.messages[..before.messages.len()],
+            before.messages.as_slice(),
+            "Resume must preserve earlier transcript entries."
+        );
+        let continuation = &after.messages[before.messages.len()];
+        assert_eq!(continuation.role, "user");
+        assert_eq!(
+            continuation.text,
+            "Continue from where we left off. If the last request is complete, let me know and wait for my next instruction."
+        );
+        assert_eq!(after.messages.last().unwrap().role, "assistant");
+        assert_eq!(after.messages.last().unwrap().text, "resumed");
+        let arguments = std::fs::read_to_string(arguments)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(arguments[0], "exec");
+        assert!(arguments.windows(2).any(|pair| pair == ["-s", "read-only"]));
+        assert_eq!(
+            &arguments[arguments.len() - 4..],
+            ["resume", "--json", "native-session", "-"]
+        );
+        assert!(std::fs::read_to_string(prompt)
+            .unwrap()
+            .ends_with("User request:\nContinue from where we left off. If the last request is complete, let me know and wait for my next instruction.\n"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn archive_preserves_task_history_and_rejects_running_tasks() {
         let dir = temp_dir("archive");
         let service = Service::open(None, dir.clone()).unwrap();
@@ -1705,7 +2211,7 @@ mod tests {
                 .archived
         );
         assert_eq!(
-            service.send(task.id.clone(), "hidden".into()),
+            service.send(task.id.clone(), "hidden".into(), vec![]),
             Err("Restore this archived task before sending a message.".into())
         );
         assert_eq!(archived.messages, before_archive.messages);
@@ -1944,6 +2450,7 @@ mod tests {
                     role: "assistant".into(),
                     text: "kept transcript".into(),
                     created_at: now(),
+                    attachments: vec![],
                 });
                 Ok(())
             })

@@ -438,6 +438,7 @@ impl Service {
                     created_at: now(),
                     sender_agent_id: Some(item.from_agent_id.clone()),
                     collaboration_id: Some(item.id.clone()),
+                    attachments: vec![],
                 });
             }
             snapshot.tasks[task_index].status = "running".into();
@@ -512,6 +513,7 @@ impl Service {
                 created_at: finished,
                 sender_agent_id: Some(item.to_agent_id.clone()),
                 collaboration_id: Some(item.id.clone()),
+                attachments: vec![],
             });
             snapshot.events.push(RunEvent {
                 id: id(),
@@ -594,7 +596,7 @@ impl Service {
                 snapshot.collaborations[index].result = Some(DELIVERED_TO_ACTIVE_TURN.into());
                 snapshot.collaborations[index].updated_at = now();
                 if !snapshot.messages.iter().any(|message| message.collaboration_id.as_deref() == Some(item.id.as_str())) {
-                    snapshot.messages.push(Message { id:id(), task_id:caller_task.into(), role:"user".into(), text:item.text.clone(), created_at:now(), sender_agent_id:Some(item.from_agent_id.clone()), collaboration_id:Some(item.id.clone()) });
+                    snapshot.messages.push(Message { id:id(), task_id:caller_task.into(), role:"user".into(), text:item.text.clone(), created_at:now(), sender_agent_id:Some(item.from_agent_id.clone()), collaboration_id:Some(item.id.clone()), attachments:vec![] });
                 }
             }
             Ok(snapshot.collaborations.iter().filter(|item| {
@@ -732,6 +734,7 @@ fn fail_queued_delivery(snapshot: &mut Snapshot, index: usize, error: &str) {
         created_at: time,
         sender_agent_id: Some(item.to_agent_id.clone()),
         collaboration_id: Some(item.id.clone()),
+        attachments: vec![],
     });
     snapshot.events.push(RunEvent {
         id: id(),
@@ -1259,7 +1262,8 @@ mod tests {
     #[test]
     fn completion_uses_delivery_marker_and_recovery_preserves_queued_work() {
         let dir = temp_dir("recovery");
-        let (store, mut snapshot, hosts) = crate::store::Store::open(dir.clone()).unwrap();
+        let (store, mut snapshot, hosts, attachments) =
+            crate::store::Store::open(dir.clone()).unwrap();
         snapshot.collaborations = vec![
             Collaboration {
                 id: "run".into(),
@@ -1300,6 +1304,7 @@ mod tests {
             created_at: 1,
             sender_agent_id: None,
             collaboration_id: None,
+            attachments: vec![],
         });
         snapshot.messages.push(Message {
             id: "marker".into(),
@@ -1309,6 +1314,7 @@ mod tests {
             created_at: 2,
             sender_agent_id: Some("a".into()),
             collaboration_id: Some("run".into()),
+            attachments: vec![],
         });
         snapshot.messages.push(Message {
             id: "new".into(),
@@ -1318,6 +1324,7 @@ mod tests {
             created_at: 3,
             sender_agent_id: None,
             collaboration_id: None,
+            attachments: vec![],
         });
         Service::complete_collaborations(&mut snapshot, "target", "completed", None);
         assert_eq!(
@@ -1326,9 +1333,9 @@ mod tests {
         );
         snapshot.collaborations[0].status = "running".into();
         snapshot.collaborations[0].result = None;
-        store.save(&snapshot, &hosts).unwrap();
+        store.save(&snapshot, &hosts, &attachments).unwrap();
         drop(store);
-        let (_, recovered, _) = crate::store::Store::open(dir.clone()).unwrap();
+        let (_, recovered, _, _) = crate::store::Store::open(dir.clone()).unwrap();
         assert_eq!(recovered.collaborations[0].status, "interrupted");
         assert_eq!(recovered.collaborations[1].status, "queued");
         let _ = fs::remove_dir_all(dir);

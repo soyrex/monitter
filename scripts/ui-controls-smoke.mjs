@@ -13,12 +13,15 @@ try {
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   const ready = async () => {
     await page.goto(url);
-    await expect(page.getByRole('button', { name: 'New task', exact: true }).first()).toBeVisible({ timeout: 30000 });
+    await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 30000 });
   };
   const scale = () => page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.interfaceScale);
   const callCount = method => page.evaluate(method => window.__MONITTER_QA__.calls.filter(call => call.method === method).length, method);
   const newDraft = async title => {
-    await page.getByRole('button', { name: 'New task', exact: true }).first().click();
+    await page.keyboard.press('Meta+p');
+    const palette = page.getByRole('dialog', { name: 'Controls', exact: true });
+    await expect(palette).toBeVisible();
+    await palette.getByText('New chat', { exact: true }).click();
     if (title) {
       await page.locator('.draft-advanced').evaluate(el => el.open = true);
       await page.getByLabel('Task title', { exact: true }).fill(title);
@@ -95,7 +98,7 @@ try {
   await composer.fill('/compact');
   await composer.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send task message', exact: true }).click();
   await expect(page.getByText(/This command is not available through Monitter/)).toBeVisible();
   await expect(composer).toHaveValue('/compact');
   await composer.press('Meta+Enter');
@@ -111,7 +114,7 @@ try {
   await composer.dispatchEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true });
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await composer.fill('//literal command explanation');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send task message', exact: true }).click();
   await expect.poll(() => callCount('sendMessage')).toBe(1);
   const sent = await page.evaluate(() => window.__MONITTER_QA__.calls.find(call => call.method === 'sendMessage'));
   expect(sent.args.text).toBe('/literal command explanation');
@@ -131,7 +134,7 @@ try {
     window.__MONITTER_QA__.releaseCreate = release;
     bridge.createTask = async (...args) => { bridge.createTask = original; await pending; return original(...args); };
   });
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send task message', exact: true }).click();
   await composer.fill('New text written while A was sending');
   await page.getByRole('button', { name: 'Unrelated draft B', exact: true }).click();
   await page.evaluate(() => window.__MONITTER_QA__.releaseCreate());
@@ -165,7 +168,7 @@ try {
   await expect(page.locator('.run-detail')).toContainText('qa-model');
   await page.getByRole('button', { name: 'Task actions', exact: true }).click();
   await page.getByRole('button', { name: 'Hide run detail', exact: true }).click();
-  await expect(page.locator('.run-detail')).toHaveCount(0);
+  await expect(page.locator('.run-detail')).toBeHidden();
   await page.getByRole('button', { name: 'Task actions', exact: true }).click();
   await page.getByRole('button', { name: 'Show run detail', exact: true }).click();
   await expect(page.locator('.run-detail')).toBeVisible();
@@ -204,7 +207,7 @@ try {
   expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
   expect(layout.paneOverflow).toBe('auto');
   await composer.fill('Draft at compact scale');
-  await page.getByRole('button', { name: 'Send', exact: true }).scrollIntoViewIfNeeded();
+  await page.getByRole('button', { name: 'Send task message', exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: 'verification/ui-new-draft-compact.png' });
   passed.push('new-chat view keeps document fixed and independently scrolls at a compact 200%-equivalent viewport');
 

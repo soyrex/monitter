@@ -9,6 +9,7 @@
   const clone = value => JSON.parse(JSON.stringify(value));
   const callbacks = new Set();
   const calls = [];
+  const attachments = new Map();
   const copy = () => clone(state);
   const notify = () => callbacks.forEach(fn => fn());
   const record = (method,args) => calls.push({method,args});
@@ -36,24 +37,36 @@
     createTask,
     renameTask:async(id,title)=>{record('renameTask',{id,title});state.tasks.find(t=>t.id===id).title=title;notify();return copy();},
     deleteTask:async id=>{record('deleteTask',id);state.tasks=state.tasks.filter(t=>t.id!==id);notify();return copy();},
+    previewTaskDeletion:async taskId=>{record('previewTaskDeletion',{taskId});return clone(state.deletionPreview?.[taskId] ?? {supported:false,reason:'Native session files are not available for this task.',files:[]});},
+    deleteArchivedTask:async(taskId,removeNativeFiles)=>{record('deleteArchivedTask',{taskId,removeNativeFiles});if(state.deleteFailure?.[taskId]) throw Error(state.deleteFailure[taskId]);const task=state.tasks.find(t=>t.id===taskId);if(!task?.archived) throw Error('Only archived chats can be permanently deleted.');state.tasks=state.tasks.filter(t=>t.id!==taskId);state.messages=state.messages.filter(m=>m.taskId!==taskId);state.events=state.events.filter(e=>e.taskId!==taskId);notify();return copy();},
     setTaskArchived:async(taskId,archived)=>{record('setTaskArchived',{taskId,archived});state.tasks.find(t=>t.id===taskId).archived=archived;notify();return copy();},
     saveProject:async project=>{record('saveProject',project);return save('projects',project);},
     deleteProject:async id=>{record('deleteProject',id);state.projects=state.projects.filter(p=>p.id!==id);state.tasks.forEach(t=>{if(t.projectId===id)t.projectId=null;});notify();return copy();},
     setTaskProject:async(taskId,projectId)=>{record('setTaskProject',{taskId,projectId});state.tasks.find(t=>t.id===taskId).projectId=projectId;notify();return copy();},
-    sendMessage:async(taskId,text)=>{
-      record('sendMessage',{taskId,text});
+    sendMessage:async(taskId,text,attachmentIds=[])=>{
+      record('sendMessage',{taskId,text,attachmentIds});
       if(text==='TEST_FAILURE') throw Error('Deliberate QA transport failure');
       state.tasks.find(t=>t.id===taskId).status='running';
-      state.messages.push({id:crypto.randomUUID(),taskId,role:'user',text,createdAt:Date.now()});
+      state.messages.push({id:crypto.randomUUID(),taskId,role:'user',text,createdAt:Date.now(),attachments:attachmentIds.map(id=>clone(attachments.get(id)))});
       state.events.push({id:crypto.randomUUID(),taskId,kind:'status',title:'Running',detail:'Browser test event; no agent is being executed.',createdAt:Date.now()});
       notify();return copy();
     },
     cancelTask:async taskId=>{record('cancelTask',taskId);state.tasks.find(t=>t.id===taskId).status='interrupted';notify();return copy();},
     saveSettings:async settings=>{record('saveSettings',settings);state.settings=settings;notify();return copy();},
     saveChannel:async c=>{record('saveChannel',c);return save('channels',c);},
-    sendChannelMessage:async(channelId,text,agentIds)=>{record('sendChannelMessage',{channelId,text,agentIds});state.channels.find(c=>c.id===channelId).messages.push({id:crypto.randomUUID(),role:'user',agentId:null,text,createdAt:Date.now(),taskId:null});notify();return copy();},
+    sendChannelMessage:async(channelId,text,agentIds,attachmentIds=[])=>{record('sendChannelMessage',{channelId,text,agentIds,attachmentIds});state.channels.find(c=>c.id===channelId).messages.push({id:crypto.randomUUID(),role:'user',agentId:null,text,createdAt:Date.now(),taskId:null,attachments:attachmentIds.map(id=>clone(attachments.get(id)))});notify();return copy();},
+    getTaskGitStatus:async taskId=>{record('getTaskGitStatus',{taskId});return clone(state.gitStatus?.[taskId] ?? {repository:false});},
+    getTaskGitDiff:async(taskId,path,scope)=>{record('getTaskGitDiff',{taskId,path,scope});return clone(state.gitDiffs?.[taskId]?.[`${scope}:${path}`] ?? {repository:false});},
     getTaskGoal:async taskId=>{record('getTaskGoal',taskId);return clone(state.goals?.[taskId] ?? null);},
-    getResumeCommand:async taskId=>{record('getResumeCommand',taskId);return "codex resume 'QA-session'";},
+    resumeTask:async taskId=>{record('resumeTask',{taskId});const task=state.tasks.find(t=>t.id===taskId);if(state.resumeFailure)throw Error(state.resumeFailure);if(!task?.nativeSessionId || task.archived || task.status==='running')throw Error('This session cannot be resumed.');task.status='running';state.messages.push({id:crypto.randomUUID(),taskId,role:'user',text:'Continue from where we left off. If the last request is complete, let me know and wait for my next instruction.',createdAt:Date.now()});notify();return copy();},
+    readAttachmentFile:async sourcePath=>{record('readAttachmentFile',{sourcePath});return {filename:sourcePath.split('/').at(-1),mimeType:'text/plain',dataBase64:btoa('Native file fixture')};},
+    storeAttachment:async(target,file,previewDataUrl=null,sourceId)=>{
+      record('storeAttachment',{target,...file,previewDataUrl,sourceId});
+      if(state.attachmentFailure)throw Error(state.attachmentFailure);
+      const task=state.tasks.find(t=>t.id===target.taskId),agent=state.agents.find(a=>a.id===target.agentId),project=state.projects.find(p=>p.id===target.projectId);
+      const cwd=task?.cwd || project?.workspaces.find(w=>w.hostId===agent?.hostId)?.cwd || agent?.cwd;
+      const item={id:crypto.randomUUID(),name:file.filename,mimeType:file.mimeType,size:atob(file.dataBase64).length,path:`${cwd}/.monitter/attachments/${crypto.randomUUID()}-${file.filename}`,previewDataUrl,sourceId};attachments.set(item.id,item);return clone(item);
+    },
     onChanged:async handler=>{callbacks.add(handler);return ()=>callbacks.delete(handler);}
   };
 })();

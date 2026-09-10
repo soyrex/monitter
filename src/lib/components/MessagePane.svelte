@@ -88,8 +88,8 @@
   .message-pane { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
   .messages { flex: 1; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 25px clamp(25px, 4vw, 50px); }
   .message-content { display: flow-root; }
-  .jump-latest { position: absolute; right: 18px; bottom: 14px; z-index: 2; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); background: var(--panel); box-shadow: 0 3px 12px #0002; cursor: pointer; }
+  .jump-latest { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; z-index: 2; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); background: var(--panel); box-shadow: 0 3px 12px #0002; cursor: pointer; }
   .jump-latest:hover { color: var(--accent-ink); border-color: var(--accent); background: var(--soft); }
   .jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  @media (max-width: 640px) { .messages { padding: 14px; } .jump-latest { right: 12px; bottom: 10px; } }
+  @media (max-width: 640px) { .messages { padding: 14px; } .jump-latest { bottom: 10px; } }
 </style>

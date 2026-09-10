@@ -29,6 +29,7 @@ export interface Message {
   id: string; taskId: string; role: 'user' | 'assistant' | 'system';
   text: string; createdAt: number;
   senderAgentId?: string | null; collaborationId?: string | null;
+  attachments?: Attachment[];
 }
 export interface Collaboration {
   id: string; kind: 'message' | 'delegation';
@@ -44,6 +45,7 @@ export interface RunEvent {
 export interface ChannelMessage {
   id: string; role: 'user' | 'assistant'; agentId: string | null;
   text: string; createdAt: number; taskId: string | null;
+  attachments?: Attachment[];
 }
 export interface Channel {
   id: string; name: string; description: string; agentIds: string[];
@@ -70,3 +72,34 @@ export interface Goal {
   tokensUsed?: number; timeUsedSeconds?: number;
 }
 export interface ComputerActivity { id: string; tool: string; summary: string; }
+
+export type GitDiffScope = 'staged' | 'unstaged' | 'untracked';
+export interface TaskDeletionPreview { supported: boolean; reason: string; files: string[]; }
+export interface Attachment {
+  id: string; name: string; mimeType: string; size: number; path: string;
+  previewDataUrl?: string | null; sourceId?: string | null;
+}
+export interface AttachmentTarget { taskId?: string; agentId?: string; projectId?: string | null; }
+export interface AttachmentFileData { filename: string; mimeType: string; dataBase64: string; }
+export interface GitFileStatus {
+  path: string;
+  originalPath: string | null;
+  indexStatus: string;
+  worktreeStatus: string;
+  untracked: boolean;
+}
+export type TaskGitStatus = { repository: false } | {
+  repository: true;
+  root: string;
+  branch: string | null;
+  files: GitFileStatus[];
+  truncated: boolean;
+};
+export type TaskGitDiff = { repository: false } | {
+  repository: true;
+  path: string;
+  scope: GitDiffScope;
+  text: string;
+  truncated: boolean;
+  binary: boolean;
+};

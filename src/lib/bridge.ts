@@ -11,6 +11,13 @@ import type {
   Settings,
   Snapshot,
   Task,
+  GitDiffScope,
+  TaskGitStatus,
+  TaskGitDiff,
+  TaskDeletionPreview,
+  Attachment,
+  AttachmentTarget,
+  AttachmentFileData,
 } from "./types";
 
 export interface MonitterBridge {
@@ -28,7 +35,7 @@ export interface MonitterBridge {
   saveProject(project: Project): Promise<Snapshot>;
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
-  sendMessage(taskId: string, text: string): Promise<Snapshot>;
+  sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;
   saveChannel(channel: Channel): Promise<Snapshot>;
@@ -36,9 +43,16 @@ export interface MonitterBridge {
     channelId: string,
     text: string,
     agentIds: string[],
+    attachmentIds?: string[],
   ): Promise<Snapshot>;
-  getResumeCommand(taskId: string): Promise<string>;
+  resumeTask(taskId: string): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
+  getTaskGitStatus(taskId: string): Promise<TaskGitStatus>;
+  getTaskGitDiff(taskId: string, path: string, scope: GitDiffScope): Promise<TaskGitDiff>;
+  previewTaskDeletion(taskId: string): Promise<TaskDeletionPreview>;
+  deleteArchivedTask(taskId: string, removeNativeFiles: boolean): Promise<Snapshot>;
+  storeAttachment(target: AttachmentTarget, file: AttachmentFileData, previewDataUrl?: string | null, sourceId?: string): Promise<Attachment>;
+  readAttachmentFile(sourcePath: string): Promise<AttachmentFileData>;
   onChanged(handler: () => void): Promise<UnlistenFn>;
 }
 
@@ -73,16 +87,21 @@ const nativeBridge: MonitterBridge = {
   saveProject: project => invoke<Snapshot>("save_project", {project}),
   deleteProject: id => invoke<Snapshot>("delete_project", {id}),
   setTaskProject: (taskId, projectId) => invoke<Snapshot>("set_task_project", {taskId, projectId}),
-  sendMessage: (taskId, text) =>
-    invoke<Snapshot>("send_message", { taskId, text }),
+  sendMessage: (taskId, text, attachmentIds = []) =>
+    invoke<Snapshot>("send_message", { taskId, text, attachmentIds }),
   cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
   saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
   saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
-  sendChannelMessage: (channelId, text, agentIds) =>
-    invoke<Snapshot>("send_channel_message", { channelId, text, agentIds }),
-  getResumeCommand: (taskId) =>
-    invoke<string>("get_resume_command", { taskId }),
+  sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) =>
+    invoke<Snapshot>("send_channel_message", { channelId, text, agentIds, attachmentIds }),
+  resumeTask: (taskId) => invoke<Snapshot>("resume_task", { taskId }),
   getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
+  getTaskGitStatus: taskId => invoke<TaskGitStatus>("get_task_git_status", { taskId }),
+  getTaskGitDiff: (taskId, path, scope) => invoke<TaskGitDiff>("get_task_git_diff", { taskId, path, scope }),
+  previewTaskDeletion: taskId => invoke<TaskDeletionPreview>("preview_task_deletion", { taskId }),
+  deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
+  storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, previewDataUrl, sourceId}),
+  readAttachmentFile: sourcePath => invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
   onChanged: async (handler) => listen("monitter:changed", handler),
 };
 
@@ -125,8 +144,14 @@ const previewBridge: MonitterBridge = {
   saveSettings: () => desktopOnly(),
   saveChannel: () => desktopOnly(),
   sendChannelMessage: () => desktopOnly(),
-  getResumeCommand: () => desktopOnly(),
+  resumeTask: () => desktopOnly(),
   getTaskGoal: async () => null,
+  getTaskGitStatus: () => desktopOnly(),
+  getTaskGitDiff: () => desktopOnly(),
+  previewTaskDeletion: () => desktopOnly(),
+  deleteArchivedTask: () => desktopOnly(),
+  storeAttachment: () => desktopOnly(),
+  readAttachmentFile: () => desktopOnly(),
   onChanged: async () => () => {},
 };
 
@@ -158,23 +183,29 @@ export function getBridge(): MonitterBridge {
       saveProject: project => test.invoke("save_project", {project}) as Promise<Snapshot>,
       deleteProject: id => test.invoke("delete_project", {id}) as Promise<Snapshot>,
       setTaskProject: (taskId, projectId) => test.invoke("set_task_project", {taskId, projectId}) as Promise<Snapshot>,
-      sendMessage: (taskId, text) =>
-        test.invoke("send_message", { taskId, text }) as Promise<Snapshot>,
+      sendMessage: (taskId, text, attachmentIds = []) =>
+        test.invoke("send_message", { taskId, text, attachmentIds }) as Promise<Snapshot>,
       cancelTask: (taskId) =>
         test.invoke("cancel_task", { taskId }) as Promise<Snapshot>,
       saveSettings: (settings) =>
         test.invoke("save_settings", { settings }) as Promise<Snapshot>,
       saveChannel: (channel) =>
         test.invoke("save_channel", { channel }) as Promise<Snapshot>,
-      sendChannelMessage: (channelId, text, agentIds) =>
+      sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) =>
         test.invoke("send_channel_message", {
           channelId,
           text,
           agentIds,
+          attachmentIds,
         }) as Promise<Snapshot>,
-      getResumeCommand: (taskId) =>
-        test.invoke("get_resume_command", { taskId }) as Promise<string>,
+      resumeTask: (taskId) => test.invoke("resume_task", { taskId }) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,
+      getTaskGitStatus: taskId => test.invoke("get_task_git_status", {taskId}) as Promise<TaskGitStatus>,
+      getTaskGitDiff: (taskId, path, scope) => test.invoke("get_task_git_diff", {taskId, path, scope}) as Promise<TaskGitDiff>,
+      previewTaskDeletion: taskId => test.invoke("preview_task_deletion", {taskId}) as Promise<TaskDeletionPreview>,
+      deleteArchivedTask: (taskId, removeNativeFiles) => test.invoke("delete_archived_task", {taskId, removeNativeFiles}) as Promise<Snapshot>,
+      storeAttachment: (target, file, previewDataUrl = null, sourceId) => test.invoke("store_attachment", {target, ...file, previewDataUrl, sourceId}) as Promise<Attachment>,
+      readAttachmentFile: sourcePath => test.invoke("read_attachment_file", {sourcePath}) as Promise<AttachmentFileData>,
       onChanged: (handler) => test.listen("monitter:changed", handler),
     };
   }

@@ -18,7 +18,7 @@ try {
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.goto(url);
-  await expect(page.getByRole('button', { name: 'New task', exact: true }).first()).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 30000 });
 
   await page.evaluate(source => { window.__scrollLongText = Function(`return (${source})`)(); }, longText.toString());
   const ids = await page.evaluate(() => {
@@ -164,7 +164,7 @@ try {
   await openChatA();
   await scrollUp();
   await page.getByLabel('Task message', { exact: true }).fill('Send chat scroll regression message');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send task message', exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'sendMessage').length)).toBeGreaterThan(0);
   await atBottom();
   await page.evaluate(taskId => {
@@ -178,7 +178,7 @@ try {
   await page.locator('.recipient-picker').getByRole('button', { name: 'Atlas', exact: true }).click();
   await scrollUp();
   await page.getByLabel('Channel message', { exact: true }).fill('Send channel scroll regression message');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send channel message', exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'sendChannelMessage').length)).toBeGreaterThan(0);
   await atBottom();
   passed.push('channel: successful send returns the active conversation to latest');
@@ -197,7 +197,7 @@ try {
     };
   });
   await page.getByLabel('Task message', { exact: true }).fill('Delayed send must stay scoped');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await page.getByRole('button', { name: 'Send task message', exact: true }).click();
   await openChatB();
   await atBottom();
   await scrollUp();

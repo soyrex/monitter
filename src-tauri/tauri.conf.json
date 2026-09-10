@@ -15,7 +15,7 @@
         "title": "Monitter",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 14, "y": 19 },
+        "trafficLightPosition": { "x": 14, "y": 34 },
         "width": 1440,
         "height": 940,
         "minWidth": 1024,

@@ -1,0 +1,57 @@
+import {chromium,expect} from '@playwright/test';
+import {mkdirSync,writeFileSync} from 'node:fs';
+mkdirSync('verification',{recursive:true});
+const browser=await chromium.launch({headless:true}),passed=[],errors=[];
+const page=await browser.newPage({viewport:{width:1440,height:900}});
+page.on('pageerror',e=>errors.push(e.message));
+try {
+  await page.addInitScript({path:'scripts/ui-fixture.js'});
+  await page.goto(process.env.MONITTER_TEST_URL||'http://127.0.0.1:18421');
+  await expect(page.getByRole('button',{name:'Monitter menu',exact:true})).toBeVisible();
+  await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot(),now=Date.now();for(const id of ['A','B'])s.tasks.push({id,agentId:'atlas',title:`Pane ${id}`,nativeSessionId:null,status:'idle',archived:false,createdAt:now,updatedAt:now,parentTaskId:null,channelId:null,projectId:null,hostId:'local',cwd:'/tmp/monitter-ui-test',provider:'codex',model:'',sandbox:'read-only'});q.setSnapshot(s)});
+  const main=page.locator('.pane-leaf[data-pane-id="main"]');
+  const open=async name=>page.locator('.sidebar .task-select').filter({hasText:name}).click();
+  const tab=(pane,name)=>pane.locator('.tabs').getByRole('button',{name,exact:true});
+  const layout=async name=>{await main.getByRole('button',{name:'Pane layout',exact:true}).click();await page.getByRole('menu',{name:'Pane layout',exact:true}).getByRole('menuitem',{name,exact:true}).click()};
+  async function drag(source,target,edge='center') {
+    const data=await page.evaluateHandle(()=>new DataTransfer());
+    await source.dispatchEvent('dragstart',{dataTransfer:data});
+    expect(await data.evaluate(d=>JSON.parse(d.getData('application/x-monitter-tab')).kind)).toMatch(/task|draft|channel/);
+    const box=await target.boundingBox();
+    const coords={clientX:box.x+box.width*(edge==='left'?.02:edge==='right'?.98:.5),clientY:box.y+box.height*(edge==='top'?.02:edge==='bottom'?.98:.5),dataTransfer:data};
+    await target.dispatchEvent('dragover',coords);
+    await expect(target.locator('.pane-drop')).toHaveAttribute('data-edge',edge);
+    await target.dispatchEvent('drop',coords);await source.dispatchEvent('dragend').catch(()=>{});await data.dispose();
+  }
+  await open('Pane A');await main.getByLabel('Task message',{exact:true}).fill('A unsent text');
+  await open('Pane B');await main.getByLabel('Task message',{exact:true}).fill('B unsent text');
+  await layout('Two columns');
+  await expect(page.locator('.pane-leaf')).toHaveCount(2);
+  const secondId=await page.locator('.pane-leaf').last().getAttribute('data-pane-id');
+  const second=page.locator(`.pane-leaf[data-pane-id="${secondId}"]`);
+  await drag(tab(main,'Pane B'),second);
+  await expect(tab(second,'Pane B')).toBeVisible();await expect(tab(main,'Pane B')).toHaveCount(0);
+  await expect(main.getByLabel('Task message',{exact:true})).toHaveValue('A unsent text');
+  await expect(second.getByLabel('Task message',{exact:true})).toHaveValue('B unsent text');
+  passed.push('tab moves between independent panes with both unsent drafts preserved');
+  await layout('2 × 2 grid');await expect(page.locator('.pane-leaf')).toHaveCount(4);
+  await expect(second.getByLabel('Task message',{exact:true})).toHaveValue('B unsent text');
+  passed.push('2x2 layout preserves existing pane selection and drafts through restructuring');
+  const divider=page.getByRole('separator',{name:'Resize panes'}).first();
+  const vertical=await divider.getAttribute('aria-orientation')==='vertical',before=Number(await divider.getAttribute('aria-valuenow'));
+  await divider.focus();await divider.press(vertical?'ArrowRight':'ArrowDown');
+  await expect(divider).toHaveAttribute('aria-valuenow',String(before+5));
+  const box=await divider.boundingBox(),x=box.x+box.width/2,y=box.y+box.height/2;
+  await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(x+(vertical?40:0),y+(vertical?0:40),{steps:5});await page.mouse.up();
+  expect(Number(await divider.getAttribute('aria-valuenow'))).toBeGreaterThan(before+5);
+  passed.push('row and column separators support pointer capture and keyboard resizing');
+  await layout('One pane');await expect(page.locator('.pane-leaf')).toHaveCount(1);
+  await expect(tab(main,'Pane B')).toBeVisible();await expect(main.getByLabel('Task message',{exact:true})).toHaveValue('B unsent text');
+  await drag(tab(main,'Pane B'),main,'bottom');await expect(page.locator('.pane-leaf')).toHaveCount(2);
+  await expect(page.locator('.pane-leaf').last().getByLabel('Task message',{exact:true})).toHaveValue('B unsent text');
+  passed.push('bottom edge preview creates a split and preserves the dragged chat');
+  expect(errors).toEqual([]);
+  await page.screenshot({path:'verification/ui-multipane.png'});
+  writeFileSync('verification/ui-multipane-results.json',JSON.stringify({passed,errors},null,2));
+  console.log(JSON.stringify({passed,errors},null,2));
+} catch(error) {await page.screenshot({path:'verification/ui-multipane-failure.png'});writeFileSync('verification/ui-multipane-results.json',JSON.stringify({passed,errors,error:String(error)},null,2));throw error}finally{await browser.close()}
