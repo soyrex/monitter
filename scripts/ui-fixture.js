@@ -23,7 +23,7 @@
     record('createTask',input);
     const a=state.agents.find(a=>a.id===input.agentId);
     const project=state.projects.find(p=>p.id===input.projectId);
-    const task={id:crypto.randomUUID(),agentId:a.id,title:input.title,nativeSessionId:input.nativeSessionId||null,status:'idle',archived:false,createdAt:Date.now(),updatedAt:Date.now(),parentTaskId:input.parentTaskId||null,channelId:input.channelId||null,projectId:input.projectId||null,hostId:a.hostId,cwd:project?.workspaces.find(w=>w.hostId===a.hostId)?.cwd || a.cwd,provider:a.provider,model:a.model,sandbox:a.sandbox};
+    const task={id:crypto.randomUUID(),agentId:a.id,title:input.title,nativeSessionId:input.nativeSessionId||null,status:'idle',archived:false,createdAt:Date.now(),updatedAt:Date.now(),parentTaskId:input.parentTaskId||null,channelId:input.channelId||null,projectId:input.projectId||null,hostId:a.hostId,cwd:project?.workspaces.find(w=>w.hostId===a.hostId)?.cwd || a.cwd,provider:a.provider,model:input.modelSettings?.model || a.model,modelSettings:input.modelSettings || null,sandbox:a.sandbox};
     state.tasks.push(task);notify();return clone(task);
   };
   window.__MONITTER_QA__ = { calls, snapshot:copy, emit:notify, setSnapshot:s=>{state=clone(s);notify();} };
@@ -59,6 +59,12 @@
     getTaskGitDiff:async(taskId,path,scope)=>{record('getTaskGitDiff',{taskId,path,scope});return clone(state.gitDiffs?.[taskId]?.[`${scope}:${path}`] ?? {repository:false});},
     getTaskGoal:async taskId=>{record('getTaskGoal',taskId);return clone(state.goals?.[taskId] ?? null);},
     resumeTask:async taskId=>{record('resumeTask',{taskId});const task=state.tasks.find(t=>t.id===taskId);if(state.resumeFailure)throw Error(state.resumeFailure);if(!task?.nativeSessionId || task.archived || task.status==='running')throw Error('This session cannot be resumed.');task.status='running';state.messages.push({id:crypto.randomUUID(),taskId,role:'user',text:'Continue from where we left off. If the last request is complete, let me know and wait for my next instruction.',createdAt:Date.now()});notify();return copy();},
+    getModelCatalog:async target=>{
+      record('getModelCatalog',target);if(state.modelCatalogFailure)throw Error(state.modelCatalogFailure);
+      const task=state.tasks.find(t=>t.id===target.taskId),agent=state.agents.find(a=>a.id===(target.agentId||task?.agentId));
+      return clone(state.modelCatalog || {models:[{id:'qa-balanced',name:'QA Balanced',description:'Model catalog fixture',reasoningEfforts:[{id:'low',description:'Lower effort'},{id:'medium',description:'Balanced effort'},{id:'high',description:'Higher effort'}],defaultEffort:'medium',supportsFast:true,fastDescription:'Fixture faster responses, increased usage'},{id:'qa-simple',name:'QA Simple',description:'No effort or fast support',reasoningEfforts:[],defaultEffort:null,supportsFast:false,fastDescription:null}],current:task?.modelSettings || {model:task?.model || agent?.model || 'qa-balanced',reasoningEffort:'medium',fastMode:false},source:'Browser QA fixture',warning:null});
+    },
+    setTaskModelSettings:async(taskId,settings)=>{record('setTaskModelSettings',{taskId,settings});const task=state.tasks.find(t=>t.id===taskId);if(task.status==='running')throw Error('Wait for the current run to finish.');task.model=settings.model;task.modelSettings=settings.model?clone(settings):null;notify();return copy();},
     readAttachmentFile:async sourcePath=>{record('readAttachmentFile',{sourcePath});return {filename:sourcePath.split('/').at(-1),mimeType:'text/plain',dataBase64:btoa('Native file fixture')};},
     storeAttachment:async(target,file,previewDataUrl=null,sourceId)=>{
       record('storeAttachment',{target,...file,previewDataUrl,sourceId});

@@ -15,6 +15,9 @@ import type {
   TaskGitStatus,
   TaskGitDiff,
   TaskDeletionPreview,
+  ModelSettings,
+  ModelTarget,
+  ModelCatalog,
   Attachment,
   AttachmentTarget,
   AttachmentFileData,
@@ -46,6 +49,8 @@ export interface MonitterBridge {
     attachmentIds?: string[],
   ): Promise<Snapshot>;
   resumeTask(taskId: string): Promise<Snapshot>;
+  getModelCatalog(target: ModelTarget): Promise<ModelCatalog>;
+  setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
   getTaskGitStatus(taskId: string): Promise<TaskGitStatus>;
   getTaskGitDiff(taskId: string, path: string, scope: GitDiffScope): Promise<TaskGitDiff>;
@@ -95,6 +100,8 @@ const nativeBridge: MonitterBridge = {
   sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) =>
     invoke<Snapshot>("send_channel_message", { channelId, text, agentIds, attachmentIds }),
   resumeTask: (taskId) => invoke<Snapshot>("resume_task", { taskId }),
+  getModelCatalog: target => invoke<ModelCatalog>("get_model_catalog", {target}),
+  setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
   getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
   getTaskGitStatus: taskId => invoke<TaskGitStatus>("get_task_git_status", { taskId }),
   getTaskGitDiff: (taskId, path, scope) => invoke<TaskGitDiff>("get_task_git_diff", { taskId, path, scope }),
@@ -145,6 +152,8 @@ const previewBridge: MonitterBridge = {
   saveChannel: () => desktopOnly(),
   sendChannelMessage: () => desktopOnly(),
   resumeTask: () => desktopOnly(),
+  getModelCatalog: () => desktopOnly(),
+  setTaskModelSettings: () => desktopOnly(),
   getTaskGoal: async () => null,
   getTaskGitStatus: () => desktopOnly(),
   getTaskGitDiff: () => desktopOnly(),
@@ -199,6 +208,8 @@ export function getBridge(): MonitterBridge {
           attachmentIds,
         }) as Promise<Snapshot>,
       resumeTask: (taskId) => test.invoke("resume_task", { taskId }) as Promise<Snapshot>,
+      getModelCatalog: target => test.invoke("get_model_catalog", {target}) as Promise<ModelCatalog>,
+      setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,
       getTaskGitStatus: taskId => test.invoke("get_task_git_status", {taskId}) as Promise<TaskGitStatus>,
       getTaskGitDiff: (taskId, path, scope) => test.invoke("get_task_git_diff", {taskId, path, scope}) as Promise<TaskGitDiff>,

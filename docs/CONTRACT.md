@@ -17,6 +17,8 @@ No fake conversations, progress, token counts, host connections or model replies
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
 - `create_task { input: CreateTaskInput }` -> Task
+- `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null } }` -> ModelCatalog
+- `set_task_model_settings { taskId: string, settings: ModelSettings }` -> Snapshot
 - `rename_task { id: string, title: string }` -> Snapshot
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
@@ -300,3 +302,26 @@ Persisted chat/channel messages show a file type icon or bounded embedded image 
 and unsent text survive navigation and tab movement within the window. Failed uploads/sends remain
 visible and preserve successfully queued files. Thumbnails are at most 192 pixels and 256 KiB; missing
 image previews fall back to a file icon.
+
+## Composer models and pane appearance
+
+The composer shows its current model beside Send, with the attachment button at bottom left.
+Codex catalogs come from that task's saved host (local or SSH) through read-only app-server
+`config/read` and paginated `model/list`, cached by host/provider/working folder for 60 seconds. The menu exposes
+only advertised models, reasoning levels and Fast capability. Other harnesses currently report that
+catalog discovery is unavailable; they keep their configured models. Catalog failures remain visible.
+
+`ModelSettings` contains `model`, nullable `reasoningEffort`, and nullable `fastMode`. New drafts keep
+these choices locally until their first send. Existing idle chats retain native session ID, host,
+folder and history when changing model. Running or archived chats reject changes. Codex receives
+invocation-only model/effort/service-tier overrides; Fast uses the advertised `priority` tier, explicit
+off uses `default` only for models advertising that capability, and resetting clears overrides.
+Models without advertised Fast support send no service-tier override. User CLI configuration and authentication are
+never edited. The Resume icon appears on interrupted/error native sessions; the backend also rejects
+Resume while the previous owned process is still active. Ordinary completed chats continue on send.
+
+Every pane uses the same tab-bar height, including native macOS zoom compensation. Split separators
+paint a one-pixel line with a wider invisible drag target. Agent messages show the sending agent's
+small avatar. `Settings.dimInactivePanes` defaults to true and `inactivePaneOpacity` to 0.6; Preferences
+provides a toggle and 10–90% slider, with validation requiring a finite value from 0.1 to 0.9.
+Pointer or keyboard focus immediately marks the receiving pane active; its opacity is always 1.

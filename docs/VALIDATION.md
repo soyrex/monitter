@@ -333,3 +333,27 @@ Browser fixtures passed Projects (7), scrolling (8), collaboration (5), controls
 (4), split panes (4), Resume (3), composer startup/Stop (7), and sidebar/Git (5). They exercise real
 frontend state transitions with a labelled test-only IPC fixture; they do not claim live model responses.
 Native harness proofs are recorded separately above.
+
+
+## Composer and pane polish — 2026-09-10
+
+The composer model menu uses the live Codex catalog and per-chat model/effort/Fast overrides. New
+drafts remain unstarted until first send. Attachments sit at bottom left, and agent output includes
+small sender avatars. Resume is icon-only on interrupted/error native chats. Pane tab bars share the
+same macOS scale compensation; inactive panes have a persisted toggle and opacity slider. Dividers
+paint one pixel while retaining a wider drag target.
+
+Browser fixture checks passed: model/panes (5), Resume (3), split panes (4), attachments (4), controls
+(12), scroll behavior (8), and composer startup/Stop (7), with no page errors. The model/pane suite
+checks native-scaled header alignment at 80%, 125% and 200%, one-pixel divider geometry, focus dimming,
+setting persistence, model/effort/Fast capabilities, reset/errors/running guards, draft preservation
+and deferred task creation. These are frontend fixtures; live catalog evidence is separate in
+`verification/model-catalog-2026-09-10.md`. `npm run check` reports zero errors and warnings.
+
+Final Rust suite: `cargo test --all-targets -j4 --quiet` — 89 passed, 0 failed, 2 opt-in live checks
+ignored in the ordinary suite. Live reader checks ran separately: local Codex 0.154 returned 6 models
+(5 Fast-capable); Mira Codex 0.130 returned 5 (none Fast-capable) using its saved executable path.
+Older Mira rejects `service_tier="default"`; unsupported Fast overrides are therefore rejected and
+the composer leaves them null. No model turns or native auth/config edits were needed. Draft catalogs
+resolve project/agent/host folders consistently with task creation; cache keys include provider,
+saved host transport/executable identity and working folder. Project browser checks also passed (7).

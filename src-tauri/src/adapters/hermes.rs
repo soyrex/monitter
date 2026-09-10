@@ -255,6 +255,7 @@ mod tests {
             cwd: "/tmp".into(),
             provider: "hermes".into(),
             model: model.into(),
+            model_settings: None,
             sandbox: "read-only".into(),
             project_id: None,
         }

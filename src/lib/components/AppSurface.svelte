@@ -47,6 +47,7 @@
     SidebarView,
     Snapshot,
     Task,
+    ModelSettings,
     Attachment,
     AttachmentTarget,
     AttachmentFileData,
@@ -65,6 +66,7 @@
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { paneIds } from '$lib/panes';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
+  import ModelPicker from '$lib/components/ModelPicker.svelte';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import {readBrowserFile,thumbnail,nativeBlob} from '$lib/attachment-files';
   import { floating } from "$lib/floating";
@@ -149,7 +151,7 @@
     probe = $state<ProbeResult | null>(null),
     recipients = $state<string[]>([]),
     drafts = $state<Record<string, string>>({});
-  type TaskDraft = { id: string; text: string; title: string; agentId: string; projectId: string; parentId: string | null; nativeSessionId: string; createdTaskId?: string };
+  type TaskDraft = { modelSettings?:ModelSettings;modelAgentId?:string; id: string; text: string; title: string; agentId: string; projectId: string; parentId: string | null; nativeSessionId: string; createdTaskId?: string };
   type CollaborationRecord = Collaboration;
   type AgentProfile = Agent & { expertise?: string[]; responsibilities?: string[]; skills?: string[]; collaborationEnabled?: boolean };
   let taskDrafts = $state<Record<string, TaskDraft>>({});
@@ -454,6 +456,16 @@
     const paste=(event:ClipboardEvent)=>{const files=Array.from(event.clipboardData?.files??[]);if(files.length){event.preventDefault();void attachFiles(files);}};
     node.addEventListener('dragover',over);node.addEventListener('dragleave',leave);node.addEventListener('drop',drop);node.addEventListener('paste',paste);
     return {destroy(){node.removeEventListener('dragover',over);node.removeEventListener('dragleave',leave);node.removeEventListener('drop',drop);node.removeEventListener('paste',paste);}};
+  }
+  const draftModelSettings=$derived(currentTaskDraft?.modelAgentId===taskAgentId ? currentTaskDraft?.modelSettings ?? null : null);
+  async function changeModel(settings:ModelSettings) {
+    const draft=currentTaskDraft, agentId=taskAgentId, taskId=selectedTask?.id ?? draft?.createdTaskId;
+    if(taskId) {
+      const ticket=++snapshotIssued;
+      const result=await bridge.setTaskModelSettings(taskId,settings);
+      applySnapshot(result,ticket);
+    }
+    if(draft && taskDrafts[draft.id]) taskDrafts[draft.id]={...taskDrafts[draft.id],modelSettings:settings,modelAgentId:agentId};
   }
   const activeTurnDelivery = "Delivered to the recipient’s active turn via its Monitter inbox.";
   const collaborationStatus = (item: CollaborationRecord) => item.result === activeTurnDelivery ? "Delivered" : item.status;
@@ -811,7 +823,7 @@
     if (!draftId || !draft || !canSend || !taskAgentId) { error = "Choose an agent and write a message."; return; }
     const textToSend = promptText(composer), attachmentIds=currentAttachments.map(item=>item.id);
     const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId };
-    const values = { agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null };
+    const values = { modelSettings:draftModelSettings, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null };
     taskDrafts[draftId] = { ...draft, ...captured };
     let taskId = draft.createdTaskId;
     busy = true; error = ''; notice = '';
@@ -1092,6 +1104,7 @@
     {id:"archived",label:"Archived chats",detail:"Restore or permanently delete archived chats",group:"Workspace"},
     {id:"tools",label:"Show tool activity",checked:snapshot?.settings.showToolActivity !== false,group:"Toggles"},
     {id:"reasoning",label:"Show reasoning summaries",checked:snapshot?.settings.showReasoningSummaries !== false,group:"Toggles"},
+    {id:"dim-panes",label:"Dim inactive panes",checked:snapshot?.settings.dimInactivePanes ?? true,group:"Toggles"},
     {id:"enter",label:"Enter to send",checked:snapshot?.settings.sendWithEnter ?? false,group:"Toggles"},
     {id:"detail",label:"Show run detail",checked:showDetail,group:"Toggles"},
     {id:"scale-up",label:"Increase interface scale",detail:`${snapshot?.settings.interfaceScale ?? 125}% → up to 200%`,group:"Appearance",disabled:(snapshot?.settings.interfaceScale ?? 125)>=200},
@@ -1126,6 +1139,7 @@
     if (!settings || busy) return;
     if (id === "tools") await run(()=>bridge.saveSettings({...settings,showToolActivity:!settings.showToolActivity}));
     else if (id === "reasoning") await run(()=>bridge.saveSettings({...settings,showReasoningSummaries:!settings.showReasoningSummaries}));
+    else if (id === "dim-panes") await run(()=>bridge.saveSettings({...settings,dimInactivePanes:!(settings.dimInactivePanes ?? true)}));
     else if (id === "enter") await run(()=>bridge.saveSettings({...settings,sendWithEnter:!settings.sendWithEnter}));
     else if (id === "detail") showDetail = !showDetail;
     else if (id.startsWith("scale-")) { if (id === "scale-reset") { scaleQueued = 125; void flushScale(); } else queueScale(id === "scale-up" ? 5 : -5); }
@@ -1197,7 +1211,10 @@
 {#snippet attachmentTools()}
   <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy || selectedTask?.status==='running'} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
-  <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
+{/snippet}
+
+{#snippet messageAvatar(agent: Agent | null | undefined)}
+  {#if agent}<span class="avatar message-avatar" style={`--agent-color:${agent.color}`} title={agent.name}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt=""/>{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span>{/if}
 {/snippet}
 
 {#snippet workspaceView()}
@@ -1382,6 +1399,7 @@
                 class="message"
               >
                 <div class="message-meta">
+                  {@render messageAvatar(snapshot.agents.find(agent=>agent.id===message.agentId))}
                   <span
                     >{message.role === "user"
                       ? "You"
@@ -1400,7 +1418,7 @@
             </div>{/if}
         </MessagePane>
         <div class="composer" use:fileDrop>
-            {@render attachmentTools()}
+            <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
           {@render slashMenu()}
           <textarea
             bind:value={composer}
@@ -1410,6 +1428,7 @@
             onkeydown={handleComposerKeydown}
           ></textarea>
           <div class="composer-footer">
+            {@render attachmentTools()}
             <div class="recipient-picker">
               <span>Send to</span
               >{#each snapshot.agents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
@@ -1436,10 +1455,10 @@
           </div>
           {#if taskFormAgent}<p class="task-workspace-preview"><Folder size={13}/><span><b>{snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.name ?? 'Host'}</b><code>{taskFormCwd}</code></span></p>{/if}
           <div class="composer draft-composer" use:fileDrop>
-            {@render attachmentTools()}
+            <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render slashMenu()}
             <textarea bind:value={composer} aria-label="Task message" placeholder="Describe what you want this agent to do…" oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
-            <div class="composer-footer"><span>{currentTaskDraft.createdTaskId ? 'Retry this chat’s first message' : 'Starts on your first message'}</span><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div>
+            <div class="composer-footer">{@render attachmentTools()}<div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
           </div>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -1462,7 +1481,7 @@
             <h1>{selectedTask.title}</h1>
             <div class="task-actions">
               {#if selectedTask.status === "running"}<button class="danger icon" aria-label="Stop" title="Stop" disabled={busy} onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={14}/></button>{/if}
-              {#if selectedTask.nativeSessionId && selectedTask.status !== "running"}<button class="secondary icon-word" disabled={busy || selectedTask.archived} title="Continue this native session in Monitter" onclick={resumeTask}><RotateCw size={14}/> Resume</button>{/if}
+              {#if selectedTask.nativeSessionId && ["interrupted","error"].includes(selectedTask.status)}<button class="icon" aria-label="Resume session" disabled={busy || selectedTask.archived} title="Reconnect and resume this session" onclick={resumeTask}><RotateCw size={15}/></button>{/if}
               <div class="task-overflow"><button bind:this={taskMenuAnchor} class="icon" aria-label="Task actions" aria-expanded={taskMenu} onclick={()=>taskMenu=!taskMenu}><MoreHorizontal size={17}/></button>{#if taskMenu && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel"><button onclick={()=>{taskMenu=false;openTaskComposer(selectedTask.id)}}><Bot size={14}/>Delegate</button><button aria-label="Task settings" onclick={()=>{taskMenu=false;renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Settings2 size={14}/>Task settings</button><button aria-label={showDetail ? "Hide run detail" : "Show run detail"} onclick={()=>{taskMenu=false;showDetail=!showDetail}}><PanelRight size={14}/>{showDetail ? "Hide" : "Show"} run detail</button></div>{/if}</div>
             </div>
           </div>
@@ -1476,6 +1495,7 @@
                   class="message"
                 >
                   <div class="message-meta">
+                    {@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}
                     <span
                       >{senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")}</span
                     ><time>{date(message.createdAt)}</time>
@@ -1491,7 +1511,7 @@
               </div>{/if}
           </MessagePane>
           <div class="composer" use:fileDrop>
-            {@render attachmentTools()}
+            <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render slashMenu()}
             <textarea
               bind:value={composer}
@@ -1502,13 +1522,10 @@
               onkeydown={handleComposerKeydown}
             ></textarea>
             <div class="composer-footer">
-              <span>{snapshot.settings.sendWithEnter ? "↵ send · ⇧↵ new line" : `${modifierLabel}↵ send · ↵ new line`}</span>
-              <div>
-                <button
-                  class="secondary compact"
-                  onclick={() => openTaskComposer()}
-                  ><Plus size={14} /> New task</button
-                >{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title={selectedTaskStepping ? "Stop current task" : "Starting task — stop"} onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}>{#if selectedTaskStepping}<Square size={15}/>{:else}<LoaderCircle class="spin" size={15}/>{/if}</button>{:else}<button class="primary composer-control" aria-label={selectedTaskStarting ? "Starting task" : "Send task message"} title={selectedTaskStarting ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={send}>{#if selectedTaskStarting}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>{/if}
+              <div class="composer-left">{@render attachmentTools()}<span>{snapshot.settings.sendWithEnter ? "↵ send · ⇧↵ new line" : `${modifierLabel}↵ send · ↵ new line`}</span></div>
+              <div class="composer-right">
+                <ModelPicker target={{taskId:selectedTask.id}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||selectedTask.status==='running'} onchange={changeModel}/>
+{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title={selectedTaskStepping ? "Stop current task" : "Starting task — stop"} onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}>{#if selectedTaskStepping}<Square size={15}/>{:else}<LoaderCircle class="spin" size={15}/>{/if}</button>{:else}<button class="primary composer-control" aria-label={selectedTaskStarting ? "Starting task" : "Send task message"} title={selectedTaskStarting ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={send}>{#if selectedTaskStarting}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>{/if}
               </div>
             </div>
           </div>
@@ -1744,7 +1761,7 @@
     </div>{/if}
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid">
-    <PaneGrid {layout} {activePaneId} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
+    <PaneGrid {layout} {activePaneId} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
         <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout}
@@ -2153,6 +2170,12 @@
         <small>Resize text and controls together. Default: 125%.</small>
       </div>
       <fieldset>
+        <legend>Pane appearance</legend>
+        <label class="check-row"><input type="checkbox" role="switch" aria-label="Dim inactive panes" checked={snapshot.settings.dimInactivePanes ?? true} disabled={busy} onchange={event=>run(()=>bridge.saveSettings({...snapshot!.settings,dimInactivePanes:event.currentTarget.checked}))}/>Dim inactive panes</label>
+        <label class="opacity-setting">Inactive pane opacity <span>{Math.round((snapshot.settings.inactivePaneOpacity ?? .6)*100)}%</span><input type="range" aria-label="Inactive pane opacity" min="10" max="90" step="5" value={(snapshot.settings.inactivePaneOpacity ?? .6)*100} disabled={busy || snapshot.settings.dimInactivePanes===false} onchange={event=>run(()=>bridge.saveSettings({...snapshot!.settings,inactivePaneOpacity:Number(event.currentTarget.value)/100}))}/></label>
+        <p class="hint">Lower opacity makes inactive panes dimmer.</p>
+      </fieldset>
+      <fieldset>
         <legend>Conversation activity</legend>
         <label class="check-row"><input type="checkbox" role="switch" disabled={busy}
           checked={snapshot.settings.showToolActivity !== false}
@@ -2296,8 +2319,9 @@
   .native-mac .window-toolbar .icon { width: calc(30px / var(--interface-scale, 1)); height: calc(30px / var(--interface-scale, 1)); }
   .native-mac .window-toolbar :global(svg) { width: calc(17px / var(--interface-scale, 1)); height: calc(17px / var(--interface-scale, 1)); }
   .native-mac .sidebar-window-space { height: calc(68px / var(--interface-scale, 1)); }
+  .native-mac { --pane-tabbar-height: max(36px, calc(68px / var(--interface-scale, 1))); }
   .native-mac .topbar {
-    height: max(36px, calc(68px / var(--interface-scale, 1)));
+    height: var(--pane-tabbar-height);
     box-sizing: border-box;
     flex-shrink: 0;
     user-select: none;
@@ -2527,7 +2551,7 @@
     display: flex;
     align-items: stretch;
     justify-content: space-between;
-    height: 52px;
+    height: var(--pane-tabbar-height,52px);
     padding: 0.5em 0.5em 0;
     gap: 10px;
     flex-shrink: 0;
@@ -2967,11 +2991,6 @@
     gap: 10px;
     color: var(--muted);
     font: 10px var(--mono);
-  }
-  .composer-footer > span {
-    display: flex;
-    align-items: center;
-    gap: 4px;
   }
   .composer-control { width: 30px; min-width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; border-radius: 50%; }
   .spin { animation: composer-spin .8s linear infinite; }
@@ -3578,12 +3597,17 @@
   .agent-directory small, .agent-directory p { margin: 0; color: var(--muted); font-size: 10px; }
   .agent-directory article.disabled { opacity: .58; }
   .app-shell.embedded { height: 100%; width: 100%; grid-template-columns: minmax(0,1fr); }
-  .embedded .topbar { height: 40px; min-height: 32px; padding: 0.5em 0.5em 0; }
+  .embedded .topbar { height: var(--pane-tabbar-height,52px); min-height: 32px; padding: 0.5em 0.5em 0; }
   .layout-control { position: relative; }
   .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 12; box-shadow: -10px 0 30px #0003; animation: detail-enter .18s ease-out; }
   .detail-backdrop { position: absolute; inset: 0; z-index: 11; background: #0002; }
   @keyframes detail-enter { from { transform: translateX(100%); } to { transform: translateX(0); } }
   @media (prefers-reduced-motion: reduce) { .compact-detail .run-detail { animation: none; } }
+  .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
+  .opacity-setting { margin-top:12px;display:grid;grid-template-columns:1fr auto;gap:8px; }
+  .opacity-setting input { grid-column:1/-1;width:100%;accent-color:var(--accent); }
+  .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
+  .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:10px; }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   .attachment-tools .icon { width: 24px; height: 24px; }
   .attachment-tools small { font-size: 10px; }

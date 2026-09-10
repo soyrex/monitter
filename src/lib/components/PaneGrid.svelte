@@ -1,8 +1,8 @@
 <script lang="ts">
   import type { PaneLayout, PaneSplit, PaneTabTransfer } from '$lib/panes';
   type Edge = 'center' | 'left' | 'right' | 'top' | 'bottom';
-  let { layout, activePaneId, onactivate, onresize, ondropTab, children }: {
-    layout: PaneLayout; activePaneId: string; onactivate: (id: string) => void;
+  let { layout, activePaneId, dimInactivePanes=true, inactivePaneOpacity=.6, onactivate, onresize, ondropTab, children }: {
+    layout: PaneLayout; activePaneId: string; dimInactivePanes?:boolean;inactivePaneOpacity?:number; onactivate: (id: string) => void;
     onresize: (id: string, ratio: number) => void;
     ondropTab: (id: string, edge: Edge, data: PaneTabTransfer) => void;
     children: import('svelte').Snippet<[string]>;
@@ -54,7 +54,7 @@
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (contains independently interactive chat controls) -->
-    <section class="pane-leaf" data-pane-id={item.id} class:active={activePaneId===item.id} aria-label="Workspace pane" onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
+    <section class="pane-leaf" data-pane-id={item.id} class:active={activePaneId===item.id} style:opacity={activePaneId===item.id || !dimInactivePanes ? 1 : Math.max(.1,Math.min(.9,inactivePaneOpacity))} aria-label="Workspace pane" onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
       {@render children(item.id)}
       {#if over?.id===item.id}<div class="pane-drop" data-edge={over.edge}><span>{over.edge==='center'?'Move tab here':`Split ${over.edge}`}</span></div>{/if}
     </section>
@@ -63,8 +63,9 @@
 {@render branch(layout)}
 <style>
   .pane-split,.split-child,.pane-leaf{display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
-  .pane-split.column{flex-direction:column}.pane-leaf{position:relative}.pane-leaf.active{outline:1px solid color-mix(in srgb,var(--accent) 25%,transparent);outline-offset:-1px}
-  .pane-resizer{position:relative;flex:0 0 5px;cursor:col-resize;background:var(--line);touch-action:none;z-index:2}.column>.pane-resizer{cursor:row-resize}.pane-resizer:hover,.pane-resizer:focus-visible{background:var(--accent);outline:0}
+  .pane-split.column{flex-direction:column}.pane-leaf{position:relative;transition:opacity .14s ease}.pane-leaf.active{outline:none}
+  .pane-resizer{position:relative;flex:0 0 1px;cursor:col-resize;background:var(--line);touch-action:none;z-index:2}.pane-resizer::after{content:"";position:absolute;inset:0 -4px}.column>.pane-resizer{cursor:row-resize}.column>.pane-resizer::after{inset:-4px 0}.pane-resizer:hover,.pane-resizer:focus-visible{background:var(--accent);outline:0}
   .pane-drop{position:absolute;inset:6px;z-index:30;display:grid;place-items:center;border:2px solid var(--accent);border-radius:10px;background:color-mix(in srgb,var(--accent) 16%,var(--panel));opacity:.94;pointer-events:none}
   .pane-drop[data-edge=left]{right:50%}.pane-drop[data-edge=right]{left:50%}.pane-drop[data-edge=top]{bottom:50%}.pane-drop[data-edge=bottom]{top:50%}.pane-drop span{padding:8px;border-radius:6px;background:var(--panel);color:var(--ink);font-size:12px}
+  @media(prefers-reduced-motion:reduce){.pane-leaf{transition:none}}
 </style>

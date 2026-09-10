@@ -220,6 +220,7 @@ impl Service {
                             parent_task_id: Some(caller_task.to_string()),
                             channel_id: None,
                             project_id: caller.project_id.clone(),
+                            model_settings: None,
                         },
                     )?
                     .id
@@ -1012,6 +1013,7 @@ mod tests {
                 parent_task_id: parent,
                 channel_id: None,
                 project_id: project,
+                model_settings: None,
             })
             .unwrap()
     }
@@ -1405,6 +1407,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             },
         );
         snapshot.tasks.push(root.clone());
@@ -1419,6 +1422,7 @@ mod tests {
                     parent_task_id: Some(parent.clone()),
                     channel_id: None,
                     project_id: None,
+                    model_settings: None,
                 },
             );
             child.agent_id = format!("agent-{index}");

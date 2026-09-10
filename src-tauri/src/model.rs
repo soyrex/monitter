@@ -71,6 +71,8 @@ pub struct Task {
     pub cwd: String,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
+    pub model_settings: Option<ModelSettings>,
     pub sandbox: String,
     #[serde(default)]
     pub project_id: Option<String>,
@@ -161,7 +163,7 @@ pub struct Channel {
     pub agent_ids: Vec<String>,
     pub messages: Vec<ChannelMessage>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub accent: String,
@@ -176,7 +178,12 @@ pub struct Settings {
     pub send_with_enter: bool,
     #[serde(default = "default_sidebar_view")]
     pub sidebar_view: String,
+    #[serde(default = "default_dim_inactive_panes")]
+    pub dim_inactive_panes: bool,
+    #[serde(default = "default_inactive_pane_opacity")]
+    pub inactive_pane_opacity: f64,
 }
+impl Eq for Settings {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -210,6 +217,12 @@ fn default_show_reasoning_summaries() -> bool {
 fn default_sidebar_view() -> String {
     "standard".into()
 }
+fn default_dim_inactive_panes() -> bool {
+    true
+}
+fn default_inactive_pane_opacity() -> f64 {
+    0.6
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -235,6 +248,63 @@ pub struct CreateTaskInput {
     pub channel_id: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub model_settings: Option<ModelSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSettings {
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub fast_mode: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogTarget {
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningEffortOption {
+    pub id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogModel {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    pub default_effort: Option<String>,
+    pub supports_fast: bool,
+    pub fast_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogCurrent {
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub fast_mode: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalog {
+    pub models: Vec<CatalogModel>,
+    pub current: ModelCatalogCurrent,
+    pub source: String,
+    pub warning: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeResult {
@@ -323,6 +393,8 @@ pub fn default_snapshot() -> Snapshot {
             show_reasoning_summaries: default_show_reasoning_summaries(),
             send_with_enter: false,
             sidebar_view: default_sidebar_view(),
+            dim_inactive_panes: default_dim_inactive_panes(),
+            inactive_pane_opacity: default_inactive_pane_opacity(),
         },
     }
 }
@@ -393,6 +465,7 @@ mod task_migration_tests {
         })).unwrap();
         assert!(!task.archived);
         assert_eq!(task.project_id, None);
+        assert_eq!(task.model_settings, None);
     }
 
     #[test]
@@ -404,6 +477,8 @@ mod task_migration_tests {
         .unwrap();
         assert!(snapshot.projects.is_empty());
         assert_eq!(snapshot.settings.sidebar_view, "standard");
+        assert!(snapshot.settings.dim_inactive_panes);
+        assert_eq!(snapshot.settings.inactive_pane_opacity, 0.6);
     }
 
     #[test]
@@ -437,6 +512,7 @@ mod task_migration_tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: Some(project_id),
+                model_settings: None,
             },
         ));
         let value = serde_json::to_value(&snapshot).unwrap();
@@ -466,7 +542,12 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
         host_id: agent.host_id.clone(),
         cwd: agent.cwd.clone(),
         provider: agent.provider.clone(),
-        model: agent.model.clone(),
+        model: input
+            .model_settings
+            .as_ref()
+            .map(|settings| settings.model.clone())
+            .unwrap_or_else(|| agent.model.clone()),
+        model_settings: input.model_settings.clone(),
         sandbox: agent.sandbox.clone(),
         project_id: input.project_id.clone(),
     }

@@ -154,6 +154,7 @@ mod tests {
             cwd: "/tmp".into(),
             provider: "opencode".into(),
             model: model.into(),
+            model_settings: None,
             sandbox: "read-only".into(),
             project_id: None,
         }

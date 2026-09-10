@@ -24,6 +24,7 @@ export interface Task {
   archived: boolean; status: TaskStatus; createdAt: number; updatedAt: number;
   parentTaskId: string | null; channelId: string | null; projectId: string | null;
   hostId: string; cwd: string; provider: Provider; model: string; sandbox: Sandbox;
+  modelSettings?: ModelSettings | null;
 }
 export interface Message {
   id: string; taskId: string; role: 'user' | 'assistant' | 'system';
@@ -52,6 +53,7 @@ export interface Channel {
   messages: ChannelMessage[];
 }
 export interface Settings {
+  dimInactivePanes?: boolean; inactivePaneOpacity?: number;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
   sidebarView: SidebarView;
@@ -65,6 +67,7 @@ export interface ProbeResult { ok: boolean; versions: Record<string, string>; me
 export interface CreateTaskInput {
   agentId: string; title: string; nativeSessionId?: string | null;
   parentTaskId?: string | null; channelId?: string | null; projectId?: string | null;
+  modelSettings?: ModelSettings | null;
 }
 
 export interface Goal {
@@ -103,3 +106,20 @@ export type TaskGitDiff = { repository: false } | {
   truncated: boolean;
   binary: boolean;
 };
+
+export interface ModelSettings {
+  model: string;
+  reasoningEffort: string | null;
+  fastMode: boolean | null;
+}
+export interface ModelTarget { taskId?: string; agentId?: string; projectId?: string | null; }
+export interface HarnessModel {
+  id: string; name: string; description: string;
+  reasoningEfforts: { id: string; description: string }[];
+  defaultEffort: string | null;
+  supportsFast: boolean; fastDescription: string | null;
+}
+export interface ModelCatalog {
+  models: HarnessModel[]; current: ModelSettings;
+  source: string; warning: string | null;
+}

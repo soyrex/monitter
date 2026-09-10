@@ -7,6 +7,7 @@ mod deletion;
 mod git;
 mod goals;
 pub mod model;
+mod models;
 mod runner;
 mod store;
 
@@ -49,6 +50,7 @@ pub(crate) struct Service {
     collaboration_started: std::sync::atomic::AtomicBool,
     stopping: std::sync::atomic::AtomicBool,
     runtime_dir: PathBuf,
+    model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
 }
 
 fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
@@ -72,6 +74,7 @@ impl Service {
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
             runtime_dir: dir.join("runtime"),
+            model_catalogs: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -80,6 +83,112 @@ impl Service {
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())
             .map(|data| data.snapshot.clone())
+    }
+
+    fn model_catalog(
+        &self,
+        host: &Host,
+        provider: &str,
+        cwd: &str,
+    ) -> Result<ModelCatalog, String> {
+        let key = format!(
+            "{provider}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            host.id,
+            host.kind,
+            host.address,
+            host.user,
+            host.port,
+            host.identity_file,
+            host.codex_path,
+            cwd
+        );
+        if let Ok(cache) = self.model_catalogs.lock() {
+            if let Some((when, catalog)) = cache.get(&key) {
+                if when.elapsed() < Duration::from_secs(60) {
+                    return Ok(catalog.clone());
+                }
+            }
+        }
+        let catalog = if provider == "codex" {
+            models::read_codex_catalog(host, cwd)?
+        } else {
+            ModelCatalog {
+                models: vec![],
+                current: ModelCatalogCurrent {
+                    model: String::new(),
+                    reasoning_effort: None,
+                    fast_mode: None,
+                },
+                source: format!("{provider} CLI"),
+                warning: Some(format!("Model catalog is unavailable for {provider}.")),
+            }
+        };
+        self.model_catalogs
+            .lock()
+            .map_err(|_| "Monitter model catalog lock failed.".to_string())?
+            .insert(key, (Instant::now(), catalog.clone()));
+        Ok(catalog)
+    }
+
+    fn set_task_model_settings(
+        &self,
+        task_id: &str,
+        settings: ModelSettings,
+    ) -> Result<Snapshot, String> {
+        let (task, host) = self.task_and_host(task_id)?;
+        if task.status == "running" {
+            return Err("This task already has an active turn.".into());
+        }
+        if task.archived {
+            return Err("Restore this archived task before changing its model.".into());
+        }
+        let reset = settings.model.trim().is_empty()
+            && settings.reasoning_effort.is_none()
+            && settings.fast_mode.is_none();
+        if settings.model.trim().is_empty() && !reset {
+            return Err("Choose a model before setting reasoning effort or Fast mode.".into());
+        }
+        if !reset {
+            let catalog = self.model_catalog(&host, &task.provider, &task.cwd)?;
+            let model = catalog
+                .models
+                .iter()
+                .find(|model| model.id == settings.model)
+                .ok_or("Selected model is not available on this host.")?;
+            if let Some(effort) = settings.reasoning_effort.as_deref() {
+                if !model
+                    .reasoning_efforts
+                    .iter()
+                    .any(|option| option.id == effort)
+                {
+                    return Err("Selected reasoning effort is not supported by this model.".into());
+                }
+            }
+            if settings.fast_mode.is_some() && !model.supports_fast {
+                return Err("Fast mode is not supported by this model.".into());
+            }
+        }
+        self.mutate(Some(task_id.into()), |snapshot| {
+            let task = snapshot
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .ok_or("Task was not found.")?;
+            if task.status == "running" {
+                return Err("This task already has an active turn.".into());
+            }
+            if task.archived {
+                return Err("Restore this archived task before changing its model.".into());
+            }
+            task.model = if reset {
+                String::new()
+            } else {
+                settings.model.clone()
+            };
+            task.model_settings = if reset { None } else { Some(settings) };
+            task.updated_at = now();
+            Ok(snapshot.clone())
+        })
     }
 
     fn changed(&self, task_id: Option<String>) {
@@ -440,6 +549,79 @@ impl Service {
     }
 
     fn create_task(&self, input: CreateTaskInput) -> Result<Task, String> {
+        if let Some(settings) = input.model_settings.as_ref() {
+            let reset = settings.model.trim().is_empty()
+                && settings.reasoning_effort.is_none()
+                && settings.fast_mode.is_none();
+            if settings.model.trim().is_empty() && !reset {
+                return Err("Choose a model before setting reasoning effort or Fast mode.".into());
+            }
+            if reset {
+                return self.mutate_data(None, |data| create_task_in_data(data, input));
+            }
+            let (host, provider, cwd) = {
+                let data = self
+                    .data
+                    .lock()
+                    .map_err(|_| "Monitter state lock failed.".to_string())?;
+                let agent = data
+                    .snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == input.agent_id)
+                    .ok_or("Agent was not found.")?;
+                let host = data
+                    .snapshot
+                    .hosts
+                    .iter()
+                    .find(|host| host.id == agent.host_id)
+                    .cloned()
+                    .ok_or("Agent host was not found.")?;
+                let cwd = if let Some(project_id) = input.project_id.as_deref() {
+                    let project = data
+                        .snapshot
+                        .projects
+                        .iter()
+                        .find(|project| project.id == project_id)
+                        .ok_or("Project was not found.")?;
+                    project
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.host_id == agent.host_id)
+                        .map(|workspace| workspace.cwd.clone())
+                        .unwrap_or_else(|| agent.cwd.clone())
+                } else {
+                    agent.cwd.clone()
+                };
+                let cwd = if cwd.trim().is_empty() {
+                    host.default_cwd.clone()
+                } else {
+                    cwd
+                };
+                if cwd.trim().is_empty() {
+                    return Err("Agent or host must specify a task folder.".into());
+                }
+                (host, agent.provider.clone(), cwd)
+            };
+            let catalog = self.model_catalog(&host, &provider, &cwd)?;
+            let model = catalog
+                .models
+                .iter()
+                .find(|model| model.id == settings.model)
+                .ok_or("Selected model is not available on this host.")?;
+            if let Some(effort) = settings.reasoning_effort.as_deref() {
+                if !model
+                    .reasoning_efforts
+                    .iter()
+                    .any(|option| option.id == effort)
+                {
+                    return Err("Selected reasoning effort is not supported by this model.".into());
+                }
+            }
+            if settings.fast_mode.is_some() && !model.supports_fast {
+                return Err("Fast mode is not supported by this model.".into());
+            }
+        }
         self.mutate_data(None, |data| create_task_in_data(data, input))
     }
 
@@ -553,6 +735,9 @@ impl Service {
             {
                 return Err("This task's provider or sandbox policy is invalid.".into());
             }
+        }
+        if self.run_is_active(&task_id) {
+            return Err("This task already has an active turn.".into());
         }
         self.send(task_id, CONTINUATION.into(), vec![])
     }
@@ -1128,8 +1313,11 @@ fn delete_agent(state: State<'_, AppState>, id: String) -> Result<Snapshot, Stri
 }
 
 #[tauri::command]
-fn create_task(state: State<'_, AppState>, input: CreateTaskInput) -> Result<Task, String> {
-    state.0.create_task(input)
+async fn create_task(state: State<'_, AppState>, input: CreateTaskInput) -> Result<Task, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.create_task(input))
+        .await
+        .map_err(|error| format!("Task creation worker failed: {error}"))?
 }
 
 fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String> {
@@ -1294,6 +1482,11 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     if !(80..=200).contains(&settings.interface_scale) {
         return Err("Interface scale must be between 80% and 200%.".into());
     }
+    if !settings.inactive_pane_opacity.is_finite()
+        || !(0.1..=0.9).contains(&settings.inactive_pane_opacity)
+    {
+        return Err("Inactive pane opacity must be between 10% and 90%.".into());
+    }
     if !matches!(
         settings.sidebar_view.as_str(),
         "standard" | "activity" | "projects"
@@ -1454,6 +1647,7 @@ fn send_channel_message(
                     parent_task_id: None,
                     channel_id: Some(channel_id.clone()),
                     project_id: None,
+                    model_settings: None,
                 };
                 let host = state
                     .hosts
@@ -1626,6 +1820,7 @@ pub fn smoke_provider_sequence(
         parent_task_id: None,
         channel_id: None,
         project_id: None,
+        model_settings: None,
     })?;
     service.send(task.id.clone(), first.into(), vec![])?;
     if cancel {
@@ -1793,6 +1988,119 @@ async fn get_task_goal(
 }
 
 #[tauri::command]
+async fn get_model_catalog(
+    state: State<'_, AppState>,
+    target: ModelCatalogTarget,
+) -> Result<ModelCatalog, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let data = service
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let (host, provider, cwd, selected) = if let Some(task_id) = target.task_id.as_deref() {
+            let task = data
+                .snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .ok_or("Task was not found.")?;
+            (
+                data.task_hosts
+                    .get(task_id)
+                    .cloned()
+                    .ok_or("Task's saved host settings were not found.")?,
+                task.provider.clone(),
+                task.cwd.clone(),
+                task.model_settings.clone().unwrap_or(ModelSettings {
+                    model: task.model.clone(),
+                    reasoning_effort: None,
+                    fast_mode: None,
+                }),
+            )
+        } else if let Some(agent_id) = target.agent_id.as_deref() {
+            let agent = data
+                .snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .ok_or("Agent was not found.")?;
+            let host = data
+                .snapshot
+                .hosts
+                .iter()
+                .find(|host| host.id == agent.host_id)
+                .cloned()
+                .ok_or("Agent host was not found.")?;
+            let cwd = if let Some(project_id) = target.project_id.as_deref() {
+                let project = data
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|project| project.id == project_id)
+                    .ok_or("Project was not found.")?;
+                project
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.host_id == agent.host_id)
+                    .map(|workspace| workspace.cwd.clone())
+                    .unwrap_or_else(|| agent.cwd.clone())
+            } else {
+                agent.cwd.clone()
+            };
+            let cwd = if cwd.trim().is_empty() {
+                host.default_cwd.clone()
+            } else {
+                cwd
+            };
+            if cwd.trim().is_empty() {
+                return Err("Agent or host must specify a task folder.".into());
+            }
+            (
+                host,
+                agent.provider.clone(),
+                cwd,
+                ModelSettings {
+                    model: agent.model.clone(),
+                    reasoning_effort: None,
+                    fast_mode: None,
+                },
+            )
+        } else {
+            return Err("Model catalog needs a task or agent target.".into());
+        };
+        drop(data);
+        let mut catalog = service.model_catalog(&host, &provider, &cwd)?;
+        if !selected.model.trim().is_empty() {
+            catalog.current.model = selected.model;
+            if selected.reasoning_effort.is_some() {
+                catalog.current.reasoning_effort = selected.reasoning_effort;
+            }
+            if selected.fast_mode.is_some() {
+                catalog.current.fast_mode = selected.fast_mode;
+            }
+        }
+        Ok(catalog)
+    })
+    .await
+    .map_err(|error| format!("Model catalog worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn set_task_model_settings(
+    state: State<'_, AppState>,
+    task_id: String,
+    settings: ModelSettings,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.set_task_model_settings(&task_id, settings)
+    })
+    .await
+    .map_err(|error| format!("Model settings worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn get_task_git_status(
     state: State<'_, AppState>,
     task_id: String,
@@ -1855,6 +2163,8 @@ pub fn run() {
             save_channel,
             send_channel_message,
             get_resume_command,
+            get_model_catalog,
+            set_task_model_settings,
             get_task_goal,
             get_task_git_status,
             get_task_git_diff
@@ -1954,6 +2264,23 @@ mod tests {
     }
 
     #[test]
+    fn settings_validation_rejects_invalid_inactive_pane_opacity() {
+        let mut settings = default_snapshot().settings;
+        settings.inactive_pane_opacity = 0.1;
+        assert!(validate_settings(&settings).is_ok());
+        settings.inactive_pane_opacity = 0.91;
+        assert_eq!(
+            validate_settings(&settings),
+            Err("Inactive pane opacity must be between 10% and 90%.".into())
+        );
+        settings.inactive_pane_opacity = f64::NAN;
+        assert_eq!(
+            validate_settings(&settings),
+            Err("Inactive pane opacity must be between 10% and 90%.".into())
+        );
+    }
+
+    #[test]
     fn task_snapshots_host_and_agent_instructions() {
         let dir = temp_dir("task-snapshot");
         let service = Service::open(None, dir.clone()).unwrap();
@@ -1976,6 +2303,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             })
             .unwrap();
         service
@@ -2015,6 +2343,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             })
         };
         let first = make().unwrap();
@@ -2067,6 +2396,7 @@ mod tests {
                     parent_task_id: None,
                     channel_id: None,
                     project_id: None,
+                    model_settings: None,
                 })
                 .unwrap();
             service
@@ -2120,6 +2450,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             })
             .unwrap();
         service
@@ -2174,6 +2505,190 @@ mod tests {
     }
 
     #[test]
+    fn model_settings_reset_restores_native_defaults_without_catalog_lookup() {
+        let dir = temp_dir("model-reset");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(CreateTaskInput {
+                agent_id,
+                title: "model reset".into(),
+                native_session_id: None,
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                model_settings: None,
+            })
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                let task = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap();
+                task.model = "gpt-test".into();
+                task.model_settings = Some(ModelSettings {
+                    model: "gpt-test".into(),
+                    reasoning_effort: Some("high".into()),
+                    fast_mode: Some(true),
+                });
+                Ok(())
+            })
+            .unwrap();
+        service
+            .set_task_model_settings(
+                &task.id,
+                ModelSettings {
+                    model: String::new(),
+                    reasoning_effort: None,
+                    fast_mode: None,
+                },
+            )
+            .unwrap();
+        let updated = service
+            .snapshot()
+            .unwrap()
+            .tasks
+            .into_iter()
+            .find(|item| item.id == task.id)
+            .unwrap();
+        assert!(updated.model.is_empty());
+        assert_eq!(updated.model_settings, None);
+        assert_eq!(
+            service.set_task_model_settings(
+                &task.id,
+                ModelSettings {
+                    model: String::new(),
+                    reasoning_effort: Some("high".into()),
+                    fast_mode: None
+                }
+            ),
+            Err("Choose a model before setting reasoning effort or Fast mode.".into())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn model_settings_reset_rejects_running_or_archived_tasks() {
+        for (status, archived, expected) in [
+            ("running", false, "This task already has an active turn."),
+            (
+                "completed",
+                true,
+                "Restore this archived task before changing its model.",
+            ),
+        ] {
+            let dir = temp_dir("model-reset-guard");
+            let service = Service::open(None, dir.clone()).unwrap();
+            let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+            let task = service
+                .create_task(CreateTaskInput {
+                    agent_id,
+                    title: "guard".into(),
+                    native_session_id: None,
+                    parent_task_id: None,
+                    channel_id: None,
+                    project_id: None,
+                    model_settings: None,
+                })
+                .unwrap();
+            service
+                .mutate(None, |snapshot| {
+                    let task = snapshot
+                        .tasks
+                        .iter_mut()
+                        .find(|item| item.id == task.id)
+                        .unwrap();
+                    task.status = status.into();
+                    task.archived = archived;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                service.set_task_model_settings(
+                    &task.id,
+                    ModelSettings {
+                        model: String::new(),
+                        reasoning_effort: None,
+                        fast_mode: None
+                    }
+                ),
+                Err(expected.into())
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn model_settings_reject_any_fast_override_when_catalog_does_not_advertise_it() {
+        let dir = temp_dir("model-fast-capability");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(CreateTaskInput {
+                agent_id,
+                title: "fast guard".into(),
+                native_session_id: None,
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                model_settings: None,
+            })
+            .unwrap();
+        let (task_snapshot, host) = service.task_and_host(&task.id).unwrap();
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            task_snapshot.provider,
+            host.id,
+            host.kind,
+            host.address,
+            host.user,
+            host.port,
+            host.identity_file,
+            host.codex_path,
+            task_snapshot.cwd
+        );
+        let catalog = ModelCatalog {
+            models: vec![CatalogModel {
+                id: "older".into(),
+                name: "Older".into(),
+                description: String::new(),
+                reasoning_efforts: vec![],
+                default_effort: None,
+                supports_fast: false,
+                fast_description: None,
+            }],
+            current: ModelCatalogCurrent {
+                model: "older".into(),
+                reasoning_effort: None,
+                fast_mode: None,
+            },
+            source: "fixture".into(),
+            warning: None,
+        };
+        service
+            .model_catalogs
+            .lock()
+            .unwrap()
+            .insert(key, (Instant::now(), catalog));
+        for fast_mode in [Some(true), Some(false)] {
+            assert_eq!(
+                service.set_task_model_settings(
+                    &task.id,
+                    ModelSettings {
+                        model: "older".into(),
+                        reasoning_effort: None,
+                        fast_mode
+                    }
+                ),
+                Err("Fast mode is not supported by this model.".into())
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn archive_preserves_task_history_and_rejects_running_tasks() {
         let dir = temp_dir("archive");
         let service = Service::open(None, dir.clone()).unwrap();
@@ -2186,6 +2701,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             })
             .unwrap();
         service
@@ -2244,6 +2760,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             },
         );
         let codex = native_session_key(&task, host, "same");
@@ -2263,6 +2780,7 @@ mod tests {
                         parent_task_id: None,
                         channel_id: None,
                         project_id: None,
+                        model_settings: None,
                     }
                 ),
                 &other_host,
@@ -2284,6 +2802,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             })
             .unwrap();
         service
@@ -2326,6 +2845,7 @@ mod tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                model_settings: None,
             })
             .unwrap();
         for _ in 0..2 {
@@ -2400,6 +2920,7 @@ mod tests {
             parent_task_id: None,
             channel_id: None,
             project_id: project_id.map(str::to_owned),
+            model_settings: None,
         }
     }
 

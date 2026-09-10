@@ -189,6 +189,23 @@ fn codex_args(task: &Task, collaboration_helper: Option<&str>) -> Vec<String> {
     if !task.model.trim().is_empty() {
         args.extend(["-m".into(), task.model.clone()]);
     }
+    if let Some(settings) = &task.model_settings {
+        if let Some(effort) = settings.reasoning_effort.as_deref() {
+            args.extend([
+                "-c".into(),
+                format!(
+                    "model_reasoning_effort={}",
+                    serde_json::to_string(effort).unwrap_or_else(|_| "\"medium\"".into())
+                ),
+            ]);
+        }
+        // The live 0.154 app-server catalog calls this tier `priority`; `fast`
+        // is a deprecated display alias. Explicit default clears inherited Fast.
+        if let Some(fast) = settings.fast_mode {
+            let tier = if fast { "priority" } else { "default" };
+            args.extend(["-c".into(), format!("service_tier={tier:?}")]);
+        }
+    }
     if let Some(helper) = collaboration_helper {
         // This only layers the Monitter server over the user's ordinary Codex
         // configuration. Credentials stay in the child environment, never in
@@ -1499,6 +1516,7 @@ mod tests {
             cwd: "/tmp/work folder; touch /tmp/no".into(),
             provider: "codex".into(),
             model: model.into(),
+            model_settings: None,
             sandbox: "read-only".into(),
             project_id: None,
         }
@@ -1562,6 +1580,47 @@ mod tests {
         assert!(command
             .get_envs()
             .any(|(key, value)| key == "CODEX_SESSION_ID" && value.is_none()));
+    }
+
+    #[test]
+    fn codex_model_settings_use_invocation_only_effort_and_priority_tier() {
+        let mut host = host("local");
+        host.codex_path = std::env::current_exe().unwrap().display().to_string();
+        let mut task = task(None, "gpt-test");
+        task.model_settings = Some(crate::model::ModelSettings {
+            model: "gpt-test".into(),
+            reasoning_effort: Some("high".into()),
+            fast_mode: Some(true),
+        });
+        let args = build_command(&host, &task)
+            .unwrap()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-c", "model_reasoning_effort=\"high\""]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-c", "service_tier=\"priority\""]));
+    }
+
+    #[test]
+    fn codex_null_fast_override_does_not_set_a_service_tier() {
+        let mut host = host("local");
+        host.codex_path = std::env::current_exe().unwrap().display().to_string();
+        let mut task = task(None, "gpt-test");
+        task.model_settings = Some(crate::model::ModelSettings {
+            model: "gpt-test".into(),
+            reasoning_effort: None,
+            fast_mode: None,
+        });
+        let args = build_command(&host, &task)
+            .unwrap()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|arg| arg.starts_with("service_tier=")));
     }
 
     #[test]

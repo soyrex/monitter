@@ -1,7 +1,7 @@
 /** Put transient menus in the browser's top layer, outside pane overflow. */
 export function floating(
   node: HTMLElement,
-  options: { anchor: HTMLElement; side?: 'below' | 'right'; focus?: boolean },
+  options: { anchor: HTMLElement; side?: 'below' | 'right' | 'above'; focus?: boolean },
 ) {
   const anchor = options.anchor;
   node.setAttribute('popover', 'manual');
@@ -14,7 +14,7 @@ export function floating(
     node.style.maxHeight = `${Math.max(0, window.innerHeight - margin * 2)}px`;
     const width = node.offsetWidth, height = node.offsetHeight;
     const preferredLeft = options.side === 'right' ? rect.right + margin : rect.right - width;
-    const preferredTop = options.side === 'right' ? rect.top : rect.bottom + 6;
+    const preferredTop = options.side === 'right' ? rect.top : options.side === 'above' ? rect.top - height - 6 : rect.bottom + 6;
     const left = Math.max(margin, Math.min(preferredLeft, window.innerWidth - width - margin));
     const top = Math.max(margin, Math.min(preferredTop, window.innerHeight - height - margin));
     node.style.left = `${left}px`;
