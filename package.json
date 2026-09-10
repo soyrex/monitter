@@ -1,0 +1,42 @@
+{
+  "name": "monitter",
+  "version": "0.1.0",
+  "description": "Your agents, together. Native local and SSH agent workspace.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "prepare": "svelte-kit sync || echo ''",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "tauri": "tauri",
+    "build:mac": "node scripts/build-macos.mjs",
+    "install:mac": "node scripts/install-macos.mjs",
+    "test:ui": "node scripts/ui-smoke.mjs",
+    "test:native": "node scripts/native-smoke.mjs",
+    "build:mac:local": "node scripts/build-macos.mjs --debug",
+    "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@lucide/svelte": "^1.43.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "dompurify": "^3.4.15",
+    "marked": "^18.0.12"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.65.1",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tauri-apps/cli": "^2",
+    "svelte": "^5.56.3",
+    "svelte-check": "^4.6.0",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
+  }
+}

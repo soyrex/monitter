@@ -1,0 +1,260 @@
+<script lang="ts">
+  import { tick } from "svelte";
+  import { Command, Search, X } from "@lucide/svelte";
+
+  export type CommandPaletteItem = {
+    id: string;
+    label: string;
+    detail?: string;
+    group?: string;
+    keywords?: string;
+    checked?: boolean;
+    disabled?: boolean;
+  };
+
+  let {
+    open = false,
+    title,
+    placeholder,
+    items,
+    onselect,
+    onclose,
+  }: {
+    open?: boolean;
+    title: string;
+    placeholder: string;
+    items: CommandPaletteItem[];
+    onselect: (id: string) => void;
+    onclose: () => void;
+  } = $props();
+
+  let query = $state("");
+  let activeIndex = $state(0);
+  let input = $state<HTMLInputElement>();
+  let dialog = $state<HTMLElement>();
+  let results = $state<HTMLDivElement>();
+  let previouslyFocused: HTMLElement | null = null;
+
+  const filteredItems = $derived.by(() => {
+    const normalizedQuery = query.toLocaleLowerCase().trim();
+    const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+
+    return items
+      .map((item, index) => ({ item, index, score: matchScore(item, normalizedQuery, terms) }))
+      .filter((match) => match.score !== undefined)
+      .sort((left, right) => left.score! - right.score! || left.index - right.index)
+      .map((match) => match.item);
+  });
+
+  const groupedItems = $derived.by(() => {
+    const groups = new Map<string, CommandPaletteItem[]>();
+    for (const item of filteredItems) {
+      const group = item.group ?? "Commands";
+      groups.set(group, [...(groups.get(group) ?? []), item]);
+    }
+    return [...groups];
+  });
+  const selectableItems = $derived(
+    groupedItems.flatMap(([, groupItems]) => groupItems).filter((item) => !item.disabled),
+  );
+
+  $effect(() => {
+    query;
+    items;
+    activeIndex = selectableItems.length ? 0 : -1;
+  });
+
+  $effect(() => {
+    if (!open) return;
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    query = "";
+    activeIndex = 0;
+    void tick().then(() => input?.focus());
+    return () => previouslyFocused?.focus();
+  });
+
+  $effect(() => {
+    if (!open || activeIndex < 0) return;
+    void tick().then(() =>
+      results?.querySelector<HTMLElement>("[data-active='true']")?.scrollIntoView({
+        block: "nearest",
+      }),
+    );
+  });
+
+  function fuzzyMatch(value: string, term: string) {
+    let position = 0;
+    for (const character of term) {
+      position = value.indexOf(character, position);
+      if (position === -1) return false;
+      position += 1;
+    }
+    return true;
+  }
+
+  function matchScore(item: CommandPaletteItem, normalizedQuery: string, terms: string[]) {
+    if (!terms.length) return 0;
+
+    const label = item.label.toLocaleLowerCase();
+    const descriptor = [item.detail, item.keywords, item.group]
+      .filter(Boolean)
+      .join(" ")
+      .toLocaleLowerCase();
+    const haystack = `${label} ${descriptor}`;
+
+    if (label === normalizedQuery) return 0;
+    if (label.startsWith(normalizedQuery)) return 1;
+    if (label.includes(normalizedQuery)) return 2;
+    if (terms.every((term) => label.includes(term))) return 3;
+    if (descriptor.includes(normalizedQuery) || terms.every((term) => descriptor.includes(term))) return 4;
+    return terms.every((term) => fuzzyMatch(haystack, term)) ? 5 : undefined;
+  }
+
+  function select(item: CommandPaletteItem | undefined) {
+    if (item && !item.disabled) onselect(item.id);
+  }
+
+  function moveActive(delta: number) {
+    if (!selectableItems.length) return;
+    activeIndex = (activeIndex + delta + selectableItems.length) % selectableItems.length;
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    if (!open || !dialog?.contains(event.target as Node)) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onclose();
+    } else if (event.key === "Tab") {
+      containFocus(event);
+    } else if (event.target === input && event.key === "ArrowDown") {
+      event.preventDefault();
+      moveActive(1);
+    } else if (event.target === input && event.key === "ArrowUp") {
+      event.preventDefault();
+      moveActive(-1);
+    } else if (event.target === input && event.key === "Enter") {
+      event.preventDefault();
+      select(selectableItems[activeIndex]);
+    }
+  }
+
+  function containFocus(event: KeyboardEvent) {
+    if (!dialog) return;
+    const focusable = [
+      ...dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ),
+    ];
+    if (!focusable.length) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+</script>
+
+<svelte:window onkeydown={handleKeydown} />
+
+{#if open}
+  <div
+    class="backdrop"
+    role="presentation"
+    onclick={(event) => event.currentTarget === event.target && onclose()}
+  >
+    <dialog bind:this={dialog} class="palette" open aria-modal="true" aria-label={title} tabindex="-1">
+      <header>
+        <span class="title"><Command size={15} strokeWidth={2.1} /> {title}</span>
+        <button class="close" type="button" aria-label="Close command palette" onclick={onclose}>
+          <X size={16} />
+        </button>
+      </header>
+
+      <label class="search">
+        <Search size={17} aria-hidden="true" />
+        <span class="sr-only">Search {title}</span>
+        <input bind:this={input} bind:value={query} {placeholder} autocomplete="off" />
+        <kbd>esc</kbd>
+      </label>
+
+      <div bind:this={results} class="results" aria-label={`${title} results`}>
+        {#if groupedItems.length}
+          {#each groupedItems as [group, groupItems] (group)}
+            <section class="group" aria-label={group}>
+              <h2>{group}</h2>
+              {#each groupItems as item (item.id)}
+                {@const isActive = selectableItems[activeIndex]?.id === item.id}
+                <button
+                  class:active={isActive}
+                  class="result"
+                  type="button"
+                  disabled={item.disabled}
+                  data-active={isActive}
+                  aria-label={item.checked === undefined ? undefined : `${item.label}, ${item.checked ? "on" : "off"}`}
+                  onclick={() => select(item)}
+                  onfocus={() => {
+                    const nextIndex = selectableItems.findIndex((candidate) => candidate.id === item.id);
+                    if (nextIndex >= 0) activeIndex = nextIndex;
+                  }}
+                >
+                  <span class="copy">
+                    <span class="label">{item.label}</span>
+                    {#if item.detail}<span class="detail">{item.detail}</span>{/if}
+                  </span>
+                  {#if item.checked !== undefined}
+                    <span class:checked={item.checked} class="switch" aria-hidden="true"><span></span></span>
+                  {:else}<span class="enter" aria-hidden="true">↵</span>{/if}
+                </button>
+              {/each}
+            </section>
+          {/each}
+        {:else}
+          <p class="empty">No matching commands.</p>
+        {/if}
+      </div>
+
+      <footer><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> select</span></footer>
+    </dialog>
+  </div>
+{/if}
+
+<style>
+  .backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgba(32, 27, 20, .42); backdrop-filter: blur(3px); }
+  .palette { position: relative; inset: auto; box-sizing: border-box; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: min(620px, 100%); height: min(530px, calc(100vh - 40px)); min-height: min(340px, calc(100vh - 40px)); margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; color: var(--ink); background: var(--panel); box-shadow: 0 22px 70px rgba(40, 31, 18, .27); }
+  header, footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-color: var(--line); background: var(--panel); }
+  header { border-bottom: 1px solid var(--line); }
+  .title { display: flex; align-items: center; gap: 7px; font: 600 11px var(--mono); color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }
+  .close { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 5px; color: var(--muted); }
+  .close:hover { color: var(--ink); background: var(--soft); }
+  .search { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); color: var(--muted); }
+  input { min-width: 0; flex: 1; padding: 0; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 15px; }
+  input::placeholder { color: var(--muted); }
+  kbd { padding: 2px 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; color: var(--muted); background: var(--soft); font: 9px var(--mono); }
+  .results { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 7px; }
+  .group + .group { margin-top: 6px; padding-top: 7px; border-top: 1px solid var(--line); }
+  h2 { margin: 4px 7px 5px; color: var(--muted); font: 10px var(--mono); font-weight: 500; letter-spacing: .03em; text-transform: uppercase; }
+  .result { display: flex; align-items: center; width: 100%; min-height: 45px; gap: 12px; padding: 8px 9px; border-radius: 7px; text-align: left; }
+  .result:hover, .result.active { background: color-mix(in srgb, var(--accent) 11%, var(--soft)); }
+  .result.active { box-shadow: inset 2px 0 var(--accent); }
+  .copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
+  .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+  .detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+  .enter { color: var(--muted); font: 13px var(--mono); }
+  .switch { display: flex; align-items: center; width: 28px; height: 16px; padding: 2px; border-radius: 99px; background: var(--line); transition: background .15s ease; }
+  .switch span { width: 12px; height: 12px; border-radius: 50%; background: var(--panel); box-shadow: 0 1px 2px rgba(0, 0, 0, .2); transition: transform .15s ease; }
+  .switch.checked { background: var(--accent); }
+  .switch.checked span { transform: translateX(12px); }
+  .empty { margin: 30px 0; text-align: center; color: var(--muted); font-size: 12px; }
+  footer { justify-content: flex-end; gap: 15px; border-top: 1px solid var(--line); color: var(--muted); font: 10px var(--mono); }
+  footer span { display: inline-flex; align-items: center; gap: 3px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  @media (max-width: 512px) { .backdrop { padding: 12px; } .palette { width: 100%; max-width: 100%; height: min(480px, calc(100vh - 24px)); min-height: 0; } footer { gap: 9px; padding-inline: 10px; } }
+</style>

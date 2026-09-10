@@ -1,0 +1,26 @@
+:root {
+  --accent: #3f9d6a;
+  --accent-rgb: 63, 157, 106;
+  --accent-ink: #2f7a51;
+  --accent-dark-ink: #6cc191;
+  --accent-dark-rgb: 108, 193, 145;
+  --on-accent: #101012;
+}
+.accent-settings {
+  position: sticky; top: 0; z-index: 1000;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  padding: 14px 44px; background: #fbf8f2; color: #262119;
+  border-bottom: 1px solid #d8cfbe;
+  font: 13px/1.4 "IBM Plex Sans", system-ui, sans-serif;
+}
+.accent-settings fieldset { display: flex; align-items: center; gap: 8px; border: 0; padding: 0; margin: 0; }
+.accent-settings legend { float: left; margin-right: 8px; font-weight: 600; }
+.accent-swatch { width: 28px; height: 28px; border: 2px solid #fbf8f2; border-radius: 50%; background: var(--swatch); cursor: pointer; }
+.accent-swatch[aria-pressed="true"] { outline: 2px solid #262119; outline-offset: 1px; }
+.accent-settings label { display: flex; align-items: center; gap: 7px; }
+.accent-settings input[type="color"] { width: 32px; height: 30px; padding: 2px; border: 1px solid #b8ae9c; border-radius: 5px; background: #fbf8f2; cursor: pointer; }
+.accent-settings output { min-width: 7ch; font: 12px "IBM Plex Mono", monospace; }
+.accent-reset { padding: 5px 10px; border: 1px solid #b8ae9c; border-radius: 5px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.accent-settings :focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; }
+.accent-hint { color: #6f6656; }
+@media (max-width: 600px) { .accent-settings { padding: 12px 16px; gap: 10px; } .accent-hint { flex-basis: 100%; } }

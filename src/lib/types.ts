@@ -1,0 +1,72 @@
+export type Provider = 'codex' | 'claude' | 'opencode' | 'hermes';
+export type Sandbox = 'read-only' | 'workspace-write' | 'harness-configured';
+export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
+export type SidebarView = 'standard' | 'activity' | 'projects';
+export interface Project {
+  id: string; name: string; description: string;
+  workspaces: { hostId: string; cwd: string }[];
+}
+export interface Host {
+  id: string; name: string; kind: 'local' | 'ssh'; address: string;
+  user: string; port: number; identityFile: string; defaultCwd: string;
+  codexPath: string; claudePath: string; opencodePath: string; hermesPath: string;
+}
+export interface Agent {
+  id: string; name: string; description: string; instructions: string;
+  avatar: string | null;
+  provider: Provider; model: string; hostId: string; cwd: string;
+  color: string; sandbox: Sandbox;
+  expertise: string[]; responsibilities: string[]; skills: string[];
+  collaborationEnabled: boolean;
+}
+export interface Task {
+  id: string; agentId: string; title: string; nativeSessionId: string | null;
+  archived: boolean; status: TaskStatus; createdAt: number; updatedAt: number;
+  parentTaskId: string | null; channelId: string | null; projectId: string | null;
+  hostId: string; cwd: string; provider: Provider; model: string; sandbox: Sandbox;
+}
+export interface Message {
+  id: string; taskId: string; role: 'user' | 'assistant' | 'system';
+  text: string; createdAt: number;
+  senderAgentId?: string | null; collaborationId?: string | null;
+}
+export interface Collaboration {
+  id: string; kind: 'message' | 'delegation';
+  fromAgentId: string; fromTaskId: string; toAgentId: string; toTaskId: string;
+  text: string; requestId: string;
+  status: 'queued' | 'running' | 'completed' | 'error' | 'interrupted';
+  result: string | null; error: string | null; createdAt: number; updatedAt: number;
+}
+export interface RunEvent {
+  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration';
+  title: string; detail: string; createdAt: number;
+}
+export interface ChannelMessage {
+  id: string; role: 'user' | 'assistant'; agentId: string | null;
+  text: string; createdAt: number; taskId: string | null;
+}
+export interface Channel {
+  id: string; name: string; description: string; agentIds: string[];
+  messages: ChannelMessage[];
+}
+export interface Settings {
+  accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
+  showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
+  sidebarView: SidebarView;
+}
+export interface Snapshot {
+  hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
+  events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
+  collaborations: Collaboration[];
+}
+export interface ProbeResult { ok: boolean; versions: Record<string, string>; message: string; }
+export interface CreateTaskInput {
+  agentId: string; title: string; nativeSessionId?: string | null;
+  parentTaskId?: string | null; channelId?: string | null; projectId?: string | null;
+}
+
+export interface Goal {
+  objective: string; status: string; tokenBudget?: number | null;
+  tokensUsed?: number; timeUsedSeconds?: number;
+}
+export interface ComputerActivity { id: string; tool: string; summary: string; }
