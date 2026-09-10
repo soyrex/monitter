@@ -221,3 +221,68 @@ compact chat headers and the monitter dropdown.
   the Mac was locked; no model prompt or UI preference change was made during installation.
   Evidence: `verification/projects-package-evidence.json` and
   `verification/projects-install-evidence.json`.
+
+
+## Cross-agent messaging and discovery (2026-09-10)
+
+Installed source: `3953dfc87f7b8e9beb7915d17a995809c8fc6e30`. This replaces the earlier
+feasibility-only status: saved agent capabilities, harness discovery, callable peer messaging,
+durable delegation/results and visible task lineage are implemented.
+
+- `cargo test --all-targets -j4`: **61 tests passed**. Collaboration coverage includes authenticated
+  caller scope, forged/revoked grants, malformed/oversized/fragmented HTTP, bounded concurrency,
+  idempotency, enabled recipients, project/host mapping, active-writer queues, reply addressing,
+  cancellation, cycles/budgets, result markers, inbox acknowledgement and restart uncertainty.
+- Python MCP protocol test passed; all four Hermes gateway offline checks passed.
+- Frontend typecheck: zero errors/warnings. Production build passed. **60 browser checks passed**
+  across general UI (28), Projects (7), controls (12), scrolling (8) and collaboration (5).
+  Final collaboration checks include actual multiline typing, legacy profile-array migration,
+  availability switches, Delivered versus completed, partial-result/error display and linked chats.
+- Real Codex proof with two agents on **Mira**, through Monitter's Mac service and two owned SSH
+  reverse forwards: **passed**. The coordinator discovered its peer, delegated exactly one task,
+  received exactly one peer inbox message and the actual result, then resumed its native session
+  and read the persisted exchange. Exactly two tasks and distinct native session IDs existed;
+  no duplicate delivery turn or delegation was created. Both tasks completed.
+  Evidence: `artifacts/collaboration-live-mira-to-mira-1789002233555994000/result.json` and its
+  private isolated state. Native sessions: `01a088d7-c014-7f73-9903-116e282cd554` and
+  `01a088d8-6e9a-7031-96a2-1b09611476b9`.
+- Mira's installed Codex 0.130 rejects GPT-5.6 Luna as requiring a newer CLI. The successful proof
+  used its configured compatible GPT-5.5; account authentication and global configuration were
+  unchanged. Existing model-catalog/skill diagnostics remained visible and did not block this proof.
+- Live testing exposed and fixed an SSH stdout/exit-status race and macOS inheritance of
+  nonblocking accepted sockets. The latter caused immediate intermittent 408 replies; explicitly
+  restoring blocking reads and a delayed-fragment regression fixed the real routed traffic.
+- After completion, no `monitter-mcp.*` directories remained on Mira. No remote daemon or public
+  listener was installed. Proof state contains only dedicated test agents/chats and host definitions.
+
+### macOS installation
+
+- Rebuilt and installed `/Applications/Monitter.app`; signed bundle and DMG verification passed.
+  Package: `~/Library/Caches/Monitter/builds/debug-6Ua8tD/Monitter.app`, built
+  `2026-09-10T01:05:19.101Z`. The app was restarted after verifying all existing tasks were idle.
+- Installed executable SHA-256:
+  `854f00a838877a515e963d7cf09bb82dc273e9a0b090f1f7bad45ad20f1b7df0`.
+  It matches the signed package. The installed process is running with its broker on loopback only.
+- Saved state remained **byte-identical**, preserving all four agents, two hosts, eight chats and
+  their messages/events/preferences. Private state and previous-application backups were retained.
+  Evidence: `verification/cross-agent-install-evidence.json`.
+
+### Remaining validation and environment blocker
+
+The complete **local Mac Codex-to-Codex** proof and mixed Mac/Mira proof are still pending. Normal
+Codex startup blocked while reading iCloud-offloaded
+`/Users/alex/Documents/opencode-harness/.agents/skills/delegate-to-opencode/SKILL.md` and
+`agents/openai.yaml`. A process sample and open-file evidence confirmed the blocked reads before a
+native session began. The bounded test timed out, marked its task interrupted and reaped its owned
+process. This is not a passed local handoff proof; no native configuration was disabled to mask it.
+Earlier local normal-config MCP registration worked before these files were evicted.
+
+The Mac was locked, so Finder pinning and final native visual inspection were unavailable. Unlock
+and keep `/Users/alex/Documents/opencode-harness` and the original desktop repository downloaded,
+then run `python3 scripts/collaboration-smoke.py --peer local` and `--peer mira` from the active
+checkout. See `WORKSPACE_RECOVERY.md` for the safe source location and Git ancestry recovery.
+
+Claude/OpenCode outbound tool injection is implemented and structurally checked; live model handoff
+through those harnesses remains unclaimed. Hermes receives delegated tasks through its existing
+adapter, but outbound callable collaboration awaits its ephemeral tool interface. Multiplayer and
+iOS remain outside this version.
