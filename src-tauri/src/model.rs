@@ -182,6 +182,8 @@ pub struct Settings {
     pub dim_inactive_panes: bool,
     #[serde(default = "default_inactive_pane_opacity")]
     pub inactive_pane_opacity: f64,
+    #[serde(default)]
+    pub focus_follows_mouse: bool,
 }
 impl Eq for Settings {}
 
@@ -395,6 +397,7 @@ pub fn default_snapshot() -> Snapshot {
             sidebar_view: default_sidebar_view(),
             dim_inactive_panes: default_dim_inactive_panes(),
             inactive_pane_opacity: default_inactive_pane_opacity(),
+            focus_follows_mouse: false,
         },
     }
 }
@@ -479,6 +482,7 @@ mod task_migration_tests {
         assert_eq!(snapshot.settings.sidebar_view, "standard");
         assert!(snapshot.settings.dim_inactive_panes);
         assert_eq!(snapshot.settings.inactive_pane_opacity, 0.6);
+        assert!(!snapshot.settings.focus_follows_mouse);
     }
 
     #[test]

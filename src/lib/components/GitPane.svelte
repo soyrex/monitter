@@ -4,13 +4,13 @@
   import { getBridge } from '$lib/bridge';
   import type { GitDiffScope, TaskGitDiff, TaskGitStatus } from '$lib/types';
 
-  type GitPaneStatus = { repository: boolean | null; error: string; loading: boolean };
+  type GitPaneStatus = { repository: boolean | null; error: string; loading: boolean; status: TaskGitStatus | null };
   let { taskId, active = false, onRepository, onStatus }: { taskId: string; active?: boolean; onRepository?: (repository: boolean) => void; onStatus?: (status: GitPaneStatus) => void } = $props();
   const bridge = getBridge();
   let status = $state<TaskGitStatus | null>(null), loading = $state(false), error = $state('');
   let selected = $state<{ path: string; scope: GitDiffScope } | null>(null), diff = $state<TaskGitDiff | null>(null), diffLoading = $state(false), diffError = $state('');
   let generation = 0, statusRevision = 0, diffRevision = 0, timer: ReturnType<typeof setInterval> | undefined;
-  function publish() { onStatus?.({ repository: status?.repository ?? null, error, loading }); }
+  function publish() { onStatus?.({ repository: status?.repository ?? null, error, loading, status }); }
   export function refreshStatus() { return refresh(); }
   async function loadDiff(selection = selected, expectedGeneration = generation) {
     if (!selection) return; const current = ++diffRevision; diffLoading = true; diffError = '';

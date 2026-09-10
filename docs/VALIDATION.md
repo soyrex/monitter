@@ -365,3 +365,17 @@ preserved (4 agents, 2 hosts, 8 chats, 50 messages), with private state and prev
 Native UI inspection confirms two aligned tab bars, the live model selector, bottom-left attachment
 button, agent avatars, thin divider and dimmed inactive pane. Installation evidence:
 `verification/ui-polish-install-evidence.json`.
+
+## Terminal tabs, activity groups and detail tabs — 2026-09-10
+
+Terminal tabs use xterm.js and an owned native PTY, with local/SSH target resolution and ephemeral
+session state. Pane moves retain the same terminal. Focus, async mount ownership, UTF-8 decoding,
+bounded output draining and retryable close failures are explicitly handled.
+
+Frontend browser fixtures passed tool-family grouping (4), frosted headers/desaturation (2),
+Run detail/Timeline (3), existing pane movement and resizing (4), chat scrolling (8), and
+composer startup/Stop (7). Tool checks verify Gmail search/read grouping, description updates,
+streamed entries preserving an open popup, outside/Escape dismissal, small-window bounds, muted
+borderless rows and unchanged raw events. Sidebar checks verify the shared Git status summary,
+non-repository omission, process folder scope and expandable diagnostic output.
+These fixture checks validate frontend behavior; they do not claim native shell or model execution.

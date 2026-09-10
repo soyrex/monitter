@@ -325,3 +325,59 @@ paint a one-pixel line with a wider invisible drag target. Agent messages show t
 small avatar. `Settings.dimInactivePanes` defaults to true and `inactivePaneOpacity` to 0.6; Preferences
 provides a toggle and 10–90% slider, with validation requiring a finite value from 0.1 to 0.9.
 Pointer or keyboard focus immediately marks the receiving pane active; its opacity is always 1.
+
+
+Dimmed panes also desaturate completely; focusing a pane or disabling dimming restores its colour.
+Task and channel title backgrounds use 80% opacity and a 14px backdrop blur, with opaque text.
+Titles remain sticky inside their own message scroller so actual conversation content passes behind
+them. The combined title/activity area has a bounded independent overflow for small panes.
+
+Consecutive tool entries of the same tool or connector family share one muted, borderless row
+with extra spacing below. Connector methods such as `gmail.search_emails` and `gmail.read_email`
+share a family; the visible description and timestamp follow the latest entry. Clicking opens a
+bounded, scrollable top-layer popup containing the full list and each entry's original details.
+Escape or clicking outside dismisses it. Matching streamed entries extend an open popup.
+Grouping is presentation-only: raw events, details, timestamps and settings remain unchanged.
+Messages, reasoning and different services separate groups. Counts say “entries” because harnesses
+can emit multiple lifecycle updates for a single call. Individual entry details can collapse.
+
+## Terminal tabs
+
+The terminal icon in each pane (also Controls → New terminal) opens a real interactive shell.
+The current chat supplies its saved host/folder; drafts and agent/project views use their configured
+folder, including per-host project folders. With no context it uses the local host's default folder.
+Local shells are login shells in a PTY. SSH shells use the saved address, user, port and identity,
+with strict existing host-key checking; a failed remote folder change cannot silently open elsewhere.
+Terminal tabs support the existing pane drag/split/merge behavior and appear in the switcher.
+Switching tabs or panes retains the same shell and screen. Closing a terminal ends its owned session;
+closing Monitter cleans up owned terminals. Terminal sessions are ephemeral, not persisted chat records,
+and are not re-created automatically after an application restart.
+
+IPC: `open_terminal {target,cols,rows}`, `write_terminal {id,data}`, `resize_terminal {id,cols,rows}`,
+`read_terminal {id,afterSeq}`, `close_terminal {id}`. Target resolves saved task, agent/project, or host
+configuration; returned TerminalSession contains id/title/hostId/cwd/status/exitCode. Reads contain
+sequenced byte chunks, `nextSeq` (last delivered sequence), status/exitCode and a truncation flag for
+actual ring loss. Native buffers retain at most 1 MiB; each read is at most 256 KiB. Terminal input is
+bounded to 64 KiB per write, sizes to 10–500 columns and 4–300 rows. xterm retains 10,000 scrollback
+lines; UTF-8 decoding spans chunks. Reads/input are serialized and late mounts cannot steal a terminal
+from its current pane. Close failures stay visible and can be retried.
+
+Shell Ctrl-C/Ctrl-P and other unshifted Ctrl combinations remain terminal input. On macOS, Cmd-K/P,
+Cmd-comma and scale shortcuts continue to control Monitter. Ctrl-Shift-K/P accesses Monitter palettes
+while a terminal is focused on other platforms. Terminal rendering uses
+[xterm.js](https://xtermjs.org/docs/api/terminal/classes/terminal/) and native PTYs use
+[portable-pty](https://docs.rs/portable-pty/latest/portable_pty/).
+
+## Run detail and timeline
+
+The right sidebar separates Run detail, Timeline, and (when available) Git changes. Run detail keeps
+agent identity and settings, adds a compact branch/staged/changed/untracked summary from the existing
+Git status poll, and lists running Monitter tasks and terminals in the same host/folder. This list is
+labelled Tracked processes: it does not claim to enumerate arbitrary OS processes or undisclosed jobs
+inside a harness. Timeline owns diagnostic events, with bounded previews and expandable full output.
+Each tab scrolls within the sidebar; panels preserve their selected detail tab during pane movement.
+
+`Settings.focusFollowsMouse` defaults to false and is available in Preferences and Controls.
+When enabled, entering a pane with the mouse activates it and directs keyboard focus to its current
+terminal, composer, or message scroller without scrolling the view. Touch, drag selections, resizing,
+and open menus/dialogs do not trigger hover focus. Disabling it restores click/keyboard activation.

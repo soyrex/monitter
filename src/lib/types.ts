@@ -53,7 +53,7 @@ export interface Channel {
   messages: ChannelMessage[];
 }
 export interface Settings {
-  dimInactivePanes?: boolean; inactivePaneOpacity?: number;
+  dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
   sidebarView: SidebarView;
@@ -123,3 +123,8 @@ export interface ModelCatalog {
   models: HarnessModel[]; current: ModelSettings;
   source: string; warning: string | null;
 }
+
+
+export interface TerminalTarget { taskId?: string; agentId?: string; hostId?: string; projectId?: string | null; }
+export interface TerminalSession { id: string; title: string; hostId: string; cwd: string; status: 'running' | 'exited'; exitCode: number | null; }
+export interface TerminalRead { chunks: { seq: number; data: number[] }[]; nextSeq: number; status: 'running' | 'exited'; exitCode: number | null; truncated: boolean; }

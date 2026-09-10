@@ -1,14 +1,26 @@
 <script lang="ts">
   import type { PaneLayout, PaneSplit, PaneTabTransfer } from '$lib/panes';
   type Edge = 'center' | 'left' | 'right' | 'top' | 'bottom';
-  let { layout, activePaneId, dimInactivePanes=true, inactivePaneOpacity=.6, onactivate, onresize, ondropTab, children }: {
-    layout: PaneLayout; activePaneId: string; dimInactivePanes?:boolean;inactivePaneOpacity?:number; onactivate: (id: string) => void;
+  let { layout, activePaneId, dimInactivePanes=true, inactivePaneOpacity=.6, focusFollowsMouse=false, onactivate, onresize, ondropTab, children }: {
+    layout: PaneLayout; activePaneId: string; dimInactivePanes?:boolean;inactivePaneOpacity?:number; focusFollowsMouse?:boolean; onactivate: (id: string) => void;
     onresize: (id: string, ratio: number) => void;
     ondropTab: (id: string, edge: Edge, data: PaneTabTransfer) => void;
     children: import('svelte').Snippet<[string]>;
   } = $props();
   let over = $state<{id:string;edge:Edge}|null>(null);
   const mime = 'application/x-monitter-tab';
+  function hoverPane(event:PointerEvent,id:string) {
+    if(!focusFollowsMouse || activePaneId===id || event.pointerType!=='mouse' || event.buttons || !document.hasFocus())return;
+    // Menus and dialogs keep keyboard focus until dismissed. Dragging must not
+    // redirect input or disrupt selections while crossing a pane boundary.
+    if(document.querySelector('dialog[open], [role="dialog"], :popover-open'))return;
+    onactivate(id);
+    const pane=event.currentTarget as HTMLElement;
+    const input=pane.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')
+      ?? pane.querySelector<HTMLElement>('textarea[aria-label="Task message"], textarea[aria-label="Channel message"]')
+      ?? pane.querySelector<HTMLElement>('.messages');
+    (input??pane).focus({preventScroll:true});
+  }
   function edge(event: DragEvent, box: DOMRect): Edge {
     const x=(event.clientX-box.left)/box.width, y=(event.clientY-box.top)/box.height;
     const closest=Math.min(x,1-x,y,1-y);
@@ -26,7 +38,7 @@
     event.preventDefault();event.stopPropagation();
     try {
       const data=JSON.parse(event.dataTransfer.getData(mime));
-      if(typeof data?.sourcePaneId==='string' && typeof data.id==='string' && ['task','draft','channel'].includes(data.kind)) ondropTab(id,zone,data);
+      if(typeof data?.sourcePaneId==='string' && typeof data.id==='string' && ['task','draft','channel','terminal'].includes(data.kind)) ondropTab(id,zone,data);
     } catch { /* Ignore unrelated drag data. */ }
   }
   function resize(event:PointerEvent,node:PaneSplit) {
@@ -54,7 +66,7 @@
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (contains independently interactive chat controls) -->
-    <section class="pane-leaf" data-pane-id={item.id} class:active={activePaneId===item.id} style:opacity={activePaneId===item.id || !dimInactivePanes ? 1 : Math.max(.1,Math.min(.9,inactivePaneOpacity))} aria-label="Workspace pane" onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
+    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:opacity={activePaneId===item.id || !dimInactivePanes ? 1 : Math.max(.1,Math.min(.9,inactivePaneOpacity))} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
       {@render children(item.id)}
       {#if over?.id===item.id}<div class="pane-drop" data-edge={over.edge}><span>{over.edge==='center'?'Move tab here':`Split ${over.edge}`}</span></div>{/if}
     </section>
@@ -63,7 +75,7 @@
 {@render branch(layout)}
 <style>
   .pane-split,.split-child,.pane-leaf{display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
-  .pane-split.column{flex-direction:column}.pane-leaf{position:relative;transition:opacity .14s ease}.pane-leaf.active{outline:none}
+  .pane-split.column{flex-direction:column}.pane-leaf{position:relative;transition:opacity .14s ease,filter .14s ease}.pane-leaf.active{outline:none}.pane-leaf.dimmed{filter:grayscale(1)}
   .pane-resizer{position:relative;flex:0 0 1px;cursor:col-resize;background:var(--line);touch-action:none;z-index:2}.pane-resizer::after{content:"";position:absolute;inset:0 -4px}.column>.pane-resizer{cursor:row-resize}.column>.pane-resizer::after{inset:-4px 0}.pane-resizer:hover,.pane-resizer:focus-visible{background:var(--accent);outline:0}
   .pane-drop{position:absolute;inset:6px;z-index:30;display:grid;place-items:center;border:2px solid var(--accent);border-radius:10px;background:color-mix(in srgb,var(--accent) 16%,var(--panel));opacity:.94;pointer-events:none}
   .pane-drop[data-edge=left]{right:50%}.pane-drop[data-edge=right]{left:50%}.pane-drop[data-edge=top]{bottom:50%}.pane-drop[data-edge=bottom]{top:50%}.pane-drop span{padding:8px;border-radius:6px;background:var(--panel);color:var(--ink);font-size:12px}

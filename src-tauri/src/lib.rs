@@ -10,6 +10,7 @@ pub mod model;
 mod models;
 mod runner;
 mod store;
+mod terminal;
 
 use model::*;
 use runner::Parsed;
@@ -51,6 +52,7 @@ pub(crate) struct Service {
     stopping: std::sync::atomic::AtomicBool,
     runtime_dir: PathBuf,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
+    terminals: Mutex<HashMap<String, Arc<terminal::Session>>>,
 }
 
 fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
@@ -75,6 +77,7 @@ impl Service {
             stopping: std::sync::atomic::AtomicBool::new(false),
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
+            terminals: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -773,6 +776,140 @@ impl Service {
         self.snapshot()
     }
 
+    fn terminal_target(&self, target: terminal::TerminalTarget) -> Result<(Host, String), String> {
+        if let Some(task_id) = target.task_id.filter(|id| !id.trim().is_empty()) {
+            let (task, host) = self.task_and_host(&task_id)?;
+            return Ok((host, task.cwd));
+        }
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let state = &data.snapshot;
+        let (host, agent_cwd) =
+            if let Some(agent_id) = target.agent_id.filter(|id| !id.trim().is_empty()) {
+                let agent = state
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == agent_id)
+                    .ok_or_else(|| "Agent was not found.".to_string())?;
+                let host = state
+                    .hosts
+                    .iter()
+                    .find(|host| host.id == agent.host_id)
+                    .cloned()
+                    .ok_or_else(|| "Agent host was not found.".to_string())?;
+                (host, Some(agent.cwd.clone()))
+            } else if let Some(host_id) = target.host_id.filter(|id| !id.trim().is_empty()) {
+                let host = state
+                    .hosts
+                    .iter()
+                    .find(|host| host.id == host_id)
+                    .cloned()
+                    .ok_or_else(|| "Host was not found.".to_string())?;
+                (host, None)
+            } else {
+                let host = state
+                    .hosts
+                    .iter()
+                    .find(|host| host.kind == "local")
+                    .or_else(|| state.hosts.first())
+                    .cloned()
+                    .ok_or_else(|| "No hosts are configured.".to_string())?;
+                (host, None)
+            };
+        let project_cwd = target
+            .project_id
+            .filter(|id| !id.trim().is_empty())
+            .map(|project_id| {
+                let project = state
+                    .projects
+                    .iter()
+                    .find(|project| project.id == project_id)
+                    .ok_or_else(|| "Project was not found.".to_string())?;
+                Ok::<Option<String>, String>(
+                    project
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.host_id == host.id)
+                        .map(|workspace| workspace.cwd.clone()),
+                )
+            })
+            .transpose()?
+            .flatten();
+        let cwd = project_cwd
+            .or(agent_cwd)
+            .filter(|cwd| !cwd.trim().is_empty())
+            .unwrap_or_else(|| host.default_cwd.clone());
+        if cwd.trim().is_empty() {
+            return Err("Host needs a default working directory.".into());
+        }
+        Ok((host, cwd))
+    }
+
+    fn open_terminal(
+        &self,
+        target: terminal::TerminalTarget,
+        cols: u16,
+        rows: u16,
+    ) -> Result<terminal::TerminalSession, String> {
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Monitter is shutting down.".into());
+        }
+        let (host, cwd) = self.terminal_target(target)?;
+        let id = id();
+        let session = terminal::open(id.clone(), &host, cwd, cols, rows)?;
+        let snapshot = session.snapshot()?;
+        let mut terminals = self
+            .terminals
+            .lock()
+            .map_err(|_| "Terminal registry lock failed.".to_string())?;
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            drop(terminals);
+            let _ = session.close();
+            return Err("Monitter is shutting down.".into());
+        }
+        terminals.insert(id, session);
+        Ok(snapshot)
+    }
+
+    fn terminal(&self, id: &str) -> Result<Arc<terminal::Session>, String> {
+        self.terminals
+            .lock()
+            .map_err(|_| "Terminal registry lock failed.".to_string())?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "Terminal session was not found.".to_string())
+    }
+
+    fn write_terminal(&self, id: &str, data: String) -> Result<(), String> {
+        self.terminal(id)?.write(data.as_bytes())
+    }
+    fn resize_terminal(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
+        self.terminal(id)?.resize(cols, rows)
+    }
+    fn read_terminal(&self, id: &str, after_seq: u64) -> Result<terminal::TerminalRead, String> {
+        self.terminal(id)?.read(after_seq)
+    }
+    fn close_terminal(&self, id: &str) -> Result<(), String> {
+        let session = match self
+            .terminals
+            .lock()
+            .map_err(|_| "Terminal registry lock failed.".to_string())?
+            .get(id)
+            .cloned()
+        {
+            Some(session) => session,
+            None => return Ok(()),
+        };
+        session.close()?;
+        self.terminals
+            .lock()
+            .map_err(|_| "Terminal registry lock failed.".to_string())?
+            .remove(id);
+        Ok(())
+    }
+
     fn cleanup(&self) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::Release);
@@ -786,6 +923,19 @@ impl Service {
             .unwrap_or_default();
         for control in controls {
             control.cancel();
+        }
+        let terminals = self
+            .terminals
+            .lock()
+            .map(|mut terminals| {
+                terminals
+                    .drain()
+                    .map(|(_, session)| session)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for session in terminals {
+            let _ = session.close();
         }
     }
 
@@ -2124,6 +2274,60 @@ async fn get_task_git_diff(
         .map_err(|error| format!("Git diff worker failed: {error}"))?
 }
 
+#[tauri::command]
+async fn open_terminal(
+    state: State<'_, AppState>,
+    target: terminal::TerminalTarget,
+    cols: u16,
+    rows: u16,
+) -> Result<terminal::TerminalSession, String> {
+    let service = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || service.open_terminal(target, cols, rows))
+        .await
+        .map_err(|error| format!("Terminal worker failed: {error}"))?
+}
+#[tauri::command]
+async fn write_terminal(
+    state: State<'_, AppState>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
+    let service = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || service.write_terminal(&id, data))
+        .await
+        .map_err(|error| format!("Terminal worker failed: {error}"))?
+}
+#[tauri::command]
+async fn resize_terminal(
+    state: State<'_, AppState>,
+    id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    let service = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || service.resize_terminal(&id, cols, rows))
+        .await
+        .map_err(|error| format!("Terminal worker failed: {error}"))?
+}
+#[tauri::command]
+async fn read_terminal(
+    state: State<'_, AppState>,
+    id: String,
+    after_seq: u64,
+) -> Result<terminal::TerminalRead, String> {
+    let service = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || service.read_terminal(&id, after_seq))
+        .await
+        .map_err(|error| format!("Terminal worker failed: {error}"))?
+}
+#[tauri::command]
+async fn close_terminal(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let service = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || service.close_terminal(&id))
+        .await
+        .map_err(|error| format!("Terminal worker failed: {error}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -2167,7 +2371,12 @@ pub fn run() {
             set_task_model_settings,
             get_task_goal,
             get_task_git_status,
-            get_task_git_diff
+            get_task_git_diff,
+            open_terminal,
+            write_terminal,
+            resize_terminal,
+            read_terminal,
+            close_terminal
         ])
         .build(tauri::generate_context!())
         .expect("error while running Monitter");
@@ -3079,6 +3288,79 @@ mod tests {
         ] {
             assert!(validate_agent_avatar(Some(avatar)).is_ok());
         }
+    }
+
+    #[test]
+    fn terminal_target_uses_task_snapshot_and_agent_project_workspace() {
+        let dir = temp_dir("terminal-target");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let (task_id, agent_id, host_id) = {
+            let snapshot = service.snapshot().unwrap();
+            (
+                id(),
+                snapshot.agents[0].id.clone(),
+                snapshot.hosts[0].id.clone(),
+            )
+        };
+        service
+            .mutate_data(None, |data| {
+                let mut saved_host = data.snapshot.hosts[0].clone();
+                saved_host.name = "Saved task host".into();
+                data.task_hosts.insert(task_id.clone(), saved_host);
+                data.snapshot.hosts[0].name = "Edited agent host".into();
+                data.snapshot.agents[0].cwd = "/edited-agent-cwd".into();
+                data.snapshot.tasks.push(Task {
+                    id: task_id.clone(),
+                    agent_id: agent_id.clone(),
+                    title: "task".into(),
+                    native_session_id: None,
+                    status: "idle".into(),
+                    archived: false,
+                    created_at: now(),
+                    updated_at: now(),
+                    parent_task_id: None,
+                    channel_id: None,
+                    host_id: host_id.clone(),
+                    cwd: "/snapshotted-task-cwd".into(),
+                    provider: "codex".into(),
+                    model: String::new(),
+                    model_settings: None,
+                    sandbox: "read-only".into(),
+                    project_id: None,
+                });
+                data.snapshot.projects.push(Project {
+                    id: "project".into(),
+                    name: "project".into(),
+                    description: String::new(),
+                    workspaces: vec![ProjectWorkspace {
+                        host_id: host_id.clone(),
+                        cwd: "/project-workspace".into(),
+                    }],
+                });
+                Ok(())
+            })
+            .unwrap();
+        let (task_host, task_cwd) = service
+            .terminal_target(terminal::TerminalTarget {
+                task_id: Some(task_id),
+                agent_id: None,
+                host_id: None,
+                project_id: Some("project".into()),
+            })
+            .unwrap();
+        assert_eq!(task_host.name, "Saved task host");
+        assert_eq!(task_cwd, "/snapshotted-task-cwd");
+        let (agent_host, agent_cwd) = service
+            .terminal_target(terminal::TerminalTarget {
+                task_id: None,
+                agent_id: Some(agent_id),
+                host_id: None,
+                project_id: Some("project".into()),
+            })
+            .unwrap();
+        assert_eq!(agent_host.name, "Edited agent host");
+        assert_eq!(agent_cwd, "/project-workspace");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

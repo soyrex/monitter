@@ -18,6 +18,9 @@ import type {
   ModelSettings,
   ModelTarget,
   ModelCatalog,
+  TerminalTarget,
+  TerminalSession,
+  TerminalRead,
   Attachment,
   AttachmentTarget,
   AttachmentFileData,
@@ -49,6 +52,11 @@ export interface MonitterBridge {
     attachmentIds?: string[],
   ): Promise<Snapshot>;
   resumeTask(taskId: string): Promise<Snapshot>;
+  openTerminal(target: TerminalTarget, cols: number, rows: number): Promise<TerminalSession>;
+  writeTerminal(id: string, data: string): Promise<void>;
+  resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
+  readTerminal(id: string, afterSeq: number): Promise<TerminalRead>;
+  closeTerminal(id: string): Promise<void>;
   getModelCatalog(target: ModelTarget): Promise<ModelCatalog>;
   setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
@@ -100,6 +108,11 @@ const nativeBridge: MonitterBridge = {
   sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) =>
     invoke<Snapshot>("send_channel_message", { channelId, text, agentIds, attachmentIds }),
   resumeTask: (taskId) => invoke<Snapshot>("resume_task", { taskId }),
+  openTerminal: (target, cols, rows) => invoke<TerminalSession>('open_terminal', {target,cols,rows}),
+  writeTerminal: (id, data) => invoke<void>('write_terminal', {id,data}),
+  resizeTerminal: (id, cols, rows) => invoke<void>('resize_terminal', {id,cols,rows}),
+  readTerminal: (id, afterSeq) => invoke<TerminalRead>('read_terminal', {id,afterSeq}),
+  closeTerminal: id => invoke<void>('close_terminal', {id}),
   getModelCatalog: target => invoke<ModelCatalog>("get_model_catalog", {target}),
   setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
   getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
@@ -152,6 +165,11 @@ const previewBridge: MonitterBridge = {
   saveChannel: () => desktopOnly(),
   sendChannelMessage: () => desktopOnly(),
   resumeTask: () => desktopOnly(),
+  openTerminal: () => desktopOnly(),
+  writeTerminal: () => desktopOnly(),
+  resizeTerminal: () => desktopOnly(),
+  readTerminal: () => desktopOnly(),
+  closeTerminal: () => desktopOnly(),
   getModelCatalog: () => desktopOnly(),
   setTaskModelSettings: () => desktopOnly(),
   getTaskGoal: async () => null,
@@ -208,6 +226,11 @@ export function getBridge(): MonitterBridge {
           attachmentIds,
         }) as Promise<Snapshot>,
       resumeTask: (taskId) => test.invoke("resume_task", { taskId }) as Promise<Snapshot>,
+      openTerminal: (target, cols, rows) => test.invoke('open_terminal', {target,cols,rows}) as Promise<TerminalSession>,
+      writeTerminal: (id, data) => test.invoke('write_terminal', {id,data}) as Promise<void>,
+      resizeTerminal: (id, cols, rows) => test.invoke('resize_terminal', {id,cols,rows}) as Promise<void>,
+      readTerminal: (id, afterSeq) => test.invoke('read_terminal', {id,afterSeq}) as Promise<TerminalRead>,
+      closeTerminal: id => test.invoke('close_terminal', {id}) as Promise<void>,
       getModelCatalog: target => test.invoke("get_model_catalog", {target}) as Promise<ModelCatalog>,
       setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,

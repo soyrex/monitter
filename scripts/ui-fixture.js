@@ -10,6 +10,17 @@
   const callbacks = new Set();
   const calls = [];
   const attachments = new Map();
+  const terminals = new Map();
+  const terminalBytes = text => Array.from(new TextEncoder().encode(text));
+  const terminalTarget = target => {
+    const task = state.tasks.find(task => task.id === target.taskId);
+    const agent = state.agents.find(agent => agent.id === (target.agentId || task?.agentId));
+    const host = state.hosts.find(host => host.id === (target.hostId || task?.hostId || agent?.hostId));
+    const project = state.projects.find(project => project.id === target.projectId);
+    if (!host) throw Error('Terminal host was not found.');
+    return { host, cwd: task?.cwd || project?.workspaces?.find(workspace => workspace.hostId === host.id)?.cwd || agent?.cwd || host.defaultCwd };
+  };
+  const terminalChunk = (terminal, data) => terminal.chunks.push({ seq: terminal.nextSeq++, data: terminalBytes(data) });
   const copy = () => clone(state);
   const notify = () => callbacks.forEach(fn => fn());
   const record = (method,args) => calls.push({method,args});
@@ -26,7 +37,7 @@
     const task={id:crypto.randomUUID(),agentId:a.id,title:input.title,nativeSessionId:input.nativeSessionId||null,status:'idle',archived:false,createdAt:Date.now(),updatedAt:Date.now(),parentTaskId:input.parentTaskId||null,channelId:input.channelId||null,projectId:input.projectId||null,hostId:a.hostId,cwd:project?.workspaces.find(w=>w.hostId===a.hostId)?.cwd || a.cwd,provider:a.provider,model:input.modelSettings?.model || a.model,modelSettings:input.modelSettings || null,sandbox:a.sandbox};
     state.tasks.push(task);notify();return clone(task);
   };
-  window.__MONITTER_QA__ = { calls, snapshot:copy, emit:notify, setSnapshot:s=>{state=clone(s);notify();} };
+  window.__MONITTER_QA__ = { calls, snapshot:copy, emit:notify, setSnapshot:s=>{state=clone(s);notify();}, terminals:()=>clone([...terminals.values()]), terminalOutput:(id,data)=>{const terminal=terminals.get(id);if(!terminal)throw Error('Terminal was not found.');terminalChunk(terminal,data);}, terminalCloseFailure:null };
   window.__MONITTER_BRIDGE__ = {
     available:true, getSnapshot:async()=>copy(),
     saveHost:async h=>{record('saveHost',h);return save('hosts',h);},
@@ -65,6 +76,14 @@
       return clone(state.modelCatalog || {models:[{id:'qa-balanced',name:'QA Balanced',description:'Model catalog fixture',reasoningEfforts:[{id:'low',description:'Lower effort'},{id:'medium',description:'Balanced effort'},{id:'high',description:'Higher effort'}],defaultEffort:'medium',supportsFast:true,fastDescription:'Fixture faster responses, increased usage'},{id:'qa-simple',name:'QA Simple',description:'No effort or fast support',reasoningEfforts:[],defaultEffort:null,supportsFast:false,fastDescription:null}],current:task?.modelSettings || {model:task?.model || agent?.model || 'qa-balanced',reasoningEffort:'medium',fastMode:false},source:'Browser QA fixture',warning:null});
     },
     setTaskModelSettings:async(taskId,settings)=>{record('setTaskModelSettings',{taskId,settings});const task=state.tasks.find(t=>t.id===taskId);if(task.status==='running')throw Error('Wait for the current run to finish.');task.model=settings.model;task.modelSettings=settings.model?clone(settings):null;notify();return copy();},
+    openTerminal:async(target,cols,rows)=>{
+      record('openTerminal',{target,cols,rows});const {host,cwd}=terminalTarget(target);const session={id:crypto.randomUUID(),title:`${host.name} shell`,hostId:host.id,cwd,status:'running',exitCode:null};
+      const terminal={...session,cols,rows,nextSeq:1,chunks:[],writes:[]};terminalChunk(terminal,`Monitter browser terminal: ${cwd}\r\n$ `);terminals.set(session.id,terminal);return clone(session);
+    },
+    writeTerminal:async(id,data)=>{record('writeTerminal',{id,data});const terminal=terminals.get(id);if(!terminal)throw Error('Terminal was not found.');if(terminal.status!=='running')throw Error('Terminal has exited.');terminal.writes.push(data);terminalChunk(terminal,data==='\u0003'?'^C\r\n$ ':data==='\u0010'?'^P\r\n$ ':data);return undefined;},
+    resizeTerminal:async(id,cols,rows)=>{record('resizeTerminal',{id,cols,rows});const terminal=terminals.get(id);if(!terminal)throw Error('Terminal was not found.');terminal.cols=cols;terminal.rows=rows;},
+    readTerminal:async(id,afterSeq)=>{record('readTerminal',{id,afterSeq});const terminal=terminals.get(id);if(!terminal)throw Error('Terminal was not found.');return clone({chunks:terminal.chunks.filter(chunk=>chunk.seq>afterSeq).slice(0,128),nextSeq:terminal.nextSeq-1,status:terminal.status,exitCode:terminal.exitCode,truncated:false});},
+    closeTerminal:async id=>{record('closeTerminal',{id});const terminal=terminals.get(id);if(!terminal)throw Error('Terminal was not found.');if(window.__MONITTER_QA__.terminalCloseFailure)throw Error(window.__MONITTER_QA__.terminalCloseFailure);terminal.status='exited';terminal.exitCode=0;terminals.delete(id);},
     readAttachmentFile:async sourcePath=>{record('readAttachmentFile',{sourcePath});return {filename:sourcePath.split('/').at(-1),mimeType:'text/plain',dataBase64:btoa('Native file fixture')};},
     storeAttachment:async(target,file,previewDataUrl=null,sourceId)=>{
       record('storeAttachment',{target,...file,previewDataUrl,sourceId});
