@@ -357,3 +357,11 @@ Older Mira rejects `service_tier="default"`; unsupported Fast overrides are ther
 the composer leaves them null. No model turns or native auth/config edits were needed. Draft catalogs
 resolve project/agent/host folders consistently with task creation; cache keys include provider,
 saved host transport/executable identity and working folder. Project browser checks also passed (7).
+
+Installed and restarted `/Applications/Monitter.app` from `debug-G15zJd/Monitter.app`, built
+`2026-09-10T08:48:11.149Z` from source commit `57ddb8b`. Codesign and installed
+executable SHA-256 `a38bc2c32fd686269ba5f866ba6d96086e0fb18251c8e01bc4e9fab9895e4c13` verified. All existing persisted fields were
+preserved (4 agents, 2 hosts, 8 chats, 50 messages), with private state and previous-app backups.
+Native UI inspection confirms two aligned tab bars, the live model selector, bottom-left attachment
+button, agent avatars, thin divider and dimmed inactive pane. Installation evidence:
+`verification/ui-polish-install-evidence.json`.
