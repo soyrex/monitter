@@ -379,3 +379,135 @@ streamed entries preserving an open popup, outside/Escape dismissal, small-windo
 borderless rows and unchanged raw events. Sidebar checks verify the shared Git status summary,
 non-repository omission, process folder scope and expandable diagnostic output.
 These fixture checks validate frontend behavior; they do not claim native shell or model execution.
+
+## Font controls and sidebar/composer refinements — 2026-09-10
+
+Source checks pass with zero Svelte errors/warnings. Font settings have independent face and base
+size controls; browser fixtures verified saved values, immediate CSS updates and default fallback.
+Native tests passed font-settings serialization/size validation and legacy settings defaults.
+The installed build recorded in `verification/latest-install.json` predates these refinements.
+
+Browser checks passed channel mention pills, case-insensitive member matching, automatic recipient
+selection/removal, preservation of manual recipients and multiline sending. Matching tests reject
+partial names, email prefixes, unknown agents and ambiguous short aliases. Attachment fixtures
+passed paste/drop previews, attachment-only sends, failure/retry and pane-move preservation.
+Native macOS drag-hover highlighting is implemented but still awaits testing in a rebuilt app.
+
+Additional browser checks verified the inline running-agent indicator and reduced-motion behavior;
+host-dot menu and sidebar-footer layout control; sidebar toggle alignment with the native traffic-light
+centre; the three sidebar view icons; avatar/name expand-collapse with a 75% black hover overlay;
+and exclusion of channel internals from sidebar views and the switcher without deleting tasks.
+Thread connector geometry was measured at default and enlarged interface fonts: it starts at the
+avatar's lower edge, passes through dot centres, and ends at the final dot.
+
+Channel headers now share DM header sizing/blur/padding; a browser geometry check matched the two
+and verified editing through the overflow menu. Channel member sidebars use the existing compact
+right-side blade. Browser command checks passed `/invite`, `/topic`, `/names`, `/kick` during a running
+turn, and `/admin`, including unknown-agent draft retention, preserved channel history and zero harness
+dispatch for local commands. Command parser tests cover case preservation, escaped slash messages,
+unknown commands and ambiguous agent names. Channel administration remains user-only.
+
+Native channel membership regression tests passed for idempotence, preserved history, administration
+form removal, cancellation and suppression of stale replies after removal/rejoin. Existing channel
+send code automatically launches fresh tasks or resumes inactive channel tasks with their native
+session IDs. The UI permits sending to idle or busy addressed members; busy recipients now use the durable queue described below.
+
+
+## Busy messages and terminal exit — 2026-09-10
+
+Browser checks in `scripts/ui-busy-queue-smoke.mjs` passed editable busy DM/channel composers,
+visible per-recipient queues and removal, persistent queue/steer preference, Stop availability, and
+single channel echo. Native queue, membership and model tests passed. Current harness adapters use
+FIFO queueing even with steering enabled; live steering is not connected, and the UI states this.
+
+`scripts/ui-terminal-exit-smoke.mjs` passed Ctrl-D through xterm, automatic tab removal after final
+output draining, and exactly one backend close. This is a browser fixture check, not a new live SSH
+terminal proof. `npm run check` passed with zero errors/warnings after these changes.
+
+## Workspace restore, tab closing and YOLO — 2026-09-10
+
+`ui-workspace-restore-smoke.mjs` passed split ratios, selected pane/chat tabs, composer drafts,
+sidebar state, active secondary-pane Cmd-W, fresh terminal restoration with saved host/folder,
+and terminal Cmd-W without closing the pane. Restoring the workspace started no agent turns.
+The browser fixture clears native sessions on reload, so this checks fresh-shell restoration;
+existing-session reuse is implemented through `list_terminals` and awaits native app QA.
+
+`ui-yolo-smoke.mjs` passed default-off, saved Codex selection, Claude availability, reset on harness
+change, and disabled unsupported providers. Four native YOLO argument/validation tests passed,
+including local/SSH Codex argument construction. Terminal target resolution tests passed saved cwd
+and deleted-host rejection. `cargo check --lib` passed the native menu, list and quit-handshake code.
+Svelte check passed with zero errors/warnings. Native Cmd-W menu dispatch and orderly quit/save
+acknowledgement still need checking in the next rebuilt macOS app; no install/restart was performed.
+
+## Settings tab and channel freeze regression — 2026-09-10
+
+Settings is now a categorized workspace tab. `ui-settings-tab-smoke.mjs` passes singleton shortcut
+routing, autosave, visible save errors/recovery, chat draft preservation, category persistence,
+edge split/drag, reload restoration, narrow-pane overflow and Cmd-W tab closing. Wide and split-pane
+screenshots were inspected. The independent font settings regression passes in the Typography category.
+
+A channel regression reproduced an unresponsive UI: workspace capture called `saveCurrentDraft`,
+which assigned a fresh recipient array, retriggering reactive persistence. Capture is now read-only,
+with current composer/recipient values written only into its detached snapshot. This also prevents
+background capture from dismissing menus. `ui-busy-queue-smoke.mjs` now passes again, and
+`ui-channel-workspace-regression.mjs` verifies bounded saves, preserved recipients/unsent text,
+restored channel responsiveness, and working Settings/menu clicks. Svelte check: zero errors/warnings.
+
+### Pointer-based sidebar ordering
+
+`node scripts/ui-sidebar-reorder-smoke.mjs` uses real mouse movement (rather than synthetic HTML drag events) to check agent, chat, channel and project ordering, reload persistence, and normal click navigation. Standard and project views retain independent chat order within each owner; sorting never changes a chat's agent or project. Activity remains running-first/recent-first. Presentation order is stored locally as `monitter.sidebar-order.v1`.
+
+### Pointer tab dragging and saved order
+
+`npm run check`, `node scripts/tab-order-test.mjs`, and `node scripts/ui-tab-drag-smoke.mjs` cover mixed tab order, same-pane/embedded-pane reordering, cross-pane insertion, edge splits, Escape cancellation, stable order on activation, and unsent draft/order restoration after reload. The UI regression uses real pointer movement; internal tabs are not native file drags. Tab-bar drops use insertion markers, while pane body edge drops show split overlays. Workspace saves are deferred during a move and restored on a failed destination, keeping an intact pre-move layout on disk. The dashboard tab is icon-only; native-Mac sizing checks compare both sidebar toggle icons and buttons. Native packaged-app verification requires a new build/install.
+
+`node scripts/ui-close-dashboard-smoke.mjs` checks dashboard close controls and Cmd-W: closing an empty split pane collapses its divider; closing only the dashboard in an occupied pane retains the other tabs. Removing the original main pane promotes a surviving pane and preserves its settings/drafts across reload. The last application pane remains available as the dashboard.
+
+`node scripts/ui-sidebar-resize-smoke.mjs` verifies pointer resizing for the main/right sidebar, 230px/260px minimums, the 40vw maximum, reload persistence, and the right sidebar's narrow-pane blade. Available pane space takes priority when it cannot accommodate the preferred minimum. Widths are local UI preferences; arrow keys resize, Home/End choose bounds, and Escape cancels a drag. Dividers retain a one-pixel visual line with a wider invisible hit area.
+
+`node scripts/ui-agent-settings-smoke.mjs` covers Settings → Agents: existing edit/create/avatar entry points route to the singleton Settings tab, agent selection populates the full form, independent edits survive switching agents/categories and moving/reloading the tab, and explicit save/create/discard work. Avatar, harness, host, permissions and collaboration fields reuse the existing editor; the old agent modal is removed. Font catalogue/system-font discovery were discussed separately and are not implemented by this editor change.
+
+New split panes start with an empty New chat / Terminal chooser, with no dashboard tab. `node scripts/ui-empty-panes-smoke.mjs` verifies lazy chat creation, terminal creation, automatic removal of a pane after its final tab moves away, preserved drafts/terminal sessions, and restored empty panes. The dashboard's under-1000px container rule now retains standard 20px padding while removing the content max-width (superseding the earlier zero-padding rule).
+
+`node scripts/ui-tab-expand-smoke.mjs` covers the three-state per-tab expansion cycle in main and embedded panes, unchanged split widths after restoration, preserved unsent chat text and terminal session IDs, and Cmd/Ctrl-0 resetting interface scale to 125%. Expansion hides sibling DOM branches without removing their sessions or changing the saved layout.
+
+`node scripts/ui-sidebar-controls-smoke.mjs` covers fixed icon-only footer controls, the conditional divider under the sidebar heading, the Agent directory category in Settings (no modal), and live on/off accent tinting of user message bubbles. Pane header backgrounds now use 50% opacity with the existing blur/gradient. Layout presets are accessed through the Controls palette rather than the sidebar.
+
+Composer access selection is covered by `ui-model-panes-smoke.mjs` and the native `task_permissions` test: drafts snapshot their own permission mode, idle saved chats update only their task, running/unsupported changes are rejected, and model/effort/Fast choices retain session and draft state. The native Settings serialization/default/round-trip tests cover opt-in message tint migration.
+
+`ui-autoname-smoke.mjs` verifies chat slash/Controls routing, preservation of unsent text through the Controls action, channel membership, terminal session IDs, and no forwarding of the command to the shell. Native `title` tests cover local/SSH argument construction, bounded title cleanup, a supervised subprocess producing large diagnostics, and timeout when a child never reads stdin. All 22 `runner::tests` pass, including existing local/SSH permissions, quoting and cancellation regressions. These are command/subprocess/fixture checks, not a live model response or packaged-app install test. Auto-name currently requires a configured Codex agent and does not guarantee absence of built-in read tools.
+
+
+### OpenCode directory mismatch diagnosis (2026-09-10)
+
+Installed OpenCode 1.18.30 was exercised against an isolated loopback OpenAI-compatible
+stub, with separate HOME/XDG directories, `--pure`, and no real account credentials or
+model requests. New and resumed turns in the same directory emitted
+`step_start`, `text`, `step_finish` and exited zero. Resuming the same native session
+from another directory emitted nothing and required termination after 40 seconds,
+matching the real affected chat's saved-folder/native-folder mismatch. Explicit
+`--dir` pointing to the original session directory restored both reply output and
+normal exit, even with a different process cwd and stale PWD. Probe scripts and
+JSONL output are retained under `artifacts/opencode-diagnosis/`.
+
+This isolates the directory failure; it does not validate every installed plugin,
+remote host, or live provider. Existing missing transcript entries are not imported
+by this test or by changing the run directory.
+
+
+### Pane chrome and slash suggestions (2026-09-10)
+
+Svelte check reports zero errors/warnings. `ui-tab-expand-smoke.mjs` and
+`ui-sidebar-controls-smoke.mjs` pass with the main sidebar toggle in the main tab bar
+and right-sidebar controls in chat headers only. A separate browser check covers
+channel member toggling and the fullscreen CSS clearance. Native macOS fullscreen
+entry/exit has not yet been exercised in an installed build.
+
+`ui-autoname-smoke.mjs` additionally checks that slash suggestions sit above the
+composer, preserve its height and position, retain input focus, and still select
+commands through Enter. The menu uses the top layer so composer overflow does not
+clip it, with an upward reveal respecting reduced-motion preferences.
+
+OpenCode native regressions passed: three export metadata/timeout tests, two adapter
+argument/event tests, and the service folder-correction persistence test. These cover
+local fake executables and command construction; live SSH resume was not exercised.

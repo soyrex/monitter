@@ -178,14 +178,28 @@ fn merge_opencode_mcp_config(existing: Option<&str>, helper: &str) -> Result<Str
     Ok(config.to_string())
 }
 
-fn codex_args(task: &Task, collaboration_helper: Option<&str>) -> Vec<String> {
+fn codex_args(task: &Task, collaboration_helper: Option<&str>, title_mode: bool) -> Vec<String> {
     // These are exec options and must precede the optional resume subcommand.
-    let mut args = vec![
-        "exec".into(),
-        "-s".into(),
-        task.sandbox.clone(),
-        "--skip-git-repo-check".into(),
-    ];
+    let mut args = vec!["exec".into()];
+    if task.sandbox == "yolo" {
+        // `yolo` is an app-level choice, not a Codex sandbox value. This is
+        // Codex CLI's documented all-approvals-and-sandbox bypass.
+        args.push("--dangerously-bypass-approvals-and-sandbox".into());
+    } else {
+        args.extend(["-s".into(), task.sandbox.clone()]);
+    }
+    args.push("--skip-git-repo-check".into());
+    if title_mode {
+        // These options are documented by the installed Codex CLI. They keep
+        // this classification turn out of persistent history and prevent user
+        // MCP/rule configuration from being inherited. Codex has no documented
+        // no-tools switch, so callers must not represent this as toolless.
+        args.extend([
+            "--ephemeral".into(),
+            "--ignore-user-config".into(),
+            "--ignore-rules".into(),
+        ]);
+    }
     if !task.model.trim().is_empty() {
         args.extend(["-m".into(), task.model.clone()]);
     }
@@ -420,14 +434,169 @@ fn isolate_child(command: &mut Command) {
 }
 
 #[cfg(test)]
-pub fn build_command(host: &Host, task: &Task) -> Result<Command, String> {
+pub(crate) fn build_command(host: &Host, task: &Task) -> Result<Command, String> {
     build_command_with_collaboration(host, task, None)
+}
+
+/// Runs one small, isolated naming turn. It intentionally uses the ordinary
+/// configured harness and read-only task policy, but has no stored task,
+/// session resume, collaboration grant, or tool configuration.
+fn title_reader<R: Read + Send + 'static>(
+    mut pipe: R,
+    limit: usize,
+) -> mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = (|| {
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let count = pipe.read(&mut buffer).map_err(|error| error.to_string())?;
+                if count == 0 {
+                    break;
+                }
+                let keep = count.min(limit.saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&buffer[..keep]);
+                // Continue draining after the capture limit so verbose diagnostics
+                // cannot block the child on a full stdout/stderr pipe.
+            }
+            Ok(bytes)
+        })();
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+pub(crate) fn generate_title(host: &Host, task: &Task, prompt: &str) -> Result<String, String> {
+    if task.provider != "codex" {
+        return Err("Auto-name currently requires a configured Codex agent.".into());
+    }
+    let mut naming_task = task.clone();
+    naming_task.sandbox = "read-only".into();
+    naming_task.native_session_id = None;
+    let command = build_title_command(host, &naming_task)?;
+    run_title_command(command, host.kind == "ssh", prompt, Duration::from_secs(45))
+}
+
+fn run_title_command(
+    mut command: Command,
+    remote: bool,
+    prompt: &str,
+    timeout_duration: Duration,
+) -> Result<String, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start Codex: {error}"))?;
+    let deadline = Instant::now() + timeout_duration;
+    let result = (|| -> Result<String, String> {
+        let mut stdin = child.stdin.take().ok_or("Could not open provider stdin.")?;
+        let stdout = title_reader(
+            child
+                .stdout
+                .take()
+                .ok_or("Could not read title response.")?,
+            256 * 1024,
+        );
+        let stderr = title_reader(
+            child
+                .stderr
+                .take()
+                .ok_or("Could not read title diagnostics.")?,
+            64 * 1024,
+        );
+        let payload = if remote {
+            format!("MONITTER/1 {}\n{}", prompt.len(), prompt)
+        } else {
+            format!("{prompt}\n")
+        };
+        let (sent, writing) = mpsc::channel();
+        let (_hold_stdin, release_stdin) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let result = stdin
+                .write_all(payload.as_bytes())
+                .and_then(|_| stdin.flush())
+                .map_err(|error| format!("Could not send title prompt: {error}"));
+            let _ = sent.send(result);
+            // EOF on the supervisor control pipe means cancel. Keep it open
+            // until the naming request completes or its deadline expires.
+            if remote {
+                let _ = release_stdin.recv();
+            }
+            drop(stdin);
+        });
+        let timeout = || {
+            format!(
+                "Auto-name timed out after {} seconds.",
+                timeout_duration.as_secs()
+            )
+        };
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("Could not wait for title response: {error}"))?
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                return Err(timeout());
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        writing
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| timeout())??;
+        let stdout = stdout
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| timeout())??;
+        let stderr = stderr
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| timeout())??;
+        if !status.success() {
+            let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                "Codex exited without a title.".into()
+            } else {
+                detail
+            });
+        }
+        let mut answer = String::new();
+        for line in String::from_utf8_lossy(&stdout).lines() {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                for parsed in parse_events("codex", &value) {
+                    if let Some(text) = parsed.assistant.filter(|text| !text.trim().is_empty()) {
+                        answer = text;
+                    }
+                }
+            }
+        }
+        if answer.is_empty() {
+            return Err("The naming harness returned no title.".into());
+        }
+        Ok(answer)
+    })();
+    if result.is_err() {
+        terminate_bounded(&mut child);
+    }
+    result
 }
 
 fn build_command_with_collaboration(
     host: &Host,
     task: &Task,
     collaboration: Option<(&SessionGrant, &str)>,
+) -> Result<Command, String> {
+    build_command_with_options(host, task, collaboration, false)
+}
+
+fn build_title_command(host: &Host, task: &Task) -> Result<Command, String> {
+    build_command_with_options(host, task, None, true)
+}
+
+fn build_command_with_options(
+    host: &Host,
+    task: &Task,
+    collaboration: Option<(&SessionGrant, &str)>,
+    title_mode: bool,
 ) -> Result<Command, String> {
     if !valid_sandbox_for_provider(&task.provider, &task.sandbox) {
         return Err("Task has an invalid provider sandbox setting.".into());
@@ -448,7 +617,7 @@ fn build_command_with_collaboration(
         None
     };
     let args = match task.provider.as_str() {
-        "codex" => codex_args(task, collaboration.map(|(_, helper)| helper)),
+        "codex" => codex_args(task, collaboration.map(|(_, helper)| helper), title_mode),
         "claude" => {
             let mut args = adapters::claude::args(task);
             if let Some((_, helper)) = collaboration {
@@ -524,6 +693,170 @@ fn build_command_with_collaboration(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     Ok(command)
+}
+
+const OPENCODE_EXPORT_TIMEOUT: Duration = Duration::from_secs(8);
+const OPENCODE_EXPORT_LIMIT: usize = 1024 * 1024;
+
+fn opencode_export_command(host: &Host, task: &Task, session_id: &str) -> Result<Command, String> {
+    let cli = configured_path(host, "opencode")?;
+    let mut command = if host.kind == "local" {
+        let mut command = Command::new(resolve_local_provider("opencode", cli)?);
+        command
+            .args(["export", session_id])
+            .current_dir(&task.cwd)
+            .env("PWD", &task.cwd);
+        command
+    } else if host.kind == "ssh" {
+        let mut command = Command::new("ssh");
+        add_ssh_options(&mut command, host);
+        command.arg(ssh_target(host)?).arg(format!(
+            "cd {} && exec {} export {}",
+            remote_path(&task.cwd),
+            remote_path(remote_cli(host, "opencode")?),
+            posix_quote(session_id),
+        ));
+        command
+    } else {
+        return Err("Host kind must be local or ssh.".into());
+    };
+    isolate_child(&mut command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    Ok(command)
+}
+
+fn read_bounded<R: Read + Send + 'static>(
+    mut pipe: R,
+    limit: usize,
+) -> mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = (|| {
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let count = pipe.read(&mut buffer).map_err(|error| error.to_string())?;
+                if count == 0 {
+                    break;
+                }
+                if bytes.len().saturating_add(count) > limit {
+                    // Keep draining the process pipe, but reject an oversized
+                    // transcript rather than retaining raw conversation data.
+                    while pipe.read(&mut buffer).map_err(|error| error.to_string())? != 0 {}
+                    return Err("OpenCode session metadata was too large to inspect safely.".into());
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            Ok(bytes)
+        })();
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn opencode_export_directory(
+    host: &Host,
+    task: &Task,
+    session_id: &str,
+    control: &RunControl,
+) -> Result<String, String> {
+    opencode_export_directory_with_timeout(host, task, session_id, control, OPENCODE_EXPORT_TIMEOUT)
+}
+
+fn opencode_export_directory_with_timeout(
+    host: &Host,
+    task: &Task,
+    session_id: &str,
+    control: &RunControl,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut command = opencode_export_command(host, task, session_id)?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not inspect OpenCode session: {error}"))?;
+    let stdout = read_bounded(
+        child
+            .stdout
+            .take()
+            .ok_or("Could not read OpenCode session metadata.")?,
+        OPENCODE_EXPORT_LIMIT,
+    );
+    let stderr = read_bounded(
+        child
+            .stderr
+            .take()
+            .ok_or("Could not read OpenCode session diagnostics.")?,
+        64 * 1024,
+    );
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if control.cancelled.load(Ordering::SeqCst) {
+            terminate_bounded(&mut child);
+            return Err("OpenCode session inspection was cancelled.".into());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("Could not inspect OpenCode session: {error}"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            terminate_bounded(&mut child);
+            return Err("OpenCode session inspection timed out.".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    // The process has exited; give its reader threads a small independent
+    // grace period to observe EOF instead of racing a just-expired deadline.
+    let drain_timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(250))
+        .min(Duration::from_secs(1));
+    let output = match stdout.recv_timeout(drain_timeout) {
+        Ok(output) => output?,
+        Err(_) => {
+            // A descendant retaining an inherited pipe must not keep this
+            // metadata probe alive after its direct child has exited.
+            signal_child(&mut child, libc::SIGTERM);
+            return Err("OpenCode session inspection timed out.".into());
+        }
+    };
+    let stderr_timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(250))
+        .min(Duration::from_secs(1));
+    let diagnostics = match stderr.recv_timeout(stderr_timeout) {
+        Ok(diagnostics) => diagnostics?,
+        Err(_) => {
+            signal_child(&mut child, libc::SIGTERM);
+            return Err("OpenCode session inspection timed out.".into());
+        }
+    };
+    if !status.success() {
+        let _ = diagnostics;
+        return Err("Could not inspect OpenCode session.".into());
+    }
+    let value: Value = serde_json::from_slice(&output)
+        .map_err(|_| "OpenCode session metadata was invalid.".to_string())?;
+    let info = value
+        .get("info")
+        .ok_or("OpenCode session metadata was invalid.")?;
+    if info.get("id").and_then(Value::as_str) != Some(session_id) {
+        return Err("OpenCode session metadata did not match the requested session.".into());
+    }
+    let directory = info
+        .get("directory")
+        .and_then(Value::as_str)
+        .filter(|directory| {
+            !directory.trim().is_empty()
+                && !directory.contains('\0')
+                && std::path::Path::new(directory).is_absolute()
+        })
+        .ok_or("OpenCode session metadata did not contain an absolute folder.")?;
+    Ok(directory.into())
 }
 
 pub fn build_probe_command(host: &Host, provider: &str) -> Result<Command, String> {
@@ -1200,13 +1533,36 @@ fn cleanup_remote_helper(host: &Host, helper_dir: &str) {
 
 pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunControl>) {
     thread::spawn(move || {
-        let (task, host) = match service.task_and_host(&task_id) {
+        let (mut task, host) = match service.task_and_host(&task_id) {
             Ok(value) => value,
             Err(error) => {
                 service.finish(&task_id, "error", Some(error));
                 return;
             }
         };
+        if task.provider == "opencode" {
+            if let Some(session_id) = task.native_session_id.clone() {
+                let directory = match opencode_export_directory(&host, &task, &session_id, &control)
+                {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        if control.cancelled.load(Ordering::SeqCst) {
+                            service.finish(&task_id, "interrupted", None);
+                        } else {
+                            service.finish(&task_id, "error", Some(error));
+                        }
+                        return;
+                    }
+                };
+                match service.restore_opencode_task_directory(&task_id, &session_id, &directory) {
+                    Ok(updated) => task = updated,
+                    Err(error) => {
+                        service.finish(&task_id, "error", Some(error));
+                        return;
+                    }
+                }
+            }
+        }
         let grant = if matches!(task.provider.as_str(), "codex" | "claude" | "opencode") {
             match service.collaboration_grant(&task_id) {
                 Ok(grant) => grant,
@@ -1583,6 +1939,34 @@ mod tests {
     }
 
     #[test]
+    fn yolo_uses_codex_bypass_flag_not_an_invalid_sandbox_value() {
+        let mut host = host("local");
+        host.codex_path = std::env::current_exe().unwrap().display().to_string();
+        let mut task = task(None, "gpt-test");
+        task.sandbox = "yolo".into();
+        let args = build_command(&host, &task)
+            .unwrap()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!args.windows(2).any(|pair| pair == ["-s", "yolo"]));
+        assert!(!args.iter().any(|arg| arg == "-s"));
+    }
+
+    #[test]
+    fn yolo_bypass_is_preserved_for_ssh_commands() {
+        let mut task = task(None, "gpt-test");
+        task.sandbox = "yolo".into();
+        let command = build_command(&host("ssh"), &task).unwrap();
+        let rendered = command.get_args().last().unwrap().to_string_lossy();
+        assert!(rendered.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!rendered.contains("-s yolo"));
+    }
+
+    #[test]
     fn codex_model_settings_use_invocation_only_effort_and_priority_tier() {
         let mut host = host("local");
         host.codex_path = std::env::current_exe().unwrap().display().to_string();
@@ -1625,7 +2009,11 @@ mod tests {
 
     #[test]
     fn codex_collaboration_is_scoped_to_the_monitter_server() {
-        let args = codex_args(&task(None, ""), Some("/private/runtime/monitter-mcp.py"));
+        let args = codex_args(
+            &task(None, ""),
+            Some("/private/runtime/monitter-mcp.py"),
+            false,
+        );
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-c", "mcp_servers.monitter.required=true"]));
@@ -1965,5 +2353,145 @@ mod tests {
         let status = control.wait().unwrap();
         assert!(!status.success());
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn title_command_is_ephemeral_and_does_not_resume() {
+        let mut title_task = task(Some("old-session"), "");
+        title_task.sandbox = "read-only".into();
+        title_task.native_session_id = None;
+        let mut local = host("local");
+        local.codex_path = "/bin/echo".into();
+        let command = build_title_command(&local, &title_task).unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args.contains(&"--ephemeral".into()));
+        assert!(args.contains(&"--ignore-user-config".into()));
+        assert!(args.contains(&"--ignore-rules".into()));
+        assert!(!args.contains(&"old-session".into()));
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "exec").count(), 1);
+        let remote = build_title_command(&host("ssh"), &title_task).unwrap();
+        let remote_args = remote
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let bootstrap = remote_args.last().unwrap();
+        assert!(bootstrap.contains("'--ephemeral'"));
+        assert!(bootstrap.contains("'--ignore-user-config'"));
+        assert!(!bootstrap.contains("old-session"));
+    }
+    #[test]
+    fn title_runner_keeps_remote_control_open_and_drains_diagnostics() {
+        let mut command = Command::new("python3");
+        command.args(["-c", REMOTE_SUPERVISOR, "/tmp", "python3", "-c",
+            "import sys,json,time; sys.stdin.read(); sys.stderr.write('x'*131072); sys.stderr.flush(); time.sleep(.05); print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Remote title'}}))"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        isolate_child(&mut command);
+        assert_eq!(
+            run_title_command(
+                command,
+                true,
+                &"Recent content ".repeat(3000),
+                Duration::from_secs(5)
+            )
+            .unwrap(),
+            "Remote title"
+        );
+    }
+
+    #[test]
+    fn title_runner_bounds_a_child_that_never_reads_stdin() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        isolate_child(&mut command);
+        let started = Instant::now();
+        let result = run_title_command(
+            command,
+            false,
+            &"x".repeat(128 * 1024),
+            Duration::from_millis(100),
+        );
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    fn fake_opencode(script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("monitter-opencode-export-{}", id()));
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    fn opencode_task(session: &str) -> Task {
+        let mut value = task(Some(session), "");
+        value.provider = "opencode".into();
+        value.sandbox = "harness-configured".into();
+        value.cwd = "/tmp".into();
+        value
+    }
+
+    #[test]
+    fn opencode_export_restores_only_matching_absolute_session_directory() {
+        let executable = fake_opencode("printf '%s\\n' '{\"info\":{\"id\":\"ses_123\",\"directory\":\"/original/project\"},\"messages\":[]}'");
+        let mut local = host("local");
+        local.opencode_path = executable.display().to_string();
+        let control = RunControl::new(false);
+        let result = opencode_export_directory_with_timeout(
+            &local,
+            &opencode_task("ses_123"),
+            "ses_123",
+            &control,
+            Duration::from_secs(1),
+        );
+        assert_eq!(result.unwrap(), "/original/project");
+        let _ = std::fs::remove_file(executable);
+    }
+
+    #[test]
+    fn opencode_export_rejects_mismatched_or_relative_metadata() {
+        for payload in [
+            "{\"info\":{\"id\":\"other\",\"directory\":\"/original/project\"},\"messages\":[]}",
+            "{\"info\":{\"id\":\"ses_123\",\"directory\":\"relative\"},\"messages\":[]}",
+        ] {
+            let executable = fake_opencode(&format!("printf '%s\\n' '{}'", payload));
+            let mut local = host("local");
+            local.opencode_path = executable.display().to_string();
+            let control = RunControl::new(false);
+            assert!(opencode_export_directory_with_timeout(
+                &local,
+                &opencode_task("ses_123"),
+                "ses_123",
+                &control,
+                Duration::from_secs(1)
+            )
+            .is_err());
+            let _ = std::fs::remove_file(executable);
+        }
+    }
+
+    #[test]
+    fn opencode_export_is_bounded() {
+        let executable = fake_opencode("sleep 30");
+        let mut local = host("local");
+        local.opencode_path = executable.display().to_string();
+        let control = RunControl::new(false);
+        let started = Instant::now();
+        let result = opencode_export_directory_with_timeout(
+            &local,
+            &opencode_task("ses_123"),
+            "ses_123",
+            &control,
+            Duration::from_millis(100),
+        );
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_file(executable);
     }
 }

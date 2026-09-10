@@ -10,6 +10,12 @@ pub fn args(task: &Task) -> Vec<String> {
         "--format".into(),
         "json".into(),
         "--thinking".into(),
+        // OpenCode uses PWD while selecting its local project instance. A
+        // desktop-launched child can inherit a different PWD even when its
+        // process current directory is correct, so make the task folder an
+        // explicit CLI input.
+        "--dir".into(),
+        task.cwd.clone(),
     ];
     if let Some(session_id) = &task.native_session_id {
         args.extend(["--session".into(), session_id.clone()]);
@@ -161,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn args_use_stdin_json_thinking_and_resume_without_auto_approval() {
+    fn args_use_task_directory_stdin_json_thinking_and_resume_without_auto_approval() {
         let args = args(&task(Some("ses_123"), "openai/gpt-5"));
 
         assert_eq!(
@@ -171,6 +177,8 @@ mod tests {
                 "--format",
                 "json",
                 "--thinking",
+                "--dir",
+                "/tmp",
                 "--session",
                 "ses_123",
                 "--model",

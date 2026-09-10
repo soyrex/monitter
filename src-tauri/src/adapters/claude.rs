@@ -11,6 +11,10 @@ pub fn args(task: &Task) -> Vec<String> {
         "stream-json".into(),
         "--verbose".into(),
     ];
+    if task.sandbox == "yolo" {
+        // Claude Code's documented non-interactive permission bypass.
+        args.push("--dangerously-skip-permissions".into());
+    }
     if let Some(session_id) = &task.native_session_id {
         args.extend(["--resume".into(), session_id.clone()]);
     }
@@ -243,6 +247,15 @@ mod tests {
         );
         assert!(!args.iter().any(|arg| arg.contains("skip-permissions")));
         assert!(!args.iter().any(|arg| arg == "acceptEdits"));
+    }
+
+    #[test]
+    fn yolo_uses_claudes_documented_permission_bypass() {
+        let mut task = task(None, "sonnet");
+        task.sandbox = "yolo".into();
+        assert!(args(&task)
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
     }
 
     #[test]

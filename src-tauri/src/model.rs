@@ -162,10 +162,52 @@ pub struct Channel {
     pub description: String,
     pub agent_ids: Vec<String>,
     pub messages: Vec<ChannelMessage>,
+    #[serde(default)]
+    pub agent_conversation_enabled: bool,
+    #[serde(default = "default_agent_conversation_turn_limit")]
+    pub agent_conversation_turn_limit: u32,
+    #[serde(default)]
+    pub agent_conversation_turns_used: u32,
+    #[serde(default)]
+    pub agent_conversation_paused: bool,
+}
+
+pub fn default_agent_conversation_turn_limit() -> u32 {
+    6
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedMessage {
+    pub id: String,
+    pub task_id: String,
+    pub channel_id: Option<String>,
+    pub text: String,
+    pub attachment_ids: Vec<String>,
+    pub created_at: i64,
+    pub status: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// A channel peer delivery is never represented as user-authored input.
+    #[serde(default)]
+    pub sender_agent_id: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: u8,
+    #[serde(default = "default_chat_font_size")]
+    pub chat_font_size: u8,
+    #[serde(default = "default_interface_font_size")]
+    pub interface_font_size: u8,
+    #[serde(default)]
+    pub terminal_font: String,
+    #[serde(default)]
+    pub chat_font: String,
+    #[serde(default)]
+    pub interface_font: String,
     pub accent: String,
     pub theme: String,
     #[serde(default = "default_interface_scale")]
@@ -174,6 +216,10 @@ pub struct Settings {
     pub show_tool_activity: bool,
     #[serde(default = "default_show_reasoning_summaries")]
     pub show_reasoning_summaries: bool,
+    #[serde(default)]
+    pub tint_user_messages: bool,
+    #[serde(default)]
+    pub compress_tool_calls: bool,
     #[serde(default)]
     pub send_with_enter: bool,
     #[serde(default = "default_sidebar_view")]
@@ -184,8 +230,29 @@ pub struct Settings {
     pub inactive_pane_opacity: f64,
     #[serde(default)]
     pub focus_follows_mouse: bool,
+    #[serde(default = "default_busy_message_mode")]
+    pub busy_message_mode: String,
+    #[serde(default = "default_shortcut_mode")]
+    pub shortcut_mode: String,
+    #[serde(default = "default_show_tab_close_buttons")]
+    pub show_tab_close_buttons: bool,
 }
 impl Eq for Settings {}
+fn default_terminal_font_size() -> u8 {
+    14
+}
+pub fn default_shortcut_mode() -> String {
+    "standard".into()
+}
+fn default_show_tab_close_buttons() -> bool {
+    true
+}
+fn default_chat_font_size() -> u8 {
+    13
+}
+fn default_interface_font_size() -> u8 {
+    14
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -225,6 +292,9 @@ fn default_dim_inactive_panes() -> bool {
 fn default_inactive_pane_opacity() -> f64 {
     0.6
 }
+fn default_busy_message_mode() -> String {
+    "queue".into()
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -239,6 +309,8 @@ pub struct Snapshot {
     pub settings: Settings,
     #[serde(default)]
     pub collaborations: Vec<Collaboration>,
+    #[serde(default)]
+    pub queued_messages: Vec<QueuedMessage>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -252,6 +324,8 @@ pub struct CreateTaskInput {
     pub project_id: Option<String>,
     #[serde(default)]
     pub model_settings: Option<ModelSettings>,
+    #[serde(default)]
+    pub sandbox: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -336,8 +410,9 @@ pub fn valid_sandbox(v: &str) -> bool {
 
 pub fn valid_sandbox_for_provider(provider: &str, sandbox: &str) -> bool {
     match provider {
-        "codex" => valid_sandbox(sandbox),
-        "claude" | "opencode" | "hermes" => sandbox == "harness-configured",
+        "codex" => valid_sandbox(sandbox) || sandbox == "yolo",
+        "claude" => sandbox == "harness-configured" || sandbox == "yolo",
+        "opencode" | "hermes" => sandbox == "harness-configured",
         _ => false,
     }
 }
@@ -387,17 +462,29 @@ pub fn default_snapshot() -> Snapshot {
         channels: vec![],
         projects: vec![],
         collaborations: vec![],
+        queued_messages: vec![],
         settings: Settings {
+            terminal_font_size: default_terminal_font_size(),
+            chat_font_size: default_chat_font_size(),
+            interface_font_size: default_interface_font_size(),
+            terminal_font: String::new(),
+            chat_font: String::new(),
+            interface_font: String::new(),
             accent: "#3f9d6a".into(),
             theme: "system".into(),
             interface_scale: default_interface_scale(),
             show_tool_activity: default_show_tool_activity(),
             show_reasoning_summaries: default_show_reasoning_summaries(),
+            tint_user_messages: false,
+            compress_tool_calls: false,
             send_with_enter: false,
             sidebar_view: default_sidebar_view(),
             dim_inactive_panes: default_dim_inactive_panes(),
             inactive_pane_opacity: default_inactive_pane_opacity(),
             focus_follows_mouse: false,
+            busy_message_mode: default_busy_message_mode(),
+            shortcut_mode: default_shortcut_mode(),
+            show_tab_close_buttons: default_show_tab_close_buttons(),
         },
     }
 }
@@ -415,7 +502,11 @@ mod tests {
         assert!(settings.show_tool_activity);
         assert!(settings.show_reasoning_summaries);
         assert!(!settings.send_with_enter);
+        assert!(!settings.tint_user_messages);
+        assert!(!settings.compress_tool_calls);
         assert_eq!(settings.sidebar_view, "standard");
+        assert_eq!(settings.shortcut_mode, "standard");
+        assert!(settings.show_tab_close_buttons);
     }
 
     #[test]
@@ -426,13 +517,17 @@ mod tests {
         assert_eq!(value["showToolActivity"], true);
         assert_eq!(value["showReasoningSummaries"], true);
         assert_eq!(value["sendWithEnter"], false);
+        assert_eq!(value["tintUserMessages"], false);
+        assert_eq!(value["compressToolCalls"], false);
         assert_eq!(value["sidebarView"], "standard");
+        assert_eq!(value["shortcutMode"], "standard");
+        assert_eq!(value["showTabCloseButtons"], true);
     }
 
     #[test]
     fn settings_round_trip_preserves_disabled_display_toggles() {
         let settings: Settings = serde_json::from_str(
-            r##"{"accent":"#3f9d6a","theme":"dark","interfaceScale":125,"showToolActivity":false,"showReasoningSummaries":false,"sendWithEnter":true}"##,
+            r##"{"accent":"#3f9d6a","theme":"dark","interfaceScale":125,"showToolActivity":false,"showReasoningSummaries":false,"sendWithEnter":true,"tintUserMessages":true,"compressToolCalls":true}"##,
         )
         .unwrap();
 
@@ -442,6 +537,16 @@ mod tests {
         assert!(!restored.show_tool_activity);
         assert!(!restored.show_reasoning_summaries);
         assert!(restored.send_with_enter);
+        assert!(restored.tint_user_messages);
+        assert!(restored.compress_tool_calls);
+    }
+
+    #[test]
+    fn yolo_is_limited_to_providers_with_a_documented_bypass() {
+        assert!(valid_sandbox_for_provider("codex", "yolo"));
+        assert!(valid_sandbox_for_provider("claude", "yolo"));
+        assert!(!valid_sandbox_for_provider("opencode", "yolo"));
+        assert!(!valid_sandbox_for_provider("hermes", "yolo"));
     }
 
     #[test]
@@ -483,6 +588,12 @@ mod task_migration_tests {
         assert!(snapshot.settings.dim_inactive_panes);
         assert_eq!(snapshot.settings.inactive_pane_opacity, 0.6);
         assert!(!snapshot.settings.focus_follows_mouse);
+        assert!(snapshot.settings.terminal_font.is_empty());
+        assert!(snapshot.settings.chat_font.is_empty());
+        assert!(snapshot.settings.interface_font.is_empty());
+        assert_eq!(snapshot.settings.terminal_font_size, 14);
+        assert_eq!(snapshot.settings.chat_font_size, 13);
+        assert_eq!(snapshot.settings.interface_font_size, 14);
     }
 
     #[test]
@@ -517,6 +628,7 @@ mod task_migration_tests {
                 channel_id: None,
                 project_id: Some(project_id),
                 model_settings: None,
+                sandbox: None,
             },
         ));
         let value = serde_json::to_value(&snapshot).unwrap();
@@ -552,7 +664,10 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
             .map(|settings| settings.model.clone())
             .unwrap_or_else(|| agent.model.clone()),
         model_settings: input.model_settings.clone(),
-        sandbox: agent.sandbox.clone(),
+        sandbox: input
+            .sandbox
+            .clone()
+            .unwrap_or_else(|| agent.sandbox.clone()),
         project_id: input.project_id.clone(),
     }
 }

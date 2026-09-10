@@ -1,8 +1,12 @@
 use crate::{model::Host, runner};
 use serde::Serialize;
 use std::{
+    collections::HashSet,
+    fs,
     io::Read,
+    path::PathBuf,
     process::{Command, Stdio},
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -11,6 +15,13 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 const STATUS_LIMIT: usize = 1024 * 1024;
 const DIFF_LIMIT: usize = 512 * 1024;
 const FILE_LIMIT: usize = 2_000;
+const MARKER_WAIT: Duration = Duration::from_secs(5 * 60);
+
+// A task can be represented by more than one Monitter chat. Keep a negative
+// result by host/folder so changing between those chats does not wake SSH or
+// start Git again. A project/window reload deliberately starts a fresh app
+// process and therefore a fresh check.
+static SILENT_PROBES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +125,273 @@ pub fn status(host: &Host, cwd: &str) -> Result<GitStatus, String> {
         files,
         truncated,
     })
+}
+
+/// The UI uses this entry point for discovery. Missing markers and probe
+/// failures are intentionally represented as an absent repository: Git is an
+/// optional pane and an unavailable host must not turn into a repeating error.
+pub fn detect_status(host: &Host, cwd: &str, session: &str) -> GitStatus {
+    let key = probe_key(host, cwd, session);
+    if silent_probes()
+        .lock()
+        .is_ok_and(|entries| entries.contains(&key))
+    {
+        return absent_status();
+    }
+    match has_marker(host, cwd) {
+        Ok(false) => {
+            remember_silent(&key);
+            absent_status()
+        }
+        Ok(true) => match status(host, cwd) {
+            Ok(status) => status,
+            Err(_) => {
+                remember_silent(&key);
+                absent_status()
+            }
+        },
+        Err(_) => {
+            remember_silent(&key);
+            absent_status()
+        }
+    }
+}
+
+/// Wait once, without invoking Git, for a `.git` marker to be created. Local
+/// folders use filesystem metadata checks; SSH keeps one lightweight shell
+/// session alive instead of reconnecting on a poll interval.
+pub fn wait_for_marker(host: &Host, cwd: &str, session: &str) -> Result<String, String> {
+    // A failed Git probe can still have a `.git` entry (for example a broken
+    // remote worktree). That is not a creation event and must never re-arm a
+    // probe loop.
+    if has_marker(host, cwd)? { return Ok("already-present".into()); }
+    let found = if host.kind == "local" {
+        wait_local_for_marker(cwd)
+    } else if host.kind == "ssh" {
+        wait_remote_for_marker(host, cwd)
+    } else {
+        Err("Host kind must be local or ssh.".into())
+    }?;
+    if found {
+        if let Ok(mut entries) = silent_probes().lock() {
+            entries.remove(&probe_key(host, cwd, session));
+        }
+    }
+    Ok(if found { "found" } else { "timeout" }.into())
+}
+
+fn absent_status() -> GitStatus {
+    GitStatus {
+        repository: false,
+        root: None,
+        branch: None,
+        files: vec![],
+        truncated: false,
+    }
+}
+
+fn silent_probes() -> &'static Mutex<HashSet<String>> {
+    SILENT_PROBES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn remember_silent(key: &str) {
+    if let Ok(mut entries) = silent_probes().lock() {
+        entries.insert(key.into());
+    }
+}
+
+fn probe_key(host: &Host, cwd: &str, session: &str) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        host.kind, host.address, host.user, host.port, cwd, session
+    )
+}
+
+fn marker_paths(cwd: &str) -> Vec<PathBuf> {
+    let mut paths = vec![];
+    let mut current = PathBuf::from(cwd);
+    loop {
+        paths.push(current.join(".git"));
+        if !current.pop() {
+            break;
+        }
+    }
+    paths
+}
+
+fn local_has_marker(cwd: &str) -> bool {
+    marker_paths(cwd)
+        .iter()
+        .any(|path| fs::symlink_metadata(path).is_ok())
+}
+
+fn has_marker(host: &Host, cwd: &str) -> Result<bool, String> {
+    if cwd.trim().is_empty() {
+        return Ok(false);
+    }
+    if host.kind == "local" {
+        return Ok(local_has_marker(cwd));
+    }
+    if host.kind != "ssh" {
+        return Err("Host kind must be local or ssh.".into());
+    }
+    let tests = marker_paths(cwd)
+        .iter()
+        .map(|path| {
+            format!(
+                "[ -e {} ] && exit 0",
+                runner::posix_quote(&runner::remote_path(&path.to_string_lossy()))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut command = Command::new("ssh");
+    runner::add_ssh_options(&mut command, host);
+    command
+        .arg(runner::ssh_target(host)?)
+        .arg(format!("{tests}; exit 1"));
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| "Could not check the task folder.".to_string())?;
+    Ok(status.success())
+}
+
+fn wait_local_for_marker(cwd: &str) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return wait_local_for_marker_kqueue(cwd);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        return wait_local_for_marker_poll(cwd);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_local_for_marker_kqueue(cwd: &str) -> Result<bool, String> {
+    use std::os::fd::AsRawFd;
+    let mut directories = vec![];
+    let mut current = PathBuf::from(cwd);
+    loop {
+        if let Ok(file) = fs::File::open(&current) {
+            directories.push(file);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return wait_local_for_marker_poll(cwd);
+    }
+    let result = (|| {
+        let changes = directories
+            .iter()
+            .map(|directory| libc::kevent {
+                ident: directory.as_raw_fd() as libc::uintptr_t,
+                filter: libc::EVFILT_VNODE,
+                flags: (libc::EV_ADD | libc::EV_CLEAR) as u16,
+                fflags: libc::NOTE_WRITE | libc::NOTE_EXTEND | libc::NOTE_RENAME | libc::NOTE_LINK,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            })
+            .collect::<Vec<_>>();
+        if changes.is_empty() {
+            return Ok(false);
+        }
+        let registered = unsafe {
+            libc::kevent(
+                queue,
+                changes.as_ptr(),
+                changes.len() as i32,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if registered < 0 {
+            return wait_local_for_marker_poll(cwd);
+        }
+        let deadline = Instant::now() + MARKER_WAIT;
+        while Instant::now() < deadline {
+            if local_has_marker(cwd) {
+                return Ok(true);
+            }
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(1));
+            let timeout = libc::timespec {
+                tv_sec: remaining.as_secs() as _,
+                tv_nsec: remaining.subsec_nanos() as _,
+            };
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let result =
+                unsafe { libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, &timeout) };
+            if result < 0 {
+                return wait_local_for_marker_poll(cwd);
+            }
+        }
+        Ok(false)
+    })();
+    unsafe {
+        libc::close(queue);
+    }
+    result
+}
+
+fn wait_local_for_marker_poll(cwd: &str) -> Result<bool, String> {
+    let deadline = Instant::now() + MARKER_WAIT;
+    while Instant::now() < deadline {
+        if local_has_marker(cwd) {
+            return Ok(true);
+        }
+        // Fallback for non-macOS builds. It is one bounded waiter and never
+        // invokes Git.
+        thread::sleep(Duration::from_millis(500));
+    }
+    Ok(false)
+}
+
+fn wait_remote_for_marker(host: &Host, cwd: &str) -> Result<bool, String> {
+    let tests = marker_paths(cwd)
+        .iter()
+        .map(|path| {
+            format!(
+                "[ -e {} ] && exit 0",
+                runner::posix_quote(&runner::remote_path(&path.to_string_lossy()))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut command = Command::new("ssh");
+    runner::add_ssh_options(&mut command, host);
+    command
+        .arg(runner::ssh_target(host)?)
+        .arg(format!("until {tests}; do sleep 1; done"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| "Could not watch the task folder.".to_string())?;
+    let deadline = Instant::now() + MARKER_WAIT;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|_| "Could not watch the task folder.".to_string())?
+        {
+            return Ok(status.success());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub fn diff(host: &Host, cwd: &str, path: &str, scope: &str) -> Result<GitDiff, String> {
@@ -561,5 +839,20 @@ mod tests {
         let error = repository_root(&remote, "/tmp").unwrap_err();
         assert!(error.contains("Git repository check failed"), "{error}");
         assert!(!is_not_repository(error.as_bytes()));
+    }
+
+    #[test]
+    fn marker_detection_accepts_ancestor_directory_and_worktree_file() {
+        let root =
+            std::env::temp_dir().join(format!("monitter-git-marker-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("one/two");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        assert!(local_has_marker(nested.to_str().unwrap()));
+        fs::remove_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git"), "gitdir: /elsewhere/worktrees/task\n").unwrap();
+        assert!(local_has_marker(nested.to_str().unwrap()));
+        assert_eq!(wait_for_marker(&host(), nested.to_str().unwrap(), "test").unwrap(), "already-present");
+        let _ = fs::remove_dir_all(root);
     }
 }

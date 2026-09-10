@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {parseChannelCommand,resolveChannelAgent} from '../src/lib/channel-commands.ts';
+assert.deepEqual(parseChannelCommand('/TOPIC Keep This Case'),{name:'topic',args:'Keep This Case'});
+assert.equal(parseChannelCommand('//kick @rafa'),null);
+assert.equal(parseChannelCommand('/unknown'),null);
+assert.deepEqual(parseChannelCommand('/names'),{name:'names',args:''});
+const agents=[{id:'r',name:'Rafa'},{id:'j',name:'Justine'}];
+assert.equal(resolveChannelAgent('@RAFA',agents).id,'r');
+assert.throws(()=>resolveChannelAgent('@unknown',agents));
+assert.throws(()=>resolveChannelAgent('@Sam',[{id:'a',name:'Sam A'},{id:'b',name:'Sam B'}]));
+assert.equal(resolveChannelAgent('@sam-b',[{id:'a',name:'Sam A'},{id:'b',name:'Sam B'}]).id,'b');
+console.log('Channel command parsing and agent resolution checks passed.');

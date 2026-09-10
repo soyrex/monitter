@@ -36,16 +36,16 @@
 {/if}
 
 <style>
-  .task-activity { flex: none; min-height: 0; max-height: 25%; overflow: auto; overscroll-behavior: contain; margin: 10px 20px 0; font-size: 12px; }
+  .task-activity { flex: none; min-height: 0; max-height: 25%; overflow: auto; overscroll-behavior: contain; margin: 10px 20px 0; font-size: calc(12px * var(--interface-font-ratio, 1)); }
   section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 10px 12px; }
   section + section { margin-top: 8px; }
   .activity-label { display: flex; align-items: center; gap: 7px; color: var(--accent-ink); }
   strong { font-weight: 600; }
-  .status { margin-left: auto; font: 10px var(--mono); color: var(--muted); }
+  .status { margin-left: auto; font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); color: var(--muted); }
   details { margin-top: 7px; }
   summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   p { line-height: 1.5; overflow-wrap: anywhere; }
-  .goal-usage { display: flex; align-items: center; gap: 12px; margin-top: 7px; color: var(--muted); font: 10px var(--mono); }
+  .goal-usage { display: flex; align-items: center; gap: 12px; margin-top: 7px; color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
   progress { width: 90px; height: 5px; accent-color: var(--accent); }
   .computer-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .computer-info { min-width: 0; }

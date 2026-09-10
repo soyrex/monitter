@@ -1,0 +1,5 @@
+import {chromium,expect} from '@playwright/test';
+const browser=await chromium.launch({headless:true});
+try{
+const page=await browser.newPage({viewport:{width:1440,height:900}});await page.addInitScript({path:'scripts/ui-fixture.js'});await page.goto('http://127.0.0.1:18433');await page.getByRole('button',{name:'Preferences',exact:true}).click({timeout:60000});const toggle=page.getByRole('switch',{name:'Show tab close buttons'});await expect(toggle).toBeChecked();await toggle.uncheck();await expect.poll(()=>page.evaluate(()=>window.__MONITTER_QA__.snapshot().settings.showTabCloseButtons)).toBe(false);await expect(page.locator('.close-tab:visible')).toHaveCount(0);await page.keyboard.press('Meta+w');await expect(toggle).toHaveCount(0);await page.getByRole('button',{name:'Preferences',exact:true}).click();await expect(toggle).not.toBeChecked();await toggle.check();await expect(page.getByRole('button',{name:'Close Settings tab'})).toBeVisible();console.log('Tab close toggle saves, hides buttons, retains keyboard close and restores buttons.');
+}finally{await browser.close();}

@@ -49,10 +49,10 @@
     padding: 10px 12px;
     border-radius: 7px;
     background: var(--code);
-    font: 12px/1.55 var(--mono);
+    font: calc(12px * var(--chat-font-ratio, 1))/1.55 var(--mono);
   }
   .markdown :global(code) {
-    font: 12px var(--mono);
+    font: calc(12px * var(--chat-font-ratio, 1)) var(--mono);
   }
   .markdown :global(:not(pre) > code) {
     padding: 1px 4px;
@@ -76,6 +76,6 @@
   .link-error {
     margin: 7px 0 0;
     color: #b84c44;
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--chat-font-ratio, 1));
   }
 </style>

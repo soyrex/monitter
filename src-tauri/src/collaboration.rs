@@ -221,6 +221,7 @@ impl Service {
                             channel_id: None,
                             project_id: caller.project_id.clone(),
                             model_settings: None,
+                            sandbox: None,
                         },
                     )?
                     .id
@@ -1014,6 +1015,7 @@ mod tests {
                 channel_id: None,
                 project_id: project,
                 model_settings: None,
+                sandbox: None,
             })
             .unwrap()
     }
@@ -1408,6 +1410,7 @@ mod tests {
                 channel_id: None,
                 project_id: None,
                 model_settings: None,
+                sandbox: None,
             },
         );
         snapshot.tasks.push(root.clone());
@@ -1423,6 +1426,7 @@ mod tests {
                     channel_id: None,
                     project_id: None,
                     model_settings: None,
+                    sandbox: None,
                 },
             );
             child.agent_id = format!("agent-{index}");

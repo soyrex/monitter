@@ -2110,7 +2110,9 @@ dependencies = [
 name = "monitter"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "libc",
+ "objc2-app-kit",
  "portable-pty",
  "serde",
  "serde_json",

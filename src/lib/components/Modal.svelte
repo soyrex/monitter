@@ -121,7 +121,7 @@
   }
   h2 {
     margin: 0;
-    font-size: 16px;
+    font-size: calc(16px * var(--interface-font-ratio, 1));
     font-weight: 600;
   }
   .body {

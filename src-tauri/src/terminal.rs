@@ -20,6 +20,8 @@ const MAX_INPUT_BYTES: usize = 64 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct TerminalTarget {
     #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
     pub task_id: Option<String>,
     #[serde(default)]
     pub agent_id: Option<String>,
@@ -229,6 +231,14 @@ fn read_output(mut reader: Box<dyn Read + Send>, session: Arc<Session>) {
 }
 
 impl Session {
+    pub fn rename(&self, title: String) -> Result<TerminalSession, String> {
+        let mut info = self
+            .info
+            .lock()
+            .map_err(|_| "Terminal session lock failed.".to_string())?;
+        info.title = title;
+        Ok(info.clone())
+    }
     pub fn snapshot(&self) -> Result<TerminalSession, String> {
         self.info
             .lock()
@@ -479,7 +489,7 @@ mod tests {
 
     #[test]
     #[ignore = "read-only saved Mira terminal PTY proof"]
-    fn live_mira_pty_executes_assembled_marker() {
+    fn live_mira_pty_executes_after_readiness_output() {
         let state_path = std::path::PathBuf::from(std::env::var("HOME").unwrap())
             .join("Library/Application Support/com.monitter.desktop/state.json");
         let state: crate::model::Snapshot =
@@ -490,15 +500,38 @@ mod tests {
             .find(|host| host.kind == "ssh" && host.name.eq_ignore_ascii_case("Mira"))
             .unwrap();
         let session = open("mira-proof".into(), host, host.default_cwd.clone(), 80, 24).unwrap();
+        wait_for_any_output(&session, std::time::Duration::from_secs(20));
+        let initial = session.read(0).unwrap();
+        eprintln!(
+            "Mira readiness: {}",
+            String::from_utf8_lossy(
+                &initial
+                    .chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.data.iter().copied())
+                    .collect::<Vec<_>>()
+            )
+        );
         session
             .write(b"printf '%s%s\\n' MONITTER_MIRA_ PTY_OK\r")
             .unwrap();
         wait_for_timeout(
             &session,
             "MONITTER_MIRA_PTY_OK",
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(20),
         );
         session.close().unwrap();
+    }
+
+    fn wait_for_any_output(session: &Session, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if !session.read(0).unwrap().chunks.is_empty() {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("Mira terminal did not produce readiness output");
     }
 
     fn wait_for(session: &Session, needle: &str) -> String {

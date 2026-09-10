@@ -1,0 +1,21 @@
+import {chromium,expect} from '@playwright/test';
+const browser=await chromium.launch({headless:true});
+const page=await browser.newPage({viewport:{width:1440,height:1000}});
+try {await page.addInitScript({path:'scripts/ui-fixture.js'});await page.goto('http://127.0.0.1:18433');await expect(page.getByRole('button',{name:'Monitter menu',exact:true})).toBeVisible({timeout:60000});
+ await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot();s.agents=[{...s.agents[0],id:'rafa',name:'Rafa'},{...s.agents[0],id:'justine',name:'Justine'}];s.channels=[{id:'everyone',name:'Everyone',description:'Original topic',agentIds:['rafa'],messages:[{id:'saved',role:'user',agentId:null,text:'Keep this history',createdAt:1,taskId:null}]}];q.setSnapshot(s);});
+ await page.getByRole('complementary',{name:'Agents and tasks'}).getByRole('button',{name:/Everyone/}).click();
+ const members=page.getByRole('complementary',{name:'Channel members'}),input=page.getByRole('textbox',{name:'Channel message',exact:true});
+ await expect(members.locator('.member-copy b').filter({hasText:/^Rafa$/})).toBeVisible();
+ const command=async text=>{await input.fill(text);await input.press('Enter');await expect(input).toHaveValue('');};
+ await command('/invite @justine');await expect(members.locator('.member-copy b').filter({hasText:/^Justine$/})).toBeVisible();
+ await command('/topic Release Planning');await expect(members.getByText('Release Planning',{exact:true})).toBeVisible();
+ await command('/names');
+ await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot();s.tasks=[{id:'channel-run',agentId:'rafa',title:'Channel run',nativeSessionId:null,status:'running',archived:false,createdAt:1,updatedAt:1,parentTaskId:null,channelId:'everyone',projectId:null,hostId:'local',cwd:'/tmp',provider:'codex',model:'',sandbox:'read-only'}];q.setSnapshot(s);});
+ await command('/kick @rafa');await expect(members.locator('.member-copy b').filter({hasText:/^Rafa$/})).toHaveCount(0);
+ expect(await page.evaluate(()=>window.__MONITTER_QA__.snapshot().tasks[0].status)).toBe('interrupted');
+ await input.fill('/kick @unknown');await input.press('Enter');await expect(input).toHaveValue('/kick @unknown');await expect(page.getByRole('alert')).toContainText('No agent matches');
+ await command('/admin');await expect(page.getByRole('dialog',{name:'Edit channel',exact:true})).toBeVisible();await page.keyboard.press('Escape');
+ const state=await page.evaluate(()=>({state:window.__MONITTER_QA__.snapshot(),calls:window.__MONITTER_QA__.calls}));
+ expect(state.state.channels[0].messages.map(m=>m.text)).toEqual(['Keep this history']);expect(state.calls.filter(c=>c.method==='sendChannelMessage')).toHaveLength(0);
+ console.log('Members sidebar, invite/topic/names/kick/admin, busy kick, unknown-target draft retention, and no harness dispatch checks passed.');
+}catch(error){console.log(await page.evaluate(()=>({state:window.__MONITTER_QA__?.snapshot(),calls:window.__MONITTER_QA__?.calls,body:document.body.innerText})));throw error;}finally{await browser.close();}

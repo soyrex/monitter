@@ -21,9 +21,11 @@ import type {
   TerminalTarget,
   TerminalSession,
   TerminalRead,
+  AutonameTarget,
   Attachment,
   AttachmentTarget,
   AttachmentFileData,
+  Sandbox,
 } from "./types";
 
 export interface MonitterBridge {
@@ -36,15 +38,21 @@ export interface MonitterBridge {
   deleteAgent(id: string): Promise<Snapshot>;
   createTask(input: CreateTaskInput): Promise<Task>;
   renameTask(id: string, title: string): Promise<Snapshot>;
+  autoname(target: AutonameTarget): Promise<Snapshot>;
   deleteTask(id: string): Promise<Snapshot>;
   setTaskArchived(taskId: string, archived: boolean): Promise<Snapshot>;
   saveProject(project: Project): Promise<Snapshot>;
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot>;
+  cancelQueuedMessage(id: string): Promise<Snapshot>;
+  editQueuedMessage(id: string, text: string): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;
   saveChannel(channel: Channel): Promise<Snapshot>;
+  setChannelAgentConversation(channelId: string, enabled: boolean, turnLimit: number): Promise<Snapshot>;
+  stopChannelAgentConversation(channelId: string): Promise<Snapshot>;
+  setChannelMembership(channelId: string, agentId: string, member: boolean): Promise<Snapshot>;
   sendChannelMessage(
     channelId: string,
     text: string,
@@ -52,6 +60,7 @@ export interface MonitterBridge {
     attachmentIds?: string[],
   ): Promise<Snapshot>;
   resumeTask(taskId: string): Promise<Snapshot>;
+  listTerminals(): Promise<TerminalSession[]>;
   openTerminal(target: TerminalTarget, cols: number, rows: number): Promise<TerminalSession>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
@@ -59,8 +68,10 @@ export interface MonitterBridge {
   closeTerminal(id: string): Promise<void>;
   getModelCatalog(target: ModelTarget): Promise<ModelCatalog>;
   setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
+  setTaskSandbox(taskId: string, sandbox: Sandbox): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
-  getTaskGitStatus(taskId: string): Promise<TaskGitStatus>;
+  getTaskGitStatus(taskId: string, detectorSession?: string): Promise<TaskGitStatus>;
+  waitForTaskGitMarker(taskId: string, detectorSession?: string): Promise<'found' | 'timeout' | 'already-present'>;
   getTaskGitDiff(taskId: string, path: string, scope: GitDiffScope): Promise<TaskGitDiff>;
   previewTaskDeletion(taskId: string): Promise<TaskDeletionPreview>;
   deleteArchivedTask(taskId: string, removeNativeFiles: boolean): Promise<Snapshot>;
@@ -95,6 +106,7 @@ const nativeBridge: MonitterBridge = {
   deleteAgent: (id) => invoke<Snapshot>("delete_agent", { id }),
   createTask: (input) => invoke<Task>("create_task", { input }),
   renameTask: (id, title) => invoke<Snapshot>("rename_task", { id, title }),
+  autoname: target => invoke<Snapshot>("autoname", { target }),
   deleteTask: (id) => invoke<Snapshot>("delete_task", { id }),
   setTaskArchived: (taskId, archived) => invoke<Snapshot>("set_task_archived", {taskId, archived}),
   saveProject: project => invoke<Snapshot>("save_project", {project}),
@@ -102,12 +114,19 @@ const nativeBridge: MonitterBridge = {
   setTaskProject: (taskId, projectId) => invoke<Snapshot>("set_task_project", {taskId, projectId}),
   sendMessage: (taskId, text, attachmentIds = []) =>
     invoke<Snapshot>("send_message", { taskId, text, attachmentIds }),
+  cancelQueuedMessage: (id) => invoke<Snapshot>("cancel_queued_message", { id }),
+  editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
   cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
   saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
   saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
+  setChannelAgentConversation: (channelId, enabled, turnLimit) => invoke<Snapshot>("set_channel_agent_conversation", {channelId, enabled, turnLimit}),
+  stopChannelAgentConversation: (channelId) => invoke<Snapshot>("stop_channel_agent_conversation", {channelId}),
+  setChannelMembership: (channelId, agentId, member) =>
+    invoke<Snapshot>("set_channel_membership", { channelId, agentId, member }),
   sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) =>
     invoke<Snapshot>("send_channel_message", { channelId, text, agentIds, attachmentIds }),
   resumeTask: (taskId) => invoke<Snapshot>("resume_task", { taskId }),
+  listTerminals: () => invoke<TerminalSession[]>('list_terminals'),
   openTerminal: (target, cols, rows) => invoke<TerminalSession>('open_terminal', {target,cols,rows}),
   writeTerminal: (id, data) => invoke<void>('write_terminal', {id,data}),
   resizeTerminal: (id, cols, rows) => invoke<void>('resize_terminal', {id,cols,rows}),
@@ -115,8 +134,10 @@ const nativeBridge: MonitterBridge = {
   closeTerminal: id => invoke<void>('close_terminal', {id}),
   getModelCatalog: target => invoke<ModelCatalog>("get_model_catalog", {target}),
   setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
+  setTaskSandbox: (taskId, sandbox) => invoke<Snapshot>('set_task_sandbox', {taskId,sandbox}),
   getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
-  getTaskGitStatus: taskId => invoke<TaskGitStatus>("get_task_git_status", { taskId }),
+  getTaskGitStatus: (taskId, detectorSession = '') => invoke<TaskGitStatus>("get_task_git_status", { taskId, detectorSession }),
+  waitForTaskGitMarker: (taskId, detectorSession = '') => invoke<'found' | 'timeout' | 'already-present'>("wait_for_task_git_marker", { taskId, detectorSession }),
   getTaskGitDiff: (taskId, path, scope) => invoke<TaskGitDiff>("get_task_git_diff", { taskId, path, scope }),
   previewTaskDeletion: taskId => invoke<TaskDeletionPreview>("preview_task_deletion", { taskId }),
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
@@ -134,8 +155,9 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   channels: [],
   projects: [],
   collaborations: [],
+  queuedMessages: [],
   settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125,
-    showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard' },
+    showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard', busyMessageMode: 'queue' },
 });
 
 async function desktopOnly<T>(): Promise<T> {
@@ -154,17 +176,24 @@ const previewBridge: MonitterBridge = {
   deleteAgent: () => desktopOnly(),
   createTask: () => desktopOnly(),
   renameTask: () => desktopOnly(),
+  autoname: () => desktopOnly(),
   deleteTask: () => desktopOnly(),
   setTaskArchived: () => desktopOnly(),
   saveProject: () => desktopOnly(),
   deleteProject: () => desktopOnly(),
   setTaskProject: () => desktopOnly(),
   sendMessage: () => desktopOnly(),
+  cancelQueuedMessage: () => desktopOnly(),
+  editQueuedMessage: () => desktopOnly(),
   cancelTask: () => desktopOnly(),
   saveSettings: () => desktopOnly(),
   saveChannel: () => desktopOnly(),
+  setChannelAgentConversation: () => desktopOnly(),
+  stopChannelAgentConversation: () => desktopOnly(),
+  setChannelMembership: () => desktopOnly(),
   sendChannelMessage: () => desktopOnly(),
   resumeTask: () => desktopOnly(),
+  listTerminals: async () => [],
   openTerminal: () => desktopOnly(),
   writeTerminal: () => desktopOnly(),
   resizeTerminal: () => desktopOnly(),
@@ -172,8 +201,10 @@ const previewBridge: MonitterBridge = {
   closeTerminal: () => desktopOnly(),
   getModelCatalog: () => desktopOnly(),
   setTaskModelSettings: () => desktopOnly(),
+  setTaskSandbox: () => desktopOnly(),
   getTaskGoal: async () => null,
   getTaskGitStatus: () => desktopOnly(),
+  waitForTaskGitMarker: () => desktopOnly(),
   getTaskGitDiff: () => desktopOnly(),
   previewTaskDeletion: () => desktopOnly(),
   deleteArchivedTask: () => desktopOnly(),
@@ -204,6 +235,7 @@ export function getBridge(): MonitterBridge {
         test.invoke("create_task", { input }) as Promise<Task>,
       renameTask: (id, title) =>
         test.invoke("rename_task", { id, title }) as Promise<Snapshot>,
+      autoname: target => test.invoke("autoname", { target }) as Promise<Snapshot>,
       deleteTask: (id) =>
         test.invoke("delete_task", { id }) as Promise<Snapshot>,
       setTaskArchived: (taskId, archived) => test.invoke("set_task_archived", {taskId, archived}) as Promise<Snapshot>,
@@ -212,12 +244,18 @@ export function getBridge(): MonitterBridge {
       setTaskProject: (taskId, projectId) => test.invoke("set_task_project", {taskId, projectId}) as Promise<Snapshot>,
       sendMessage: (taskId, text, attachmentIds = []) =>
         test.invoke("send_message", { taskId, text, attachmentIds }) as Promise<Snapshot>,
+      cancelQueuedMessage: (id) => test.invoke("cancel_queued_message", { id }) as Promise<Snapshot>,
+      editQueuedMessage: (id, text) => test.invoke("edit_queued_message", { id, text }) as Promise<Snapshot>,
       cancelTask: (taskId) =>
         test.invoke("cancel_task", { taskId }) as Promise<Snapshot>,
       saveSettings: (settings) =>
         test.invoke("save_settings", { settings }) as Promise<Snapshot>,
       saveChannel: (channel) =>
         test.invoke("save_channel", { channel }) as Promise<Snapshot>,
+      setChannelAgentConversation: (channelId, enabled, turnLimit) => test.invoke("set_channel_agent_conversation", {channelId,enabled,turnLimit}) as Promise<Snapshot>,
+      stopChannelAgentConversation: (channelId) => test.invoke("stop_channel_agent_conversation", {channelId}) as Promise<Snapshot>,
+      setChannelMembership: (channelId, agentId, member) =>
+        test.invoke("set_channel_membership", { channelId, agentId, member }) as Promise<Snapshot>,
       sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) =>
         test.invoke("send_channel_message", {
           channelId,
@@ -226,6 +264,7 @@ export function getBridge(): MonitterBridge {
           attachmentIds,
         }) as Promise<Snapshot>,
       resumeTask: (taskId) => test.invoke("resume_task", { taskId }) as Promise<Snapshot>,
+      listTerminals: () => test.invoke('list_terminals', {}) as Promise<TerminalSession[]>,
       openTerminal: (target, cols, rows) => test.invoke('open_terminal', {target,cols,rows}) as Promise<TerminalSession>,
       writeTerminal: (id, data) => test.invoke('write_terminal', {id,data}) as Promise<void>,
       resizeTerminal: (id, cols, rows) => test.invoke('resize_terminal', {id,cols,rows}) as Promise<void>,
@@ -233,8 +272,10 @@ export function getBridge(): MonitterBridge {
       closeTerminal: id => test.invoke('close_terminal', {id}) as Promise<void>,
       getModelCatalog: target => test.invoke("get_model_catalog", {target}) as Promise<ModelCatalog>,
       setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
+      setTaskSandbox: (taskId, sandbox) => test.invoke('set_task_sandbox', {taskId,sandbox}) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,
-      getTaskGitStatus: taskId => test.invoke("get_task_git_status", {taskId}) as Promise<TaskGitStatus>,
+      getTaskGitStatus: (taskId, detectorSession = '') => test.invoke("get_task_git_status", {taskId, detectorSession}) as Promise<TaskGitStatus>,
+      waitForTaskGitMarker: (taskId, detectorSession = '') => test.invoke("wait_for_task_git_marker", {taskId, detectorSession}) as Promise<'found' | 'timeout' | 'already-present'>,
       getTaskGitDiff: (taskId, path, scope) => test.invoke("get_task_git_diff", {taskId, path, scope}) as Promise<TaskGitDiff>,
       previewTaskDeletion: taskId => test.invoke("preview_task_deletion", {taskId}) as Promise<TaskDeletionPreview>,
       deleteArchivedTask: (taskId, removeNativeFiles) => test.invoke("delete_archived_task", {taskId, removeNativeFiles}) as Promise<Snapshot>,

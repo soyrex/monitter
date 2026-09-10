@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {completeVimCommand, parseVimCommand, parseVimWindowKey} from '../src/lib/vim-commands.ts';
+assert.deepEqual(parseVimCommand(':tabnew'), {command:{kind:'tabnew'}});
+assert.deepEqual(parseVimCommand(':2tabnew'), {command:{kind:'tabnew',after:{kind:'index',index:2}}});
+assert.deepEqual(parseVimCommand(':tabnext 3'), {command:{kind:'tabselect',target:{kind:'index',index:3}}});
+assert.deepEqual(parseVimCommand(':-tabclose'), {command:{kind:'tabclose',target:{kind:'relative',offset:-1}}});
+assert.deepEqual(parseVimCommand(':tabmove 0'), {command:{kind:'tabmove',target:'first'}});
+assert.deepEqual(parseVimCommand(':tabmove +2'), {command:{kind:'tabmove',target:{kind:'relative',offset:2}}});
+assert.deepEqual(parseVimCommand(':10vs'), {command:{kind:'split',axis:'horizontal',size:10}});
+assert.deepEqual(parseVimCommand(':resize -3'), {command:{kind:'resize-pane',axis:'vertical',delta:-3}});
+assert.deepEqual(parseVimCommand(':wincmd h'), {command:{kind:'focus-pane',target:{kind:'direction',direction:'left'}}});
+assert.deepEqual(parseVimWindowKey('>',4), {command:{kind:'resize-pane',axis:'horizontal',delta:4}});
+assert.deepEqual(completeVimCommand(':tabn').map(item=>item.value), ['tabnew','tabnext']);
+assert.match(parseVimCommand(':edit README.md').error, /Unknown or unsupported/);
+console.log('Vim pane/tab command parsing and completion: ok');

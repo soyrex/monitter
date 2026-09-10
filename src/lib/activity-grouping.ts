@@ -42,9 +42,17 @@ export function toolFamily(event: RunEvent) {
   return dotted ? dotted[1] : identity;
 }
 
+/** Recognize harness shell tools without exposing command arguments in the summary. */
+export function isShellActivity(event: RunEvent): boolean {
+  const identity = toolIdentity(event);
+  if (['command_execution', 'bash', 'shell', 'shell_command', 'exec_command', 'functions.exec_command'].includes(identity)) return true;
+  return /^(?:\/[^\s]+\/)?(?:ba|z|fi|k|da)?sh(?:\s|$)/i.test(event.title.trim());
+}
+
 export function groupConversationActivity(
   messages: Message[],
   events: RunEvent[],
+  compressToolCalls = false,
 ): ConversationActivityItem[] {
   const ordered = [
     ...messages.map(value => ({ type: 'message' as const, value })),
@@ -58,7 +66,7 @@ export function groupConversationActivity(
       continue;
     }
     const previous = grouped.at(-1);
-    if (previous?.type === 'tool-group' && toolFamily(previous.values[0]) === toolFamily(item.value)) {
+    if (previous?.type === 'tool-group' && (compressToolCalls || toolFamily(previous.values[0]) === toolFamily(item.value))) {
       previous.values.push(item.value);
     } else {
       grouped.push({ type: 'tool-group', values: [item.value] });

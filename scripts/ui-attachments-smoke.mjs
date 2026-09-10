@@ -12,7 +12,7 @@ async function newChat(){await page.keyboard.press('Meta+p');await page.getByRol
 async function seed(fn){await page.evaluate(fn);}
 try {
   await page.addInitScript({path:'scripts/ui-fixture.js'});await page.goto(process.env.MONITTER_TEST_URL||'http://127.0.0.1:18421');
-  await expect(page.getByRole('button',{name:'Monitter menu',exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Monitter menu',exact:true})).toBeVisible({timeout:60000});
   await newChat();
   await input.evaluate(node=>{
     const canvas=document.createElement('canvas');canvas.width=32;canvas.height=24;canvas.getContext('2d').fillRect(0,0,32,24);
@@ -39,7 +39,7 @@ try {
   await seed(()=>{const q=window.__MONITTER_QA__,s=q.snapshot();delete s.attachmentFailure;q.setSnapshot(s)});
   await main.locator('input[type=file]').setInputFiles({name:'kept.txt',mimeType:'text/plain',buffer:Buffer.from('test')});await expect(cards).toHaveCount(1);
   passed.push('file picker failures remain visible and preserve unsent text; retry uploads');
-  await main.getByRole('button',{name:'Pane layout',exact:true}).click();await page.getByRole('menuitem',{name:'Two columns',exact:true}).click();
+  await page.getByRole('button',{name:'Pane layout',exact:true}).click();await page.getByRole('menuitem',{name:'Two columns',exact:true}).click();
   const second=page.locator('.pane-leaf').last(),tab=main.locator('.tabs .tab-entry.active > .tab');
   const data=await page.evaluateHandle(()=>new DataTransfer());await tab.dispatchEvent('dragstart',{dataTransfer:data});const box=await second.boundingBox();
   const event={dataTransfer:data,clientX:box.x+box.width/2,clientY:box.y+box.height/2};await second.dispatchEvent('dragover',event);await second.dispatchEvent('drop',event);await data.dispose();

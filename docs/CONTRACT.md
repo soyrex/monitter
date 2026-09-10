@@ -19,14 +19,24 @@ No fake conversations, progress, token counts, host connections or model replies
 - `create_task { input: CreateTaskInput }` -> Task
 - `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null } }` -> ModelCatalog
 - `set_task_model_settings { taskId: string, settings: ModelSettings }` -> Snapshot
+- `set_task_sandbox { taskId: string, sandbox: Sandbox }` -> Snapshot (idle, unarchived tasks only)
 - `rename_task { id: string, title: string }` -> Snapshot
+- `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
 - `delete_task { id: string }` -> Snapshot (archived only; reject running; preserve native CLI history)
 - `send_message { taskId: string, text: string, attachmentIds?: string[] }` -> Snapshot (starts asynchronously)
 - `cancel_task { taskId: string }` -> Snapshot
+- `list_terminals {}` -> `TerminalSession[]`
+- `finish_quit {}` completes a native quit only after `monitter-before-quit` lets the frontend save workspace state
+- `edit_queued_message { id: string, text: string }` -> Snapshot (queued/error only; preserves attachments, recipient, position and status; never retries automatically)
+- `cancel_queued_message { id: string }` -> Snapshot (removes only an unsent queued/error message)
 - `save_settings { settings: Settings }` -> Snapshot
 - `save_channel { channel: Channel }` -> Snapshot (empty id creates; preserve existing messages)
+- `set_channel_membership { channelId: string, agentId: string, member: boolean }` -> Snapshot
+  validates both records and is idempotent. Removing an agent preserves channel and native history,
+  blocks any buffered reply from mirroring into the channel, and cancels that agent's running
+  channel task tree through the ordinary cancellation path before a new turn can be sent.
 - `send_channel_message { channelId: string, text: string, agentIds: string[], attachmentIds?: string[] }` -> Snapshot
   Explicit selected/mentioned recipients only. Each recipient has a dedicated task under channelId;
   initial/follow-up prompt includes recent channel context. Final replies mirror into channel messages.
@@ -35,6 +45,17 @@ No fake conversations, progress, token counts, host connections or model replies
 Event `monitter:changed` payload `{ taskId?: string }` tells UI to reload snapshot (debounce <=150ms).
 The backend is authoritative; listen before initial snapshot. Errors reject with a readable string.
 Frontend may show a labelled browser design preview when Tauri isn't available, but never simulate an agent reply.
+
+## Busy messages
+
+`Settings.busyMessageMode` defaults to `queue`. `Snapshot.queuedMessages` persists FIFO records per
+task, including the original text, attachment IDs, optional channel, status and error. A busy direct
+chat or selected busy channel recipient queues its follow-up; idle recipients still start immediately,
+and a channel user message is recorded once at submission rather than again when a recipient drains.
+Current CLI adapters do not support live steering, so `steer` safely queues and records a visible
+fallback event. The next queued item starts only after its owned native run releases. A restart changes
+an uncertain `sending` item to `error` and never replays it automatically. Cancelling, kicking,
+archiving or deleting prevents queued follow-ups from launching; task deletion removes their records.
 
 ## Agent identity
 
@@ -49,6 +70,10 @@ Agent identity. The lowercase monitter menu contains Preferences, Hosts and Agen
 is shown in the sidebar.
 
 ## Appearance and conversation preferences
+
+Base sizes `interfaceFontSize`, `chatFontSize`, and `terminalFontSize` are integer pixels (8–32), defaulting to 14, 13, and 14 respectively. Interface typography retains its relative hierarchy; native interface zoom scales all three exactly once.
+
+Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions.
 
 Settings include `accent`, `theme`, `interfaceScale` (integer percent, 80–200, default 125),
 `showToolActivity` and `showReasoningSummaries` (default true), `sendWithEnter` (default false),
@@ -101,7 +126,11 @@ Codex event stream is JSONL item/turn events; do not promise token deltas unavai
 Use real CLI account/config; do not copy auth or change global config. Resolve local CLI paths even
 when launched by Finder with limited PATH (user local bin, Homebrew, standard dirs).
 Claude uses `--print --output-format stream-json --verbose` and `--resume`; OpenCode uses
-`run --format json --thinking` and `--session`. Hermes runs the installed TUI gateway with a Python
+`run --format json --thinking --dir <folder>` and `--session`. Before resuming OpenCode,
+a bounded read-only `export <session>` lookup verifies the native ID and restores the original
+session folder into the task snapshot, before collaboration setup. This prevents inherited PWD
+or a mismatched attachment folder from silently losing the CLI event stream. Export contents
+are not imported into the chat or logged. Hermes runs the installed TUI gateway with a Python
 bridge: session.create/resume, prompt.submit, durable stored_session_id, normalized JSONL events,
 explicit denial of interactive requests, and owned child cleanup. Never silently substitute a harness.
 Host.claudePath defaults to an empty string for older stored host snapshots. Task.archived defaults
@@ -112,8 +141,14 @@ archived one. Permanent deletion is available only after archiving. The confirma
 Persist configuration and transcript in the Tauri app data directory, private permissions, atomic writes.
 Recover formerly running tasks as interrupted after restart. One active turn per task and provider/host/native-session key.
 Store task host/cwd/provider/model/sandbox as a snapshot when created; agent edits affect new tasks.
-Codex defaults to read-only with explicit workspace-write selection. Other providers require
-`harness-configured`; do not describe their host permission rules as an OS sandbox. Never use a bypass-all-permissions flag.
+An idle, unarchived task may change its saved sandbox through `set_task_sandbox`; its next native
+launch or explicit resume uses that saved mode. A running process keeps its launch-time mode.
+Codex defaults to read-only with explicit workspace-write selection. `yolo` is an explicit,
+per-agent choice, captured in each newly created task's snapshot and off by default. Codex invokes
+`--dangerously-bypass-approvals-and-sandbox`; Claude invokes `--dangerously-skip-permissions`.
+OpenCode and Hermes reject `yolo`: OpenCode's `--auto` still respects explicit denials, and the
+Hermes bridge has no verified per-invocation bypass. Other providers require `harness-configured`;
+do not describe their host permission rules as an OS sandbox.
 Noninteractive exec cannot answer approval prompts: show actual tool failures and allow changing policy
 for a new task; do not present nonfunctional Approve buttons. No auto-resubmission after errors.
 
@@ -155,6 +190,7 @@ Typing `/` opens a filtered, keyboard-accessible menu labelled Monitter commands
 actions: `/new` opens an independent draft, `/settings` opens preferences, `/project` selects the
 chat's project, `/stop` cancels a running task, `/resume` continues the saved native session in this chat, and
 `/goal` reads the available Codex goal. Task-specific actions only appear in applicable contexts.
+`/autoname` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming uses the configured default Codex agent (first Codex agent, then first agent), makes an ephemeral read-only title run with user config/rules ignored and no persisted task or session, and preserves channel history/membership and terminal session identity.
 Selection supports arrows, Enter, Escape and clicking. IME composition does not select an action.
 
 The current CLI transports do not expose a shared native slash-command catalog. Unknown commands
@@ -349,12 +385,14 @@ folder, including per-host project folders. With no context it uses the local ho
 Local shells are login shells in a PTY. SSH shells use the saved address, user, port and identity,
 with strict existing host-key checking; a failed remote folder change cannot silently open elsewhere.
 Terminal tabs support the existing pane drag/split/merge behavior and appear in the switcher.
-Switching tabs or panes retains the same shell and screen. Closing a terminal ends its owned session;
-closing Monitter cleans up owned terminals. Terminal sessions are ephemeral, not persisted chat records,
-and are not re-created automatically after an application restart.
+Switching tabs or panes retains the same shell and screen. Closing a terminal ends its owned session.
+Workspace restoration reuses a still-live terminal after a frontend reload; after an application quit
+it opens a fresh shell at the saved host and launch folder. The old shell process, screen, current
+directory changes and session ID do not survive a quit.
 
-IPC: `open_terminal {target,cols,rows}`, `write_terminal {id,data}`, `resize_terminal {id,cols,rows}`,
-`read_terminal {id,afterSeq}`, `close_terminal {id}`. Target resolves saved task, agent/project, or host
+IPC: `open_terminal {target,cols,rows}`, `list_terminals {}`, `write_terminal {id,data}`, `resize_terminal {id,cols,rows}`,
+`read_terminal {id,afterSeq}`, `close_terminal {id}`. Target resolves saved task, agent/project, host,
+or an explicit validated `cwd` on its host
 configuration; returned TerminalSession contains id/title/hostId/cwd/status/exitCode. Reads contain
 sequenced byte chunks, `nextSeq` (last delivered sequence), status/exitCode and a truncation flag for
 actual ring loss. Native buffers retain at most 1 MiB; each read is at most 256 KiB. Terminal input is
@@ -362,7 +400,9 @@ bounded to 64 KiB per write, sizes to 10–500 columns and 4–300 rows. xterm r
 lines; UTF-8 decoding spans chunks. Reads/input are serialized and late mounts cannot steal a terminal
 from its current pane. Close failures stay visible and can be retried.
 
-Shell Ctrl-C/Ctrl-P and other unshifted Ctrl combinations remain terminal input. On macOS, Cmd-K/P,
+Shell Ctrl-C/Ctrl-P and other unshifted Ctrl combinations remain terminal input, except Ctrl-W on
+Windows/Linux, which closes the active Monitter tab. On macOS, Cmd-W closes the active Monitter tab;
+Cmd-K/P,
 Cmd-comma and scale shortcuts continue to control Monitter. Ctrl-Shift-K/P accesses Monitter palettes
 while a terminal is focused on other platforms. Terminal rendering uses
 [xterm.js](https://xtermjs.org/docs/api/terminal/classes/terminal/) and native PTYs use
@@ -381,3 +421,64 @@ Each tab scrolls within the sidebar; panels preserve their selected detail tab d
 When enabled, entering a pane with the mouse activates it and directs keyboard focus to its current
 terminal, composer, or message scroller without scrolling the view. Touch, drag selections, resizing,
 and open menus/dialogs do not trigger hover focus. Disabling it restores click/keyboard activation.
+
+## Settings workspace tab
+
+Preferences, Cmd/Ctrl-comma, Cmd-P Settings, and the Cmd-K Settings entry open or focus a single
+Settings tab in the workspace. It closes with its close icon or Cmd/Ctrl-W, moves between panes
+(including edge-created splits), and restores its location and selected category with the workspace.
+Its category navigation and content scroll inside the pane; it does not block other tabs.
+Categories are Agents, Agent directory, Appearance, Typography, Permissions & Behaviour, and Conversation. Existing controls
+save automatically. Permissions remain per-agent/task; the page does not introduce a global bypass.
+Settings edits and command-palette preference changes use a shared queue that merges each patch
+into the latest saved settings. Failed saves remain visible; switching tabs preserves the settings
+page's local state and the chat's unsent draft.
+
+Conversation display: `Settings.tintUserMessages` defaults to false for existing and new installs. When enabled, user bubbles in direct chats and channels use a subtle accent tint; message content and agent replies are unchanged.
+
+
+`autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` returns Snapshot. Exactly one target is required; terminal text comes from a bounded, control-sequence-scrubbed client buffer. Chat/channel context uses the last 12 messages, bounded to 12,000 characters. The first configured Codex agent supplies the naming host/folder. An advertised Spark/Luna/Mini model is preferred, otherwise the Codex harness default is used. The ephemeral read-only invocation ignores user config/rules and does not resume the working session. Codex built-in read tools remain available; this is not a guaranteed tool-free API. Unsupported CLI isolation flags fail visibly rather than falling back to the working session. The title subprocess times out after 45 seconds, with input/output handled concurrently and the SSH control pipe held open until completion. Titles are bounded to 60 characters. Terminal names update the existing session and are refreshed into the tab runtime. Use /autoname in chat or find /autoname in the Controls palette (Cmd-P on macOS) for a terminal; the shell never receives the command.
+
+
+### Pane controls and window chrome
+
+The main sidebar toggle is the first control in the main pane tab bar. The sidebar brand and
+Standard/Activity/Projects icons share its top row. Native macOS window-control clearance is
+removed in fullscreen and restored on exit, using the native window fullscreen state.
+Right-sidebar toggles live beside expansion in chat/channel headers only, because those are
+the pane types with run detail or channel-member sidebars. Compact sidebar blades retain
+their own close control. Expansion controls remain reachable when their tab bar is hidden.
+
+
+`Settings.compressToolCalls` defaults to false. When enabled, consecutive visible tool
+events across tool families render as one count (for example `9 tool calls · 4.6s`).
+Messages and displayed reasoning remain boundaries. The duration is the recorded
+first-to-last event span, not summed tool execution time. Clicking expands an inline
+scrollable box containing every original event; disabling compression restores family
+grouping. Stored events remain unchanged.
+
+Queue edits update only the selected unsent delivery. In channels, each recipient's queued
+delivery is independent; already posted channel history or deliveries to other agents are
+not rewritten. Empty text requires a retained attachment. Claiming a queue item and editing
+it use the same state lock, so an edit cannot silently replace an already dispatched prompt.
+
+
+## Agent conversations in channels
+
+Channel configuration includes `agentConversationEnabled` (default false),
+`agentConversationTurnLimit` (default 6, range 1–20), and runtime
+`agentConversationTurnsUsed`/`agentConversationPaused`. Dedicated commands
+`set_channel_agent_conversation {channelId, enabled, turnLimit}` and
+`stop_channel_agent_conversation {channelId}` manage this feature. Ordinary channel
+edits preserve the runtime counters. The member sidebar exposes these controls.
+
+Only completed agent replies can request another member through an explicit mention.
+Automatic deliveries share a per-channel budget, remain in that channel, and queue when
+the recipient is busy. Peer requests retain their sender identity and are context rather
+than new user authorization. A user-written channel message begins a new round.
+Stopping pauses routing before cancelling channel work; disabling prevents further
+automatic deliveries. Enabling does not replay old channel history.
+
+Queued peer requests use `origin: "channel-agent-mention"` and `senderAgentId`. They
+show their originating agent and recipient in the queue and can be removed, but not
+rewritten as if the agent authored new text. User-authored queued messages remain editable.

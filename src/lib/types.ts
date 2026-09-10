@@ -1,5 +1,5 @@
 export type Provider = 'codex' | 'claude' | 'opencode' | 'hermes';
-export type Sandbox = 'read-only' | 'workspace-write' | 'harness-configured';
+export type Sandbox = 'read-only' | 'workspace-write' | 'harness-configured' | 'yolo';
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
 export interface Project {
@@ -49,25 +49,39 @@ export interface ChannelMessage {
   attachments?: Attachment[];
 }
 export interface Channel {
+  agentConversationEnabled?: boolean; agentConversationTurnLimit?: number;
+  agentConversationTurnsUsed?: number; agentConversationPaused?: boolean;
   id: string; name: string; description: string; agentIds: string[];
   messages: ChannelMessage[];
 }
+export interface QueuedMessage {
+  id: string; taskId: string; channelId: string | null; text: string;
+  attachmentIds: string[]; createdAt: number; status: 'queued' | 'sending' | 'error'; error?: string | null;
+  senderAgentId?: string | null; origin?: string | null;
+}
 export interface Settings {
+  shortcutMode?: 'standard' | 'vim';
+  showTabCloseButtons?: boolean;
+  tintUserMessages?: boolean;
+  compressToolCalls?: boolean;
+  terminalFontSize?: number; chatFontSize?: number; interfaceFontSize?: number;
+  terminalFont?: string; chatFont?: string; interfaceFont?: string;
   dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
-  sidebarView: SidebarView;
+  sidebarView: SidebarView; busyMessageMode?: 'queue' | 'steer';
 }
 export interface Snapshot {
   hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
-  collaborations: Collaboration[];
+  collaborations: Collaboration[]; queuedMessages: QueuedMessage[];
 }
 export interface ProbeResult { ok: boolean; versions: Record<string, string>; message: string; }
 export interface CreateTaskInput {
   agentId: string; title: string; nativeSessionId?: string | null;
   parentTaskId?: string | null; channelId?: string | null; projectId?: string | null;
   modelSettings?: ModelSettings | null;
+  sandbox?: Sandbox | null;
 }
 
 export interface Goal {
@@ -125,6 +139,7 @@ export interface ModelCatalog {
 }
 
 
-export interface TerminalTarget { taskId?: string; agentId?: string; hostId?: string; projectId?: string | null; }
+export interface TerminalTarget { cwd?: string; taskId?: string; agentId?: string; hostId?: string; projectId?: string | null; }
 export interface TerminalSession { id: string; title: string; hostId: string; cwd: string; status: 'running' | 'exited'; exitCode: number | null; }
 export interface TerminalRead { chunks: { seq: number; data: number[] }[]; nextSeq: number; status: 'running' | 'exited'; exitCode: number | null; truncated: boolean; }
+export interface AutonameTarget { taskId?: string; channelId?: string; terminalId?: string; content?: string; }

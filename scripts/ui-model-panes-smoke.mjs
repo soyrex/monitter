@@ -5,7 +5,7 @@ const browser=await chromium.launch({headless:true}),passed=[],errors=[];
 const page=await browser.newPage({viewport:{width:1440,height:900}});page.on('pageerror',e=>errors.push(e.message));
 const calls=method=>page.evaluate(method=>window.__MONITTER_QA__.calls.filter(c=>c.method===method),method);
 try{
- await page.addInitScript({path:'scripts/ui-fixture.js'});await page.goto(process.env.MONITTER_TEST_URL||'http://127.0.0.1:18423');await expect(page.getByRole('button',{name:'Monitter menu',exact:true})).toBeVisible();
+ await page.addInitScript({path:'scripts/ui-fixture.js'});await page.goto(process.env.MONITTER_TEST_URL||'http://127.0.0.1:18433');await expect(page.getByRole('button',{name:'Preferences',exact:true})).toBeVisible();
  await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot(),now=Date.now();s.tasks=[{id:'model-chat',agentId:'atlas',title:'Model controls',nativeSessionId:'same-native',status:'completed',archived:false,createdAt:now,updatedAt:now,parentTaskId:null,channelId:null,projectId:null,hostId:'local',cwd:'/tmp/monitter-ui-test',provider:'codex',model:'',sandbox:'read-only'}];s.messages=[{id:'answer',taskId:'model-chat',role:'assistant',text:'An agent response.',createdAt:now}];q.setSnapshot(s)});
  await page.locator('.sidebar .task-select').filter({hasText:'Model controls'}).click();
  const main=page.locator('.pane-leaf[data-pane-id="main"]'),input=main.getByLabel('Task message',{exact:true});
@@ -19,27 +19,32 @@ try{
  await menu.getByRole('radio',{name:/QA Simple/}).click();await expect(menu.getByLabel('Reasoning effort',{exact:true})).toHaveCount(0);await expect(menu.getByRole('switch',{name:'Fast mode',exact:true})).toHaveCount(0);expect((await calls('setTaskModelSettings')).at(-1).args.settings.fastMode).toBeNull();
  expect(await page.evaluate(()=>window.__MONITTER_QA__.snapshot().tasks[0].nativeSessionId)).toBe('same-native');await expect(input).toHaveValue('Unsent text survives model changes');
  await menu.getByRole('button',{name:'Use harness defaults'}).click();await expect(main.getByRole('button',{name:'Model: QA Balanced',exact:true})).toBeVisible();expect((await calls('setTaskModelSettings')).at(-1).args.settings.model).toBe('');
+ const access=main.getByLabel('Access permissions',{exact:true});await access.selectOption('workspace-write');await expect.poll(()=>calls('setTaskSandbox').then(c=>c.at(-1)?.args.sandbox)).toBe('workspace-write');
  await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot();s.modelCatalogFailure='Host model lookup failed';q.setSnapshot(s)});await menu.getByRole('button',{name:'Refresh models'}).click();await expect(menu.getByRole('alert')).toHaveText('Host model lookup failed');
  await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot();delete s.modelCatalogFailure;s.tasks[0].status='running';q.setSnapshot(s)});await expect(menu.getByRole('radio').first()).toBeDisabled();await expect(menu.getByLabel('Reasoning effort',{exact:true})).toBeDisabled();
+ await expect(access).toBeDisabled();
  await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot();s.tasks[0].status='completed';q.setSnapshot(s)});await menu.getByRole('button',{name:'Refresh models'}).click();await expect(menu.getByRole('alert')).toHaveCount(0);await expect(menu.getByRole('radio').first()).toBeEnabled();await page.screenshot({path:'verification/ui-model-menu.png'});await menu.getByRole('button',{name:'Close model picker'}).click();
  passed.push('model defaults reset cleanly, lookup errors stay visible and running chats disable model changes');
+ passed.push('composer exposes per-chat permissions beside attachments, persists supported Codex modes, and blocks changes while running');
  passed.push('composer uses bottom-left attachment, author avatar and capability-driven model/effort/Fast controls without losing draft or native session');
- await main.getByRole('button',{name:'Pane layout'}).click();await page.getByRole('menuitem',{name:'Two columns',exact:true}).click();
+ await page.keyboard.press('Meta+p');await page.getByRole('dialog',{name:'Controls'}).getByText('Two columns',{exact:true}).click();
  const second=page.locator('.pane-leaf').last();
  await expect.poll(()=>second.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(.6);
  const resize=page.getByRole('separator',{name:'Resize panes'});expect((await resize.boundingBox()).width).toBe(1);expect(await resize.evaluate(el=>getComputedStyle(el,'::after').left)).toBe('-4px');
  await page.evaluate(()=>document.querySelector('main.app-shell').classList.add('native-mac'));
  for(const scale of [0.8,1.25,2]){await page.evaluate(scale=>document.documentElement.style.setProperty('--interface-scale',String(scale)),scale);const a=await main.locator('.topbar').boundingBox(),b=await second.locator('.topbar').boundingBox();expect(Math.abs(a.height-b.height)).toBeLessThan(.2);}
  await page.evaluate(()=>{document.querySelector('main.app-shell').classList.remove('native-mac');document.documentElement.style.setProperty('--interface-scale','1.25');});
- await second.getByRole('button',{name:'Overview',exact:true}).click();await expect.poll(()=>second.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(1);await expect.poll(()=>main.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(.6);
+ await second.locator('.topbar').click();await expect.poll(()=>second.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(1);await expect.poll(()=>main.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(.6);
  passed.push('panes share native-scaled header height; visible dividers are 1px with wider drag targets; inactive panes dim and focus restores brightness');
- await page.keyboard.press('Meta+,');let settings=page.getByRole('dialog',{name:'Appearance',exact:true});await expect(settings.getByRole('switch',{name:'Dim inactive panes',exact:true})).toBeChecked();
+ await page.keyboard.press('Meta+,');let settings=second.getByRole('region',{name:'Settings',exact:true});await expect(settings.getByRole('switch',{name:'Dim inactive panes',exact:true})).toBeChecked();
  const opacity=settings.getByLabel('Inactive pane opacity',{exact:true});await opacity.press('Home');for(let i=0;i<3;i++)await opacity.press('ArrowRight');await expect.poll(()=>page.evaluate(()=>window.__MONITTER_QA__.snapshot().settings.inactivePaneOpacity)).toBe(.25);
- await settings.getByRole('switch',{name:'Dim inactive panes',exact:true}).uncheck();await expect.poll(()=>main.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(1);await settings.getByRole('button',{name:'Close',exact:true}).click();
+ await settings.getByRole('switch',{name:'Dim inactive panes',exact:true}).uncheck();await expect.poll(()=>main.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(1);await second.getByRole('button',{name:'Close Settings tab',exact:true}).click();
  passed.push('dimming opacity and enable toggle persist through Preferences');
  await second.locator('.topbar').click();await page.keyboard.press('Meta+p');await page.getByRole('dialog',{name:'Controls'}).getByText('New chat',{exact:true}).click();
  await second.getByRole('button',{name:'Model: QA Balanced',exact:true}).click();menu=page.getByRole('dialog',{name:'Model and reasoning'});await menu.getByRole('radio',{name:/QA Simple/}).click();await menu.getByRole('button',{name:'Close model picker'}).click();
+ await second.getByLabel('Access permissions',{exact:true}).selectOption('workspace-write');
  expect((await calls('createTask')).length).toBe(0);await second.getByLabel('Task message',{exact:true}).fill('First prompt');await second.getByRole('button',{name:'Send task message'}).click();await expect.poll(()=>calls('createTask').then(c=>c.length)).toBe(1);expect((await calls('createTask'))[0].args.modelSettings.model).toBe('qa-simple');
- passed.push('new draft model choice is passed only when first sending and never spawns an agent while configuring');
+ expect((await calls('createTask'))[0].args.sandbox).toBe('workspace-write');
+ passed.push('new draft model and permissions choices are passed only when first sending and never spawn an agent while configuring');
  expect(errors).toEqual([]);await page.screenshot({path:'verification/ui-model-panes.png'});writeFileSync('verification/ui-model-panes-results.json',JSON.stringify({passed,errors},null,2));console.log(JSON.stringify({passed,errors},null,2));
 }catch(error){writeFileSync('verification/ui-model-panes-results.json',JSON.stringify({passed,errors,error:String(error)},null,2));await page.screenshot({path:'verification/ui-model-panes-failure.png'});throw error}finally{await browser.close()}

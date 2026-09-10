@@ -13,5 +13,5 @@
   {:else if session.status === 'exited'}<p class="terminal-state">Exited {session.exitCode === null ? '' : 'with status ' + session.exitCode}.</p>{/if}
 </section>
 <style>
-  .terminal-pane{position:relative;min-height:0;height:100%;overflow:hidden;background:var(--panel,#101214)}.terminal-screen{height:100%;min-height:0;overflow:hidden;padding:6px;box-sizing:border-box}.terminal-state{position:absolute;right:10px;bottom:8px;margin:0;padding:3px 6px;border-radius:4px;background:var(--soft);color:var(--muted);font-size:11px;pointer-events:none}.terminal-state.error{color:#d66}
+  .terminal-pane{position:relative;min-height:0;height:100%;padding:1em;box-sizing:border-box;overflow:hidden;background:var(--terminal-background,#090b0d)}.terminal-screen{height:100%;min-height:0;overflow:hidden;box-sizing:border-box}.terminal-state{position:absolute;right:10px;bottom:8px;margin:0;padding:3px 6px;border-radius:4px;background:var(--soft);color:var(--muted);font-size:calc(11px * var(--interface-font-ratio, 1));pointer-events:none}.terminal-state.error{color:#d66}
 </style>

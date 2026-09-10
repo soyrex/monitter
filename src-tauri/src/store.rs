@@ -68,6 +68,13 @@ impl Store {
                 recovered = true;
             }
         }
+        for queued in &mut snapshot.queued_messages {
+            if queued.status == "sending" {
+                queued.status = "error".into();
+                queued.error = Some("Monitter restarted before this queued message could be confirmed. Review and retry it manually.".into());
+                recovered = true;
+            }
+        }
         let had_running_deliveries = snapshot
             .collaborations
             .iter()

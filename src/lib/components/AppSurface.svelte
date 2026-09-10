@@ -1,6 +1,20 @@
 <script lang="ts">
+  import "../../app.css";
+  import AnimatedTitle from "./AnimatedTitle.svelte";
+  import { autonaming } from "$lib/autoname-state";
   import { onMount, tick, untrack } from "svelte";
-  import { isTauri } from "@tauri-apps/api/core";
+  import { sidebarReorder } from "$lib/sidebar-reorder";
+  import SidebarResize from "./SidebarResize.svelte";
+  import PaneNotice from "./PaneNotice.svelte";
+  import SettingsPane from "./SettingsPane.svelte";
+  import { saveSettingsPatch } from "$lib/settings-save";
+  import MentionComposer from "./MentionComposer.svelte";
+  import ChannelMembers from "./ChannelMembers.svelte";
+  import QueuedMessages from "./QueuedMessages.svelte";
+  import { channelCommands, parseChannelCommand, resolveChannelAgent } from "$lib/channel-commands";
+  import { completeVimCommand, parseVimCommand, parseVimWindowKey, vimCommandHelp, type VimCommand, type VimTabTarget } from "$lib/vim-commands";
+  import { mentionedAgentIds } from "$lib/mentions";
+  import { invoke, isTauri } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
@@ -9,7 +23,6 @@
     Activity,
     ArrowUp,
     Search,
-    Check,
     ChevronDown,
     ChevronRight,
     RotateCw,
@@ -18,13 +31,15 @@
     Folder,
     HardDrive,
     LoaderCircle,
-    LayoutGrid,
+    LayoutDashboard,
     MessageSquare,
     MoreHorizontal,
+    MoveDiagonal,
+    Minimize2,
     Network,
     PanelRight,
-    PanelLeft,
     Paperclip,
+    Pencil,
     Play,
     Plus,
     Radio,
@@ -46,6 +61,7 @@
     Project,
     SidebarView,
     Snapshot,
+    Settings,
     Task,
     ModelSettings,
     TerminalTarget,
@@ -53,6 +69,7 @@
     Attachment,
     AttachmentTarget,
     AttachmentFileData,
+    Sandbox,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
   import Modal from "$lib/components/Modal.svelte";
@@ -70,45 +87,86 @@
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { paneIds } from '$lib/panes';
+  import { insertTab, normalizeTabOrder, type TabKey } from '$lib/tab-order';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
   import ModelPicker from '$lib/components/ModelPicker.svelte';
+  import AccessPicker from '$lib/components/AccessPicker.svelte';
   import TerminalPane from '$lib/components/TerminalPane.svelte';
-  import { terminalSessions, registerTerminal, closeTerminalSession } from '$lib/terminal-runtime';
+  import { terminalSessions, registerTerminal, closeTerminalSession, recentTerminalOutput } from '$lib/terminal-runtime';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import {readBrowserFile,thumbnail,nativeBlob} from '$lib/attachment-files';
   import { floating } from "$lib/floating";
+  import { loadWorkspace, remapTerminalIds, saveWorkspace, type PersistedWorkspace } from '$lib/workspace-persistence';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect }:
+  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
     { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null;
-      onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer) => void;
-      onLayout?: (mode: 'single' | 'columns' | 'grid') => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void } = $props();
+      onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void;
+      parentExpandedPaneId?:string|null; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: 'single' | 'columns' | 'grid') => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
-  type TabPayload = { tab: PaneTabTransfer; draft?: TaskDraft; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
-  type PaneState = { openTerminalIds:string[];selectedTerminalId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
+  type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
+  type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
+  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
-  let paneRefs = $state<Record<string, { openTerminalTab:(id:string)=>void;openTask: (task: Task) => void; openChannel: (channel: Channel) => void; openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void; takeTab: (tab: PaneTabTransfer) => TabPayload | null; receiveTab: (payload: TabPayload) => void; allTabs: () => PaneTabTransfer[]; captureState:()=>PaneState; restoreState:(value:PaneState)=>void; hasPending:()=>boolean;attachNativeFiles:(paths:string[])=>Promise<void> }>>({});
+  let tabOrder = $state<TabKey[]>([]);
+  let expandedPaneId=$state<string|null>(null), focusStep=$state<0|1|2>(0), focusTarget=$state('');
+  const workspaceExpansion=$derived(embedded?parentExpandedPaneId:expandedPaneId);
+  const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
+  function setPaneExpansion(id:string|null){if(embedded)onExpandPane?.(id);else{expandedPaneId=id;if(id)activePaneId=id;}}
+  function resetTabExpansion(){focusStep=0;focusTarget='';if(workspaceExpansion===paneId)setPaneExpansion(null);}
+  function expandTab(workspace=false){
+    if(focusStep){resetTabExpansion();return;}
+    focusTarget=contentKey;
+    focusStep=workspace?2:1;
+    if(workspace)setPaneExpansion(paneId);
+  }
+  $effect(()=>{if(focusStep && (contentKey!==focusTarget || (focusStep===2 && workspaceExpansion!==paneId)))untrack(resetTabExpansion);});
+  $effect(()=>{if(!embedded && expandedPaneId && (activePaneId!==expandedPaneId || !paneIds(layout).includes(expandedPaneId)))expandedPaneId=null;});
+
+  let pointerTabDrag = $state<{tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null>(null);
+  let paneRefs = $state<Record<string, { openAgentSettings:(draft:Agent)=>void;openSettings:(category?:string)=>void;openTerminalTab:(id:string)=>void;openTask: (task: Task) => void; openChannel: (channel: Channel) => void; openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void; takeTab: (tab: PaneTabTransfer) => TabPayload | null; receiveTab: (payload: TabPayload, before?: TabKey) => void; reorderTab:(tab:PaneTabTransfer,before?:TabKey)=>void; allTabs: () => PaneTabTransfer[]; captureState:()=>PaneState; restoreState:(value:PaneState)=>void; closeActiveTab:()=>void; hasPending:()=>boolean;attachNativeFiles:(paths:string[])=>Promise<void> }>>({});
   let paneSelections = $state<Record<string,string|null>>({});
-  let layoutMenu = $state(false), layoutAnchor = $state<HTMLButtonElement>();
+  let sidebarScrolled = $state(false);
+  let workspaceReady = $state(false);
+  let workspacePersistenceError = $state('');
   let compactDetail = $state(false);
   let queuedAttachments=$state<Record<string,Attachment[]>>({}), attachmentContexts=$state<Record<string,string>>({}), pendingUploads=$state<Record<string,boolean>>({});
   let filePicker=$state<HTMLInputElement>();
   const currentAttachments=$derived(queuedAttachments[currentDraftKey() ?? ''] ?? []);
   const filesBusy=$derived(pendingUploads[currentDraftKey() ?? ''] ?? false);
+  let overviewOpen = $state(untrack(()=>!embedded));
+  let settingsOpen = $state(false), settingsCategory = $state('appearance');
   let openChannelIds = $state<string[]>([]);
   let channelRecipients = $state<Record<string,string[]>>({});
   $effect(()=>{ if(embedded && parentSnapshot) snapshot=parentSnapshot; });
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
-  const accents = ["#3f9d6a", "#3978d4", "#8755c7", "#c44c79", "#c27524"];
   const bridge = getBridge();
   const macPlatform = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  let tabIndexModifier = $state(false);
   const modifierLabel = macPlatform ? '⌘' : 'Ctrl+';
   const nativeMac = $derived(
     !embedded && typeof navigator !== "undefined" && isTauri() && /Mac/.test(navigator.userAgent));
+  let nativeFullscreen = $state(false);
+  onMount(() => {
+    if (!nativeMac) return;
+    let mounted = true, revision = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const updateFullscreen = () => {
+      const request = ++revision;
+      void getCurrentWindow().isFullscreen().then(value => {
+        if (mounted && request === revision) nativeFullscreen = value;
+      }).catch(() => { /* Keep the control clearance if native state is unavailable. */ });
+    };
+    const resized = () => { updateFullscreen(); clearTimeout(timer); timer = setTimeout(updateFullscreen, 200); };
+    window.addEventListener('resize', resized);
+    updateFullscreen();
+    return () => { mounted = false; clearTimeout(timer); window.removeEventListener('resize', resized); };
+  });
   let snapshot = $state<Snapshot | null>(null),
     selectedTaskId = $state<string | null>(null),
     selectedChannelId = $state<string | null>(null),
-    pane = $state<"overview" | "task" | "channel" | "agent" | "project" | "terminal">("overview");
+    pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "settings">(untrack(()=>embedded?"empty":"overview"));
   let openTerminalIds=$state<string[]>([]), selectedTerminalId=$state<string|null>(null), terminalBusy=$state(false);
   const selectedTerminal=$derived(selectedTerminalId ? $terminalSessions[selectedTerminalId] ?? null : null);
   const openTerminals=$derived(openTerminalIds.flatMap(id=>$terminalSessions[id]?[$terminalSessions[id]]:[]));
@@ -122,32 +180,23 @@
   const canSend=$derived(Boolean(composer.trim() || currentAttachments.length) && !filesBusy);
   let scaleQueued = $state<number | null>(null), scaleInFlight = $state<number | null>(null), scaleSaving = false;
   let slashOpen = $state(false), slashIndex = $state(0);
-  let taskMenu = $state(false), monitterMenu = $state(false);
-  let sidebarCollapsed = $state(false), sidebarViewMenu = $state(false);
+  let taskMenu = $state(false);
+  let sidebarCollapsed = $state(false);
+  let collapsedAgents = $state<Record<string, boolean>>({});
   let railAgentId = $state<string | null>(null);
   let railAnchor = $state<HTMLButtonElement>();
-  let viewAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
-  let monitterMenuAnchor = $state<HTMLButtonElement>();
   let detailTab = $state<'run' | 'git' | 'timeline'>('run');
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
   let gitPane = $state<GitPane>();
   const railAgent = $derived(snapshot?.agents.find(agent => agent.id === railAgentId) ?? null);
   const sidebarViews = [{ id: 'standard', label: 'Standard', icon: Bot }, { id: 'activity', label: 'Activity', icon: Activity }, { id: 'projects', label: 'Projects', icon: Folder }] as const;
-  let returnToMonitterMenu = $state(false);
-  $effect(() => {
-    if (modal === null && returnToMonitterMenu) {
-      returnToMonitterMenu = false;
-      void tick().then(() => document.querySelector<HTMLButtonElement>('[aria-label="Monitter menu"]')?.focus());
-    }
-  });
   let modal = $state<
       | "agent"
       | "hosts"
       | "host"
       | "taskSettings"
       | "channel"
-      | "appearance"
       | "archived"
       | "project"
       | "deleteProject"
@@ -161,7 +210,7 @@
     probe = $state<ProbeResult | null>(null),
     recipients = $state<string[]>([]),
     drafts = $state<Record<string, string>>({});
-  type TaskDraft = { modelSettings?:ModelSettings;modelAgentId?:string; id: string; text: string; title: string; agentId: string; projectId: string; parentId: string | null; nativeSessionId: string; createdTaskId?: string };
+  type TaskDraft = { modelSettings?:ModelSettings;modelAgentId?:string;sandbox?:Sandbox;sandboxAgentId?:string; id: string; text: string; title: string; agentId: string; projectId: string; parentId: string | null; nativeSessionId: string; createdTaskId?: string };
   type CollaborationRecord = Collaboration;
   type AgentProfile = Agent & { expertise?: string[]; responsibilities?: string[]; skills?: string[]; collaborationEnabled?: boolean };
   let taskDrafts = $state<Record<string, TaskDraft>>({});
@@ -173,16 +222,35 @@
     taskNativeSessionId = $state(""),
     renameTitle = $state("");
   let palette = $state<"switch" | "controls" | null>(null);
+  let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
+  let vimCommandInput = $state<HTMLInputElement>();
+  let vimArmed = $state(false);
+  let vimCompletionSeed='',vimCompletionValue='',vimCompletionIndex=-1;
+  let paneFocusChord = $state(false);
+  const vimShortcuts = $derived(snapshot?.settings.shortcutMode === 'vim');
+  $effect(() => { vimShortcuts; paneFocusChord=false; vimArmed=false; vimCommandOpen=false; });
   let directoryQuery = $state("");
   let focusedAgentId = $state<string | null>(null);
   let focusedProjectId = $state<string | null>(null);
   let collapsedProjects = $state<Record<string, boolean>>({});
+  let sidebarOrder = $state<Record<string,string[]>>({});
+  function sidebarSorted<T extends {id:string}>(items:T[],group:string):T[] {
+    const order=sidebarOrder[group]??[];
+    return [...items].sort((a,b)=>(order.indexOf(a.id)<0?Infinity:order.indexOf(a.id))-(order.indexOf(b.id)<0?Infinity:order.indexOf(b.id)));
+  }
+  function moveSidebar(group:string,id:string,target:string,after:boolean) {
+    const visible=Array.from(document.querySelectorAll<HTMLElement>('[data-sidebar-sort-group]')).filter(node=>node.dataset.sidebarSortGroup===group).map(node=>node.dataset.sidebarSortId!).filter(Boolean);
+    const order=[...new Set(visible)].filter(value=>value!==id);
+    const index=order.indexOf(target);if(index<0)return;
+    order.splice(index+(after?1:0),0,id);sidebarOrder={...sidebarOrder,[group]:order};
+    try{localStorage.setItem('monitter.sidebar-order.v1',JSON.stringify(sidebarOrder));}catch{error='Could not save sidebar order.';}
+  }
+
   const projects = $derived(snapshot?.projects ?? []);
   const focusedProject = $derived(projects.find(project => project.id === focusedProjectId) ?? null);
   const sidebarView = $derived(snapshot?.settings.sidebarView ?? 'standard');
-  const currentSidebarView = $derived(sidebarViews.find(view => view.id === sidebarView)!);
   const activeTasks = $derived(snapshot?.tasks.filter(task => !task.archived) ?? []);
-  const activityTasks = $derived([...activeTasks].sort((a,b) =>
+  const activityTasks = $derived(activeTasks.filter(task=>!task.channelId).sort((a,b) =>
     Number(b.status === 'running') - Number(a.status === 'running') || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id)));
   const taskFormAgent = $derived(snapshot?.agents.find(agent => agent.id === taskAgentId));
   const taskFormProject = $derived(projects.find(project => project.id === taskProjectId));
@@ -257,6 +325,7 @@
     messages,
     visibleEvents.filter(event => event.kind === "tool" ||
       (event.kind === "reasoning" && event.detail.trim())),
+    snapshot?.settings.compressToolCalls === true,
   ));
   const collaborations = $derived(((snapshot as (Snapshot & { collaborations?: CollaborationRecord[] }) | null)?.collaborations ?? []));
   const taskCollaborations = $derived(selectedTask ? collaborations.filter(item => item.fromTaskId === selectedTask.id || item.toTaskId === selectedTask.id) : []);
@@ -281,6 +350,25 @@
     resize.observe(node);
     return { destroy: () => resize.disconnect() };
   }
+  function focusExistingChat(kind: 'task' | 'channel', id: string, requester: string): boolean {
+    if (embedded) return onExistingChat?.(kind, id, requester) ?? false;
+    const candidates = paneIds(layout);
+    const owner = [activePaneId, ...candidates.filter(candidate => candidate !== activePaneId)]
+      .find(candidate => candidates.includes(candidate) && (candidate === 'main' ? allTabs() : paneRefs[candidate]?.allTabs() ?? [])
+        .some(tab => tab.kind === kind && tab.id === id));
+    if (!owner || owner === requester) return false;
+    activePaneId = owner;
+    const target = owner === 'main' ? { openTask, openChannel } : paneRefs[owner];
+    if (kind === 'task') {
+      const task = snapshot?.tasks.find(item => item.id === id);
+      if (task) target?.openTask(task);
+    } else {
+      const channel = snapshot?.channels.find(item => item.id === id);
+      if (channel) target?.openChannel(channel);
+    }
+    void tick().then(() => document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(owner)}"]`)?.focus({ preventScroll: true }));
+    return true;
+  }
   function routeTask(task: Task) {
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openTask(task); else openTask(task);
@@ -301,19 +389,42 @@
     }
     layout = resize(layout);
   }
-  export function allTabs(): PaneTabTransfer[] {
-    return [...openTaskIds.map(id=>({sourcePaneId:paneId,kind:'task' as const,id})),
-      ...openDraftIds.map(id=>({sourcePaneId:paneId,kind:'draft' as const,id})),
-      ...openChannelIds.map(id=>({sourcePaneId:paneId,kind:'channel' as const,id})),
-      ...openTerminalIds.map(id=>({sourcePaneId:paneId,kind:'terminal' as const,id}))];
+  function availableTabs(): TabKey[] {
+    return [
+      ...openTaskIds.map(id=>({kind:'task' as const,id})),
+      ...openDraftIds.map(id=>({kind:'draft' as const,id})),
+      ...openChannelIds.map(id=>({kind:'channel' as const,id})),
+      ...openTerminalIds.map(id=>({kind:'terminal' as const,id})),
+      ...(settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
+    ];
   }
+  function orderedTabs(): TabKey[] { return normalizeTabOrder(tabOrder, availableTabs()); }
+  function rememberTab(tab: TabKey, before?: TabKey) {
+    const current=orderedTabs();
+    if (!before && current.some(item=>item.kind===tab.kind && item.id===tab.id)) { tabOrder=current; return; }
+    tabOrder = insertTab(current, tab, before);
+  }
+  function forgetTab(tab: TabKey) { tabOrder = tabOrder.filter(current=>current.kind!==tab.kind || current.id!==tab.id); }
+  export function allTabs(): PaneTabTransfer[] {
+    return orderedTabs().map(tab=>({sourcePaneId:paneId,...tab}));
+  }
+  export function reorderTab(tab: PaneTabTransfer, before?: TabKey) { tabOrder=insertTab(orderedTabs(),tab,before); }
   export function hasPending() { return terminalBusy || Object.values(composerPending).some(Boolean) || Object.values(pendingUploads).some(Boolean); }
   export function captureState():PaneState {
-    saveCurrentDraft();
-    return JSON.parse(JSON.stringify({openTerminalIds,selectedTerminalId,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
+    // Persistence must only read reactive state: writing here can recursively trigger itself.
+    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
+    const key=currentDraftKey();
+    if(key)captured.drafts[key]=composer;
+    if(pane==='channel' && selectedChannelId)captured.channelRecipients[selectedChannelId]=[...recipients];
+    if(pane==='task' && currentDraftId && captured.taskDrafts[currentDraftId]) {
+      captured.taskDrafts[currentDraftId]={...captured.taskDrafts[currentDraftId],text:composer,title:taskTitle,agentId:taskAgentId,projectId:taskProjectId,parentId:taskParentId,nativeSessionId:taskNativeSessionId};
+    }
+    return captured;
   }
   export function restoreState(value:PaneState) {
-    ({openTerminalIds,selectedTerminalId,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
+    agentDraft=value.settingsEditor?.draft??null;agentEdits=value.settingsEditor?.edits??{};
+    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openTaskIds,openDraftIds,openChannelIds,tabOrder,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
+    tabOrder = normalizeTabOrder(Array.isArray(tabOrder) ? tabOrder : [], availableTabs());
     composer=drafts[currentDraftKey() ?? ''] ?? '';
     recipients=selectedChannelId?channelRecipients[selectedChannelId]??[]:[];
     const draft=currentDraftId?taskDrafts[currentDraftId]:null;
@@ -322,14 +433,135 @@
   function captureChildren() {
     return Object.fromEntries(paneIds(layout).filter(id=>id!=='main').flatMap(id=>paneRefs[id]?[[id,paneRefs[id].captureState()]]:[]));
   }
+  function captureWorkspace(): PersistedWorkspace {
+    const main = captureState() as unknown as Record<string, unknown>;
+    const panes = captureChildren() as unknown as Record<string, Record<string, unknown>>;
+    const terminalIds = new Set<string>([
+      ...(main.openTerminalIds as string[]),
+      ...Object.values(panes).flatMap(state => Array.isArray(state.openTerminalIds) ? state.openTerminalIds as string[] : []),
+    ]);
+    const terminals = [...terminalIds].flatMap(id => {
+      const session = $terminalSessions[id];
+      return session ? [{ id, hostId: session.hostId, cwd: session.cwd }] : [];
+    });
+    return { version: 1, layout, activePaneId, main, panes, sidebarCollapsed, collapsedAgents, collapsedProjects, terminals };
+  }
+  let workspaceTransition = false;
+  function persistWorkspace() {
+    if (workspaceTransition) return true;
+    if (!workspaceReady) return true;
+    const failure = saveWorkspace(captureWorkspace());
+    if (failure && !workspacePersistenceError) {
+      workspacePersistenceError = failure;
+      notice = `Could not save workspace state: ${failure}`;
+    }
+    if (!failure) workspacePersistenceError = '';
+    return !failure;
+  }
+  function isWorkspaceLayout(value: PaneLayout) {
+    const ids = paneIds(value);
+    return ids.includes('main') && ids.length <= 4 && new Set(ids).size === ids.length;
+  }
+  function sanitizePaneState(value: Record<string, unknown>, terminalIds: Record<string, string>): PaneState {
+    const saved = remapTerminalIds(value, terminalIds) as unknown as Partial<PaneState>;
+    const fallback = captureState();
+    const state: PaneState = {
+      ...fallback, ...saved,
+      overviewOpen: saved.overviewOpen !== false,
+      settingsOpen: saved.settingsOpen === true,
+      settingsCategory: ['appearance','typography','behaviour','conversation','agents','directory'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
+      openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
+      openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,
+      openDraftIds: Array.isArray(saved.openDraftIds) ? saved.openDraftIds : fallback.openDraftIds,
+      openChannelIds: Array.isArray(saved.openChannelIds) ? saved.openChannelIds : fallback.openChannelIds,
+      tabOrder: Array.isArray(saved.tabOrder) ? saved.tabOrder.filter((tab): tab is TabKey => !!tab && typeof tab === 'object' && ['task','draft','channel','terminal','settings'].includes((tab as TabKey).kind) && typeof (tab as TabKey).id === 'string') : fallback.tabOrder,
+      taskDrafts: saved.taskDrafts && typeof saved.taskDrafts === 'object' ? saved.taskDrafts : fallback.taskDrafts,
+      drafts: saved.drafts && typeof saved.drafts === 'object' ? saved.drafts : fallback.drafts,
+      queuedAttachments: saved.queuedAttachments && typeof saved.queuedAttachments === 'object' ? saved.queuedAttachments : fallback.queuedAttachments,
+      attachmentContexts: saved.attachmentContexts && typeof saved.attachmentContexts === 'object' ? saved.attachmentContexts : fallback.attachmentContexts,
+      channelRecipients: saved.channelRecipients && typeof saved.channelRecipients === 'object' ? saved.channelRecipients : fallback.channelRecipients,
+      pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
+      detailTab: ['run', 'git', 'timeline'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
+    };
+    const taskIds = new Set(snapshot?.tasks.filter(task => !task.archived).map(task => task.id) ?? []);
+    const channelIds = new Set(snapshot?.channels.map(channel => channel.id) ?? []);
+    const agentIds = new Set(snapshot?.agents.map(agent => agent.id) ?? []);
+    const projectIds = new Set(snapshot?.projects.map(project => project.id) ?? []);
+    state.openTaskIds = state.openTaskIds.filter(id => taskIds.has(id));
+    state.openChannelIds = state.openChannelIds.filter(id => channelIds.has(id));
+    state.openDraftIds = state.openDraftIds.filter(id => {
+      const draft = state.taskDrafts[id];
+      return !!draft && agentIds.has(draft.agentId) && (!draft.projectId || projectIds.has(draft.projectId));
+    });
+    state.taskDrafts = Object.fromEntries(state.openDraftIds.map(id => [id, state.taskDrafts[id]]));
+    state.tabOrder = normalizeTabOrder(state.tabOrder, [
+      ...state.openTaskIds.map(id=>({kind:'task' as const,id})), ...state.openDraftIds.map(id=>({kind:'draft' as const,id})),
+      ...state.openChannelIds.map(id=>({kind:'channel' as const,id})), ...state.openTerminalIds.map(id=>({kind:'terminal' as const,id})),
+      ...(state.settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
+    ]);
+    state.selectedTaskId = state.selectedTaskId && taskIds.has(state.selectedTaskId) ? state.selectedTaskId : null;
+    state.selectedChannelId = state.selectedChannelId && channelIds.has(state.selectedChannelId) ? state.selectedChannelId : null;
+    state.currentDraftId = state.currentDraftId && state.taskDrafts[state.currentDraftId] ? state.currentDraftId : null;
+    state.focusedAgentId = state.focusedAgentId && agentIds.has(state.focusedAgentId) ? state.focusedAgentId : null;
+    state.focusedProjectId = state.focusedProjectId && projectIds.has(state.focusedProjectId) ? state.focusedProjectId : null;
+    if (state.pane === 'task' && !state.selectedTaskId && !state.currentDraftId) state.pane = 'overview';
+    if (state.pane === 'channel' && !state.selectedChannelId) state.pane = 'overview';
+    if (state.pane === 'settings' && !state.settingsOpen) state.pane = 'overview';
+    if (state.pane === 'terminal' && !state.selectedTerminalId) state.pane = 'overview';
+    if (state.pane === 'overview' && !state.overviewOpen) state.pane = 'empty';
+    return state;
+  }
+  async function restoreWorkspace() {
+    const saved = loadWorkspace();
+    if (!saved || !snapshot || !isWorkspaceLayout(saved.layout)) return;
+    layout = saved.layout;
+    sidebarCollapsed = saved.sidebarCollapsed;
+    collapsedAgents = saved.collapsedAgents;
+    collapsedProjects = saved.collapsedProjects;
+    await tick();
+    const replacements: Record<string, string> = {};
+    let failedTerminals = 0;
+    const liveTerminals = await bridge.listTerminals();
+    await Promise.all(saved.terminals.map(async terminal => {
+      if (!snapshot?.hosts.some(host => host.id === terminal.hostId) || !terminal.cwd.trim()) return;
+      const live = liveTerminals.find(session => session.id === terminal.id);
+      if (live) {
+        registerTerminal(live);
+        replacements[terminal.id] = live.id;
+        return;
+      }
+      try {
+        const fresh = await bridge.openTerminal({ hostId: terminal.hostId, cwd: terminal.cwd }, 80, 24);
+        registerTerminal(fresh);
+        replacements[terminal.id] = fresh.id;
+      } catch { failedTerminals += 1; }
+    }));
+    restoreState(sanitizePaneState(saved.main, replacements));
+    for (const id of paneIds(layout)) if (id !== 'main' && saved.panes[id] && paneRefs[id]) {
+      paneRefs[id].restoreState(sanitizePaneState(saved.panes[id], replacements));
+    }
+    activePaneId = paneIds(layout).includes(saved.activePaneId) ? saved.activePaneId : 'main';
+    if (failedTerminals) notice = `${failedTerminals} saved terminal${failedTerminals === 1 ? '' : 's'} could not be reopened.`;
+  }
+  $effect(() => {
+    // Stringifying tracks pane-local edits, including drafts, without mutating state from captureState.
+    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openTaskIds, openDraftIds, openChannelIds, tabOrder, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
+    workspaceReady;
+    untrack(() => { if (embedded) onWorkspaceChange?.(); else persistWorkspace(); });
+  });
   function layoutPending() { return hasPending() || paneIds(layout).some(id=>paneRefs[id]?.hasPending()); }
   export function takeTab(tab: PaneTabTransfer): TabPayload | null {
     saveCurrentDraft();
     if (composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`]) return null;
+    if(tab.kind==='settings') {
+      if(!settingsOpen)return null;
+      const category=settingsCategory,settingsEditor:AgentEditorState=JSON.parse(JSON.stringify({draft:agentDraft,edits:agentEdits}));closeSettings();forgetTab(tab);return {tab,settingsCategory:category,settingsEditor};
+    }
     if(tab.kind==='terminal') {
       if(terminalBusy || !openTerminalIds.includes(tab.id))return null;
       openTerminalIds=openTerminalIds.filter(id=>id!==tab.id);
       if(pane==='terminal' && selectedTerminalId===tab.id)openOverview();
+      forgetTab(tab);
       return {tab};
     }
     const attachments=queuedAttachments[`${tab.kind}:${tab.id}`], attachmentContext=attachmentContexts[`${tab.kind}:${tab.id}`];
@@ -338,6 +570,7 @@
       if (!draft) return null;
       const payload = {tab,draft:{...draft},text:draft.text,attachments,attachmentContext};
       closeTaskDraft(tab.id); delete taskDrafts[tab.id]; delete drafts[`draft:${tab.id}`];
+      forgetTab(tab);
       return payload;
     }
     const key = `${tab.kind}:${tab.id}`, text = drafts[key] ?? '';
@@ -347,27 +580,28 @@
       if (selectedChannelId === tab.id) openOverview();
     }
     delete drafts[key];
+    forgetTab(tab);
     return {tab,text,attachments,attachmentContext,recipients:channelRecipients[tab.id]};
   }
-  export function receiveTab(payload: TabPayload) {
+  export function receiveTab(payload: TabPayload, before?: TabKey) {
     const {tab} = payload;
-    if(tab.kind==='terminal') {openTerminalTab(tab.id);return;}
+    if(tab.kind==='settings') {agentDraft=payload.settingsEditor?.draft??null;agentEdits=payload.settingsEditor?.edits??{};settingsCategory=payload.settingsCategory??'appearance';openSettings();rememberTab(tab,before);return;}
+    if(tab.kind==='terminal') {openTerminalTab(tab.id);rememberTab(tab,before);return;}
     if(tab.kind==='channel')channelRecipients[tab.id]=payload.recipients ?? [];
     queuedAttachments[`${tab.kind}:${tab.id}`]=payload.attachments ?? [];
     if(payload.attachmentContext) attachmentContexts[`${tab.kind}:${tab.id}`]=payload.attachmentContext;
     if (tab.kind === 'draft' && payload.draft) {
       taskDrafts[tab.id] = payload.draft;
-      openTaskDraft(payload.draft);
+      openTaskDraft(payload.draft); rememberTab(tab,before);
     } else if (tab.kind === 'task') {
       const task = snapshot?.tasks.find(task=>task.id===tab.id);
-      if (task) { drafts[`task:${tab.id}`] = payload.text ?? ''; openTask(task); }
+      if (task) { drafts[`task:${tab.id}`] = payload.text ?? ''; openTask(task); rememberTab(tab,before); }
     } else if (tab.kind === 'channel') {
       const channel = snapshot?.channels.find(channel=>channel.id===tab.id);
-      if (channel) { drafts[`channel:${tab.id}`] = payload.text ?? ''; openChannel(channel); }
+      if (channel) { drafts[`channel:${tab.id}`] = payload.text ?? ''; openChannel(channel); rememberTab(tab,before); }
     }
   }
   async function setLayout(mode: 'single' | 'columns' | 'grid') {
-    layoutMenu = false;
     if (embedded) { onLayout?.(mode); return; }
     if(layoutPending()) {notice='Wait for the message to be accepted before changing layout.';return;}
     const saved=captureChildren();
@@ -385,37 +619,86 @@
     await tick();
     for(const id of ids) if(saved[id]) paneRefs[id]?.restoreState(saved[id]);
   }
-  async function dropTab(targetId: string, edge: DropEdge, tab: PaneTabTransfer) {
-    if(embedded) { onTabDrop?.(targetId,edge,tab); return; }
+  async function splitPaneForVim(id: string, axis: 'horizontal' | 'vertical') {
+    if (embedded) { onVimSplit?.(paneId, axis); return; }
+    if (workspaceTransition || layoutPending()) { notice = 'Wait for the current action before splitting a pane.'; return; }
+    if (!paneIds(layout).includes(id)) return;
+    if (paneIds(layout).length >= 4) { error = 'Monitter supports up to four panes.'; return; }
+    saveCurrentDraft();
+    const saved = captureChildren();
+    const fresh = crypto.randomUUID();
+    const insert = (node: PaneLayout): PaneLayout => {
+      if ('axis' in node) return { ...node, first: insert(node.first), second: insert(node.second) };
+      return node.id === id ? { id: crypto.randomUUID(), axis, ratio: .5, first: node, second: { id: fresh } } : node;
+    };
+    persistWorkspace(); workspaceTransition = true;
+    try {
+      layout = insert(layout); await tick();
+      for (const pane of paneIds(layout)) if (saved[pane]) paneRefs[pane]?.restoreState(saved[pane]);
+      activePaneId = fresh;
+    } finally { workspaceTransition = false; persistWorkspace(); }
+  }
+  async function dropTab(targetId: string, edge: DropEdge, tab: PaneTabTransfer, before?: TabKey) {
+    if(embedded) { onTabDrop?.(targetId,edge,tab,before); return; }
+    if (workspaceTransition || composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`] || terminalBusy) { notice='Wait for the current action before moving this tab.'; return; }
     const ids=paneIds(layout);
     if (!ids.includes(tab.sourcePaneId) || !ids.includes(targetId)) return;
-    if (edge==='center' && targetId===tab.sourcePaneId) return;
+    if (edge==='center' && targetId===tab.sourcePaneId) {
+      if(before && before.kind===tab.kind && before.id===tab.id) return;
+      if(targetId==='main') reorderTab(tab,before); else paneRefs[targetId]?.reorderTab(tab,before); return;
+    }
     if (edge!=='center' && ids.length>=4) { notice='Up to four panes are available. Drop in the centre to move a tab.'; return; }
     if(edge!=='center' && layoutPending()) {notice='Wait for the message to be accepted before splitting a pane.';return;}
-    const source=tab.sourcePaneId==='main'?{takeTab}:paneRefs[tab.sourcePaneId];
-    const payload=source?.takeTab(tab); if(!payload) return;
-    const saved=edge!=='center'?captureChildren():{};
-    let destination=targetId;
-    if(edge!=='center') {
-      destination=crypto.randomUUID();
-      function insert(node:PaneLayout):PaneLayout {
-        if('axis' in node) return {...node,first:insert(node.first),second:insert(node.second)};
-        if(node.id!==targetId) return node;
-        const fresh={id:destination}, before=edge==='left'||edge==='top';
-        return {id:crypto.randomUUID(),axis:edge==='left'||edge==='right'?'horizontal':'vertical',ratio:.5,first:before?fresh:node,second:before?node:fresh};
+    const source=tab.sourcePaneId==='main'?{takeTab,hasPending}:paneRefs[tab.sourcePaneId];
+    if(!source || source.hasPending())return;
+    const previousLayout=layout, previousMain=captureState(), previousChildren=captureChildren(), previousActive=activePaneId;
+    // Keep disk state complete while split rendering temporarily unmounts panes.
+    persistWorkspace();workspaceTransition=true;
+    let moved=false;
+    try {
+      const payload=source.takeTab(tab);if(!payload)return;
+      const saved=edge!=='center'?captureChildren():{};
+      let destination=targetId;
+      if(edge!=='center') {
+        destination=crypto.randomUUID();
+        function insert(node:PaneLayout):PaneLayout {
+          if('axis' in node)return {...node,first:insert(node.first),second:insert(node.second)};
+          if(node.id!==targetId)return node;
+          const fresh={id:destination}, before=edge==='left'||edge==='top';
+          return {id:crypto.randomUUID(),axis:edge==='left'||edge==='right'?'horizontal':'vertical',ratio:.5,first:before?fresh:node,second:before?node:fresh};
+        }
+        layout=insert(layout);
       }
-      layout=insert(layout);
+      await tick();
+      for(const id of paneIds(layout))if(saved[id])paneRefs[id]?.restoreState(saved[id]);
+      const receiver=destination==='main'?{receiveTab,allTabs}:paneRefs[destination];
+      if(!receiver)throw new Error('The destination pane could not be opened.');
+      receiver.receiveTab(payload,before);
+      if(!receiver.allTabs().some(item=>item.kind===tab.kind && item.id===tab.id))throw new Error('The destination could not accept this tab.');
+      activePaneId=destination;moved=true;
+    } catch(reason) {
+      layout=previousLayout;await tick();restoreState(previousMain);
+      for(const [id,state] of Object.entries(previousChildren))paneRefs[id]?.restoreState(state);
+      activePaneId=previousActive;error=`Could not move tab: ${text(reason)}`;
+    } finally {workspaceTransition=false;persistWorkspace();}
+    if(moved){
+      const remaining=tab.sourcePaneId==='main'?captureState():paneRefs[tab.sourcePaneId]?.captureState();
+      if(remaining && !remaining.overviewOpen && !(remaining.openTaskIds.length+remaining.openDraftIds.length+remaining.openChannelIds.length+remaining.openTerminalIds.length+(remaining.settingsOpen?1:0)))await removeEmptyPane(tab.sourcePaneId);
     }
-    await tick();
-    for(const id of paneIds(layout)) if(saved[id]) paneRefs[id]?.restoreState(saved[id]);
-    if(destination==='main') receiveTab(payload); else paneRefs[destination]?.receiveTab(payload);
-    activePaneId=destination;
   }
+
   function dragTab(event:DragEvent,kind:PaneTabTransfer['kind'],id:string) {
     saveCurrentDraft();
     if(terminalBusy || !event.dataTransfer || composerPending[`${kind}:${id}`] || pendingUploads[`${kind}:${id}`]) {event.preventDefault();return;}
     event.dataTransfer.effectAllowed='move';
     event.dataTransfer.setData('application/x-monitter-tab',JSON.stringify({sourcePaneId:paneId,kind,id}));
+  }
+  function startTabPointer(event: PointerEvent, kind: PaneTabTransfer['kind'], id: string) {
+    if (event.button !== 0 || terminalBusy || composerPending[`${kind}:${id}`] || pendingUploads[`${kind}:${id}`]) return;
+    event.preventDefault();
+    const tab={sourcePaneId:paneId,kind,id};
+    if (embedded) { onTabPointerStart?.(event,tab); return; }
+    pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY};
   }
   function tabBarOver(event:DragEvent) {
     if(event.dataTransfer?.types.includes('application/x-monitter-tab')) {event.preventDefault();event.stopPropagation();}
@@ -427,7 +710,7 @@
   }
   function attachmentTargets():{target:AttachmentTarget;scope:string}[] {
     if(pane==='task' && !currentDraftId && selectedTask) return [{target:{taskId:selectedTask.id},scope:`${selectedTask.hostId}:${selectedTask.cwd}`}];
-    const agentIds=pane==='channel'?recipients:currentDraftId?[taskAgentId]:[];
+    const agentIds=pane==='channel'?effectiveRecipients:currentDraftId?[taskAgentId]:[];
     return agentIds.flatMap(agentId=>{
       const agent=snapshot?.agents.find(item=>item.id===agentId);if(!agent)return [];
       const projectId=pane==='channel'?null:taskProjectId||null;
@@ -451,7 +734,7 @@
   function clearAttachments(key:string,ids:string[]) {queuedAttachments[key]=(queuedAttachments[key]??[]).filter(item=>!ids.includes(item.id));}
   async function attachFiles(items:(File|string)[]) {
     const key=currentDraftKey(), targets=attachmentTargets(), scope=attachmentScope;
-    if(!key || filesBusy || busy || selectedTask?.status==='running')return;
+    if(!key || filesBusy || busy)return;
     if(!targets.length) {error='Choose an agent to receive these files.';return;}
     pendingUploads[key]=true;error='';
     try {
@@ -469,13 +752,15 @@
   export function attachNativeFiles(paths:string[]) {return attachFiles(paths);}
   function fileDrop(node:HTMLElement) {
     const over=(event:DragEvent)=>{if(event.dataTransfer?.types.includes('Files')){event.preventDefault();event.stopPropagation();node.classList.add('drop-files');}};
-    const leave=()=>node.classList.remove('drop-files');
-    const drop=(event:DragEvent)=>{leave();const files=Array.from(event.dataTransfer?.files??[]);if(files.length){event.preventDefault();event.stopPropagation();void attachFiles(files);}};
+    const clear=()=>node.classList.remove('drop-files');
+    const leave=(event:DragEvent)=>{if(!(event.relatedTarget instanceof Node) || !node.contains(event.relatedTarget))clear();};
+    const drop=(event:DragEvent)=>{clear();const files=Array.from(event.dataTransfer?.files??[]);if(files.length){event.preventDefault();event.stopPropagation();void attachFiles(files);}};
     const paste=(event:ClipboardEvent)=>{const files=Array.from(event.clipboardData?.files??[]);if(files.length){event.preventDefault();void attachFiles(files);}};
     node.addEventListener('dragover',over);node.addEventListener('dragleave',leave);node.addEventListener('drop',drop);node.addEventListener('paste',paste);
     return {destroy(){node.removeEventListener('dragover',over);node.removeEventListener('dragleave',leave);node.removeEventListener('drop',drop);node.removeEventListener('paste',paste);}};
   }
   const draftModelSettings=$derived(currentTaskDraft?.modelAgentId===taskAgentId ? currentTaskDraft?.modelSettings ?? null : null);
+  const draftSandbox=$derived(currentTaskDraft?.sandboxAgentId===taskAgentId ? currentTaskDraft?.sandbox ?? taskFormAgent?.sandbox ?? 'read-only' : taskFormAgent?.sandbox ?? 'read-only');
   async function changeModel(settings:ModelSettings) {
     const draft=currentTaskDraft, agentId=taskAgentId, taskId=selectedTask?.id ?? draft?.createdTaskId;
     if(taskId) {
@@ -484,6 +769,15 @@
       applySnapshot(result,ticket);
     }
     if(draft && taskDrafts[draft.id]) taskDrafts[draft.id]={...taskDrafts[draft.id],modelSettings:settings,modelAgentId:agentId};
+  }
+  async function changeSandbox(sandbox:Sandbox) {
+    const draft=currentTaskDraft, agentId=taskAgentId, taskId=selectedTask?.id ?? draft?.createdTaskId;
+    if(taskId) {
+      const ticket=++snapshotIssued;
+      const result=await bridge.setTaskSandbox(taskId,sandbox);
+      applySnapshot(result,ticket);
+    }
+    if(draft && taskDrafts[draft.id]) taskDrafts[draft.id]={...taskDrafts[draft.id],sandbox,sandboxAgentId:agentId};
   }
   const activeTurnDelivery = "Delivered to the recipient’s active turn via its Monitter inbox.";
   const collaborationStatus = (item: CollaborationRecord) => item.result === activeTurnDelivery ? "Delivered" : item.status;
@@ -532,7 +826,7 @@
     const reader = new FileReader();
     reader.onerror = () => { if (agentDraft === target) error = 'Could not read this image.'; };
     reader.onload = () => {
-      if (agentDraft !== target || modal !== 'agent') return;
+      if (agentDraft !== target || settingsCategory !== 'agents') return;
       if (typeof reader.result === 'string' && reader.result.length <= 3 * 1024 * 1024) target.avatar = reader.result;
       else error = 'Avatar image is too large.';
     };
@@ -629,6 +923,14 @@
       white = [255, 255, 255],
       black = [0, 0, 0];
     root.dataset.theme = settings.theme;
+    root.style.setProperty('--interface-font-ratio', String((settings.interfaceFontSize ?? 14) / 14));
+    root.style.setProperty('--chat-font-ratio', String((settings.chatFontSize ?? 13) / 13));
+    root.style.setProperty('--chat-font-size', `${settings.chatFontSize ?? 13}px`);
+    root.style.setProperty('--terminal-font-size', String(settings.terminalFontSize ?? 14));
+    const fontStack = (name: string | undefined, fallback: string) => name?.trim() ? `${JSON.stringify(name.trim())}, ${fallback}` : fallback;
+    root.style.setProperty('--interface-font', fontStack(settings.interfaceFont, '"IBM Plex Sans", system-ui, sans-serif'));
+    root.style.setProperty('--chat-font', fontStack(settings.chatFont, '"IBM Plex Sans", system-ui, sans-serif'));
+    root.style.setProperty('--terminal-font', fontStack(settings.terminalFont, '"IBM Plex Mono", Menlo, monospace'));
     root.style.setProperty("--accent", settings.accent);
     root.style.setProperty("--accent-rgb", colour.join(", "));
     root.style.setProperty(
@@ -692,12 +994,27 @@
     refreshTimer = setTimeout(reload, 125);
   }
   onMount(() => {
+    if(!embedded)try{const saved=JSON.parse(localStorage.getItem('monitter.sidebar-order.v1')??'{}');if(saved && typeof saved==='object' && !Array.isArray(saved))sidebarOrder=Object.fromEntries(Object.entries(saved).filter(([,ids])=>Array.isArray(ids)&&ids.every(id=>typeof id==='string')) as [string,string[]][]);}catch{/* Use original order if storage is unavailable. */}
+
     if (embedded) return;
     let unlisten: (() => void) | undefined;
     let unlistenDrop: (() => void) | undefined;
+    let unlistenCloseTab: UnlistenFn | undefined;
+    let unlistenBeforeQuit: UnlistenFn | undefined;
     let mounted = true;
+    let dragGeneration = 0;
+    const clearNativeDrop = () => document.querySelectorAll('.composer.drop-files').forEach(node=>node.classList.remove('drop-files'));
+    const persistOnPageHide = () => persistWorkspace();
+    window.addEventListener('pagehide', persistOnPageHide);
     void (async () => {
       try {
+        if (isTauri()) {
+          const stopBeforeQuit = await listen('monitter-before-quit', async () => {
+            if (workspaceReady && !persistWorkspace()) { error = workspacePersistenceError || 'Could not save workspace state before quitting.'; return; }
+            try { await invoke('finish_quit'); } catch (reason) { error = `Could not quit: ${text(reason)}`; }
+          });
+          if (mounted) unlistenBeforeQuit = stopBeforeQuit; else { stopBeforeQuit(); return; }
+        }
         const stopListening = await bridge.onChanged(debouncedReload);
         if (!mounted) {
           stopListening();
@@ -705,18 +1022,35 @@
         }
         unlisten = stopListening;
         await reload();
+        try { await restoreWorkspace(); } catch (reason) { error = `Could not restore workspace state: ${text(reason)}`; }
+        workspaceReady = true;
+        persistWorkspace();
         if(isTauri()) {
+          const stopCloseTab = await listen('monitter-close-tab', () => {
+            if (mounted) {
+              cancelPaneFocusChord();
+              closeFocusedTab();
+            }
+          });
+          if (mounted) unlistenCloseTab = stopCloseTab; else stopCloseTab();
           const stopDrop=await getCurrentWebview().onDragDropEvent(event=>{
-            if(event.payload.type!=='drop')return;
-            const payload=event.payload;
+            const payload=event.payload, generation=++dragGeneration;
+            if(payload.type==='leave') { clearNativeDrop(); return; }
+            if(payload.type==='drop') clearNativeDrop();
             void (async()=>{
               const physical=await getCurrentWindow().innerSize();
+              if(!mounted || (payload.type!=='drop' && generation!==dragGeneration))return;
               const x=payload.position.x/(physical.width/window.innerWidth), y=payload.position.y/(physical.height/window.innerHeight);
               const composerNode=document.elementFromPoint(x,y)?.closest('.composer');
+              if(payload.type!=='drop') {
+                clearNativeDrop();
+                composerNode?.classList.add('drop-files');
+                return;
+              }
               if(!composerNode)return;
               const id=composerNode.closest<HTMLElement>('[data-pane-id]')?.dataset.paneId ?? 'main';
               if(id==='main') await attachNativeFiles(payload.paths); else await paneRefs[id]?.attachNativeFiles(payload.paths);
-            })().catch(reason=>{error=text(reason)});
+            })().catch(reason=>{clearNativeDrop();error=text(reason)});
           });
           if(mounted)unlistenDrop=stopDrop;else stopDrop();
         }
@@ -729,8 +1063,24 @@
       clearTimeout(refreshTimer);
       unlisten?.();
       unlistenDrop?.();
+      unlistenCloseTab?.();
+      unlistenBeforeQuit?.();
+      cancelPaneFocusChord();
+      persistWorkspace();
+      window.removeEventListener('pagehide', persistOnPageHide);
+      clearNativeDrop();
     };
   });
+  function slashFloating(node: HTMLElement) {
+    const anchor = node.closest<HTMLElement>('.composer');
+    if (!anchor) return;
+    const size = () => { node.style.width = `${Math.max(0, anchor.getBoundingClientRect().width - 20)}px`; };
+    size();
+    const popup = floating(node, {anchor, side:'above', focus:false});
+    const observer = new ResizeObserver(size);
+    observer.observe(anchor);
+    return {destroy() { observer.disconnect(); popup.destroy(); }};
+  }
   function currentDraftKey() {
     if (pane === "task" && currentDraftId) return `draft:${currentDraftId}`;
     if (pane === "task" && selectedTaskId) return `task:${selectedTaskId}`;
@@ -740,14 +1090,15 @@
   }
   function saveCurrentDraft() {
     taskMenu = false;
-    monitterMenu = false;
     railAgentId = null;
-    sidebarViewMenu = false;
     const key = currentDraftKey();
     if(pane==='channel' && selectedChannelId)channelRecipients[selectedChannelId]=[...recipients];
-    if (key) drafts[key] = composer;
+    if (key && drafts[key] !== composer) drafts[key] = composer;
     if (pane === "task" && currentDraftId && taskDrafts[currentDraftId]) {
-      taskDrafts[currentDraftId] = { ...taskDrafts[currentDraftId], text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId };
+      const current = taskDrafts[currentDraftId];
+      if (current.text !== composer || current.title !== taskTitle || current.agentId !== taskAgentId || current.projectId !== taskProjectId || current.parentId !== taskParentId || current.nativeSessionId !== taskNativeSessionId) {
+        taskDrafts[currentDraftId] = { ...current, text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId };
+      }
     }
   }
   function terminalTarget():TerminalTarget {
@@ -768,13 +1119,31 @@
   export function openTerminalTab(id:string) {
     if(!$terminalSessions[id])return;
     saveCurrentDraft();if(!openTerminalIds.includes(id))openTerminalIds=[...openTerminalIds,id];
+    rememberTab({kind:'terminal',id});
     selectedTerminalId=id;selectedTaskId=null;selectedChannelId=null;currentDraftId=null;
     focusedAgentId=null;focusedProjectId=null;composer='';pane='terminal';
   }
+  $effect(() => {
+    const sessions=$terminalSessions, ids=openTerminalIds;
+    if(!ids.some(id=>!sessions[id]))return;
+    untrack(()=>{
+      openTerminalIds=ids.filter(id=>sessions[id]);
+      if(pane!=='terminal'||!selectedTerminalId||sessions[selectedTerminalId])return;
+      const terminal=openTerminalIds.at(-1);
+      const task=snapshot?.tasks.find(task=>task.id===openTaskIds.at(-1));
+      const channel=snapshot?.channels.find(channel=>channel.id===openChannelIds.at(-1));
+      const draft=taskDrafts[openDraftIds.at(-1)??''];
+      if(terminal)openTerminalTab(terminal);
+      else if(task)openTask(task);
+      else if(channel)openChannel(channel);
+      else if(draft)openTaskDraft(draft);
+      else openOverview();
+    });
+  });
   async function closeTerminalTab(id:string) {
     if(terminalBusy)return;
     terminalBusy=true;
-    try {await closeTerminalSession(id);openTerminalIds=openTerminalIds.filter(value=>value!==id);
+    try {await closeTerminalSession(id);openTerminalIds=openTerminalIds.filter(value=>value!==id);forgetTab({kind:'terminal',id});
       if(pane==='terminal' && selectedTerminalId===id) {const next=openTerminalIds.at(-1);if(next)openTerminalTab(next);else openOverview();}
     } catch(reason){error=`Could not close terminal: ${text(reason)}`;}
     finally{terminalBusy=false;}
@@ -785,6 +1154,44 @@
     if(owner && owner!=='main'){activePaneId=owner;paneRefs[owner]?.openTerminalTab(id);}
     else{activePaneId='main';openTerminalTab(id);}
   }
+  function closeOverview() {
+    const next=orderedTabs().at(-1);
+    if(!next){if(embedded)onClosePane?.(paneId);else void removeEmptyPane(paneId);return;}
+    overviewOpen=false;
+    if(pane!=='overview')return;
+    if(next.kind==='settings')openSettings();
+    else if(next.kind==='terminal')openTerminalTab(next.id);
+    else if(next.kind==='draft')openTaskDraft(taskDrafts[next.id]);
+    else if(next.kind==='task'){const task=snapshot?.tasks.find(item=>item.id===next.id);if(task)openTask(task);}
+    else {const channel=snapshot?.channels.find(item=>item.id===next.id);if(channel)openChannel(channel);}
+  }
+  async function removeEmptyPane(id:string) {
+    if(embedded){onClosePane?.(id);return;}
+    const ids=paneIds(layout);
+    if(ids.length===1 || !ids.includes(id))return;
+    if(workspaceTransition || layoutPending()){notice='Wait for the current action before closing this pane.';return;}
+    if((id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).length)return;
+    const states:Record<string,PaneState>={main:captureState(),...captureChildren()};
+    function prune(node:PaneLayout):PaneLayout|null {
+      if(!('axis' in node))return node.id===id?null:node;
+      const first=prune(node.first),second=prune(node.second);
+      return first && second?{...node,first,second}:first??second;
+    }
+    let next=prune(layout)!;
+    const promoted=id==='main'?paneIds(next)[0]:null;
+    if(promoted){
+      const rename=(node:PaneLayout):PaneLayout=>'axis' in node?{...node,first:rename(node.first),second:rename(node.second)}:node.id===promoted?{id:'main'}:node;
+      next=rename(next);
+    }
+    persistWorkspace();workspaceTransition=true;
+    try {
+      layout=next;await tick();
+      if(promoted)restoreState(states[promoted]);
+      for(const remaining of paneIds(next))if(remaining!=='main' && states[remaining])paneRefs[remaining]?.restoreState(states[remaining]);
+      if(activePaneId===id)activePaneId=promoted?'main':paneIds(next)[0];
+      else if(activePaneId===promoted)activePaneId='main';
+    }finally{workspaceTransition=false;persistWorkspace();}
+  }
   function openOverview() {
     saveCurrentDraft();
     selectedTaskId = null;
@@ -793,11 +1200,13 @@
     composer = "";
     focusedAgentId = null;
     focusedProjectId = null;
-    pane = "overview";
+    pane = overviewOpen ? "overview" : "empty";
   }
   export function openTask(task: Task) {
+    if (focusExistingChat('task', task.id, paneId)) return;
     saveCurrentDraft();
     if (!openTaskIds.includes(task.id)) openTaskIds = [...openTaskIds, task.id];
+    rememberTab({kind:'task',id:task.id});
     selectedTaskId = task.id;
     currentDraftId = null;
     selectedChannelId = null;
@@ -809,13 +1218,16 @@
   }
   function closeTaskTab(id: string) {
     openTaskIds = openTaskIds.filter(openId => openId !== id);
+    forgetTab({kind:'task',id});
     if (selectedTaskId === id) {
       const next = openTasks.at(-1);
       if (next) openTask(next); else openOverview();
     }
   }
   export function openChannel(channel: Channel) {
+    if (focusExistingChat('channel', channel.id, paneId)) return;
     if(!openChannelIds.includes(channel.id)) openChannelIds=[...openChannelIds,channel.id];
+    rememberTab({kind:'channel',id:channel.id});
     saveCurrentDraft();
     selectedChannelId = channel.id;
     selectedTaskId = null;
@@ -834,15 +1246,207 @@
     const agent = agentId ?? (parentId ? selectedTask?.agentId ?? defaultAgent?.id ?? '' : focusedAgent?.id ?? defaultAgent?.id ?? '');
     taskDrafts[id] = { id, text: '', title: '', agentId: agent, projectId: project, parentId, nativeSessionId: '' };
     openDraftIds = [...openDraftIds, id]; currentDraftId = id; selectedTaskId = null; selectedChannelId = null; pane = 'task';
+    rememberTab({kind:'draft',id});
     composer = ''; taskTitle = ''; taskAgentId = agent; taskProjectId = project; taskParentId = parentId; taskNativeSessionId = ''; scrollRevision += 1;
   }
   function openTaskDraft(draft: TaskDraft) {
     saveCurrentDraft();
     if (!openDraftIds.includes(draft.id)) openDraftIds = [...openDraftIds, draft.id];
+    rememberTab({kind:'draft',id:draft.id});
     currentDraftId = draft.id; selectedTaskId = null; selectedChannelId = null; pane = 'task';
     composer = draft.text; taskTitle = draft.title; taskAgentId = draft.agentId; taskProjectId = draft.projectId; taskParentId = draft.parentId; taskNativeSessionId = draft.nativeSessionId; scrollRevision += 1;
   }
-  function closeTaskDraft(id: string) { saveCurrentDraft(); openDraftIds = openDraftIds.filter(item => item !== id); if (currentDraftId === id) { currentDraftId = null; const next = openDrafts.at(-1); if (next) openTaskDraft(next); else openOverview(); } }
+  function closeTaskDraft(id: string) { saveCurrentDraft(); openDraftIds = openDraftIds.filter(item => item !== id); forgetTab({kind:'draft',id}); if (currentDraftId === id) { currentDraftId = null; const next = openDrafts.at(-1); if (next) openTaskDraft(next); else openOverview(); } }
+  export function openSettings(category?:string) {
+    if(category)settingsCategory=category;
+    saveCurrentDraft(); settingsOpen=true; rememberTab({kind:'settings',id:'settings'}); pane='settings';
+    selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;
+    focusedAgentId=null;focusedProjectId=null;composer='';modal=null;palette=null;
+  }
+  function routeSettings(category?:string) {
+    if(embedded){onSettingsSelect?.(category);return;}
+    const owner=paneIds(layout).find(id=>(id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).some(tab=>tab.kind==='settings')) ?? activePaneId;
+    activePaneId=owner;
+    if(owner==='main')openSettings(category);else paneRefs[owner]?.openSettings(category);
+  }
+  function closeSettings() {
+    settingsOpen=false;forgetTab({kind:'settings',id:'settings'});if(pane!=='settings')return;
+    const task=openTasks.at(-1), draft=openDrafts.at(-1);
+    const channel=snapshot?.channels.find(item=>item.id===openChannelIds.at(-1));
+    const terminal=openTerminalIds.at(-1);
+    if(task)openTask(task);else if(draft)openTaskDraft(draft);else if(channel)openChannel(channel);
+    else if(terminal)openTerminalTab(terminal);else openOverview();
+  }
+  async function savePreference(patch:Partial<Settings>) {
+    error='';
+    try {
+      const next=await saveSettingsPatch(patch);
+      applySnapshot(next,++snapshotIssued);
+    } catch(reason) {
+      error=`Could not save settings: ${text(reason)}`;
+      throw reason;
+    }
+  }
+  export function closeActiveTab() {
+    if(pane==='overview'||pane==='empty'){closeOverview();return;}
+    if(pane==='settings'){closeSettings();return;}
+    if (pane === 'terminal' && selectedTerminalId) { void closeTerminalTab(selectedTerminalId); return; }
+    if (pane === 'task' && currentDraftId) { closeTaskDraft(currentDraftId); return; }
+    if (pane === 'task' && selectedTaskId) { closeTaskTab(selectedTaskId); return; }
+    if (pane === 'channel' && selectedChannelId) {
+      saveCurrentDraft();
+      openChannelIds = openChannelIds.filter(id => id !== selectedChannelId);
+      forgetTab({kind:'channel',id:selectedChannelId});
+      openOverview();
+    }
+  }
+
+  function openVimCommand() {
+    vimCompletionSeed='';vimCompletionValue='';vimCompletionIndex=-1;
+    vimArmed = false; vimCommandOpen = true; vimCommandError = ''; vimHelpOpen = false; vimCommandText = '';
+    void tick().then(() => vimCommandInput?.focus());
+  }
+  function closeVimCommand() { vimCommandOpen = false; vimCommandError = ''; vimHelpOpen = false; }
+  function selectRelativeTab(direction: 1 | -1) {
+    const tabs = orderedTabs();
+    if (!tabs.length) return;
+    const current = pane === 'task' ? (currentDraftId ? { kind: 'draft' as const, id: currentDraftId } : selectedTaskId ? { kind: 'task' as const, id: selectedTaskId } : null)
+      : pane === 'channel' && selectedChannelId ? { kind: 'channel' as const, id: selectedChannelId }
+      : pane === 'terminal' && selectedTerminalId ? { kind: 'terminal' as const, id: selectedTerminalId }
+      : pane === 'settings' ? { kind: 'settings' as const, id: 'settings' } : null;
+    const index = current ? tabs.findIndex(tab => tab.kind === current.kind && tab.id === current.id) : -1;
+    const next = tabs[(index + direction + tabs.length) % tabs.length];
+    if (next.kind === 'task') { const task = snapshot?.tasks.find(item => item.id === next.id); if (task) openTask(task); }
+    else if (next.kind === 'draft') { const draft = taskDrafts[next.id]; if (draft) openTaskDraft(draft); }
+    else if (next.kind === 'channel') { const channel = snapshot?.channels.find(item => item.id === next.id); if (channel) openChannel(channel); }
+    else if (next.kind === 'terminal') openTerminalTab(next.id);
+    else openSettings();
+  }
+  function currentVimTab(): TabKey | null {
+    if (pane === 'task') return currentDraftId ? {kind:'draft',id:currentDraftId} : selectedTaskId ? {kind:'task',id:selectedTaskId} : null;
+    if (pane === 'channel' && selectedChannelId) return {kind:'channel',id:selectedChannelId};
+    if (pane === 'terminal' && selectedTerminalId) return {kind:'terminal',id:selectedTerminalId};
+    return pane === 'settings' ? {kind:'settings',id:'settings'} : null;
+  }
+  function selectVimTab(target: VimTabTarget): boolean {
+    const tabs=orderedTabs(); if(!tabs.length)return false;
+    const current=currentVimTab(), index=current?tabs.findIndex(tab=>tab.kind===current.kind&&tab.id===current.id):-1;
+    const targetIndex=target.kind==='last'?tabs.length-1:target.kind==='index'?target.index-1:((index+target.offset)%tabs.length+tabs.length)%tabs.length;
+    const tab=tabs[targetIndex]; if(!tab)return false;
+    if(tab.kind==='task'){const item=snapshot?.tasks.find(item=>item.id===tab.id);if(item)openTask(item);}
+    else if(tab.kind==='draft'){const item=taskDrafts[tab.id];if(item)openTaskDraft(item);}
+    else if(tab.kind==='channel'){const item=snapshot?.channels.find(item=>item.id===tab.id);if(item)openChannel(item);}
+    else if(tab.kind==='terminal')openTerminalTab(tab.id); else openSettings(); return true;
+  }
+  async function executeWorkspaceVim(command: VimCommand) {
+    if (embedded) { await onVimWorkspace?.(paneId,command); return; }
+    const ids=paneIds(layout), current=activePaneId;
+    if(command.kind==='focus-pane') { const t=command.target; if(typeof t==='object'&&'direction'in t)focusAdjacentPane(t.direction); else { const index=t==='first'?0:t==='last'?ids.length-1:t==='next'?(ids.indexOf(current)+1)%ids.length:t==='previous'?(ids.indexOf(current)-1+ids.length)%ids.length:t.index-1; if(ids[index])activePaneId=ids[index]; } return; }
+    if(command.kind==='only-pane') {
+      const kept=current==='main'?captureState():paneRefs[current]?.captureState();
+      await setLayout('single'); activePaneId='main';
+      if(kept){
+        if(kept.pane==='task'&&kept.currentDraftId&&taskDrafts[kept.currentDraftId])openTaskDraft(taskDrafts[kept.currentDraftId]);
+        else if(kept.pane==='task'){const task=snapshot?.tasks.find(t=>t.id===kept.selectedTaskId);if(task)openTask(task);}
+        else if(kept.pane==='channel'){const channel=snapshot?.channels.find(c=>c.id===kept.selectedChannelId);if(channel)openChannel(channel);}
+        else if(kept.pane==='terminal'&&kept.selectedTerminalId)openTerminalTab(kept.selectedTerminalId);
+        else if(kept.pane==='settings')openSettings(kept.settingsCategory);
+        else openOverview();
+      }
+      return;
+    }
+    if(command.kind==='close-pane') { const id=command.target?ids[command.target-1]:current; if(id&&ids.length>1) { const destination=ids.find(item=>item!==id)!; const tabs=id==='main'?allTabs():paneRefs[id]?.allTabs()??[]; for(const tab of tabs)await dropTab(destination,'center',tab); await removeEmptyPane(id); } return; }
+    if(command.kind==='equalize-panes') { const equal=(node:PaneLayout):PaneLayout=>'axis'in node?{...node,ratio:.5,first:equal(node.first),second:equal(node.second)}:node; layout=equal(layout);persistWorkspace();return; }
+    if(command.kind==='split') { const previous=activePaneId;await splitPaneForVim(current,command.axis);if(command.size&&activePaneId!==previous)await executeWorkspaceVim({kind:'resize-pane',axis:command.axis,size:command.size});return; }
+    const restoreLayout=async(next:PaneLayout)=>{const states:Record<string,PaneState>={main:captureState(),...captureChildren()};persistWorkspace();workspaceTransition=true;try{layout=next;await tick();for(const id of paneIds(next))if(id==='main')restoreState(states.main);else if(states[id])paneRefs[id]?.restoreState(states[id]);}finally{workspaceTransition=false;persistWorkspace();}};
+    const exchangeContents = async (sources: string[]) => {
+      const states: Record<string, PaneState> = {main: captureState(), ...captureChildren()};
+      workspaceTransition = true;
+      try {
+        for (const [index, id] of ids.entries()) {
+          const state = states[sources[index]];
+          if (id === 'main') restoreState(state);
+          else paneRefs[id]?.restoreState(state);
+        }
+        activePaneId = ids[sources.indexOf(current)];
+        await tick();
+      } finally { workspaceTransition = false; persistWorkspace(); }
+    };
+    if(command.kind==='rotate-panes') {
+      await exchangeContents(command.direction===1?[ids.at(-1)!,...ids.slice(0,-1)]:[...ids.slice(1),ids[0]]);return;
+    }
+    if(command.kind==='exchange-pane') {
+      const target=command.target?ids[command.target-1]:ids[(ids.indexOf(current)+1)%ids.length];
+      if(!target)throw new Error('That pane number is not open.');
+      await exchangeContents(ids.map(id=>id===current?target:id===target?current:id));return;
+    }
+    if(command.kind==='move-pane') {
+      if(ids.length<2)return;
+      const prune=(node:PaneLayout):PaneLayout|null=>{if(!('axis'in node))return node.id===current?null:node;const first=prune(node.first),second=prune(node.second);return first&&second?{...node,first,second}:first??second;};
+      const rest=prune(layout)!;const leading=command.edge==='left'||command.edge==='top';
+      await restoreLayout({id:crypto.randomUUID(),axis:command.edge==='left'||command.edge==='right'?'horizontal':'vertical',ratio:.5,first:leading?{id:current}:rest,second:leading?rest:{id:current}});return;
+    }
+    if(command.kind==='resize-pane') {
+      let nearest:{node:Extract<PaneLayout,{axis:string}>;first:boolean}|undefined;
+      const search=(node:PaneLayout)=>{if(!('axis'in node))return;const first=paneIds(node.first).includes(current),second=paneIds(node.second).includes(current);if(!first&&!second)return;if(node.axis===command.axis)nearest={node,first};search(first?node.first:node.second);};search(layout);
+      if(!nearest)return;
+      const match=nearest as {node:Extract<PaneLayout,{axis:string}>;first:boolean};
+      const box=document.querySelector<HTMLElement>(`.pane-split[data-split-id="${CSS.escape(match.node.id)}"]`)?.getBoundingClientRect();
+      if(!box)return;
+      const extent=Math.max(1,(command.axis==='horizontal'?box.width:box.height)-1);
+      const font=parseFloat(getComputedStyle(document.documentElement).fontSize)||16;
+      const unit=command.axis==='horizontal'?font*.6:font*1.5;
+      const currentFraction=match.first?match.node.ratio:1-match.node.ratio;
+      const requested=command.maximize ? .85:command.size!==undefined?command.size*unit/extent:currentFraction+(command.delta??0)*unit/extent;
+      const fraction=Math.max(.15,Math.min(.85,requested));
+      resizeSplit(match.node.id,match.first?fraction:1-fraction);persistWorkspace();return;
+    }
+  }
+
+  async function executeVimCommand(command: VimCommand) {
+    if (command.kind === 'help') { vimCommandError = ''; vimHelpOpen = true; return; }
+    if (command.kind === 'tabnew') {
+      const tabs=orderedTabs(),current=currentVimTab(),currentIndex=current?tabs.findIndex(t=>t.kind===current.kind&&t.id===current.id):-1;
+      let before:TabKey|undefined;
+      if(command.after){const target=command.after;const at=target.kind==='last'?tabs.length-1:target.kind==='index'?target.index-1:currentIndex+target.offset;if(at<0||at>=tabs.length){vimCommandError='That tab target does not exist.';return;}before=tabs[at+1];}
+      openTaskComposer();if(currentDraftId&&command.after)reorderTab({sourcePaneId:paneId,kind:'draft',id:currentDraftId},before);
+    }
+    else if (command.kind === 'tabselect') selectVimTab(command.target);
+    else if (command.kind === 'tabclose') { if(command.target&&!selectVimTab(command.target)){vimCommandError='That tab target does not exist.';return;} closeActiveTab(); }
+    else if (command.kind === 'tabonly') {
+      if(command.target&&!selectVimTab(command.target)){vimCommandError='That tab target does not exist.';return;}
+      if(hasPending()){vimCommandError='Wait for the current action before closing tabs.';return;}
+      const keep=currentVimTab();
+      for(const tab of [...orderedTabs()]){
+        if(keep&&tab.kind===keep.kind&&tab.id===keep.id)continue;
+        if(tab.kind==='terminal')await closeTerminalTab(tab.id);
+        else if(tab.kind==='task')closeTaskTab(tab.id);
+        else if(tab.kind==='draft')closeTaskDraft(tab.id);
+        else if(tab.kind==='channel'){openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);}
+        else closeSettings();
+      }
+      if(keep)overviewOpen=false;
+    }
+    else if (command.kind === 'tabmove') { const current=currentVimTab(); if(current){const ordered=orderedTabs(), currentIndex=ordered.findIndex(tab=>tab.kind===current.kind&&tab.id===current.id),tabs=ordered.filter(tab=>tab.kind!==current.kind||tab.id!==current.id);let before:TabKey|undefined; if(command.target==='first')before=tabs[0]; else if(command.target==='last')before=undefined; else if(command.target.kind==='after')before=tabs[command.target.index]; else {const index=Math.max(0,Math.min(tabs.length,currentIndex+command.target.offset));before=tabs[index];} reorderTab({sourcePaneId:paneId,...current},before); } }
+    else if (command.kind === 'terminal') await newTerminal();
+    else if (command.kind === 'split' || command.kind === 'close-pane' || command.kind === 'only-pane' || command.kind === 'focus-pane' || command.kind === 'resize-pane' || command.kind === 'equalize-panes' || command.kind === 'rotate-panes' || command.kind === 'exchange-pane' || command.kind === 'move-pane') { await executeWorkspaceVim(command); }
+    closeVimCommand();
+  }
+  function submitVimCommand() {
+    const result = parseVimCommand(vimCommandText);
+    if ('error' in result) { vimCommandError = result.error; return; }
+    void executeVimCommand(result.command).catch(reason=>{vimCommandError=text(reason);});
+  }
+  function handleVimCommandKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeVimCommand(); }
+    else if (event.key === 'Tab') {
+      event.preventDefault();event.stopPropagation();
+      if(vimCommandText!==vimCompletionValue){vimCompletionSeed=vimCommandText;vimCompletionIndex=-1;}
+      const choices=completeVimCommand(vimCompletionSeed);
+      if(choices.length){vimCompletionIndex=(vimCompletionIndex<0?(event.shiftKey?choices.length-1:0):(vimCompletionIndex+(event.shiftKey?-1:1)+choices.length)%choices.length);vimCommandText=choices[vimCompletionIndex].value;vimCompletionValue=vimCommandText;}
+    }
+    else if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); submitVimCommand(); }
+  }
 
   function isSendKey(event: KeyboardEvent) {
     return event.key === "Enter" && !event.isComposing && !event.shiftKey && !event.altKey &&
@@ -851,7 +1455,7 @@
   async function send() {
     if (busy || handleSlashSubmit()) return;
     if (currentDraftId) { await createTask(); return; }
-    if (!selectedTask || selectedTask.status === "running" || !canSend || busy) return;
+    if (!selectedTask || !canSend || busy) return;
     const taskId = selectedTask.id;
     const sentDraft = composer;
     const key = `task:${taskId}`, attachmentIds=currentAttachments.map(item=>item.id);
@@ -871,7 +1475,7 @@
     if (!draftId || !draft || !canSend || !taskAgentId) { error = "Choose an agent and write a message."; return; }
     const textToSend = promptText(composer), attachmentIds=currentAttachments.map(item=>item.id);
     const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId };
-    const values = { modelSettings:draftModelSettings, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null };
+    const values = { modelSettings:draftModelSettings, sandbox:draftSandbox, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null };
     taskDrafts[draftId] = { ...draft, ...captured };
     let taskId = draft.createdTaskId;
     busy = true; error = ''; notice = '';
@@ -892,6 +1496,7 @@
       delete drafts[`draft:${draftId}`];
       openDraftIds = openDraftIds.filter(id => id !== draftId);
       if (wasOpen && !openTaskIds.includes(taskId)) openTaskIds = [...openTaskIds, taskId];
+      tabOrder = tabOrder.map(tab=>tab.kind==='draft' && tab.id===draftId?{kind:'task' as const,id:taskId!}:tab);
       if (currentDraftId === draftId) {
         currentDraftId = null;
         const created = snapshot?.tasks.find(task => task.id === taskId);
@@ -901,12 +1506,31 @@
     finally { busy = false; setComposerPending(`draft:${draftId}`, false); }
   }
 
+  let agentEdits=$state<Record<string,Agent>>({});
+  function selectAgentEditor(id:string) {
+    if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
+    agentDraft=JSON.parse(JSON.stringify(agentEdits[id]??snapshot?.agents.find(agent=>agent.id===id)??blankAgent()));
+  }
+  export function openAgentSettings(draft:Agent) {
+    if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
+    agentDraft=JSON.parse(JSON.stringify(agentEdits[draft.id]??draft));
+    openSettings();settingsCategory='agents';
+  }
+  function routeAgentSettings(draft:Agent) {
+    modal=null;
+    if(embedded){onAgentSettingsSelect?.(draft);return;}
+    const owner=paneIds(layout).find(id=>(id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).some(tab=>tab.kind==='settings'))??activePaneId;
+    activePaneId=owner;
+    if(owner==='main')openAgentSettings(draft);else paneRefs[owner]?.openAgentSettings(draft);
+  }
+  $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && snapshot)untrack(()=>selectAgentEditor(snapshot!.agents[0]?.id??''));});
+  function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(snapshot?.agents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
+  async function deleteEditedAgent(){if(!agentDraft?.id)return;const id=agentDraft.id;if(await run(()=>bridge.deleteAgent(id),'Agent removed.')){delete agentEdits[id];agentDraft=null;selectAgentEditor(snapshot?.agents[0]?.id??'');}}
   async function saveAgent() {
-    if (
-      agentDraft &&
-      (await run(() => bridge.saveAgent({ ...agentDraft!, expertise: (agentDraft!.expertise ?? []).map(value=>value.trim()).filter(Boolean), responsibilities: (agentDraft!.responsibilities ?? []).map(value=>value.trim()).filter(Boolean), skills: (agentDraft!.skills ?? []).map(value=>value.trim()).filter(Boolean) }), "Agent saved."))
-    )
-      modal = null;
+    if(!agentDraft)return;
+    const oldId=agentDraft.id;
+    const submitted={...agentDraft,id:oldId||crypto.randomUUID(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean)};
+    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(snapshot?.agents.find(agent=>agent.id===submitted.id)??submitted));}
   }
   async function saveHost() {
     if (
@@ -961,7 +1585,7 @@
   }
   async function setSidebarView(view: SidebarView) {
     if (!snapshot || busy) return;
-    await run(()=>bridge.saveSettings({...snapshot!.settings,sidebarView:view}));
+    await run(()=>saveSettingsPatch({sidebarView:view}));
   }
   async function moveTaskProject(taskId: string, projectId: string) {
     await run(()=>bridge.setTaskProject(taskId, projectId || null), 'Chat project updated.');
@@ -993,6 +1617,25 @@
     )
       modal = null;
   }
+  async function autonameCurrentPane() {
+    if (busy || terminalBusy) return;
+    const terminalId = pane === 'terminal' ? selectedTerminal?.id ?? null : null;
+    const target = pane === 'task' && selectedTask ? { taskId: selectedTask.id }
+      : pane === 'channel' && activeChannel ? { channelId: activeChannel.id }
+      : pane === 'terminal' && selectedTerminal ? { terminalId: selectedTerminal.id, content: recentTerminalOutput(selectedTerminal.id) }
+      : null;
+    if (!target) { error = 'Open a chat, channel, or terminal with recent content to auto-name it.'; return; }
+    const namingKey = 'taskId' in target ? `task:${target.taskId}` : 'channelId' in target ? `channel:${target.channelId}` : `terminal:${target.terminalId}`;
+    if ($autonaming[namingKey]) return;
+    autonaming.update(value=>({...value,[namingKey]:true}));
+    try {
+    const result = await run(() => bridge.autoname(target), 'Title updated.');
+    if (result && terminalId) {
+      const refreshed = (await bridge.listTerminals()).find(session => session.id === terminalId);
+      if (refreshed) registerTerminal(refreshed);
+    }
+    } finally { autonaming.update(value=>{const next={...value};delete next[namingKey];return next;}); }
+  }
   async function deleteArchivedTask(task: Task, removeNativeFiles: boolean) {
     const result = await bridge.deleteArchivedTask(task.id, removeNativeFiles);
     applySnapshot(result, ++snapshotIssued);
@@ -1015,9 +1658,11 @@
     pane = "agent";
   }
   const slashItems = $derived([
+    ...(pane === "channel" ? channelCommands : []),
     { id: "new", label: "/new", detail: "Open a local New chat draft" },
     { id: "settings", label: "/settings", detail: "Open Monitter preferences" },
     ...(pane === "task" ? [{ id: "project", label: "/project", detail: "Choose the project for this chat" }] : []),
+    ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel) ? [{ id: "autoname", label: "/autoname", detail: "Generate a title from recent content" }] : []),
     ...(selectedTask?.status === "running" ? [{ id: "stop", label: "/stop", detail: "Stop this running task" }] : []),
     ...(selectedTask?.nativeSessionId && selectedTask.status !== "running" && !selectedTask.archived ? [{ id: "resume", label: "/resume", detail: "Continue this native session in Monitter" }] : []),
     ...(selectedTask?.provider === "codex" && selectedTask.nativeSessionId ? [{ id: "goal", label: "/goal", detail: "Read this Codex goal" }] : []),
@@ -1036,6 +1681,8 @@
   }
   function handleSlashSubmit() {
     if (!isSlashCommand(composer)) return false;
+    const channelCommand = pane === 'channel' ? parseChannelCommand(composer) : null;
+    if(channelCommand) { void executeChannelCommand(channelCommand.name,channelCommand.args,composer); return true; }
     const command = composer.trim().toLowerCase();
     void selectSlash(slashItems.find(item => item.label === command));
     return true;
@@ -1046,6 +1693,11 @@
       error = "This command is not available through Monitter. Use the native terminal for harness commands, or start with // to send a literal slash message.";
       return;
     }
+    if(item.id.startsWith('channel:')) {
+      const name=item.id.slice(8);
+      if(['invite','kick','topic'].includes(name)) { composer=`/${name} `; slashOpen=false; return; }
+      await executeChannelCommand(name,'',composer); return;
+    }
     const task = selectedTask;
     const agentId = currentDraftId ? taskAgentId : selectedAgent?.id ?? null;
     const projectId = currentDraftId ? taskProjectId : task?.projectId ?? focusedProjectId;
@@ -1055,11 +1707,12 @@
     notice = "";
     saveCurrentDraft();
     if (item.id === "new") openTaskComposer(null, agentId, projectId);
-    else if (item.id === "settings") modal = "appearance";
+    else if (item.id === "settings") routeSettings();
     else if (item.id === "project") {
       if (currentTaskDraft) document.getElementById("task-project")?.focus();
       else if (task) { renameTitle = task.title; modal = "taskSettings"; }
-    } else if (item.id === "stop" && task) await run(()=>bridge.cancelTask(task.id), "Stopping task…");
+    } else if (item.id === "autoname") await autonameCurrentPane();
+    else if (item.id === "stop" && task) await run(()=>bridge.cancelTask(task.id), "Stopping task…");
     else if (item.id === "resume") await resumeTask();
     else if (item.id === "goal" && task) {
       try {
@@ -1070,6 +1723,8 @@
   }
   function handleComposerKeydown(event: KeyboardEvent) {
     if (event.isComposing) return;
+    const typedChannelCommand = pane==='channel' ? parseChannelCommand(composer) : null;
+    if(event.key==='Enter' && !event.shiftKey && typedChannelCommand && (typedChannelCommand.args || !['invite','kick'].includes(typedChannelCommand.name))) { event.preventDefault(); handleSlashSubmit(); return; }
     if (slashOpen && isSlashCommand(composer)) {
       if (event.key === "ArrowDown") { event.preventDefault(); slashIndex = Math.min(slashIndex + 1, Math.max(0, slashVisibleItems.length - 1)); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); slashIndex = Math.max(0, slashIndex - 1); return; }
@@ -1090,37 +1745,110 @@
       while (scaleQueued !== null) {
         const target = scaleQueued; scaleQueued = null; scaleInFlight = target;
         const settings = snapshot?.settings; if (!settings) break;
-        const result = await bridge.saveSettings({ ...settings, interfaceScale: target });
+        const result = await saveSettingsPatch({interfaceScale: target});
         if (isSnapshot(result)) applySnapshot(result, ++snapshotIssued);
       }
     } catch (reason) { error = text(reason); }
     finally { scaleInFlight = null; scaleSaving = false; }
   }
   function dismissMonitterMenu(event: PointerEvent) {
-    if (!(event.target instanceof Element) || !event.target.closest('.layout-control')) layoutMenu=false;
-    if (!(event.target instanceof Element) || !event.target.closest('.monitter-menu')) monitterMenu = false;
     if (!(event.target instanceof Element) || !event.target.closest('.task-overflow')) taskMenu = false;
-    if (!(event.target instanceof Element) || !event.target.closest('.sidebar-views')) sidebarViewMenu = false;
     if (!(event.target instanceof Element) || !event.target.closest('.agent-rail, .rail-chats')) railAgentId = null;
   }
+  function focusAdjacentPane(direction: 'left' | 'right' | 'up' | 'down') {
+    if (embedded) return false;
+    const current = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"]`);
+    if (!current) return false;
+    const origin = current.getBoundingClientRect(), horizontal = direction === 'left' || direction === 'right';
+    const originCenter = horizontal ? origin.top + origin.height / 2 : origin.left + origin.width / 2;
+    const candidates = [...document.querySelectorAll<HTMLElement>('.pane-leaf[data-pane-id]')]
+      .filter(node => node !== current)
+      .map(node => ({ node, rect: node.getBoundingClientRect() }))
+      .filter(({ rect }) => direction === 'left' ? rect.right <= origin.left + 1 : direction === 'right' ? rect.left >= origin.right - 1 : direction === 'up' ? rect.bottom <= origin.top + 1 : rect.top >= origin.bottom - 1)
+      .sort((a, b) => {
+        const distanceA = horizontal ? Math.abs((direction === 'left' ? origin.left - a.rect.right : a.rect.left - origin.right)) : Math.abs((direction === 'up' ? origin.top - a.rect.bottom : a.rect.top - origin.bottom));
+        const distanceB = horizontal ? Math.abs((direction === 'left' ? origin.left - b.rect.right : b.rect.left - origin.right)) : Math.abs((direction === 'up' ? origin.top - b.rect.bottom : b.rect.top - origin.bottom));
+        const offsetA = Math.abs((horizontal ? a.rect.top + a.rect.height / 2 : a.rect.left + a.rect.width / 2) - originCenter);
+        const offsetB = Math.abs((horizontal ? b.rect.top + b.rect.height / 2 : b.rect.left + b.rect.width / 2) - originCenter);
+        return distanceA - distanceB || offsetA - offsetB;
+      });
+    const next = candidates[0]?.node;
+    if (!next) return false;
+    activePaneId = next.dataset.paneId!;
+    const target = next.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')
+      ?? next.querySelector<HTMLElement>('textarea[aria-label="Task message"], textarea[aria-label="Channel message"]')
+      ?? next.querySelector<HTMLElement>('.messages') ?? next;
+    target.focus({ preventScroll: true });
+    return true;
+  }
+  $effect(() => {
+    if (embedded || !isTauri()) return;
+    const enabled = vimShortcuts;
+    let disposed=false, stop:UnlistenFn|undefined;
+    const syncShield=()=>{void invoke('set_native_escape_shield',{enabled:enabled && !(document.activeElement instanceof Element && document.activeElement.closest('.terminal-pane'))}).catch(reason=>{error=`Could not apply keyboard mode: ${text(reason)}`;});};
+    document.addEventListener('focusin',syncShield);
+    syncShield();
+    void listen('monitter-native-escape',()=>{
+      if(!enabled||disposed)return;
+      const target=document.activeElement ?? window;
+      target.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));
+    }).then(unlisten=>{if(disposed)unlisten();else stop=unlisten;});
+    return()=>{disposed=true;stop?.();document.removeEventListener('focusin',syncShield);void invoke('set_native_escape_shield',{enabled:false}).catch(()=>{});};
+  });
+  function cancelPaneFocusChord() { paneFocusChord=false; }
+  function closeFocusedTab() {
+    const target = activePaneId === 'main' ? { closeActiveTab } : paneRefs[activePaneId];
+    target?.closeActiveTab();
+  }
   function handleShortcuts(event: KeyboardEvent) {
-    if(embedded ? !active : activePaneId !== 'main' && !modal && !palette) return;
+    tabIndexModifier = macPlatform ? event.metaKey : event.ctrlKey;
+    if (!embedded && tabIndexModifier && !event.altKey && !event.shiftKey && !event.isComposing && /^[1-9]$/.test(event.key) && !document.querySelector('[role="dialog"]')) {
+      event.preventDefault();
+      const buttons=document.querySelectorAll<HTMLButtonElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"] .tabs > .tab-entry > button.tab`);
+      buttons[Number(event.key)-1]?.click();
+      return;
+    }
     const inTerminal=event.target instanceof Element && !!event.target.closest('.terminal-pane');
+    if (!embedded && !modal && !palette && !taskMenu && !railAgentId && !vimCommandOpen) {
+      if (paneFocusChord) {
+        cancelPaneFocusChord(); event.preventDefault(); event.stopPropagation();
+        if(event.key==='Escape')return;
+        const aliases:Record<string,string>={ArrowLeft:'h',ArrowRight:'l',ArrowUp:'k',ArrowDown:'j'};
+        const parsed=parseVimWindowKey(aliases[event.key]??event.key);
+        if('error'in parsed){notice=parsed.error;return;}
+        void executeWorkspaceVim(parsed.command).catch(reason=>{error=text(reason);});return;
+      }
+      if (!(inTerminal && event.ctrlKey && !event.metaKey) && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && !event.isComposing && event.key.toLowerCase() === 'w') {
+        event.preventDefault();
+        if (vimShortcuts) paneFocusChord=true;
+        else if (!isTauri()) closeFocusedTab();
+        return;
+      }
+    }
+    if(embedded ? !active : activePaneId !== 'main' && !modal && !palette) return;
+    if (vimCommandOpen) return;
     if(inTerminal && event.ctrlKey && !event.metaKey) {
       if(event.shiftKey && ['p','k'].includes(event.key.toLowerCase())) {event.preventDefault();palette=event.key.toLowerCase()==='p'?'controls':'switch';return;}
       if(!event.shiftKey)return;
     }
-    if(event.key==='Escape' && compactDetail && showDetail && !modal && !palette && !taskMenu && !monitterMenu && !railAgentId && !sidebarViewMenu && !layoutMenu) {event.preventDefault();showDetail=false;return;}
-    if(event.key==='Escape' && layoutMenu) {event.preventDefault();layoutMenu=false;return;}
-    if (event.key === 'Escape' && (monitterMenu || taskMenu || sidebarViewMenu || railAgentId)) { event.preventDefault(); monitterMenu = false; taskMenu = false; sidebarViewMenu = false; railAgentId = null; return; }
+    if(!vimShortcuts && event.key==='Escape' && compactDetail && showDetail && !modal && !palette && !taskMenu && !railAgentId) {event.preventDefault();showDetail=false;return;}
+    if (event.key === 'Escape' && (taskMenu || railAgentId)) { event.preventDefault(); taskMenu = false; railAgentId = null; return; }
+    if (vimShortcuts && !inTerminal && !modal && !palette && !taskMenu && !railAgentId) {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); vimArmed = true; return; }
+      if (vimArmed && event.key === ':' && !event.metaKey && !event.ctrlKey && !event.altKey) { event.preventDefault(); openVimCommand(); return; }
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.length === 1) vimArmed = false;
+    }
 
     if ((event.metaKey || event.ctrlKey) && event.key === ',' && !event.altKey && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
-      monitterMenu = false; sidebarViewMenu = false; taskMenu = false; railAgentId = null;
-      palette = null; modal = 'appearance';
+      taskMenu = false; railAgentId = null;
+      palette = null; routeSettings();
       return;
     }
 
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && !event.isComposing && (event.key==='0' || event.code==='Numpad0')) {
+      event.preventDefault();scaleQueued=125;void flushScale();return;
+    }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.isComposing && (event.key === "+" || event.key === "=" || event.code === "NumpadAdd" || event.key === "-" || event.code === "NumpadSubtract")) {
       event.preventDefault();
       queueScale(event.key === "-" || event.code === "NumpadSubtract" ? -5 : 5);
@@ -1135,30 +1863,35 @@
   }
 
   const switchItems = $derived([
+    {id:"settings:settings",label:"Settings",group:"Workspace",detail:"Appearance, typography and behaviour"},
     ...Object.values($terminalSessions).map(session=>({id:`terminal:${session.id}`,label:session.title,group:'Terminals',detail:`${snapshot?.hosts.find(host=>host.id===session.hostId)?.name??'Host'} · ${session.cwd}`})),
     ...Object.values(taskDrafts).map(draft => ({id:`draft:${draft.id}`,label:draft.title || 'New chat',group:'Draft chats',detail:snapshot?.agents.find(agent=>agent.id===draft.agentId)?.name ?? 'Agent'})),
-    ...(snapshot?.tasks ?? []).toSorted((a,b)=>b.updatedAt-a.updatedAt).map(task=>({
+    ...(snapshot?.tasks ?? []).filter(task=>!task.channelId).toSorted((a,b)=>b.updatedAt-a.updatedAt).map(task=>({
       id:`task:${task.id}`,label:task.title,group:task.archived ? "Archived chats" : "Chats",
       detail:`${task.archived ? "Select to restore · " : ""}${snapshot?.agents.find(agent=>agent.id===task.agentId)?.name ?? "Agent"}`,
       keywords:`${task.provider} ${task.cwd}`,
     })),
     ...(snapshot?.channels ?? []).map(channel=>({id:`channel:${channel.id}`,label:channel.name,group:"Channels",detail:channel.description})),
     ...(snapshot?.agents ?? []).map(agent=>({id:`agent:${agent.id}`,label:agent.name,group:"Agents",detail:`${agent.provider} · ${agent.description}`})),
-    ...projects.map(project=>({id:`project:${project.id}`,label:project.name,group:'Projects',detail:project.description || `${activeTasks.filter(task=>task.projectId===project.id).length} chats`})),
+    ...projects.map(project=>({id:`project:${project.id}`,label:project.name,group:'Projects',detail:project.description || `${activityTasks.filter(task=>task.projectId===project.id).length} chats`})),
   ]);
   const controlItems = $derived([
+    ...([{id:'single',label:'One pane'},{id:'columns',label:'Two columns'},{id:'grid',label:'2 × 2 grid'}] as const).map(item=>({id:`layout:${item.id}`,label:item.label,group:'Layout'})),
     {id:"new-task",label:"New chat",group:"Create"},
+    {id:"vim-command",label:"Vim command",detail:"Open : command mode for workspace controls",keywords:"vim ex command tabnew split terminal quit",group:"Workspace"},
     {id:"new-terminal",label:"New terminal",detail:"Open a shell in this host and folder",group:"Create",disabled:terminalBusy},
+    ...(selectedTask || activeChannel || selectedTerminal ? [{id:"autoname",label:"Auto-name current pane",detail:"Generate a title from recent visible content",keywords:"/autoname rename title",group:"Current pane",disabled:terminalBusy}] : []),
     {id:"new-agent",label:"New agent",group:"Create"},
     {id:"agent-directory",label:"Agent directory",detail:"Find agents by expertise, responsibility, or skill",group:"Collaborate"},
     {id:"new-channel",label:"New channel",group:"Create"},
     {id:"new-project",label:"New project",group:"Create"},
     ...(['standard','activity','projects'] as SidebarView[]).map(view=>({id:`sidebar:${view}`,label:`${view[0].toUpperCase()+view.slice(1)} sidebar view`,group:'Sidebar',checked:sidebarView===view})),
-    {id:"appearance",label:"Appearance and preferences",detail:"Accent colour, scale, theme and conversation settings",group:"Settings"},
+    {id:"appearance",label:"Settings",detail:"Accent colour, scale, theme and conversation settings",group:"Settings"},
     {id:"hosts",label:"Manage hosts",detail:"Local and SSH connections",group:"Settings"},
     {id:"archived",label:"Archived chats",detail:"Restore or permanently delete archived chats",group:"Workspace"},
     {id:"tools",label:"Show tool activity",checked:snapshot?.settings.showToolActivity !== false,group:"Toggles"},
     {id:"reasoning",label:"Show reasoning summaries",checked:snapshot?.settings.showReasoningSummaries !== false,group:"Toggles"},
+    {id:"steer-busy",label:"Steer busy agents when supported",checked:snapshot?.settings.busyMessageMode==='steer',group:"Toggles"},
     {id:"focus-mouse",label:"Focus follows mouse",checked:snapshot?.settings.focusFollowsMouse ?? false,group:"Toggles"},
     {id:"dim-panes",label:"Dim inactive panes",checked:snapshot?.settings.dimInactivePanes ?? true,group:"Toggles"},
     {id:"enter",label:"Enter to send",checked:snapshot?.settings.sendWithEnter ?? false,group:"Toggles"},
@@ -1174,7 +1907,8 @@
     if (palette === "switch") {
       palette = null;
       const [kind,itemId] = id.split(":");
-      if (kind === "terminal") { routeTerminal(itemId);
+      if (kind === "settings") { routeSettings();
+      } else if (kind === "terminal") { routeTerminal(itemId);
       } else if (kind === "draft") {
         const draft = taskDrafts[itemId]; if (draft) openTaskDraft(draft);
       } else if (kind === "task") {
@@ -1194,28 +1928,62 @@
     }
     const settings = snapshot?.settings;
     if (!settings || busy) return;
-    if (id === "new-terminal") {palette=null;await newTerminal();}
-    else if (id === "tools") await run(()=>bridge.saveSettings({...settings,showToolActivity:!settings.showToolActivity}));
-    else if (id === "reasoning") await run(()=>bridge.saveSettings({...settings,showReasoningSummaries:!settings.showReasoningSummaries}));
-    else if (id === "focus-mouse") await run(()=>bridge.saveSettings({...settings,focusFollowsMouse:!settings.focusFollowsMouse}));
-    else if (id === "dim-panes") await run(()=>bridge.saveSettings({...settings,dimInactivePanes:!(settings.dimInactivePanes ?? true)}));
-    else if (id === "enter") await run(()=>bridge.saveSettings({...settings,sendWithEnter:!settings.sendWithEnter}));
+    if (id === "vim-command") { palette=null; openVimCommand(); }
+    else if (id === "new-terminal") {palette=null;await newTerminal();}
+    else if (id === "autoname") { palette=null; await autonameCurrentPane(); }
+    else if (id.startsWith('layout:')) {palette=null;setLayout(id.slice(7) as 'single'|'columns'|'grid');}
+    else if (id === "tools") await run(()=>saveSettingsPatch({showToolActivity:!settings.showToolActivity}));
+    else if (id === "reasoning") await run(()=>saveSettingsPatch({showReasoningSummaries:!settings.showReasoningSummaries}));
+    else if (id === "steer-busy") await run(()=>saveSettingsPatch({busyMessageMode:settings.busyMessageMode==='steer'?'queue':'steer'}));
+    else if (id === "focus-mouse") await run(()=>saveSettingsPatch({focusFollowsMouse:!settings.focusFollowsMouse}));
+    else if (id === "dim-panes") await run(()=>saveSettingsPatch({dimInactivePanes:!(settings.dimInactivePanes ?? true)}));
+    else if (id === "enter") await run(()=>saveSettingsPatch({sendWithEnter:!settings.sendWithEnter}));
     else if (id === "detail") showDetail = !showDetail;
     else if (id.startsWith("scale-")) { if (id === "scale-reset") { scaleQueued = 125; void flushScale(); } else queueScale(id === "scale-up" ? 5 : -5); }
-    else if (id.startsWith("theme:")) await run(()=>bridge.saveSettings({...settings,theme:id.slice(6) as "light"|"dark"|"system"}));
+    else if (id.startsWith("theme:")) await run(()=>saveSettingsPatch({theme:id.slice(6) as "light"|"dark"|"system"}));
     else if (id.startsWith('sidebar:')) await setSidebarView(id.slice(8) as SidebarView);
     else {
       palette = null;
       if (id === "new-task") openTaskComposer();
-      if (id === "new-agent") { agentDraft=blankAgent(); modal="agent"; }
-      if (id === "agent-directory") { directoryQuery=""; modal="directory"; }
+      if (id === "new-agent") { routeAgentSettings(blankAgent()); }
+      if (id === "agent-directory") { directoryQuery='';routeSettings('directory'); }
       if (id === "new-channel") { channelDraft=blankChannel(); modal="channel"; }
       if (id === 'new-project') editProject();
-      if (id === "hosts" || id === "appearance") modal=id;
+      if (id === "hosts") modal=id;
+      if (id === "appearance") routeSettings();
       if (id === "archive" && selectedTask) await archiveTask(selectedTask);
       if (id === "archived") modal = 'archived';
       if (id === "stop" && selectedTask) await run(()=>bridge.cancelTask(selectedTask.id));
     }
+  }
+  function editActiveChannel() {
+    if(!activeChannel)return;
+    taskMenu=false;channelDraft={...activeChannel,agentIds:[...activeChannel.agentIds],messages:activeChannel.messages};modal='channel';
+  }
+  async function changeChannelMembership(agentId:string,member:boolean) {
+    const channel=activeChannel;if(!channel)return false;
+    const agent=snapshot?.agents.find(agent=>agent.id===agentId);
+    const result=await run(()=>bridge.setChannelMembership(channel.id,agentId,member),`${agent?.name??'Agent'} ${member?'joined':'left'} ${channel.name}.`);
+    if(result && !member) { channelRecipients[channel.id]=(channelRecipients[channel.id]??[]).filter(id=>id!==agentId);if(selectedChannelId===channel.id)recipients=recipients.filter(id=>id!==agentId); }
+    return !!result;
+  }
+  async function executeChannelCommand(name:string,args:string,original:string) {
+    const channel=activeChannel,key=currentDraftKey();if(!channel||!key||busy)return;
+    let success=true;
+    error="";notice="";
+    try {
+      if(['members','names','help','admin'].includes(name) && args)throw Error(`/${name} does not take arguments.`);
+      if(name==='members'||name==='names') {showDetail=true;notice=`Members: ${channelMentionAgents.map(agent=>agent.name).join(', ')||'None'}`;}
+      else if(name==='help') {showDetail=true;notice='Channel commands: /members, /invite @name, /kick @name, /topic text, /admin. Use // to send a literal slash message.';}
+      else if(name==='admin')editActiveChannel();
+      else if(name==='topic') {if(!args)notice=`Topic: ${channel.description||'No topic set'}`;else success=!!await run(()=>bridge.saveChannel({...channel,description:args==='-'?'':args}),'Channel topic updated.');}
+      else if(name==='invite'||name==='kick') {
+        if(!args)throw Error(`Usage: /${name} @agent-name`);
+        const agent=resolveChannelAgent(args,name==='kick'?channelMentionAgents:snapshot?.agents??[]);
+        success=await changeChannelMembership(agent.id,name==='invite');
+      }
+      if(success) {clearSentDraft(key,original);slashOpen=false;}
+    }catch(reason){error=text(reason);}
   }
   function toggleRecipient(id: string) {
     recipients = recipients.includes(id)
@@ -1223,12 +1991,19 @@
       : [...recipients, id];
   }
   async function stopChannel() {
-    for (const task of activeChannelTasks) await run(() => bridge.cancelTask(task.id), "Stopping channel task…");
+    if(activeChannel) await run(()=>bridge.stopChannelAgentConversation(activeChannel.id), "Channel stopped.");
   }
+  async function configureChannelConversation(enabled:boolean,turnLimit:number) { if(activeChannel) await run(()=>bridge.setChannelAgentConversation(activeChannel.id,enabled,turnLimit)); }
+  const channelMentionAgents = $derived(snapshot?.agents.filter(agent=>activeChannel?.agentIds.includes(agent.id)) ?? []);
+  const channelMentionIds = $derived(mentionedAgentIds(composer, channelMentionAgents));
+  const effectiveRecipients = $derived([...new Set([...recipients, ...channelMentionIds])].filter(id=>activeChannel?.agentIds.includes(id)));
+  const currentQueuedMessages = $derived((snapshot?.queuedMessages??[]).filter(message=>pane==='channel'?message.channelId===selectedChannelId:message.taskId===selectedTaskId));
+  async function editQueuedMessage(id:string,text:string) { return Boolean(await run(()=>bridge.editQueuedMessage(id,text))); }
+  async function removeQueuedMessage(id:string) { await run(()=>bridge.cancelQueuedMessage(id)); }
   async function sendChannel() {
-    if (busy || activeChannelTasks.length || handleSlashSubmit()) return;
-    if (!activeChannel || !canSend || !recipients.length) { error = "Choose at least one agent to receive this channel message."; return; }
-    const channelId = activeChannel.id, sentDraft = composer, agentIds = [...recipients], key = `channel:${channelId}`, attachmentIds=currentAttachments.map(item=>item.id);
+    if (busy || handleSlashSubmit()) return;
+    if (!activeChannel || !canSend || !effectiveRecipients.length) { error = "Choose at least one agent to receive this channel message."; return; }
+    const channelId = activeChannel.id, sentDraft = composer, agentIds = [...effectiveRecipients], key = `channel:${channelId}`, attachmentIds=currentAttachments.map(item=>item.id);
     setComposerPending(key, true);
     try { if (await run(() => bridge.sendChannelMessage(channelId, promptText(sentDraft), agentIds,attachmentIds))) {clearSentDraft(key, sentDraft);clearAttachments(key,attachmentIds);}  }
     finally { setComposerPending(key, false); }
@@ -1236,24 +2011,35 @@
 </script>
 
 <svelte:head><meta name="theme-color" content="#e9e3d8" /></svelte:head>
-<svelte:window onkeydown={handleShortcuts} onpointerdown={dismissMonitterMenu} />
+<svelte:window onkeydown={handleShortcuts} onkeyup={event=>tabIndexModifier=macPlatform?event.metaKey:event.ctrlKey} onblur={()=>{tabIndexModifier=false;cancelPaneFocusChord()}} onpointerdown={dismissMonitterMenu} />
+
+{#if vimCommandOpen}
+  <div class="vim-commandbar" role="dialog" aria-label="Monitter Vim command">
+    <form onsubmit={event=>{event.preventDefault();submitVimCommand();}}>
+      <label><span aria-hidden="true">:</span><input aria-label="Monitter command" bind:this={vimCommandInput} bind:value={vimCommandText} onkeydown={handleVimCommandKeydown} autocomplete="off" spellcheck="false" /></label>
+    </form>
+    {#if vimCommandError}<p role="alert">{vimCommandError}</p>{/if}
+    {#if vimHelpOpen}<ul aria-label="Available Monitter commands">{#each vimCommandHelp as item}<li>{item}</li>{/each}</ul>{/if}
+  </div>
+{/if}
 
 {#snippet slashMenu()}
   {#if slashOpen && isSlashCommand(composer)}
-    <div class="slash-menu" role="menu" aria-label="Monitter commands">
+    <div class="slash-menu" use:slashFloating role="menu" aria-label="Monitter commands"><div class="slash-options">
       <p class="slash-caption">Monitter commands</p>
       {#each slashVisibleItems as item, index}
         <button type="button" role="menuitem" class:active={index===slashIndex} disabled={busy} onclick={()=>selectSlash(item)}><b>{item.label}</b><span>{item.detail}</span></button>
       {:else}
         <p>Use the native terminal for harness commands. Start with // to send a literal slash message.</p>
       {/each}
-    </div>
+    </div></div>
   {/if}
 {/snippet}
 
 {#snippet sidebarChat(task: Task, detail = false)}
+  {@const sortGroup=sidebarView==='activity'?'':sidebarView==='projects'?`project-chats:${task.projectId??'unassigned'}`:`agent-chats:${task.agentId}`}
   {@const agent = snapshot?.agents.find(item=>item.id===task.agentId)}
-  <div class="task-row" class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
+  <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
     <button class="task-select" onclick={() => routeTask(task)} title={task.title}>
       {#if detail}<span class="avatar small" style={`--agent-color:${agent?.color ?? '#3f9d6a'}`} title={agent?.name ?? 'Agent'} aria-label={agent?.name ?? 'Agent'}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{(agent?.name ?? 'A').slice(0,1).toUpperCase()}{/if}</span>{/if}
       <span class={`dot ${task.status}`}></span><span class="chat-copy"><span>{task.title}</span>
@@ -1268,7 +2054,7 @@
 {/snippet}
 
 {#snippet attachmentTools()}
-  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy || selectedTask?.status==='running'} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
+  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
 {/snippet}
 
@@ -1276,93 +2062,96 @@
   {#if agent}<span class="avatar message-avatar" style={`--agent-color:${agent.color}`} title={agent.name}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt=""/>{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span>{/if}
 {/snippet}
 
+{#snippet agentWaiting(agent: Agent | null | undefined, starting = false)}
+  <div class="agent-waiting" role="status" aria-live="polite" aria-label={`${agent?.name ?? 'Agent'} ${starting ? 'is getting ready…' : 'is pondering…'}`}>
+    {@render messageAvatar(agent)}
+    <span class="waiting-spinner" aria-hidden="true"><LoaderCircle size={14}/></span>
+  </div>
+{/snippet}
+
+{#snippet paneExpandControl()}
+  {@const label=focusStep===0?'Expand pane':'Restore pane layout'}
+  <button class="icon pane-expand-control" aria-label={label} aria-pressed={focusStep>0} title={focusStep?label:`Expand pane (${modifierLabel}click to fill workspace)`} oncontextmenu={event=>{if(event.ctrlKey){event.preventDefault();expandTab(true)}}} onclick={event=>expandTab(event.metaKey||event.ctrlKey)}>{#if focusStep}<Minimize2 size={15}/>{:else}<MoveDiagonal size={15}/>{/if}</button>
+{/snippet}
+
+{#snippet rightSidebarControl()}
+  <button class="icon right-sidebar-control" aria-label={showDetail ? 'Hide right sidebar' : 'Show right sidebar'} title={showDetail ? 'Hide right sidebar' : 'Show right sidebar'} aria-pressed={showDetail} onclick={()=>showDetail=!showDetail}><PanelRight size={16}/></button>
+{/snippet}
+
 {#snippet workspaceView()}
-  <section class="workspace" use:watchPane>
+  <section class="workspace" class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
     <header class="topbar" data-tauri-drag-region>
-      <nav class="tabs" aria-label="Open tasks" data-tauri-drag-region ondragover={tabBarOver} ondrop={tabBarDrop}>
-        <button class="tab" class:active={pane === "overview"}
-          aria-pressed={pane === "overview"} onclick={openOverview}>Overview</button>
-        {#each openDrafts as draft (draft.id)}
-          <div class="tab-entry" class:active={currentDraftId === draft.id}><button class="tab" draggable={!composerPending[`draft:${draft.id}`]} ondragstart={event=>dragTab(event,'draft',draft.id)} onclick={() => openTaskDraft(draft)}><span class="dot idle"></span><span>{draft.title || 'New chat'}</span></button><button class="close-tab" aria-label="Close draft" onclick={() => closeTaskDraft(draft.id)}><X size={12}/></button></div>
+      <nav class="tabs" class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
+        {#if overviewOpen}<div class="tab-entry dashboard-tab" class:active={pane==='overview'}>
+          <button class="tab" aria-pressed={pane==='overview'} aria-label="Overview" title="Dashboard" onclick={openOverview}><LayoutDashboard size={16}/></button>
+
+          <button class="close-tab" aria-label="Close dashboard tab" title="Close dashboard tab" onclick={closeOverview}><X size={12}/></button>
+        </div>{/if}
+        {#each orderedTabs() as tab (`${tab.kind}:${tab.id}`)}
+          {#if tab.kind === 'draft'}{@const draft=taskDrafts[tab.id]}{#if draft}
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={currentDraftId === tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'draft',tab.id)} onpointerdown={event=>startTabPointer(event,'draft',tab.id)} onclick={() => openTaskDraft(draft)}><span class="dot idle"></span><span>{draft.title || 'New chat'}</span></button><button class="close-tab" aria-label="Close draft" onclick={() => closeTaskDraft(tab.id)}><X size={12}/></button></div>
+          {/if}
+          {:else if tab.kind === 'task'}{@const task=snapshot?.tasks.find(item=>item.id===tab.id)}{#if task}
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
+              <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => openTask(task)} title={task.title}><span class={`dot ${task.status}`}></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
+
+              <button class="close-tab" aria-label={`Close tab ${task.title}`} onclick={() => closeTaskTab(tab.id)}><X size={12} /></button>
+            </div>
+          {/if}
+          {:else if tab.kind === 'channel'}{@const channel=snapshot?.channels.find(item=>item.id===tab.id)}{#if channel}
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>openChannel(channel)}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview()}}><X size={12}/></button></div>
+          {/if}
+          {:else if tab.kind === 'terminal'}{@const session=$terminalSessions[tab.id]}{#if session}
+            <div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>openTerminalTab(tab.id)} title={session.cwd}><Terminal size={13}/><span><AnimatedTitle text={session.title} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>closeTerminalTab(tab.id)}><X size={12}/></button></div>
+          {/if}
+          {:else if tab.kind === 'settings'}
+            <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} onclick={()=>openSettings()}><Settings2 size={13}/><span>Settings</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={closeSettings}><X size={12}/></button></div>
+          {/if}
         {/each}
-        {#each openTasks as task (task.id)}
-          <div class="tab-entry" class:active={selectedTaskId === task.id}>
-            <button class="tab" draggable={!composerPending[`task:${task.id}`]} ondragstart={event=>dragTab(event,'task',task.id)} aria-pressed={selectedTaskId === task.id}
-              onclick={() => openTask(task)} title={task.title}>
-              <span class={`dot ${task.status}`}></span><span>{task.title}</span>
-            </button>
-            <button class="close-tab" aria-label={`Close tab ${task.title}`}
-              onclick={() => closeTaskTab(task.id)}><X size={12} /></button>
-          </div>
-        {/each}
-        {#if pane === "agent" && focusedAgent}<button class="tab active" aria-pressed="true"><Bot size={13}/>{focusedAgent.name}</button>{/if}
-        {#if pane === 'project' && focusedProject}<button class="tab active" aria-pressed="true"><Folder size={13}/>{focusedProject.name}</button>{/if}
-        {#each openChannelIds as channelId}{@const channel=snapshot?.channels.find(item=>item.id===channelId)}{#if channel}
-          <div class="tab-entry" class:active={selectedChannelId===channelId}><button class="tab" aria-pressed={selectedChannelId===channelId} draggable={!composerPending[`channel:${channelId}`]} ondragstart={event=>dragTab(event,'channel',channelId)} onclick={()=>openChannel(channel)}><Radio size={13}/><span>{channel.name}</span></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==channelId);if(selectedChannelId===channelId)openOverview()}}><X size={12}/></button></div>
-        {/if}{/each}
-        {#each openTerminals as session (session.id)}
-          <div class="tab-entry" class:active={pane==='terminal' && selectedTerminalId===session.id}>
-            <button class="tab" draggable={!terminalBusy} ondragstart={event=>dragTab(event,'terminal',session.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===session.id} onclick={()=>openTerminalTab(session.id)} title={session.cwd}><Terminal size={13}/><span>{session.title}{session.status==='exited'?' · exited':''}</span></button>
-            <button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>closeTerminalTab(session.id)}><X size={12}/></button>
-          </div>
-        {/each}
+        {#if pane === "agent" && focusedAgent}<div class="tab-entry active"><button class="tab active" aria-pressed="true"><Bot size={13}/>{focusedAgent.name}</button></div>{/if}
+        {#if pane === 'project' && focusedProject}<div class="tab-entry active"><button class="tab active" aria-pressed="true"><Folder size={13}/>{focusedProject.name}</button></div>{/if}
       </nav>
       <div class="top-actions" data-tauri-drag-region>
+        {#if pane==='empty' && (embedded || paneIds(layout).length>1)}<button class="icon" aria-label="Close empty pane" title="Close pane" onclick={closeOverview}><X size={16}/></button>{/if}
         <button class="icon" aria-label={terminalBusy?'Opening terminal':'Open terminal'} title="Open terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<Terminal size={16}/>{/if}</button>
-        <div class="layout-control"><button class="icon" bind:this={layoutAnchor} aria-label="Pane layout" title="Pane layout" aria-expanded={layoutMenu} onclick={()=>layoutMenu=!layoutMenu}><LayoutGrid size={16}/></button>
-          {#if layoutMenu && layoutAnchor}<div class="view-menu floating-panel" role="menu" aria-label="Pane layout" use:floating={{anchor:layoutAnchor}}>
-            <button role="menuitem" onclick={()=>setLayout('single')}>One pane</button><button role="menuitem" onclick={()=>setLayout('columns')}>Two columns</button><button role="menuitem" onclick={()=>setLayout('grid')}>2 × 2 grid</button>
-          </div>{/if}
-        </div>
-        <span class="environment"
-          ><i></i>{selectedHost?.kind === "ssh"
-            ? "Remote host"
-            : "Local host"}</span
-        ><button
-          class="icon"
-          aria-label={showDetail ? "Hide right sidebar" : "Show right sidebar"}
-          title={showDetail ? "Hide right sidebar" : "Show right sidebar"}
-          aria-pressed={showDetail}
-          onclick={() => (showDetail = !showDetail)}
-          ><PanelRight size={16} /></button
-        >
+
+
       </div>
     </header>
-    {#if error}<div class="alert error" role="alert">
-        <X size={16} /><span>{error}</span><button
-          aria-label="Dismiss error"
-          onclick={() => (error = "")}><X size={15} /></button
-        >
-      </div>{/if}{#if notice}<div class="alert notice" role="status">
-        <Check size={16} /><span>{notice}</span><button
-          aria-label="Dismiss notice"
-          onclick={() => (notice = "")}><X size={15} /></button
-        >
-      </div>{/if}{#if !bridge.available}<div class="preview-banner">
+    {#if error}<PaneNotice message={error} blocking ondismiss={()=>error=''}/>{/if}
+    {#if notice}<PaneNotice message={notice} ondismiss={()=>notice=''}/>{/if}
+    {#if !bridge.available}<div class="preview-banner">
         <Command size={14} /> Browser design preview — connect the native app to
         use hosts, agents, and tasks.
       </div>{/if}
+    {#if settingsOpen && snapshot}<div class="settings-surface" class:settings-hidden={pane!=='settings'}>
+      <SettingsPane settings={snapshot.settings} bind:category={settingsCategory} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
+    </div>{/if}
     {#if !snapshot}<div class="loading">
         <LoaderCircle size={22} /><span>Loading your workspace…</span
         >{#if error}<button onclick={reload}>Try again</button>{/if}
       </div>
-    {:else if pane === 'terminal' && selectedTerminal}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/>
+    {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
+      <button class="pane-choice" disabled={busy} onclick={()=>snapshot?.agents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
+      <button class="pane-choice" disabled={terminalBusy} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<Terminal size={22}/>{/if}<span>Terminal</span></button>
+    </div></section>
+    {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface"><header class="terminal-pane-header">{@render paneExpandControl()}</header><TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
     {:else if pane === 'project' && focusedProject}<section class="overview project-overview">
-      <div class="overview-head"><div><p class="eyebrow">PROJECT</p><h1>{focusedProject.name}</h1><p>{focusedProject.description || 'A shared project for your agents.'}</p></div>
+      <div class="overview-head"><div class="overview-expand">{@render paneExpandControl()}</div><div><p class="eyebrow">PROJECT</p><h1>{focusedProject.name}</h1><p>{focusedProject.description || 'A shared project for your agents.'}</p></div>
         <div class="project-overview-actions"><button class="secondary" aria-label={`Edit project ${focusedProject.name}`} onclick={()=>editProject(focusedProject)}><Settings2 size={15}/>Edit project</button><button class="primary" onclick={()=>openTaskComposer(null,null,focusedProject.id)}><Plus size={16}/>New chat</button></div>
       </div>
       {#if focusedProject.workspaces.length}<dl class="project-folders">{#each focusedProject.workspaces as workspace}<div><dt><HardDrive size={13}/>{snapshot.hosts.find(host=>host.id===workspace.hostId)?.name ?? 'Host'}</dt><dd>{workspace.cwd}</dd></div>{/each}</dl>{/if}
       <div class="agent-chats">{#each activityTasks.filter(task=>task.projectId===focusedProject.id) as task (task.id)}<button class="overview-task" onclick={()=>openTask(task)}><span class={`dot ${task.status}`}></span><div><b>{task.title}</b><small>{snapshot.agents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {task.provider} · {relative(task.updatedAt)}</small></div></button>{:else}<p class="hint">No chats yet. Choose any agent to start working on this project.</p>{/each}</div>
     </section>
     {:else if pane === "agent" && focusedAgent}<section class="overview">
-        <div class="overview-head"><div><p class="eyebrow">AGENT · {focusedAgent.provider}</p><h1>{focusedAgent.name}</h1><p>{focusedAgent.description}</p></div>
+        <div class="overview-head"><div class="overview-expand">{@render paneExpandControl()}</div><div><p class="eyebrow">AGENT · {focusedAgent.provider}</p><h1>{focusedAgent.name}</h1><p>{focusedAgent.description}</p></div>
           <button class="primary" onclick={()=>openTaskComposer(null,focusedAgent.id)}><Plus size={16}/>New chat</button></div>
         <div class="agent-chats">{#each snapshot.tasks.filter(task=>task.agentId===focusedAgent.id && !task.archived) as task}<button class="overview-task" onclick={()=>openTask(task)}><span class={`dot ${task.status}`}></span><div><b>{task.title}</b><small>{relative(task.updatedAt)}</small></div></button>{:else}<p class="hint">No chats yet. Start one with {focusedAgent.name}.</p>{/each}</div>
       </section>
     {:else if pane === "overview" || (pane === "task" && !selectedTask && !currentTaskDraft) || (pane === "channel" && !activeChannel) || (pane === 'project' && !focusedProject) || (pane==='terminal' && !selectedTerminal)}<section
-        class="overview"
+        class="overview dashboard-overview"
       >
-        <div class="overview-head">
+        <div class="overview-head"><div class="overview-expand">{@render paneExpandControl()}</div>
           <div>
             <p class="eyebrow">YOUR WORKSPACE</p>
             <h1>
@@ -1381,7 +2170,7 @@
             onclick={() =>
               snapshot!.agents.length
                 ? openTaskComposer()
-                : ((agentDraft = blankAgent()), (modal = "agent"))}
+                : routeAgentSettings(blankAgent())}
             ><Plus size={16} />{snapshot.agents.length
               ? "Start a task"
               : "Create agent"}</button
@@ -1407,7 +2196,7 @@
                 onclick={() =>
                   !snapshot!.hosts.length
                     ? ((hostDraft = blankHost()), (modal = "host"))
-                    : ((agentDraft = blankAgent()), (modal = "agent"))}
+                    : routeAgentSettings(blankAgent())}
                 >{snapshot.hosts.length
                   ? "Create Codex agent"
                   : "Add local host"}</button
@@ -1438,32 +2227,26 @@
             </section>{/each}
         </div>
       </section>
-    {:else if pane === "channel" && activeChannel}<section class="conversation">
+    {:else if pane === "channel" && activeChannel}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}><section class="conversation">
         <MessagePane resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
-        {#snippet header()}<div class="conversation-head">
-          <div>
-            <p class="eyebrow">CHANNEL</p>
-            <h1>{activeChannel.name}</h1>
-            <p>
-              {activeChannel.description ||
-                "Send only to the agents you choose."}
-            </p>
+        {#snippet header()}<div class="conversation-head task-heading">
+          <h1 title={activeChannel.description || undefined}><AnimatedTitle text={activeChannel.name} active={$autonaming[`channel:${activeChannel.id}`]}/></h1>
+          <div class="task-actions">
+            {#if activeChannelTasks.length}<button class="danger icon" aria-label="Stop channel agents" title="Stop channel agents" disabled={busy} onclick={stopChannel}><Square size={14}/></button>{/if}
+            {@render paneExpandControl()}
+              {@render rightSidebarControl()}
+            <div class="task-overflow">
+              <button bind:this={taskMenuAnchor} class="icon" aria-label="Channel actions" aria-haspopup="menu" aria-expanded={taskMenu} onclick={()=>taskMenu=!taskMenu}><MoreHorizontal size={17}/></button>
+              {#if taskMenu && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Channel actions">
+                <button role="menuitem" onclick={editActiveChannel}><Settings2 size={15}/>Edit channel</button>
+              </div>{/if}
+            </div>
           </div>
-          <button
-            class="secondary"
-            onclick={() => {
-              channelDraft = {
-                ...activeChannel,
-                agentIds: [...activeChannel.agentIds],
-                messages: activeChannel.messages,
-              };
-              modal = "channel";
-            }}><Settings2 size={15} /> Edit channel</button
-          >
         </div>
         {/snippet}
           {#if activeChannel.messages.length}{#each activeChannel.messages as message}<article
                 class:user={message.role === "user"}
+                class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                 class="message"
               >
                 <div class="message-meta">
@@ -1484,35 +2267,44 @@
                 explicit linked task.
               </p>
             </div>{/if}
+          {#each [...new Set(activeChannelTasks.map(task=>task.agentId))] as agentId}
+            {@render agentWaiting(snapshot.agents.find(agent=>agent.id===agentId))}
+          {/each}
+          {#if composerPending[`channel:${activeChannel.id}`] && !activeChannelTasks.length}
+            {#each effectiveRecipients as agentId}{@render agentWaiting(snapshot.agents.find(agent=>agent.id===agentId), true)}{/each}
+          {/if}
         </MessagePane>
+        <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
         <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
           {@render slashMenu()}
-          <textarea
-            bind:value={composer}
-            aria-label="Channel message"
-            placeholder="Message this channel…"
-            oninput={(event) => updateSlash(event.currentTarget.value)}
-            onkeydown={handleComposerKeydown}
-          ></textarea>
+          <MentionComposer bind:value={composer} agents={channelMentionAgents} oninput={updateSlash} onkeydown={handleComposerKeydown}/>
           <div class="composer-footer">
             {@render attachmentTools()}
             <div class="recipient-picker">
               <span>Send to</span
               >{#each snapshot.agents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
-                  class:selected={recipients.includes(agent.id)}
-                  aria-pressed={recipients.includes(agent.id)}
+                  class:selected={effectiveRecipients.includes(agent.id)}
+                  aria-pressed={effectiveRecipients.includes(agent.id)}
+                  disabled={channelMentionIds.includes(agent.id)}
+                  title={channelMentionIds.includes(agent.id) ? "Mentioned in this message. Remove the @mention to deselect." : `Send to ${agent.name}`}
                   onclick={() => toggleRecipient(agent.id)}>{agent.name}</button
                 >{/each}
             </div>
-            {#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{:else}<button class="primary composer-control" aria-label={activeChannelStarting ? "Starting channel message" : "Send channel message"} title={activeChannelStarting ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>{/if}
+            {#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
           </div>
         </div>
+      </section>
+      {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss channel members" onclick={()=>showDetail=false}></button>{/if}
+      <aside class="run-detail channel-members" class:closed={!showDetail} aria-label="Channel members">
+        <SidebarResize side="right"/>
+        <ChannelMembers channel={activeChannel} agents={snapshot.agents} hosts={snapshot.hosts} tasks={snapshot.tasks} {busy} onmembership={changeChannelMembership} onadmin={editActiveChannel} onconversation={configureChannelConversation} onstopconversation={stopChannel} onclose={()=>showDetail=false}/>
+      </aside>
       </section>
     {:else if currentTaskDraft}
       <section class="draft-layout" aria-label="New chat draft">
         <div class="draft-content">
-          <div class="draft-intro">
+          <div class="draft-intro"><div class="draft-expand">{@render paneExpandControl()}</div>
             <p class="eyebrow">NEW CHAT</p>
             <h1>What would you like to work on?</h1>
             <p>Ask a question, explore a project, or describe a change. Your agent starts when you send.</p>
@@ -1526,7 +2318,7 @@
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render slashMenu()}
             <textarea bind:value={composer} aria-label="Task message" placeholder="Describe what you want this agent to do…" oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
-            <div class="composer-footer">{@render attachmentTools()}<div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
+            <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
           </div>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -1547,20 +2339,22 @@
         <section class="conversation">
           <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`}>
           {#snippet header()}<div class="conversation-head task-heading">
-            <h1>{selectedTask.title}</h1>
+            <h1 class="task-title"><AnimatedTitle text={selectedTask.title} active={$autonaming[`task:${selectedTask.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={()=>{renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Pencil size={14}/></button></h1>
             <div class="task-actions">
               {#if selectedTask.status === "running"}<button class="danger icon" aria-label="Stop" title="Stop" disabled={busy} onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={14}/></button>{/if}
               {#if selectedTask.nativeSessionId && ["interrupted","error"].includes(selectedTask.status)}<button class="icon" aria-label="Resume session" disabled={busy || selectedTask.archived} title="Reconnect and resume this session" onclick={resumeTask}><RotateCw size={15}/></button>{/if}
-              <div class="task-overflow"><button bind:this={taskMenuAnchor} class="icon" aria-label="Task actions" aria-expanded={taskMenu} onclick={()=>taskMenu=!taskMenu}><MoreHorizontal size={17}/></button>{#if taskMenu && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel"><button onclick={()=>{taskMenu=false;openTaskComposer(selectedTask.id)}}><Bot size={14}/>Delegate</button><button aria-label="Task settings" onclick={()=>{taskMenu=false;renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Settings2 size={14}/>Task settings</button><button aria-label={showDetail ? "Hide run detail" : "Show run detail"} onclick={()=>{taskMenu=false;showDetail=!showDetail}}><PanelRight size={14}/>{showDetail ? "Hide" : "Show"} run detail</button></div>{/if}</div>
+              {@render paneExpandControl()}
+              {@render rightSidebarControl()}
             </div>
           </div>
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
           {/snippet}
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' ? `tool:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}<RunActivity event={item.value} />
-              {:else if item.type === "tool-group"}<RunActivity events={item.values} />
+              {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} />
               {:else}{@const message = item.value}<article
                   class:user={message.role === "user"}
+                class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                   class:system={message.role === "system"}
                   class="message"
                 >
@@ -1579,7 +2373,11 @@
                   will appear here.
                 </p>
               </div>{/if}
+            {#if selectedTask.status === 'running' || selectedTaskStarting}
+              {@render agentWaiting(selectedAgent, selectedTask.status !== 'running')}
+            {/if}
           </MessagePane>
+          <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
           <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render slashMenu()}
@@ -1587,34 +2385,34 @@
               bind:value={composer}
               aria-label="Task message"
               placeholder={`Message ${selectedAgent?.name ?? "agent"}…`}
-              disabled={selectedTask.status === "running"}
               oninput={(event) => updateSlash(event.currentTarget.value)}
               onkeydown={handleComposerKeydown}
             ></textarea>
             <div class="composer-footer">
-              <div class="composer-left">{@render attachmentTools()}<span>{snapshot.settings.sendWithEnter ? "↵ send · ⇧↵ new line" : `${modifierLabel}↵ send · ↵ new line`}</span></div>
+              <div class="composer-left">{@render attachmentTools()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||selectedTask.status==='running'} onchange={changeSandbox}/></div>
               <div class="composer-right">
                 <ModelPicker target={{taskId:selectedTask.id}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||selectedTask.status==='running'} onchange={changeModel}/>
-{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title={selectedTaskStepping ? "Stop current task" : "Starting task — stop"} onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}>{#if selectedTaskStepping}<Square size={15}/>{:else}<LoaderCircle class="spin" size={15}/>{/if}</button>{:else}<button class="primary composer-control" aria-label={selectedTaskStarting ? "Starting task" : "Send task message"} title={selectedTaskStarting ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={send}>{#if selectedTaskStarting}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>{/if}
+{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}
+                <button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
               </div>
             </div>
           </div>
         </section>
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
+          <SidebarResize side="right"/>
             <div class="detail-tabs">
               <button class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} aria-pressed={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Run detail</button>
               <button class:active={detailTab==='timeline'} aria-pressed={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button>
               {#if gitState.repository}<button class:active={detailTab==='git'} aria-pressed={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button>{/if}
-              <button aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>
+              <button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>
             </div>
             <div class="git-slot" class:hidden={detailTab!=='git' || gitState.repository!==true}>
-              <GitPane bind:this={gitPane} taskId={selectedTask.id} active={showDetail} onStatus={value=>{gitState=value}}/>
+              <GitPane bind:this={gitPane} taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} onStatus={value=>{gitState=value}}/>
             </div>
             <div class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={visibleEvents} {goalError}/></div>
             <div class="detail-scroll" class:hidden={detailTab==='timeline' || (detailTab==='git' && gitState.repository===true)}>
-              {#if gitState.error}<p class="git-probe-error">Git status unavailable. <button title={gitState.error} onclick={()=>gitPane?.refreshStatus()}>Retry</button><small>{gitState.error}</small></p>{/if}
-              <details class="agent-identity" open aria-label="Agent identity"><summary><span class="avatar identity-avatar" style={`--agent-color:${selectedAgent?.color ?? '#3f9d6a'}`}>{#if avatarSrc(selectedAgent)}<img src={avatarSrc(selectedAgent)!} alt="" />{:else}{(selectedAgent?.name ?? 'A').slice(0,1).toUpperCase()}{/if}</span><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary><div class="identity-actions"><button onclick={()=>{if(selectedAgent){agentDraft={...selectedAgent};modal='agent'}}}>Change avatar</button><p>{selectedAgent?.description || 'No agent description.'}</p></div></details>
+              <details class="agent-identity" open aria-label="Agent identity"><summary><span class="avatar identity-avatar" style={`--agent-color:${selectedAgent?.color ?? '#3f9d6a'}`}>{#if avatarSrc(selectedAgent)}<img src={avatarSrc(selectedAgent)!} alt="" />{:else}{(selectedAgent?.name ?? 'A').slice(0,1).toUpperCase()}{/if}</span><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary><div class="identity-actions"><button onclick={()=>{if(selectedAgent){routeAgentSettings({...selectedAgent})}}}>Change avatar</button><p>{selectedAgent?.description || 'No agent description.'}</p></div></details>
               <dl>
                 <div>
                   <dt>harness</dt>
@@ -1632,7 +2430,7 @@
                 <div><dt>project</dt><dd>{projects.find(project=>project.id===selectedTask.projectId)?.name ?? 'No project'}</dd></div>
                 <div>
                   <dt>permissions</dt>
-                  <dd>{selectedTask.sandbox === "harness-configured" ? "Harness permissions" : selectedTask.sandbox}</dd>
+                  <dd>{selectedTask.sandbox === "yolo" ? "YOLO — skip permissions" : selectedTask.sandbox === "harness-configured" ? "Harness permissions" : selectedTask.sandbox}</dd>
                 </div>
                 {#if selectedTask.nativeSessionId}<div>
                     <dt>native session</dt>
@@ -1669,64 +2467,54 @@
   </section>
 {/snippet}
 
-<main class:preview={!bridge.available} class:native-mac={nativeMac} class:sidebar-collapsed={sidebarCollapsed} class:embedded class="app-shell">
-  {#if !embedded}<div class="window-toolbar" data-tauri-drag-region>
-    <button class="icon" aria-label={sidebarCollapsed ? 'Expand main sidebar' : 'Collapse main sidebar'} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} aria-pressed={sidebarCollapsed} onclick={()=>{sidebarCollapsed=!sidebarCollapsed;railAgentId=null;sidebarViewMenu=false;monitterMenu=false}}><PanelLeft size={17}/></button>
-  </div>
-  <aside class="sidebar" aria-label="Agents and tasks">
-    <div class="sidebar-window-space" data-tauri-drag-region></div>
-    <div class="brand monitter-menu" data-tauri-drag-region>
-      {#if !sidebarCollapsed}<strong>monitter</strong>{/if}<button bind:this={monitterMenuAnchor} class="icon" aria-label="Monitter menu" title="Monitter menu" aria-expanded={monitterMenu} onclick={(event)=>{event.stopPropagation();monitterMenu=!monitterMenu}}><ChevronDown size={16}/></button>
-      {#if monitterMenu && monitterMenuAnchor}<div use:floating={{anchor:monitterMenuAnchor}} class="monitter-dropdown floating-panel" role="menu"><button role="menuitem" onclick={()=>{monitterMenu=false;returnToMonitterMenu=true;modal='appearance'}}><Settings2 size={15}/>Preferences</button><button role="menuitem" onclick={()=>{monitterMenu=false;returnToMonitterMenu=true;modal='hosts'}}><Network size={15}/>Hosts</button><button role="menuitem" onclick={()=>{monitterMenu=false;returnToMonitterMenu=true;directoryQuery='';modal='directory'}}><Bot size={15}/>Agent directory</button><button role="menuitem" onclick={()=>{monitterMenu=false;returnToMonitterMenu=true;modal='archived'}}><Archive size={15}/>Archived chats</button></div>{/if}
-    </div>
-    {#if !sidebarCollapsed}<div class="sidebar-views">
-      <button bind:this={viewAnchor} class="view-selector" aria-label={`Sidebar view: ${currentSidebarView.label}`} aria-haspopup="menu" aria-expanded={sidebarViewMenu} onclick={()=>sidebarViewMenu=!sidebarViewMenu}>
-        <currentSidebarView.icon size={14}/><span>{currentSidebarView.label}</span><ChevronDown size={12}/>
-      </button>
-      {#if sidebarViewMenu && viewAnchor}<div use:floating={{anchor:viewAnchor}} class="view-menu floating-panel" role="menu" aria-label="Sidebar view">
-        {#each sidebarViews as view}<button role="menuitemradio" aria-checked={sidebarView === view.id} disabled={busy || !bridge.available || !snapshot} onclick={()=>{sidebarViewMenu=false;void setSidebarView(view.id)}}><view.icon size={14}/><span>{view.label}</span>{#if sidebarView === view.id}<Check size={12}/>{/if}</button>{/each}
+<main class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCollapsed} class:embedded class="app-shell">
+  {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks">
+    <SidebarResize side="left" collapsed={sidebarCollapsed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>
+    <div class="brand" class:scrolled={sidebarScrolled} data-tauri-drag-region>
+      {#if !sidebarCollapsed}<strong>monitter</strong>{/if}
+      {#if !sidebarCollapsed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
+        {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} disabled={busy || !bridge.available || !snapshot} onclick={()=>{void setSidebarView(view.id)}}><view.icon size={15}/></button>{/each}
       </div>{/if}
     </div>
-    <nav class="side-scroll">
+    {#if !sidebarCollapsed}
+    <nav class="side-scroll" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
       {#if sidebarView === 'standard'}
       <div class="section-label">
         <span>AGENTS</span><button
           aria-label="New agent"
           onclick={() => {
-            agentDraft = blankAgent();
-            modal = "agent";
+            routeAgentSettings(blankAgent());
           }}><Plus size={15} /></button
         >
       </div>
-      {#if snapshot?.agents.length}{#each snapshot.agents as agent}{@const agentTasks =
-            snapshot.tasks.filter(
-              (task) => task.agentId === agent.id && !task.parentTaskId && !task.archived,
-            )}
-          <section class="agent-group">
-            <div class="agent-row">
-              <span class="avatar" style={`--agent-color:${agent.color}`}
-                >{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0, 1).toUpperCase()}{/if}</span
-              ><button
+      {#if snapshot?.agents.length}{#each sidebarSorted(snapshot.agents,'agents') as agent}{@const agentTasks =
+            sidebarSorted(snapshot.tasks.filter(
+              (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId && !task.archived,
+            ),`agent-chats:${agent.id}`)}
+          <section class="agent-group" class:has-chats={agentTasks.length > 0 && !collapsedAgents[agent.id]}>
+            <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
+              <button class="avatar agent-avatar-toggle" style={`--agent-color:${agent.color}`} aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={()=>collapsedAgents[agent.id]=!collapsedAgents[agent.id]}>
+                {#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0, 1).toUpperCase()}{/if}
+                <span class="avatar-toggle-overlay" aria-hidden="true">{#if collapsedAgents[agent.id]}<ChevronRight size={16}/>{:else}<ChevronDown size={16}/>{/if}</span>
+              </button><button
                 class="agent-name"
-                onclick={() => {
-                  agentDraft = { ...agent };
-                  modal = "agent";
-                }}
+                aria-expanded={!collapsedAgents[agent.id]}
+                aria-controls={`agent-chats-${agent.id}`}
+                onclick={() => collapsedAgents[agent.id]=!collapsedAgents[agent.id]}
                 ><b>{agent.name}</b><small
                   >{agent.provider}{agent.model
                     ? ` · ${agent.model}`
                     : ""}</small
                 ></button
-              >{#if !openTasks.some(task=>task.agentId===agent.id)}<button class="quiet" aria-label={`New chat with ${agent.name}`} title="New chat" onclick={() => routeDraft(agent.id)}><Plus size={15}/></button>{/if}<button
+              >{#if !openTasks.some(task=>task.agentId===agent.id && !task.channelId)}<button class="quiet" aria-label={`New chat with ${agent.name}`} title="New chat" onclick={() => routeDraft(agent.id)}><Plus size={15}/></button>{/if}<button
                 class="quiet"
                 aria-label={`Edit ${agent.name}`}
                 onclick={() => {
-                  agentDraft = { ...agent };
-                  modal = "agent";
+                  routeAgentSettings({ ...agent });
                 }}><MoreHorizontal size={15} /></button
               >
             </div>
-            <div class="task-tree">
+            <div class="task-tree" id={`agent-chats-${agent.id}`} hidden={collapsedAgents[agent.id]}>
               {#each agentTasks as task}{@render sidebarChat(task)}{/each}{#if !agentTasks.length}<p class="empty-tree">No chats yet</p>{/if}
             </div>
           </section>{/each}{:else}<div class="side-empty">
@@ -1735,8 +2523,7 @@
           <button
             class="text-button"
             onclick={() => {
-              agentDraft = blankAgent();
-              modal = "agent";
+              routeAgentSettings(blankAgent());
             }}>Create first agent</button
           >
         </div>{/if}
@@ -1746,10 +2533,10 @@
         <div class="activity-list">{#each activityTasks as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}</div>
       {:else}
         <div class="section-label"><span>PROJECTS</span><button aria-label="New project" title="New project" onclick={()=>editProject()}><Plus size={15}/></button></div>
-        {#each projects as project (project.id)}
-          {@const projectTasks = activityTasks.filter(task=>task.projectId===project.id)}
+        {#each sidebarSorted(projects,'projects') as project (project.id)}
+          {@const projectTasks = sidebarSorted(activityTasks.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
           <section class="project-group" aria-label={`Project ${project.name}`}>
-            <div class="project-row" class:current={focusedProjectId === project.id || selectedTask?.projectId === project.id}>
+            <div use:sidebarReorder={{group:'projects',id:project.id,move:moveSidebar}} class="project-row" class:current={focusedProjectId === project.id || selectedTask?.projectId === project.id}>
               <button class="folder-toggle" aria-label={`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} project ${project.name}`} aria-expanded={!collapsedProjects[project.id]} onclick={()=>collapsedProjects[project.id]=!collapsedProjects[project.id]}>
                 {#if collapsedProjects[project.id]}<ChevronRight size={13}/>{:else}<ChevronDown size={13}/>{/if}
               </button>
@@ -1764,10 +2551,10 @@
         {:else}<p class="view-hint">Group chats from any agent in a project.</p>{/each}
         <section class="project-group" aria-label="No project">
           <button class="unassigned-folder" aria-expanded={!collapsedProjects.unassigned} onclick={()=>collapsedProjects.unassigned=!collapsedProjects.unassigned}>
-            {#if collapsedProjects.unassigned}<ChevronRight size={13}/>{:else}<ChevronDown size={13}/>{/if}<Folder size={14}/><span>No project</span><small>{activeTasks.filter(task=>!task.projectId).length}</small>
+            {#if collapsedProjects.unassigned}<ChevronRight size={13}/>{:else}<ChevronDown size={13}/>{/if}<Folder size={14}/><span>No project</span><small>{activityTasks.filter(task=>!task.projectId).length}</small>
           </button>
           {#if !collapsedProjects.unassigned}<div class="task-tree">
-            {#each activityTasks.filter(task=>!task.projectId) as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">All chats are organised.</p>{/each}
+            {#each sidebarSorted(activityTasks.filter(task=>!task.projectId),'project-chats:unassigned') as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">All chats are organised.</p>{/each}
           </div>{/if}
         </section>
       {/if}
@@ -1780,7 +2567,7 @@
           }}><Plus size={15} /></button
         >
       </div>
-      {#each snapshot?.channels ?? [] as channel}<button
+      {#each sidebarSorted(snapshot?.channels ?? [],'channels') as channel}<button use:sidebarReorder={{group:'channels',id:channel.id,move:moveSidebar}}
           class:current={channel.id === selectedChannelId}
           class="channel-row"
           onclick={() => routeChannel(channel)}
@@ -1789,32 +2576,38 @@
           ></button
         >{/each}
     </nav>
-    {:else}<nav class="agent-rail" aria-label="Agents">
-      {#each snapshot?.agents ?? [] as agent}<button class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
+    {:else}<nav class="agent-rail" aria-label="Agents" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
+      {#each sidebarSorted(snapshot?.agents ?? [],'agents') as agent}<button use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}} class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
         <span class="avatar" style={`--agent-color:${agent.color}`}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span>
         {#if activeTasks.some(task=>task.agentId===agent.id && task.status==='running')}<span class="rail-running" aria-label="Running"></span>{/if}
       </button>{/each}
-      <button class="icon" aria-label="New agent" title="New agent" onclick={()=>{agentDraft=blankAgent();modal='agent'}}><Plus size={17}/></button>
+      <button class="icon" aria-label="New agent" title="New agent" onclick={()=>{routeAgentSettings(blankAgent())}}><Plus size={17}/></button>
       <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
     </nav>{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
-      <div class="rail-chat-list">{#each activityTasks.filter(task=>task.agentId===railAgent.id) as task (task.id)}{@render sidebarChat(task)}{:else}<p class="detail-empty">No chats yet.</p>{/each}</div>
+      <div class="rail-chat-list">{#each sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`) as task (task.id)}{@render sidebarChat(task)}{:else}<p class="detail-empty">No chats yet.</p>{/each}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
+    <footer class="sidebar-footer" aria-label="Workspace controls">
+      <button class="icon" aria-label="Preferences" title="Preferences" onclick={()=>routeSettings()}><Settings2 size={16}/></button>
+      <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
+      <button class="icon" aria-label="Agent directory" title="Agent directory" onclick={()=>{directoryQuery='';routeSettings('directory')}}><Bot size={16}/></button>
+      <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
+    </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid">
-    <PaneGrid {layout} {activePaneId} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
+    <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
         <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot}
-          onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout}
-          onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} bind:this={paneRefs[id]}/>
+          onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
+          onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={persistWorkspace} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}
     </PaneGrid>
   </div>{/if}
 </main>
 
-<Modal title="Agent directory" open={modal === 'directory'} onclose={()=>modal=null}><div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each (snapshot?.agents ?? []).filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar" style={`--agent-color:${agent.color}`}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span><div><b>{agent.name}</b><small>{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{agentDraft={...agent};modal='agent'}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div></Modal>
+
 <CommandPalette open={palette !== null} title={palette === "switch" ? "Switch to" : "Controls"} placeholder={palette === "switch" ? "Find a channel, chat or agent…" : "Find a control or setting…"} items={palette === "switch" ? switchItems : controlItems} onselect={selectPalette} onclose={()=>palette=null}/>
 {#if modal === 'archived' && snapshot}<ArchivedChats {snapshot} onclose={()=>modal=null}
   onRestore={async taskId=>applySnapshot(await bridge.setTaskArchived(taskId,false),++snapshotIssued)}
@@ -1843,12 +2636,13 @@
   </div>{/if}
 </Modal>
 
-<Modal
-  title={agentDraft?.id ? "Edit agent" : "Create agent"}
-  open={modal === "agent"}
-  onclose={() => (modal = null)}
-  >{#if agentDraft}<form
-      class="form"
+{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each (snapshot?.agents ?? []).filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar" style={`--agent-color:${agent.color}`}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span><div><b>{agent.name}</b><small>{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
+
+{#snippet agentEditor()}
+  <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each snapshot?.agents??[] as agent}<option value={agent.id}>{agent.name}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
+  <p class="hint">Choose an agent to edit its identity, harness, permissions and collaboration profile.</p>
+{#if agentDraft}<form
+      class="form agent-settings-form"
       onsubmit={(event) => {
         event.preventDefault();
         saveAgent();
@@ -1900,8 +2694,9 @@
           >Permissions<select aria-label="Permissions" bind:value={agentDraft.sandbox}
             >{#if agentDraft.provider === "codex"}<option value="read-only">Read only</option><option
               value="workspace-write">Workspace write</option>
-            {:else}<option value="harness-configured">Use harness permissions</option>{/if}</select
-          >{#if agentDraft.provider !== "codex"}<small>Uses this harness's permissions on the selected host. Requests for extra approval are declined.</small>{/if}</label
+            {:else}<option value="harness-configured">Use harness permissions</option>{/if}{#if ['codex','claude'].includes(agentDraft.provider)}<option value="yolo">YOLO — skip permissions</option>{/if}</select
+          >{#if agentDraft.provider !== "codex" && agentDraft.sandbox !== 'yolo'}<small>Uses this harness's permissions on the selected host. Requests for extra approval are declined.</small>{/if}</label
+        ><label class="check-row"><input type="checkbox" role="switch" disabled={!['codex','claude'].includes(agentDraft.provider)} checked={agentDraft.sandbox === 'yolo'} onchange={event => { if (agentDraft) agentDraft.sandbox = event.currentTarget.checked ? 'yolo' : (agentDraft.provider === 'codex' ? 'read-only' : 'harness-configured'); }} /> YOLO — skip permissions<small>{['codex','claude'].includes(agentDraft.provider) ? 'Applies to new chats. Existing chats keep their saved permissions.' : 'This harness has no verified skip-permissions mode.'}</small></label
         ><label
           >Colour<input type="color" bind:value={agentDraft.color} /></label
         >
@@ -1911,23 +2706,18 @@
           type="button"
           class="danger-text"
           disabled={!agentDraft.id || busy}
-          onclick={() =>
-            agentDraft?.id &&
-            run(
-              () => bridge.deleteAgent(agentDraft!.id),
-              "Agent removed.",
-            ).then((ok) => ok && (modal = null))}
+          onclick={deleteEditedAgent}
           ><Trash2 size={15} /> Delete</button
         ><span></span><button
           type="button"
           class="secondary"
-          onclick={() => (modal = null)}>Cancel</button
+          onclick={discardAgentEdits}>Discard changes</button
         ><button class="primary" disabled={busy}
           ><Save size={15} /> Save agent</button
         >
       </footer>
-    </form>{/if}</Modal
->
+    </form>{/if}
+{/snippet}
 <Modal title="Hosts" open={modal === "hosts"} onclose={() => (modal = null)}
   ><div class="host-list">
     {#each snapshot?.hosts ?? [] as host}<button
@@ -2150,109 +2940,14 @@
       </footer>
     </form>{/if}</Modal
 >
-<Modal
-  title="Appearance"
-  open={modal === "appearance"}
-  onclose={() => (modal = null)}
-  >{#if snapshot}<div class="form">
-      <fieldset>
-        <legend>Theme</legend>
-        <div class="segmented">
-          {#each ["system", "light", "dark"] as theme}<button
-              class:chosen={snapshot.settings.theme === theme}
-              disabled={busy}
-              onclick={() =>
-                run(() =>
-                  bridge.saveSettings({
-                    ...snapshot!.settings,
-                    theme: theme as "system" | "light" | "dark",
-                  }),
-                )}>{theme}</button
-            >{/each}
-        </div>
-      </fieldset>
-      <fieldset>
-        <legend>Accent colour</legend>
-        <div class="swatches">
-          {#each accents as accent}<button
-              aria-label={accent}
-              class:chosen={snapshot.settings.accent === accent}
-              disabled={busy}
-              style={`--swatch:${accent}`}
-              onclick={() =>
-                run(() =>
-                  bridge.saveSettings({ ...snapshot!.settings, accent }),
-                )}
-            ></button>{/each}<input
-            aria-label="Custom accent colour"
-            type="color"
-            disabled={busy}
-            value={snapshot.settings.accent}
-            onchange={(event) =>
-              run(() =>
-                bridge.saveSettings({
-                  ...snapshot!.settings,
-                  accent: event.currentTarget.value,
-                }),
-              )}
-          />
-        </div>
-      </fieldset>
-      <div class="scale-control"><label for="interface-scale">Interface scale</label>
-        <div class="scale-value"><span>{snapshot.settings.interfaceScale ?? 125}%</span>
-          <button type="button" disabled={busy} onclick={() => run(() => bridge.saveSettings({
-            ...snapshot!.settings, interfaceScale: 125,
-          }))}>Reset to default · 125%</button>
-        </div>
-        <input id="interface-scale" type="range" aria-label="Interface scale" min="80" max="200" step="5" disabled={busy}
-          value={snapshot.settings.interfaceScale ?? 125}
-          onchange={event => run(() => bridge.saveSettings({
-            ...snapshot!.settings, interfaceScale: Number(event.currentTarget.value),
-          }))} />
-        <div class="scale-limits"><span>80%</span><span>200%</span></div>
-        <small>Resize text and controls together. Default: 125%.</small>
-      </div>
-      <fieldset>
-        <legend>Pane appearance</legend>
-        <label class="check-row"><input type="checkbox" role="switch" aria-label="Focus follows mouse" checked={snapshot.settings.focusFollowsMouse ?? false} disabled={busy} onchange={event=>run(()=>bridge.saveSettings({...snapshot!.settings,focusFollowsMouse:event.currentTarget.checked}))}/>Focus follows mouse</label>
-        <label class="check-row"><input type="checkbox" role="switch" aria-label="Dim inactive panes" checked={snapshot.settings.dimInactivePanes ?? true} disabled={busy} onchange={event=>run(()=>bridge.saveSettings({...snapshot!.settings,dimInactivePanes:event.currentTarget.checked}))}/>Dim inactive panes</label>
-        <label class="opacity-setting">Inactive pane opacity <span>{Math.round((snapshot.settings.inactivePaneOpacity ?? .6)*100)}%</span><input type="range" aria-label="Inactive pane opacity" min="10" max="90" step="5" value={(snapshot.settings.inactivePaneOpacity ?? .6)*100} disabled={busy || snapshot.settings.dimInactivePanes===false} onchange={event=>run(()=>bridge.saveSettings({...snapshot!.settings,inactivePaneOpacity:Number(event.currentTarget.value)/100}))}/></label>
-        <p class="hint">Lower opacity makes inactive panes dimmer.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Conversation activity</legend>
-        <label class="check-row"><input type="checkbox" role="switch" disabled={busy}
-          checked={snapshot.settings.showToolActivity !== false}
-          onchange={event => run(() => bridge.saveSettings({
-            ...snapshot!.settings, showToolActivity: event.currentTarget.checked,
-          }))} />Show tool activity</label>
-        <label class="check-row"><input type="checkbox" role="switch" disabled={busy}
-          checked={snapshot.settings.showReasoningSummaries !== false}
-          onchange={event => run(() => bridge.saveSettings({
-            ...snapshot!.settings, showReasoningSummaries: event.currentTarget.checked,
-          }))} />Show reasoning summaries</label>
-        <p class="hint">Collapsible blocks show the activity and summaries supplied by the harness.</p>
-      </fieldset>
-      <fieldset>
-        <legend>Messages</legend>
-        <label class="check-row"><input type="checkbox" role="switch" disabled={busy}
-          checked={snapshot.settings.sendWithEnter ?? false}
-          onchange={event => run(() => bridge.saveSettings({
-            ...snapshot!.settings, sendWithEnter: event.currentTarget.checked,
-          }))} />Enter to send</label>
-        <p class="hint">{snapshot.settings.sendWithEnter
-          ? "Enter sends. Shift+Enter adds a new line."
-          : `${modifierLabel}Enter sends. Enter adds a new line.`}</p>
-      </fieldset>
-      <p class="hint">Saved on this device and applied throughout Monitter.</p>
-    </div>{/if}</Modal
->
 
 <style>
   :global(*) {
     box-sizing: border-box;
   }
   :global(:root) {
+    --terminal-background: #090b0d;
+    --terminal-foreground: #e5e7eb;
     --paper: #fbf8f2;
     --sidebar: #f2ede3;
     --panel: #fffdf8;
@@ -2267,14 +2962,7 @@
     --accent-ink: var(--accent-light-ink);
     --on-accent: #fff;
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-family:
-      "IBM Plex Sans",
-      ui-sans-serif,
-      system-ui,
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      sans-serif;
+    font-family: var(--interface-font, "IBM Plex Sans", system-ui, sans-serif);
     color: var(--ink);
     background: #e9e3d8;
     font-synthesis: none;
@@ -2302,7 +2990,7 @@
     background: var(--paper);
   }
   :global(*) { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
-  :global(svg.lucide) { stroke-width: 1.35; }
+  :global(svg.lucide) { stroke-width: .5px; }
   :global(button),
   :global(input),
   :global(textarea),
@@ -2336,6 +3024,7 @@
     background: var(--paper);
   }
   .sidebar {
+    position: relative;
     display: flex;
     min-height: 0;
     flex-direction: column;
@@ -2351,18 +3040,15 @@
     padding: 0 13px;
   }
   .brand strong {
-    font-size: 14px;
+    font-size: calc(14px * var(--interface-font-ratio, 1));
     letter-spacing: -0.02em;
   }
-  .brand .icon {
-    margin-left: auto;
-  }
-  .sidebar-window-space { height: 52px; flex-shrink: 0; }
-  .window-toolbar { position: absolute; left: 13px; top: 11px; z-index: 15; }
-  .native-mac .window-toolbar { left: calc(88px / var(--interface-scale, 1)); top: calc(25px / var(--interface-scale, 1)); }
-  .native-mac .window-toolbar .icon { width: calc(30px / var(--interface-scale, 1)); height: calc(30px / var(--interface-scale, 1)); }
-  .native-mac .window-toolbar :global(svg) { width: calc(17px / var(--interface-scale, 1)); height: calc(17px / var(--interface-scale, 1)); }
-  .native-mac .sidebar-window-space { height: calc(68px / var(--interface-scale, 1)); }
+  .brand { height: var(--pane-tabbar-height,52px); box-sizing: border-box; }
+  .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: calc(12px / var(--interface-scale,1)); gap: 4px; }
+  .native-mac.native-fullscreen .brand { padding-left: 13px; }
+  .native-mac.native-fullscreen.sidebar-collapsed { grid-template-columns: 56px minmax(0,1fr); }
+  .native-mac .sidebar-views { gap: 0; }
+  .native-mac .view-toggle { width: 22px; }
   .native-mac { --pane-tabbar-height: max(36px, calc(68px / var(--interface-scale, 1))); }
   .native-mac .topbar {
     height: var(--pane-tabbar-height);
@@ -2371,8 +3057,7 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  .native-mac .brand strong,
-  .native-mac .environment {
+  .native-mac .brand strong {
     pointer-events: none;
   }
   .icon {
@@ -2386,12 +3071,6 @@
   .quiet:hover {
     background: var(--soft);
   }
-  .environment i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
   .side-scroll {
     flex: 1;
     min-height: 0;
@@ -2400,38 +3079,39 @@
     overscroll-behavior: contain;
     padding: 11px 8px;
   }
-  .sidebar-views { flex: none; padding: 2px 12px 5px; }
-  .view-selector { display: flex; align-items: center; gap: 7px; padding: 6px 5px; color: var(--muted); font-size: 11px; border-radius: 5px; }
-  .view-selector:hover { background: var(--soft); color: var(--ink); }
-  .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+  .sidebar-views { display: flex; flex: none; gap: 2px; margin-left: auto; }
+  .view-toggle { display: grid; place-items: center; width: 24px; height: 26px; padding: 0; border-radius: 5px; color: var(--muted); }
+  .view-toggle:hover { background: var(--soft); color: var(--ink); }
+  .view-toggle[aria-pressed="true"] { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
   .project-group { margin: 5px 0 12px; }
   .project-row { display: flex; align-items: center; gap: 1px; min-width: 0; border-radius: 5px; }
   .project-row.current { background: var(--paper); }
   .folder-toggle { display: grid; place-items: center; flex: none; width: 20px; height: 30px; color: var(--muted); }
-  .project-name { display: flex; align-items: center; flex: 1; min-width: 0; gap: 6px; padding: 7px 0; text-align: left; font-size: 12px; }
+  .project-name { display: flex; align-items: center; flex: 1; min-width: 0; gap: 6px; padding: 7px 0; text-align: left; font-size: calc(12px * var(--interface-font-ratio, 1)); }
   .project-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .project-name :global(svg) { flex: none; color: var(--accent-ink); }
-  .project-name small, .unassigned-folder small { margin-left: auto; padding-right: 3px; font: 9px var(--mono); color: var(--muted); }
+  .project-name small, .unassigned-folder small { margin-left: auto; padding-right: 3px; font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); color: var(--muted); }
   .project-row .quiet { flex: none; width: 21px; }
-  .unassigned-folder { display: flex; align-items: center; gap: 5px; width: 100%; padding: 7px 3px; color: var(--muted); font-size: 11.5px; text-align: left; }
+  .unassigned-folder { display: flex; align-items: center; gap: 5px; width: 100%; padding: 7px 3px; color: var(--muted); font-size: calc(11.5px * var(--interface-font-ratio, 1)); text-align: left; }
   .project-overview-actions { display: flex; flex-wrap: wrap; gap: 8px; }
   .project-folders { display: grid; gap: 10px; margin: 20px 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
-  .project-folders dt { display: flex; align-items: center; gap: 5px; color: var(--muted); font: 10px var(--mono); }
-  .project-folders dd { margin: 5px 0 0; overflow-wrap: anywhere; font: 12px var(--mono); }
+  .project-folders dt { display: flex; align-items: center; gap: 5px; color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
+  .project-folders dd { margin: 5px 0 0; overflow-wrap: anywhere; font: calc(12px * var(--interface-font-ratio, 1)) var(--mono); }
   .project-workspaces { display: grid; gap: 12px; }
-  .project-workspaces h3 { margin: 0; font-size: 12px; }
+  .project-workspaces h3 { margin: 0; font-size: calc(12px * var(--interface-font-ratio, 1)); }
   .project-workspaces p { margin: 0; }
   .task-workspace-preview { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); }
   .task-workspace-preview > span { display: grid; gap: 5px; min-width: 0; }
-  .task-workspace-preview b { font-size: 11px; }
-  .task-workspace-preview code { overflow-wrap: anywhere; font: 11px var(--mono); }
+  .task-workspace-preview b { font-size: calc(11px * var(--interface-font-ratio, 1)); }
+  .task-workspace-preview code { overflow-wrap: anywhere; font: calc(11px * var(--interface-font-ratio, 1)) var(--mono); }
   .section-label {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 5px 7px;
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
     letter-spacing: 0.1em;
   }
   .section-label button {
@@ -2462,8 +3142,12 @@
     border-radius: 6px;
     color: white;
     background: var(--agent-color, var(--accent));
-    font: 11px var(--mono);
+    font: calc(11px * var(--interface-font-ratio, 1)) var(--mono);
   }
+  .agent-avatar-toggle { position:relative; padding:0; border:0; overflow:hidden; cursor:pointer; }
+  .avatar-toggle-overlay { position:absolute; inset:0; display:grid; place-items:center; background:rgba(0,0,0,.75); color:#fff; opacity:0; pointer-events:none; border-radius:inherit; }
+  .agent-avatar-toggle:hover .avatar-toggle-overlay, .agent-avatar-toggle:focus-visible .avatar-toggle-overlay { opacity:1; }
+  .task-tree[hidden] { display:none; }
   .avatar.small {
     width: 20px;
     height: 20px;
@@ -2478,7 +3162,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 12.5px;
+    font-size: calc(12.5px * var(--interface-font-ratio, 1));
     font-weight: 600;
   }
   .agent-name small {
@@ -2486,7 +3170,7 @@
     color: var(--muted);
     text-overflow: ellipsis;
     white-space: nowrap;
-    font: 9.5px var(--mono);
+    font: calc(9.5px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .quiet {
     display: grid;
@@ -2496,11 +3180,24 @@
     border-radius: 5px;
     color: var(--muted);
   }
-  .task-tree {
-    margin-left: 10px;
-    border-left: 1px solid var(--line);
-    padding-left: 7px;
+  .agent-group { --thread-axis: 16.5px; }
+  .agent-group > .agent-row { position: relative; }
+  .agent-group.has-chats > .agent-row::after {
+    content: ""; position: absolute; pointer-events: none;
+    left: calc(var(--thread-axis) - .5px); width: 1px;
+    top: calc(50% + 11.5px); bottom: 0; background: var(--line);
   }
+  .task-tree { margin-left:10px; border-left:1px solid var(--line); padding-left:7px; }
+  .agent-group > .task-tree { margin:0; border:0; padding:0; }
+  .agent-group.has-chats > .task-tree { padding-bottom: 1em; }
+  .agent-group > .task-tree > .task-row { position: relative; padding-left: calc(var(--thread-axis) - 3px); }
+  .agent-group > .task-tree > .task-row::before {
+    content: ""; position: absolute; pointer-events: none;
+    left: calc(var(--thread-axis) - .5px); width: 1px;
+    top: 0; bottom: 0; background: var(--line);
+  }
+  .agent-group > .task-tree > .task-row:last-child::before { bottom: 50%; }
+  .agent-group > .task-tree .task-select > .dot { position: relative; z-index: 1; }
   .task-row,
   .channel-row {
     display: flex;
@@ -2511,7 +3208,7 @@
     padding: 6px 7px;
     border-radius: 5px;
     text-align: left;
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
   .task-row:hover,
   .task-row.current,
@@ -2522,7 +3219,7 @@
   .task-select > span:last-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .chat-copy { display: grid; gap: 3px; }
   .chat-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chat-meta { font-size: 9.5px; color: var(--muted); }
+  .chat-meta { font-size: calc(9.5px * var(--interface-font-ratio, 1)); color: var(--muted); }
   .chat-actions { display:flex; align-items:center; flex:none; gap:1px; opacity:0; pointer-events:none; }
   .task-row:hover .chat-actions, .task-row:focus-within .chat-actions { opacity:1; pointer-events:auto; }
   .chat-actions button { display:grid; place-items:center; width:20px; height:22px; padding:0; color:var(--muted); border-radius:4px; }
@@ -2539,12 +3236,12 @@
   .task-row small,
   .channel-row small {
     color: var(--muted);
-    font: 9px var(--mono);
+    font: calc(9px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .empty-tree {
     margin: 5px 7px;
     color: var(--muted);
-    font-size: 11px;
+    font-size: calc(11px * var(--interface-font-ratio, 1));
   }
   .dot {
     flex: none;
@@ -2573,17 +3270,27 @@
     padding: 19px 10px;
     color: var(--muted);
     text-align: center;
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .side-empty :global(svg) {
     opacity: 0.6;
   }
   .text-button {
     color: var(--accent-ink);
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .pane-grid { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+  .settings-surface { container-type:inline-size; flex:1; min-width:0; min-height:0; overflow:hidden; display:flex; }
+  .settings-surface.settings-hidden { display:none; }
+  .pane-expand-control { flex:none; }
+  .overview-expand { order:99; flex:none; }
+  .draft-expand { float:right; }
+  .terminal-surface { display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; background:var(--terminal-background,#090b0d); }
+  .terminal-pane-header { display:flex; justify-content:flex-end; flex:none; padding:2px 10px; }
+  .terminal-surface :global(.terminal-pane) { flex:1; height:auto; }
+  .tab-expanded > .topbar { display:none; }
   .workspace {
+    container: workspace-pane / inline-size;
     flex: 1; width: 100%; height: 100%;
     position: relative;
     display: flex;
@@ -2609,13 +3316,11 @@
     flex-shrink: 0;
     padding-bottom: 0.5em;
   }
-  .environment {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    color: var(--muted);
-    font: 10px var(--mono);
-  }
+  .sidebar-footer { position:absolute; bottom:0; left:0; right:0; z-index:3; display:flex; justify-content:space-around; align-items:center; height:48px; padding:4px 10px; box-sizing:border-box; border-top:1px solid var(--line); background:var(--sidebar); }
+  .sidebar .side-scroll { padding-bottom:60px; }
+  .sidebar .agent-rail { padding-bottom:156px; }
+  .sidebar-collapsed .sidebar-footer { flex-direction:column; height:144px; padding:4px; }
+  .brand.scrolled { box-shadow:inset 0 -1px var(--line); }
   .new-task,
   .primary {
     display: inline-flex;
@@ -2626,7 +3331,7 @@
     padding: 8px 11px;
     color: var(--on-accent);
     background: var(--accent);
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
     font-weight: 600;
     box-shadow: inset 0 -1px rgba(0, 0, 0, 0.14);
   }
@@ -2639,7 +3344,7 @@
     border-radius: 6px;
     padding: 8px 11px;
     background: var(--panel);
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .secondary:hover {
     background: var(--soft);
@@ -2655,9 +3360,8 @@
     border-radius: 6px;
     padding: 7px 9px;
     color: #b54b43;
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
   }
-  .alert,
   .preview-banner {
     position: absolute;
     z-index: 10;
@@ -2672,22 +3376,7 @@
     border-radius: 7px;
     background: var(--panel);
     box-shadow: 0 7px 18px rgba(32, 26, 18, 0.14);
-    font-size: 12px;
-  }
-  .alert {
-    z-index: 50;
-  }
-  .alert button {
-    display: grid;
-    margin-left: 4px;
-    color: var(--muted);
-  }
-  .alert.error {
-    border-color: color-mix(in srgb, #bd4c43 45%, var(--line));
-    color: #b84c44;
-  }
-  .alert.notice {
-    color: var(--accent-ink);
+    font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .preview-banner {
     left: 50%;
@@ -2703,7 +3392,7 @@
     justify-items: center;
     gap: 10px;
     color: var(--muted);
-    font-size: 13px;
+    font-size: calc(13px * var(--interface-font-ratio, 1));
   }
   .loading :global(svg) {
     animation: spin 1s linear infinite;
@@ -2713,6 +3402,10 @@
       transform: rotate(360deg);
     }
   }
+  .empty-pane { flex:1;min-width:0;min-height:0;overflow:auto;display:grid;place-items:center;padding:20px; }
+  .pane-choices { display:flex;flex-wrap:wrap;justify-content:center;gap:16px; }
+  .pane-choice { display:flex;align-items:center;gap:12px;padding:20px 24px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--muted); }
+  .pane-choice:hover { color:var(--ink);background:var(--soft);border-color:var(--accent); }
   .overview {
     flex: 1;
     min-height: 0;
@@ -2731,22 +3424,21 @@
   .eyebrow {
     margin: 0 0 8px;
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
     letter-spacing: 0.12em;
   }
   .overview h1,
   .conversation h1 {
     margin: 0;
-    font-size: 28px;
+    font-size: calc(28px * var(--interface-font-ratio, 1));
     font-weight: 600;
     letter-spacing: -0.045em;
   }
-  .overview-head > div > p:last-child,
-  .conversation-head > div > p:last-child {
+  .overview-head > div > p:last-child {
     max-width: 600px;
     margin: 9px 0 0;
     color: var(--muted);
-    font-size: 13px;
+    font-size: calc(13px * var(--interface-font-ratio, 1));
     line-height: 1.55;
   }
   .onboarding {
@@ -2761,17 +3453,17 @@
   }
   .onboard-number {
     color: var(--accent-ink);
-    font: 600 13px var(--mono);
+    font: 600 calc(13px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .onboarding h2 {
     margin: 0;
-    font-size: 15px;
+    font-size: calc(15px * var(--interface-font-ratio, 1));
   }
   .onboarding p {
     max-width: 600px;
     margin: 6px 0 14px;
     color: var(--muted);
-    font-size: 13px;
+    font-size: calc(13px * var(--interface-font-ratio, 1));
     line-height: 1.5;
   }
   .overview-grid {
@@ -2796,7 +3488,7 @@
   }
   .status-group h2 {
     margin: 0;
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
     font-weight: 600;
   }
   .status-group header span {
@@ -2804,12 +3496,12 @@
     border-radius: 3px;
     color: var(--muted);
     background: var(--soft);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .status-group > p {
     margin: 17px 15px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .overview-task {
     display: flex;
@@ -2831,14 +3523,14 @@
   }
   .overview-task b {
     overflow: hidden;
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .overview-task small,
   .overview-task > span:last-child {
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .overview-task > span:last-child {
     white-space: nowrap;
@@ -2852,6 +3544,7 @@
   }
   .task-layout.detail-hidden { grid-template-columns: minmax(0, 1fr); }
   .conversation {
+    --chat-content-max-width: 900px;
     display: flex;
     min-width: 0;
     min-height: 0;
@@ -2881,7 +3574,7 @@
     border-bottom: 0;
     border-radius: 6px 6px 0 0;
     color: var(--muted);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
   .tab.active {
     color: var(--ink);
@@ -2896,8 +3589,11 @@
   .close-tab { display: grid; place-items: center; align-self: center; width: 22px; height: 24px; margin-right: 3px; color: var(--muted); border-radius: 4px; }
   .close-tab:hover, .tab:hover { background: var(--soft); }
   .tab.active:hover, .tab-entry.active .tab:hover { background: var(--paper); }
+  .terminal-tab.active, .terminal-tab.active .tab:hover { background: var(--terminal-background); }
+  .terminal-tab.active .tab, .terminal-tab.active .close-tab { color: var(--terminal-foreground); }
+  .terminal-tab.active .close-tab:hover { background: #252a31; }
   .conversation-head {
-    background: color-mix(in srgb, var(--paper) 80%, transparent);
+    background: color-mix(in srgb, var(--paper) 50%, transparent);
     -webkit-backdrop-filter: blur(14px);
     backdrop-filter: blur(14px);
     display: flex;
@@ -2913,12 +3609,14 @@
     padding-top: 20px;
   }
   .conversation-head h1 {
-    font-size: 22px;
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: calc(22px * var(--interface-font-ratio, 1));
   }
-  .conversation-head p :global(svg) {
-    vertical-align: -2px;
-    margin-right: 4px;
-  }
+  .conversation-head h1 :global(.animated-title) { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .task-actions {
     display: flex;
     flex: none;
@@ -2926,9 +3624,10 @@
     gap: 7px;
   }
   .message {
-    max-width: 72ch;
+    max-width: 100%;
     margin: 0 0 24px;
   }
+  .message.user.tinted { background:color-mix(in srgb, var(--accent) 16%, var(--panel)); }
   .message.user {
     margin-left: auto;
     padding: 12px 14px;
@@ -2945,16 +3644,16 @@
     align-items: center;
     gap: 8px;
     margin-bottom: 7px;
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
     font-weight: 600;
   }
   .message-meta time {
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
     font-weight: 400;
   }
   .message :global(.markdown) {
-    font-size: 13px;
+    font-size: var(--chat-font-size, 13px);
     line-height: 1.65;
   }
   .blank-conversation {
@@ -2973,11 +3672,11 @@
   .blank-conversation h2 {
     margin: 10px 0 5px;
     color: var(--ink);
-    font-size: 15px;
+    font-size: calc(15px * var(--interface-font-ratio, 1));
   }
   .blank-conversation p {
     margin: 0;
-    font-size: 12.5px;
+    font-size: calc(12.5px * var(--interface-font-ratio, 1));
     line-height: 1.55;
   }
   .draft-layout { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; padding: clamp(18px, 5vh, 60px) clamp(16px, 5vw, 64px); }
@@ -2989,22 +3688,28 @@
   .draft-composer.composer { max-height: none; margin: 16px 0 12px; }
   .draft-composer.composer textarea { min-height: 110px; }
   .suggestions { display: flex; gap: 7px; flex-wrap: wrap; }
-  .suggestions button { border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-size: 12px; padding: 7px 10px; }
+  .suggestions button { border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-size: calc(12px * var(--interface-font-ratio, 1)); padding: 7px 10px; }
   .suggestions button:hover { border-color: var(--accent); color: var(--ink); }
-  .draft-advanced { margin-top: 24px; color: var(--muted); font-size: 12px; }
+  .draft-advanced { margin-top: 24px; color: var(--muted); font-size: calc(12px * var(--interface-font-ratio, 1)); }
   .draft-advanced summary { cursor: pointer; margin-bottom: 12px; }
-  .slash-menu { max-height: min(240px, 38vh); overflow-y: auto; overscroll-behavior: contain; margin: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 10px 28px rgba(0,0,0,.16); }
-  .slash-menu .slash-caption { font: 10px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+  .slash-menu { position:fixed; inset:auto; margin:0; padding:0; overflow:hidden; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--ink); box-shadow:0 5px 20px #0002; animation:slash-rise 160ms ease-out; }
+  .slash-options { max-height:min(240px,38vh); overflow-y:auto; overscroll-behavior:contain; }
+  @keyframes slash-rise { from { clip-path:inset(100% -24px -24px); transform:translateY(6px); opacity:0; } to { clip-path:inset(-24px); transform:translateY(0); opacity:1; } }
+  @media (prefers-reduced-motion:reduce) { .slash-menu { animation:none; } }
+
+  .slash-menu .slash-caption { font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .06em; }
   .slash-menu button { width: 100%; display: flex; gap: 10px; text-align: left; padding: 9px 11px; }
   .slash-menu button.active, .slash-menu button:hover { background: color-mix(in srgb, var(--accent) 13%, transparent); }
-  .slash-menu b { min-width: 78px; font: 12px var(--mono); }
-  .slash-menu span, .slash-menu p { color: var(--muted); font-size: 12px; margin: 0; padding: 9px 11px; }
+  .slash-menu b { min-width: 78px; font: calc(12px * var(--interface-font-ratio, 1)) var(--mono); }
+  .slash-menu span, .slash-menu p { color: var(--muted); font-size: calc(12px * var(--interface-font-ratio, 1)); margin: 0; padding: 9px 11px; }
   .composer {
     flex-shrink: 0;
     max-height: 40%;
     overflow: auto;
     overscroll-behavior: contain;
-    margin: 0 clamp(25px, 4vw, 50px) 20px;
+    width: min(var(--chat-content-max-width), calc(100% - 2 * var(--chat-side-padding, clamp(25px, 4vw, 50px))));
+    box-sizing: border-box;
+    margin: 0 auto 20px;
     padding: 11px 12px 9px;
     border: 1px solid var(--line);
     border-radius: 10px;
@@ -3015,6 +3720,7 @@
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .composer textarea {
+    font-family: var(--chat-font, "IBM Plex Sans", system-ui, sans-serif);
     display: block;
     width: 100%;
     min-height: 52px;
@@ -3024,9 +3730,10 @@
     outline: 0;
     color: var(--ink);
     background: transparent;
-    font-size: 13px;
+    font-size: var(--chat-font-size, 13px);
     line-height: 1.5;
   }
+  .composer :global(textarea:focus-visible) { outline: none; box-shadow: none; }
   .composer textarea::placeholder {
     color: var(--muted);
   }
@@ -3036,7 +3743,7 @@
     justify-content: space-between;
     gap: 10px;
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .composer-control { width: 30px; min-width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; border-radius: 50%; }
   .spin { animation: composer-spin .8s linear infinite; }
@@ -3062,7 +3769,7 @@
     border-radius: 4px;
     padding: 3px 5px;
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .recipient-picker button.selected {
     border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
@@ -3070,6 +3777,7 @@
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
   .run-detail {
+    position: relative;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -3080,30 +3788,46 @@
   .detail-tabs {
     flex-shrink: 0;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 38px;
-    padding: 0 12px;
-    border-bottom: 1px solid var(--line);
+    align-items: stretch;
+    gap: 3px;
+    height: var(--pane-tabbar-height, 52px);
+    padding: 0.5em 0.5em 0;
+    border-bottom: 0;
+    background: linear-gradient(var(--line), var(--line)) left bottom / 100% 1px no-repeat, var(--sidebar);
   }
   .detail-section h3 {
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
     letter-spacing: 0.08em;
   }
   .detail-tabs button {
     display: flex;
     align-items: center;
     gap: 5px;
-    color: var(--accent-ink);
-    font-size: 10.5px;
+    flex-shrink: 0;
+    min-height: 28px;
+    padding: 0 9px;
+    border: 1px solid transparent;
+    border-bottom: 0;
+    border-radius: 6px 6px 0 0;
+    color: var(--muted);
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
-  .detail-tabs button.active { color: var(--ink); }
-  .detail-tabs button:last-child { margin-left: auto; }
+  .detail-tabs button:hover { background: var(--soft); color: var(--ink); }
+  .detail-tabs button.active { color: var(--ink); border-color: var(--line); background: var(--paper); }
+  .detail-tabs button.active:hover { background: var(--paper); }
+  .detail-tabs .detail-close {
+    width: 30px;
+    min-height: 30px;
+    margin: 0 0 0 auto;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    color: var(--accent-ink);
+    align-self: center;
+  }
+  .channel-members { display:flex;flex-direction:column;overflow:hidden;padding:0; }
   .run-detail.closed, .hidden { display: none; }
   .git-slot { flex: 1; min-height: 0; overflow: hidden; }
-  .git-probe-error { font-size: 11px; color: var(--muted); }
-  .git-probe-error button { color: var(--accent-ink); text-decoration: underline; }
-  .git-probe-error small { display: block; overflow-wrap: anywhere; margin-top: 5px; }
   .detail-scroll {
     overflow: auto;
     flex: 1;
@@ -3119,7 +3843,7 @@
     display: flex;
     justify-content: space-between;
     gap: 10px;
-    font: 10.5px var(--mono);
+    font: calc(10.5px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .run-detail dt {
     color: var(--muted);
@@ -3172,13 +3896,13 @@
   }
   .delegated b {
     overflow: hidden;
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .delegated small {
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .delegate-button {
     display: flex;
@@ -3191,7 +3915,7 @@
     border: 1px dashed var(--line);
     border-radius: 6px;
     color: var(--muted);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
   .delegate-button:hover {
     border-color: var(--accent);
@@ -3207,7 +3931,7 @@
     display: grid;
     gap: 6px;
     color: var(--muted);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
   .form label small {
     line-height: 1.45;
@@ -3216,7 +3940,7 @@
     justify-self: end;
     margin-top: -18px;
     color: var(--muted);
-    font: 9.5px var(--mono);
+    font: calc(9.5px * var(--interface-font-ratio, 1)) var(--mono);
     text-transform: uppercase;
   }
   .draft-content input,
@@ -3231,13 +3955,8 @@
     outline: none;
     color: var(--ink);
     background: var(--paper);
-    font-size: 12.5px;
+    font-size: calc(12.5px * var(--interface-font-ratio, 1));
   }
-  .form input[type="range"] { padding: 0; accent-color: var(--accent); cursor: pointer; }
-  .scale-control { display: grid; gap: 8px; }
-  .scale-value, .scale-limits { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  .scale-value button { color: var(--accent-ink); font-size: 11px; }
-  .scale-limits { color: var(--muted); font: 10px var(--mono); }
   .form textarea {
     min-height: 86px;
     resize: vertical;
@@ -3261,12 +3980,12 @@
     align-items: center;
     gap: 5px;
     color: #b84c44;
-    font-size: 12px;
+    font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .modal-copy {
     margin: 0;
     color: var(--muted);
-    font-size: 12.5px;
+    font-size: calc(12.5px * var(--interface-font-ratio, 1));
     line-height: 1.55;
   }
   .hint {
@@ -3275,7 +3994,7 @@
     gap: 5px;
     margin: 0;
     color: var(--muted);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
   .segmented {
     display: flex;
@@ -3293,7 +4012,7 @@
     padding: 7px 8px;
     border-radius: 4px;
     color: var(--muted);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
     text-transform: capitalize;
   }
   .segmented button.chosen {
@@ -3303,7 +4022,7 @@
   }
   .form details {
     color: var(--muted);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
   .form details[open] {
     display: grid;
@@ -3318,7 +4037,7 @@
     border-radius: 7px;
     color: var(--accent-ink);
     background: color-mix(in srgb, var(--accent) 6%, transparent);
-    font-size: 11.5px;
+    font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
   .probe.bad {
     border-color: color-mix(in srgb, #bd4c43 40%, var(--line));
@@ -3330,7 +4049,7 @@
   }
   .probe code {
     margin-right: 6px;
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .form fieldset {
     border: 0;
@@ -3391,7 +4110,7 @@
   .check-row small {
     margin-left: auto;
     color: var(--muted);
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .host-list {
     display: grid;
@@ -3427,40 +4146,18 @@
     gap: 2px;
   }
   .host-card b {
-    font-size: 12.5px;
+    font-size: calc(12.5px * var(--interface-font-ratio, 1));
   }
   .host-card small {
     overflow: hidden;
     color: var(--muted);
     text-overflow: ellipsis;
     white-space: nowrap;
-    font: 10px var(--mono);
+    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .add-host {
     justify-self: start;
     margin-top: 4px;
-  }
-  .swatches {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-  }
-  .swatches button {
-    width: 25px;
-    height: 25px;
-    border: 2px solid transparent;
-    border-radius: 50%;
-    background: var(--swatch);
-  }
-  .swatches button.chosen {
-    outline: 2px solid var(--ink);
-    outline-offset: 2px;
-  }
-  .swatches input {
-    width: 29px !important;
-    height: 29px;
-    padding: 1px !important;
-    border-radius: 50% !important;
   }
   @media (max-width: 1100px) {
     .task-layout {
@@ -3499,8 +4196,7 @@
     }
     .task-layout { grid-template-columns: minmax(0, 1fr); }
     .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(292px, 100%); z-index: 10; box-shadow: -10px 0 25px #0002; }
-    .environment { display: none; }
-    .conversation-head, .overview-head { flex-wrap: wrap; }
+    .overview-head { flex-wrap: wrap; }
     .conversation-head { padding: 20px; }
     .composer-footer { flex-wrap: wrap; }
   }
@@ -3508,18 +4204,22 @@
     .app-shell { grid-template-columns: 150px minmax(0, 1fr); }
     .sidebar { min-width: 0; }
     .brand { padding-right: 5px; gap: 3px; }
-    .brand strong { font-size: 13px; }
-    .brand .icon { width: 24px; }
+    .brand strong { font-size: calc(13px * var(--interface-font-ratio, 1)); }
     .conversation-head, .overview { padding: 12px; }
     .conversation-head { gap: 8px; }
-    .conversation-head h1 { font-size: 18px; }
+    .conversation-head h1 { font-size: calc(18px * var(--interface-font-ratio, 1)); }
     .composer { margin: 0 10px 10px; }
     .task-actions { flex-wrap: wrap; }
     .form-grid { grid-template-columns: minmax(0, 1fr); }
   }
+  @container workspace-pane (width < 1000px) {
+    .dashboard-overview { padding: 20px; }
+    .conversation { --chat-side-padding: 20px; }
+    .conversation-head { padding-left: 20px; padding-right: 20px; }
+    .dashboard-overview .overview-head, .dashboard-overview .overview-grid { max-width: none; }
+  }
   @media (max-height: 500px) {
     .conversation-head { padding-top: 10px; padding-bottom: 10px; gap: 6px; }
-    .conversation-head p { margin-bottom: 0; }
     .task-heading { padding-top: 10px; }
     .composer { padding: 7px; margin-bottom: 8px; }
     .composer textarea { min-height: 36px; }
@@ -3528,6 +4228,14 @@
   .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
   .task-heading { align-items: center; padding-top: 13px; padding-bottom: 13px; }
   .task-heading > h1 { margin: 0; }
+  .tabs.hide-tab-close .close-tab { display:none; }
+  .tabs { counter-reset: tab-index; }
+  .tabs > .tab-entry { counter-increment: tab-index; }
+  .tabs.show-tab-index > .tab-entry::after { content: counter(tab-index); position:absolute; right:5px; top:50%; transform:translateY(-50%); z-index:3; min-width:18px; height:18px; display:grid; place-items:center; border-radius:4px; background:var(--panel); color:var(--accent-ink); border:1px solid var(--line); font:11px var(--mono); pointer-events:none; }
+  .task-title { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
+  .task-title-edit { flex: none; opacity: 0; color: var(--muted); transition: opacity .12s ease, color .12s ease; }
+  .task-heading:hover .task-title-edit, .task-title:focus-within .task-title-edit { opacity: 1; }
+  .task-title-edit:hover { color: var(--ink); }
   .task-overflow { position: relative; }
   .task-menu { display: grid; min-width: 155px; }
   .task-menu button { display: flex; gap: 7px; align-items: center; padding: 7px; text-align: left; }
@@ -3536,63 +4244,69 @@
   .agent-identity summary::-webkit-details-marker { display: none; }
   .identity-avatar { width: 32px; height: 32px; }
   .agent-identity b, .agent-identity small { display: block; }
-  .agent-identity small { color: var(--muted); font: 10px var(--mono); margin-top: 2px; }
+  .agent-identity small { color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); margin-top: 2px; }
   .identity-actions { padding: 9px 0 0 41px; }
-  .identity-actions button { color: var(--accent-ink); font-size: 11px; }
-  .identity-actions p { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+  .identity-actions button { color: var(--accent-ink); font-size: calc(11px * var(--interface-font-ratio, 1)); }
+  .identity-actions p { margin: 6px 0 0; color: var(--muted); font-size: calc(11px * var(--interface-font-ratio, 1)); }
   .avatar-preview { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
   .avatar-preview img { width: 34px; height: 34px; border-radius: 7px; object-fit: cover; }
 
-  .monitter-menu { position: relative; }
-  .monitter-dropdown { display: grid; min-width: 150px; }
-  .monitter-dropdown button { display: flex; align-items: center; gap: 8px; padding: 8px; text-align: left; border-radius: 5px; }
-  .monitter-dropdown button:hover, .monitter-dropdown button:focus-visible { background: var(--soft); }
   .floating-panel { position: fixed; inset: auto; z-index: 50; margin: 0; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--panel); box-shadow: 0 12px 30px #0003; }
-  .view-menu { display: grid; min-width: 155px; }
-  .view-menu button { display: flex; align-items: center; gap: 8px; padding: 8px; text-align: left; font-size: 12px; }
-  .view-menu button span { flex: 1; }
-  .view-menu button:hover { background: var(--soft); border-radius: 5px; }
   .app-shell.sidebar-collapsed { grid-template-columns: 56px minmax(0,1fr); }
   .sidebar-collapsed .sidebar { min-width: 0; }
-  .sidebar-collapsed .brand { justify-content: center; padding: 0; height: 30px; }
-  .sidebar-collapsed .brand .icon { margin: 0; }
+  .sidebar-collapsed .brand { justify-content: center; padding: 0; height: var(--pane-tabbar-height,52px); }
   .native-mac.sidebar-collapsed { grid-template-columns: max(56px,calc(124px / var(--interface-scale,1))) minmax(0,1fr); }
   .agent-rail { display: flex; align-items: center; gap: 8px; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; padding: 10px 4px; }
   .rail-avatar { position: relative; flex: none; padding: 4px; border: 1px solid transparent; border-radius: 9px; }
   .rail-avatar.current, .rail-avatar:hover { border-color: var(--line); background: var(--soft); }
-  .rail-avatar .avatar { width: 30px; height: 30px; font-size: 12px; }
+  .rail-avatar .avatar { width: 30px; height: 30px; font-size: calc(12px * var(--interface-font-ratio, 1)); }
   .rail-running { position: absolute; width: 6px; height: 6px; border: 2px solid var(--sidebar); border-radius: 50%; background: var(--accent); right: 0; bottom: 0; }
   .rail-chats { width: 320px; }
-  .rail-chats header { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-size: 13px; }
+  .rail-chats header { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-size: calc(13px * var(--interface-font-ratio, 1)); }
   .rail-chat-list { max-height: min(50vh,420px); overflow: auto; }
-  .rail-new-chat { display: flex; gap: 7px; align-items: center; width: 100%; padding: 10px; color: var(--accent-ink); font-size: 12px; }
+  .rail-new-chat { display: flex; gap: 7px; align-items: center; width: 100%; padding: 10px; color: var(--accent-ink); font-size: calc(12px * var(--interface-font-ratio, 1)); }
 
   .agent-profile { display: grid; gap: 9px; margin: 4px 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
+  .agent-settings-form { max-width:none; }
+  .agent-editor-selector { display:flex;align-items:end;gap:12px;flex-wrap:wrap; }
+  .agent-editor-selector label { display:grid;gap:6px;flex:1;min-width:140px; }
+  .agent-editor-selector select { width:100%; }
   .agent-profile summary { cursor: pointer; font-weight: 600; }
-  .agent-profile p { margin: 0; color: var(--muted); font-size: 11px; }
+  .agent-profile p { margin: 0; color: var(--muted); font-size: calc(11px * var(--interface-font-ratio, 1)); }
   .collaboration-row { display: flex; width: 100%; gap: 7px; padding: 7px 0; text-align: left; border-bottom: 1px solid var(--line); }
   .collaboration-row > span:last-child { display: grid; min-width: 0; gap: 2px; }
-  .collaboration-row small, .collaboration-row em { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-style: normal; }
+  .collaboration-row small, .collaboration-row em { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: calc(10px * var(--interface-font-ratio, 1)); font-style: normal; }
   .collaboration-row .collaboration-error { color: var(--danger, #c44c79); }
   .agent-directory article { display: flex; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
   .agent-directory article > div { display: grid; flex: 1; min-width: 0; gap: 2px; }
-  .agent-directory small, .agent-directory p { margin: 0; color: var(--muted); font-size: 10px; }
+  .agent-directory small, .agent-directory p { margin: 0; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .agent-directory article.disabled { opacity: .58; }
   .app-shell.embedded { height: 100%; width: 100%; grid-template-columns: minmax(0,1fr); }
   .embedded .topbar { height: var(--pane-tabbar-height,52px); min-height: 32px; padding: 0.5em 0.5em 0; }
-  .layout-control { position: relative; }
   .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 12; box-shadow: -10px 0 30px #0003; animation: detail-enter .18s ease-out; }
   .detail-backdrop { position: absolute; inset: 0; z-index: 11; background: #0002; }
   @keyframes detail-enter { from { transform: translateX(100%); } to { transform: translateX(0); } }
+  .app-shell:not(.embedded):not(.sidebar-collapsed) { grid-template-columns: min(40vw, max(230px, var(--left-sidebar-width, 252px))) minmax(0, 1fr); }
+  .task-layout:not(.detail-hidden) { grid-template-columns: minmax(0, 1fr) min(40vw, max(260px, var(--right-sidebar-width, 292px)), calc(100% - 300px)); }
+  .compact-detail .run-detail { width: min(40vw, max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
   @media (prefers-reduced-motion: reduce) { .compact-detail .run-detail { animation: none; } }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
-  .opacity-setting { margin-top:12px;display:grid;grid-template-columns:1fr auto;gap:8px; }
-  .opacity-setting input { grid-column:1/-1;width:100%;accent-color:var(--accent); }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
-  .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:10px; }
+  .agent-waiting { display:flex; align-items:center; gap:8px; margin:8px 0 24px; color:var(--muted); font-family:var(--chat-font,"IBM Plex Sans",system-ui,sans-serif); font-size:var(--chat-font-size,13px); }
+  .waiting-spinner { display:inline-flex; flex:none; color:var(--accent-ink); animation:waiting-turn 1.4s linear infinite; }
+  @keyframes waiting-turn { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .waiting-spinner { animation:none; } }
+  .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   .attachment-tools .icon { width: 24px; height: 24px; }
-  .attachment-tools small { font-size: 10px; }
+  .attachment-tools small { font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .attachment-input { display: none; }
   .composer.drop-files { outline: 2px solid var(--accent); background: color-mix(in srgb,var(--accent) 8%,var(--panel)); }
+  .vim-commandbar { position: fixed; z-index: 80; left: 50%; bottom: 20px; width: min(540px,calc(100vw - 32px)); transform: translateX(-50%); padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--panel); box-shadow: 0 12px 30px #0004; }
+  .vim-commandbar form { display: flex; align-items: center; gap: 6px; }
+  .vim-commandbar label { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--accent-ink); font: 600 calc(14px * var(--interface-font-ratio,1)) var(--mono); }
+  .vim-commandbar input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; }
+  .vim-commandbar p { margin: 7px 2px 0; color: var(--danger,#b84c44); font-size: calc(11px * var(--interface-font-ratio,1)); }
+  .vim-commandbar ul { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 4px 10px; margin: 8px 2px 1px; padding: 0; list-style: none; color: var(--muted); font: calc(10px * var(--interface-font-ratio,1)) var(--mono); }
+  @media (prefers-reduced-motion: reduce) { .vim-commandbar { transition: none; } }
 </style>

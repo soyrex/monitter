@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { groupConversationActivity } from '../src/lib/activity-grouping.ts';
+import { groupConversationActivity, isShellActivity } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
@@ -34,3 +34,14 @@ assert.equal(groups([], [event('a',1,'gmail.search_emails','query'),event('b',2,
 assert.equal(groups([], [event('a',1,'gmail.search_emails','query'),event('b',2,'slack.search','query')]).length,2);
 assert.equal(groups([], [event('a',1,'mcp__gmail__search_emails','query'),event('b',2,'mcp__gmail__read_email','email')]).length,1);
 console.log('activity grouping assertions passed');
+
+const mixed = [event('cmd1',1,'/bin/zsh -lc ls',''),event('web',2,'web_search',''),event('cmd2',3,'/bin/zsh -lc pwd','')];
+assert.equal(groupConversationActivity([],mixed,true).length,1);
+assert.equal(groupConversationActivity([],mixed,true)[0].values.length,3);
+assert.equal(groupConversationActivity([message('boundary',2.5)],mixed,true).length,3);
+assert.equal(groupConversationActivity([],mixed,false).length,3);
+
+assert.equal(isShellActivity(event('shell',1,'/bin/zsh -lc git status','')),true);
+assert.equal(isShellActivity(event('shell',1,'Run command','')),true);
+assert.equal(isShellActivity(event('shell',1,'git status','{"type":"command_execution"}')),true);
+assert.equal(isShellActivity(event('search',1,'web_search','')),false);

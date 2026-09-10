@@ -15,7 +15,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font: 11px var(--mono);
+    font: calc(11px * var(--interface-font-ratio, 1)) var(--mono);
     color: var(--muted);
     text-transform: capitalize;
   }
