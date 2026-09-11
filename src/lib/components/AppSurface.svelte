@@ -3044,7 +3044,7 @@
         ><label
           >Model<input
             bind:value={agentDraft.model}
-            placeholder="Harness default"
+            placeholder={agentDraft.provider === "hermes" ? "Harness default, or provider/model" : "Harness default"}
           /></label
         ><label
           >Host<select bind:value={agentDraft.hostId}

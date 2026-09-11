@@ -41,6 +41,7 @@ def install_fake(root: Path, source: str) -> Path:
 PROTOCOL_GATEWAY = r'''
 import json
 import sys
+from pathlib import Path
 
 resumed = False
 
@@ -62,6 +63,7 @@ while line := sys.stdin.readline():
     request = json.loads(line)
     method = request["method"]
     if method == "session.create":
+        (Path(__file__).parent / "create.json").write_text(json.dumps(request["params"]))
         send({
             "jsonrpc": "2.0", "id": request["id"],
             "result": {"session_id": "live", "stored_session_id": "new-key"},
@@ -257,6 +259,16 @@ def test_protocol_create_resume_and_race() -> None:
         )
 
 
+def test_legacy_minimax_override_selects_its_oauth_provider() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "hermes-agent"
+        wrapper = install_fake(root, PROTOCOL_GATEWAY)
+        invoke(wrapper, Path(temporary), "--model", "minimax-oath/minimax-m3")
+        create = json.loads((root / "tui_gateway" / "create.json").read_text(encoding="utf-8"))
+        assert create["model"] == "minimax-m3"
+        assert create["provider"] == "minimax-oauth"
+
+
 def test_process_group_cancellation_reaches_gateway() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "hermes-agent"
@@ -314,6 +326,7 @@ def test_unresponsive_close_is_bounded() -> None:
 def main() -> None:
     test_locator_keeps_venv_interpreter()
     test_protocol_create_resume_and_race()
+    test_legacy_minimax_override_selects_its_oauth_provider()
     test_process_group_cancellation_reaches_gateway()
     test_unresponsive_close_is_bounded()
     print("Hermes bridge offline tests passed")

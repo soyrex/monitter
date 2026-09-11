@@ -137,7 +137,9 @@ session folder into the task snapshot, before collaboration setup. This prevents
 or a mismatched attachment folder from silently losing the CLI event stream. Export contents
 are not imported into the chat or logged. Hermes runs the installed TUI gateway with a Python
 bridge: session.create/resume, prompt.submit, durable stored_session_id, normalized JSONL events,
-explicit denial of interactive requests, and owned child cleanup. Never silently substitute a harness.
+explicit denial of interactive requests, and owned child cleanup. An explicit Hermes `provider/model`
+selection is passed as separate session-scoped provider and model fields; unqualified models retain
+Hermes' configured provider. Never silently substitute a harness.
 Host.claudePath defaults to an empty string for older stored host snapshots. Task.archived defaults
 false; archiving preserves messages/events/native IDs and hides the chat from ordinary navigation.
 Cmd-K explicitly restores archived chats. Channel sends start a new task instead of reusing an

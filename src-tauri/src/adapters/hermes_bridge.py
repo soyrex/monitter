@@ -22,10 +22,50 @@ class BridgeError(RuntimeError):
 
 _OUTPUT_LOCK = threading.Lock()
 
+# Monitter stores a harness model as one field. Hermes, however, keeps model
+# and provider as separate session-scoped values. Older Monitter state can also
+# contain the legacy ``minimax-oath`` typo. Without the provider Hermes uses
+# its configured default (often ``openai-codex``), which sends that MiniMax
+# model through the user's ChatGPT-backed Codex account and fails before a turn
+# starts.
+_LEGACY_PROVIDER_ALIASES = {"minimax-oath": "minimax-oauth"}
+
 
 def emit(kind: str, **fields: Any) -> None:
     with _OUTPUT_LOCK:
         print(json.dumps({"type": kind, **fields}, ensure_ascii=False), flush=True)
+
+
+def split_model_override(raw: str) -> tuple[str, str | None]:
+    """Turn a Hermes ``provider/model`` pick into session-create fields.
+
+    An unqualified model remains untouched so Hermes preserves its configured
+    provider. For a known Hermes provider, passing the provider separately is
+    essential: it is a session override, not a request to use whatever provider
+    happens to be configured globally. Unknown prefixes are retained as a raw
+    model rather than inventing a provider route.
+    """
+    value = raw.strip()
+    if "/" not in value:
+        return value, None
+    provider_hint, model = (part.strip() for part in value.split("/", 1))
+    if not provider_hint or not model:
+        return value, None
+    provider_hint = _LEGACY_PROVIDER_ALIASES.get(provider_hint.lower(), provider_hint)
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        from hermes_cli.models import normalize_provider
+
+        provider = normalize_provider(provider_hint)
+        if provider in PROVIDER_REGISTRY:
+            return model, provider
+    except Exception:
+        # Hermes' own modules are optional in isolated bridge tests. Keep the
+        # known legacy repair available without making startup depend on them.
+        pass
+    if provider_hint == "minimax-oauth":
+        return model, provider_hint
+    return value, None
 
 
 def _expand_executable(raw: str) -> Path:
@@ -450,7 +490,10 @@ def run(options: argparse.Namespace, prompt: str) -> int:
                 "cols": 120,
             }
             if options.model:
-                create["model"] = options.model
+                model, provider = split_model_override(options.model)
+                create["model"] = model
+                if provider:
+                    create["provider"] = provider
             result = gateway.call("session.create", create)
             gateway.live_session_id = str(result.get("session_id") or "")
             gateway.durable_session_id = str(result.get("stored_session_id") or "")
