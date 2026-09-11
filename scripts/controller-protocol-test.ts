@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { ControllerDispatcher, type ControllerClient } from '../src/lib/controller/index.ts';
 
 import { controllerSnapshot } from '../src/lib/controller/dispatcher.ts';
+import { sharedSnapshot } from '../src/lib/operator-sharing.ts';
+import type { Snapshot, Task, ApprovalRequest } from '../src/lib/types.ts';
 
 const task = '11111111-1111-4111-8111-111111111111';
 const terminal = '22222222-2222-4222-8222-222222222222';
@@ -9,7 +11,7 @@ const request = (id: string, action: string, params: Record<string, unknown>) =>
 const context = { authenticated: true as const, subject: 'paired-device:test' };
 let sends = 0, cancellations = 0, resumes = 0;
 const client: ControllerClient = {
-  getSnapshot: async () => ({ hosts: [], agents: [], tasks: [], messages: [], events: [], channels: [], projects: [], collaborations: [], queuedMessages: [], settings: { accent: '#000', theme: 'dark', interfaceScale: 125, showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard' } }),
+  getSnapshot: async () => ({ hosts: [], agents: [], tasks: [], messages: [], events: [], channels: [], projects: [], collaborations: [], queuedMessages: [], approvalRequests: [], settings: { accent: '#000', theme: 'dark', interfaceScale: 125, showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard' } }),
   sendMessage: async () => { sends += 1; return client.getSnapshot(); },
   cancelTask: async () => { cancellations += 1; return client.getSnapshot(); },
   resumeTask: async () => { resumes += 1; return client.getSnapshot(); },
@@ -28,6 +30,30 @@ assert.equal(sourceSnapshot.events.length, 120);
 assert.equal(sourceSnapshot.events[0].createdAt, 0);
 assert.equal(sourceSnapshot.events[119].detail.length, 5000);
 assert.equal(projected.messages, sourceSnapshot.messages);
+
+// Shared visitors may see selected conversations, never owner-only approval
+// payloads (which can contain local paths or secrets), including on shared tasks.
+const sharedTask: Task = { id: task, agentId: 'agent', title: 'Shared chat', nativeSessionId: 'private-native-session', archived: false, status: 'idle', createdAt: 0, updatedAt: 0, parentTaskId: null, channelId: null, projectId: 'shared-project', hostId: 'private-host', cwd: '/private/folder', provider: 'claude', model: '', sandbox: 'harness-configured' };
+const approval = (taskId: string): ApprovalRequest => ({ id: `approval-${taskId}`, taskId, provider: 'claude', runId: 'private-run', tool: 'Write', summary: 'Owner decision', detail: 'owner-only-approval-payload', risk: 'high', status: 'pending', createdAt: 0, resolvedAt: null, decision: null });
+const sharingSource: Snapshot & { futureOwnerOnly: string } = {
+  ...sourceSnapshot,
+  tasks: [sharedTask, { ...sharedTask, id: 'unshared-task', projectId: null }],
+  messages: [{ id: 'shared-message', taskId: task, role: 'user', text: 'Selected content', createdAt: 0 }, { id: 'hidden-message', taskId: 'unshared-task', role: 'user', text: 'Unshared content', createdAt: 0 }],
+  approvalRequests: [approval(task), approval('unshared-task')],
+  futureOwnerOnly: 'future-private-field',
+};
+for (const selection of [{ taskIds: [task], projectIds: [] }, { taskIds: [], projectIds: ['shared-project'] }]) {
+  const visitor = sharedSnapshot(sharingSource, selection);
+  assert.deepEqual(visitor.tasks.map(item => item.id), [task]);
+  assert.deepEqual(visitor.messages.map(item => item.id), ['shared-message']);
+  assert.deepEqual(visitor.approvalRequests, []);
+  assert.equal(visitor.tasks[0].cwd, '');
+  assert.equal(visitor.tasks[0].nativeSessionId, null);
+  assert.equal('futureOwnerOnly' in visitor, false);
+  assert.ok(!JSON.stringify(visitor).includes('owner-only-approval-payload'));
+}
+assert.equal(sharingSource.approvalRequests.length, 2);
+assert.equal(sharingSource.tasks[0].cwd, '/private/folder');
 const dispatcher = new ControllerDispatcher(client, { maxMutationReceipts: 3 });
 
 // This is the loopback transport proof: both directions are JSON strings and

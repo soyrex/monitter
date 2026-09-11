@@ -550,7 +550,10 @@ grants no workspace access.
 After approval, the owner selects individual chats and/or projects. The visitor
 can view and send messages only within that current selection; they cannot stop
 or resume agents, create chats, access terminals, inspect hosts, folders,
-attachments, agent instructions, activity, queues or other workspace records.
+attachments, agent instructions, activity, approval details, queues or other workspace records.
+Visitor snapshots use an explicit field projection; new desktop snapshot fields
+must be reviewed before they are exposed to visitors. Harness approvals remain
+with the desktop owner, even for a shared chat.
 Ending sharing revokes the in-memory session immediately. A reconnect needs a
 fresh link and approval.
 

@@ -53,7 +53,7 @@ function safeMessage(message: Message): Message {
 
 /**
  * The visitor receives only explicitly selected task/project data. Local paths,
- * agent instructions, attachment references, events, queues and terminal data
+ * agent instructions, attachment references, events, approvals, queues and terminal data
  * are intentionally absent from the remote view.
  */
 export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorShare, 'taskIds' | 'projectIds'>): Snapshot {
@@ -62,7 +62,9 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
   const agentIds = new Set(tasks.map(task => task.agentId));
   const projectIds = new Set(tasks.flatMap(task => task.projectId ? [task.projectId] : []));
   return {
-    ...snapshot,
+    // Explicit projection: new owner-only Snapshot fields must never become
+    // visitor-visible just because they were added to the desktop protocol.
+    settings: snapshot.settings,
     hosts: [],
     agents: snapshot.agents.filter(agent => agentIds.has(agent.id)).map(safeAgent),
     tasks,
@@ -72,5 +74,6 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
     projects: snapshot.projects.filter(project => projectIds.has(project.id)).map(safeProject),
     collaborations: [],
     queuedMessages: [],
+    approvalRequests: [],
   };
 }
