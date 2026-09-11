@@ -1,0 +1,50 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "monitter-opaque-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-11",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "api.monitter.com",
+      "custom_domain": true
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOM",
+        "class_name": "RelayRoom"
+      },
+      {
+        "name": "PAIRINGS",
+        "class_name": "PairingRegistry"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RelayRoom"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "PairingRegistry"
+      ]
+    }
+  ],
+  "account_id": "dcd4e18763e736678737420e8d1a2d7d",
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "none",
+    "run_worker_first": [
+      "/relay",
+      "/health",
+      "/pairing",
+      "/pairing/*"
+    ]
+  }
+}

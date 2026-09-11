@@ -1,0 +1,12 @@
+import { mkdir, copyFile, writeFile, readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+const root=fileURLToPath(new URL('../',import.meta.url));
+const output=join(root,'artifacts','relay',String(Date.now()));
+const lock=JSON.parse(await readFile(join(root,'package-lock.json'),'utf8'));
+const version=lock.packages['node_modules/ws'].version;
+await mkdir(output,{recursive:true});
+await copyFile(join(root,'scripts/relay-server.mjs'),join(output,'relay-server.mjs'));
+for(const file of ['monitter-relay.service','Caddyfile.example','README.md'])await copyFile(join(root,'deploy/relay',file),join(output,file));
+await writeFile(join(output,'package.json'),JSON.stringify({name:'monitter-relay',version:'0.1.0',private:true,type:'module',scripts:{start:'node relay-server.mjs'},dependencies:{ws:version}},null,2)+'\n');
+console.log(output);

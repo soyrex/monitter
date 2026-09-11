@@ -1,0 +1,31 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.soyrex.monitter'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.soyrex.monitter'
+        minSdk 26
+        targetSdk 35
+        versionCode 3
+        versionName '0.2.0'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    // AAPT's default asset ignore pattern excludes directories beginning with
+    // an underscore. SvelteKit publishes every JS module beneath `/_app/`.
+    androidResources {
+        ignoreAssetsPattern ''
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'com.google.android.gms:play-services-code-scanner:16.1.0'
+}

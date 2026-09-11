@@ -1,0 +1,25 @@
+[Unit]
+Description=Monitter encrypted device relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=monitter-relay
+Group=monitter-relay
+WorkingDirectory=/opt/monitter-relay
+Environment=NODE_ENV=production
+Environment=MONITTER_RELAY_HOST=127.0.0.1
+Environment=MONITTER_RELAY_PORT=8789
+ExecStart=/usr/bin/node /opt/monitter-relay/relay-server.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

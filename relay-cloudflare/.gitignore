@@ -1,0 +1,4 @@
+public/downloads/
+
+.wrangler/
+worker-configuration.d.ts

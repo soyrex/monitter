@@ -1,0 +1,14 @@
+{
+  "name": "monitter-relay-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "wrangler types && tsc --noEmit --skipLibCheck",
+    "test": "node test/integration.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "wrangler": "^4.40.0",
+    "ws": "^8.18.0"
+  }
+}

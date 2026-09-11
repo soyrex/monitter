@@ -482,3 +482,14 @@ automatic deliveries. Enabling does not replay old channel history.
 Queued peer requests use `origin: "channel-agent-mention"` and `senderAgentId`. They
 show their originating agent and recipient in the queue and can be removed, but not
 rewritten as if the agent authored new text. User-authored queued messages remain editable.
+
+## Mobile controller
+
+`docs/MOBILE-CONTROLLER.md` describes the paired mobile clients and relay.
+Remote control is opt-in. The versioned controller allowlist dispatches only
+approved encrypted sessions through the existing desktop bridge. Desktop and
+mobile navigation stay independent. Pairing uses ephemeral keys, QR invitations
+or one-use nine-digit rendezvous codes, and explicit desktop approval after
+comparing verification numbers. Session closure blocks further requests;
+already accepted desktop work continues. Mutation receipts are session-local,
+so disconnects require new pairing and uncertain sends are never auto-retried.

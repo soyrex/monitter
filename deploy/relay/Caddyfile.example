@@ -1,0 +1,4 @@
+# Replace the hostname with the chosen relay hostname before use.
+relay.example.com {
+    reverse_proxy 127.0.0.1:8789
+}

@@ -16,7 +16,14 @@
     "test:ui": "node scripts/ui-smoke.mjs",
     "test:native": "node scripts/native-smoke.mjs",
     "build:mac:local": "node scripts/build-macos.mjs --debug",
-    "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py"
+    "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py",
+    "test:controller": "node scripts/controller-protocol-test.mjs",
+    "test:remote": "node scripts/secure-transport-run.mjs",
+    "relay": "node scripts/relay-server.mjs",
+    "build:ios:web": "sh mobile-ios/build.sh",
+    "test:mobile": "node scripts/mobile-ui-test.mjs",
+    "package:relay": "node scripts/package-relay.mjs",
+    "test:android-bundle": "node scripts/android-bundle-test.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -28,7 +35,9 @@
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "dompurify": "^3.4.15",
-    "marked": "^18.0.12"
+    "marked": "^18.0.12",
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
@@ -36,6 +45,8 @@
     "@sveltejs/kit": "^2.65.1",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tauri-apps/cli": "^2",
+    "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.1",
     "svelte": "^5.56.3",
     "svelte-check": "^4.6.0",
     "typescript": "~6.0.3",

@@ -1,0 +1,8 @@
+MonitterIOS/Web/*
+!MonitterIOS/Web/.gitkeep
+.build/
+
+xcuserdata/
+*.xcuserstate
+*.mobileprovision
+*.p12
