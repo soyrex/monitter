@@ -29,6 +29,13 @@
     Cloud,
     Command,
     Folder,
+    Code,
+    Rocket,
+    Globe,
+    Database,
+    Wrench,
+    Layers,
+    Briefcase,
     HardDrive,
     LoaderCircle,
     LayoutDashboard,
@@ -818,6 +825,13 @@
   const avatarSrc = (agent: Agent | null | undefined) => {
     const value = agent?.avatar;
     return value && /^data:image\/(png|jpeg|webp);base64,/i.test(value) ? value : null;
+  };
+  const agentAvatarIcons = [Bot, Terminal, Code, Rocket, Wrench, Layers, Briefcase, Database, Globe, Network];
+  const agentAvatarIcon = (agent: Agent | null | undefined) => {
+    const seed = agent?.id || agent?.name || 'agent';
+    let hash = 0;
+    for (let index = 0; index < seed.length; index += 1) hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+    return agentAvatarIcons[hash % agentAvatarIcons.length];
   };
   async function chooseAvatar(file?: File) {
     if (!agentDraft || !file) return;
@@ -2041,7 +2055,7 @@
   {@const agent = snapshot?.agents.find(item=>item.id===task.agentId)}
   <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
     <button class="task-select" onclick={() => routeTask(task)} title={task.title}>
-      {#if detail}<span class="avatar small" style={`--agent-color:${agent?.color ?? '#3f9d6a'}`} title={agent?.name ?? 'Agent'} aria-label={agent?.name ?? 'Agent'}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{(agent?.name ?? 'A').slice(0,1).toUpperCase()}{/if}</span>{/if}
+      {#if detail}<span class="avatar small" title={agent?.name ?? 'Agent'} aria-label={agent?.name ?? 'Agent'}>{@render avatarVisual(agent, 12)}</span>{/if}
       <span class={`dot ${task.status}`}></span><span class="chat-copy"><span>{task.title}</span>
         {#if detail}<span class="chat-meta">{snapshot?.agents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
       </span>
@@ -2058,8 +2072,17 @@
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
 {/snippet}
 
+{#snippet avatarVisual(agent: Agent | null | undefined, size = 13)}
+  {#if avatarSrc(agent)}
+    <img src={avatarSrc(agent)!} alt="" />
+  {:else}
+    {@const Icon = agentAvatarIcon(agent)}
+    <Icon {size} strokeWidth={1.8} aria-hidden="true" />
+  {/if}
+{/snippet}
+
 {#snippet messageAvatar(agent: Agent | null | undefined)}
-  {#if agent}<span class="avatar message-avatar" style={`--agent-color:${agent.color}`} title={agent.name}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt=""/>{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span>{/if}
+  {#if agent}<span class="avatar message-avatar" title={agent.name}>{@render avatarVisual(agent, 12)}</span>{/if}
 {/snippet}
 
 {#snippet agentWaiting(agent: Agent | null | undefined, starting = false)}
@@ -2412,7 +2435,7 @@
             </div>
             <div class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={visibleEvents} {goalError}/></div>
             <div class="detail-scroll" class:hidden={detailTab==='timeline' || (detailTab==='git' && gitState.repository===true)}>
-              <details class="agent-identity" open aria-label="Agent identity"><summary><span class="avatar identity-avatar" style={`--agent-color:${selectedAgent?.color ?? '#3f9d6a'}`}>{#if avatarSrc(selectedAgent)}<img src={avatarSrc(selectedAgent)!} alt="" />{:else}{(selectedAgent?.name ?? 'A').slice(0,1).toUpperCase()}{/if}</span><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary><div class="identity-actions"><button onclick={()=>{if(selectedAgent){routeAgentSettings({...selectedAgent})}}}>Change avatar</button><p>{selectedAgent?.description || 'No agent description.'}</p></div></details>
+              <details class="agent-identity" open aria-label="Agent identity"><summary><span class="avatar identity-avatar">{@render avatarVisual(selectedAgent, 17)}</span><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary><div class="identity-actions"><button onclick={()=>{if(selectedAgent){routeAgentSettings({...selectedAgent})}}}>Change avatar</button><p>{selectedAgent?.description || 'No agent description.'}</p></div></details>
               <dl>
                 <div>
                   <dt>harness</dt>
@@ -2493,8 +2516,8 @@
             ),`agent-chats:${agent.id}`)}
           <section class="agent-group" class:has-chats={agentTasks.length > 0 && !collapsedAgents[agent.id]}>
             <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
-              <button class="avatar agent-avatar-toggle" style={`--agent-color:${agent.color}`} aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={()=>collapsedAgents[agent.id]=!collapsedAgents[agent.id]}>
-                {#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0, 1).toUpperCase()}{/if}
+              <button class="avatar agent-avatar-toggle" aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={()=>collapsedAgents[agent.id]=!collapsedAgents[agent.id]}>
+                {@render avatarVisual(agent, 14)}
                 <span class="avatar-toggle-overlay" aria-hidden="true">{#if collapsedAgents[agent.id]}<ChevronRight size={16}/>{:else}<ChevronDown size={16}/>{/if}</span>
               </button><button
                 class="agent-name"
@@ -2578,7 +2601,7 @@
     </nav>
     {:else}<nav class="agent-rail" aria-label="Agents" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
       {#each sidebarSorted(snapshot?.agents ?? [],'agents') as agent}<button use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}} class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
-        <span class="avatar" style={`--agent-color:${agent.color}`}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span>
+        <span class="avatar">{@render avatarVisual(agent, 15)}</span>
         {#if activeTasks.some(task=>task.agentId===agent.id && task.status==='running')}<span class="rail-running" aria-label="Running"></span>{/if}
       </button>{/each}
       <button class="icon" aria-label="New agent" title="New agent" onclick={()=>{routeAgentSettings(blankAgent())}}><Plus size={17}/></button>
@@ -2636,7 +2659,7 @@
   </div>{/if}
 </Modal>
 
-{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each (snapshot?.agents ?? []).filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar" style={`--agent-color:${agent.color}`}>{#if avatarSrc(agent)}<img src={avatarSrc(agent)!} alt="" />{:else}{agent.name.slice(0,1).toUpperCase()}{/if}</span><div><b>{agent.name}</b><small>{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
+{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each (snapshot?.agents ?? []).filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small>{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
 
 {#snippet agentEditor()}
   <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each snapshot?.agents??[] as agent}<option value={agent.id}>{agent.name}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
@@ -2924,8 +2947,8 @@
                 )
                   ? channelDraft.agentIds.filter((id) => id !== agent.id)
                   : [...channelDraft.agentIds, agent.id])}
-            /><span class="avatar small" style={`--agent-color:${agent.color}`}
-              >{agent.name.slice(0, 1)}</span
+            /><span class="avatar small"
+              >{@render avatarVisual(agent, 12)}</span
             >{agent.name}<small>{agent.provider}</small></label
           >{/each}
       </fieldset>
@@ -3141,7 +3164,7 @@
     height: 23px;
     border-radius: 6px;
     color: white;
-    background: var(--agent-color, var(--accent));
+    background: var(--accent);
     font: calc(11px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .agent-avatar-toggle { position:relative; padding:0; border:0; overflow:hidden; cursor:pointer; }

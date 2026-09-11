@@ -62,7 +62,8 @@ archiving or deleting prevents queued follow-ups from launching; task deletion r
 `Agent.avatar` is a nullable embedded PNG/JPEG/WebP Base64 data URL. Missing avatars migrate to null.
 The frontend accepts files up to 2 MiB; the backend rejects remote URLs, SVG, malformed Base64 and
 serialized values above 3 MiB. Images stay in the app's private local state; selecting or removing
-an avatar does not alter the agent's native session. The sidebar and run detail fall back to initials.
+an avatar does not alter the agent's native session. Missing avatars use a deterministic icon from
+the bundled icon set on the active theme accent colour.
 
 An existing chat header contains its subject, Resume and the task overflow menu, plus Stop while
 running. Folder, harness, model, host, project and permissions appear at the top of run detail with
