@@ -494,3 +494,24 @@ or one-use nine-digit rendezvous codes, and explicit desktop approval after
 comparing verification numbers. Session closure blocks further requests;
 already accepted desktop work continues. Mutation receipts are session-local,
 so disconnects require new pairing and uncertain sends are never auto-retried.
+
+## Shared operators
+
+Workspace sharing is a separate, opt-in capability built on the same ephemeral,
+encrypted one-use pairing transport. The desktop owner enters their display name,
+shares a one-use link or quoted nine-digit code, compares the verification code,
+and explicitly approves the visitor's declared display name. Pairing by itself
+grants no workspace access.
+
+After approval, the owner selects individual chats and/or projects. The visitor
+can view and send messages only within that current selection; they cannot stop
+or resume agents, create chats, access terminals, inspect hosts, folders,
+attachments, agent instructions, activity, queues or other workspace records.
+Ending sharing revokes the in-memory session immediately. A reconnect needs a
+fresh link and approval.
+
+Shared user messages are stored and sent to the model with visible attribution:
+`@(Alex): message`. The execution prompt also names the two operators, such as
+`Alex (primary user)` and `Luke (visitor)`, so attribution is model context
+rather than an implicit authority change. The UI renders the operator name and
+avatar separately from the message text.

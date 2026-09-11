@@ -6,6 +6,7 @@ import type { ControllerClient } from './protocol';
 
 export type RemoteConnectionStatus = 'connecting' | 'waiting_for_peer' | 'pending' | 'awaiting_approval' | 'connected' | 'rejected' | 'closed' | 'error';
 export interface RemoteConnectionState { readonly status: RemoteConnectionStatus; readonly error?: string; readonly verificationCode?: string; }
+export interface CollaboratorIdentity { readonly name: string; readonly role: 'visitor'; }
 export interface ControllerInvitationV1 { readonly version: 1; readonly relayUrl: string; readonly room: string; readonly secret: string; }
 export interface ControllerInvitationV2 { readonly version: 2; readonly relayUrl: string; readonly room: string; readonly publicKey: string; }
 export type ControllerInvitation = ControllerInvitationV1 | ControllerInvitationV2;
@@ -14,6 +15,7 @@ export interface DesktopSession {
   readonly invitation: string;
   getStatus(): RemoteConnectionStatus;
   getVerificationCode(): string | null;
+  getPeer(): CollaboratorIdentity | null;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   onPendingPeer(listener: () => void): () => void;
   approve(): Promise<void>;
@@ -57,6 +59,12 @@ function parseInvitation(value: string): ControllerInvitation {
   throw new Error('Invalid controller invitation.');
 }
 function asObject(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+function collaborator(value: unknown): CollaboratorIdentity | null {
+  const candidate = asObject(value);
+  if (!candidate || candidate.role !== 'visitor' || typeof candidate.name !== 'string') return null;
+  const name = candidate.name.trim();
+  return /^[\p{L}\p{N}][\p{L}\p{N} ._'’-]{1,47}$/u.test(name) ? { name, role: 'visitor' } : null;
+}
 
 class PairingConnection {
   protected socket: WebSocket | null = null;
@@ -181,9 +189,11 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
   const invitationData: ControllerInvitationV2 = { version: 2, relayUrl, room: bytesToBase64url(randomBytes(18)), publicKey: bytesToBase64url(publicKey) };
   const session = new class extends PairingConnection {
     private approved = false;
+    private peer: CollaboratorIdentity | null = null;
     private readonly pendingListeners = new Set<() => void>();
     private readonly dispatcher = new ControllerDispatcher(bridge);
     readonly invitation = JSON.stringify(invitationData);
+    getPeer() { return this.peer; }
     onPendingPeer(listener: () => void) { this.pendingListeners.add(listener); return () => this.pendingListeners.delete(listener); }
     async approve() {
       if (!this.channel || this.status !== 'pending') throw new Error('No pending paired device to approve.');
@@ -195,6 +205,10 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value) throw new Error('Invalid paired message.');
       if (value.type === 'pair-request' && !this.approved) {
+        if (Object.hasOwn(value, 'operator')) {
+          this.peer = collaborator(value.operator);
+          if (!this.peer) throw new Error('Invalid collaborator identity.');
+        }
         this.setStatus('pending'); for (const listener of this.pendingListeners) listener(); return;
       }
       if (value.type !== 'rpc' || !this.approved || this.status !== 'connected' || typeof value.json !== 'string') throw new Error('Unapproved controller request.');
@@ -205,14 +219,15 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
   return session;
 }
 
-export async function createMobileSession(invitation: string): Promise<MobileSession> {
+export async function createMobileSession(invitation: string, operator?: CollaboratorIdentity): Promise<MobileSession> {
+  if (operator && !collaborator(operator)) throw new Error('Enter a collaborator name of 2-48 characters.');
   const invitationData = parseInvitation(invitation);
   const keyPair = invitationData.version === 2 ? await generatePairingKeyPair() : null;
   const publicKey = keyPair ? await exportPairingPublicKey(keyPair.publicKey) : undefined;
   const expectedPeerPublicKey = invitationData.version === 2 ? base64urlToBytes(invitationData.publicKey) : undefined;
   const session = new class extends PairingConnection {
     private readonly pending = new Map<string, { resolve: (value: ControllerResult) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-    protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure({ type: 'pair-request' }); }
+    protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request' }); }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
       if (value.type === 'pair-request') return;

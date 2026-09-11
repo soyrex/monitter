@@ -80,6 +80,7 @@
     Sandbox,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
+  import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage } from '$lib/operator-sharing';
   import Modal from "$lib/components/Modal.svelte";
   import Markdown from "$lib/components/Markdown.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
@@ -827,8 +828,18 @@
   const profileList = (value: string[] | undefined) => (value ?? []).join("\n");
   const parseProfileList = (value: string) => value.split(/\n/);
   const senderName = (message: (typeof messages)[number]) => {
+    if (message.role === 'user') return splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')).name;
     const sender = (message as typeof message & { senderAgentId?: string | null }).senderAgentId;
     return sender ? snapshot?.agents.find(agent => agent.id === sender)?.name ?? "Agent" : null;
+  };
+  const operatorMessageText = (value: string) => splitOperatorMessage(value.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')).text;
+  const operatorShareFor = (taskId: string) => {
+    const share = $activeOperatorShare;
+    return share?.taskIds.includes(taskId) ? share : null;
+  };
+  const operatorPrompt = (taskId: string, value: string) => {
+    const share = operatorShareFor(taskId);
+    return share ? formatOperatorMessage([share.primary, share.visitor], share.primary, value) : value;
   };
   const delegated = $derived(
     selectedTask
@@ -1527,7 +1538,7 @@
     const sentDraft = composer;
     const key = `task:${taskId}`, attachmentIds=currentAttachments.map(item=>item.id);
     setComposerPending(key, true);
-    try { const result = await run(() => bridge.sendMessage(taskId, promptText(sentDraft),attachmentIds)); if (result) {clearSentDraft(key, sentDraft);clearAttachments(key,attachmentIds);}  }
+    try { const result = await run(() => bridge.sendMessage(taskId, operatorPrompt(taskId, promptText(sentDraft)),attachmentIds)); if (result) {clearSentDraft(key, sentDraft);clearAttachments(key,attachmentIds);}  }
     finally { setComposerPending(key, false); }
   }
   function clearSentDraft(key: string, sentDraft: string) {
@@ -2488,19 +2499,19 @@
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' ? `tool:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}<RunActivity event={item.value} />
               {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
-              {:else}{@const message = item.value}<article
+              {:else}{@const message = item.value}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                   class:system={message.role === "system"}
                   class="message"
                 >
                   <div class="message-meta">
-                    {@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}
+                    {#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}
                     <span
                       >{senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")}</span
                     ><time>{date(message.createdAt)}</time>
                   </div>
-                  <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
+                  <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
                 </article>{/if}{/each}{:else}<div class="blank-conversation">
                 <Terminal size={24} />
                 <h2>No messages yet</h2>
@@ -4466,6 +4477,7 @@
   @keyframes waiting-turn { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .waiting-spinner { animation:none; } }
   .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }
+  .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   .attachment-tools .icon { width: 24px; height: 24px; }
   .attachment-tools small { font-size: calc(10px * var(--interface-font-ratio, 1)); }

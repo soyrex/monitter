@@ -80,6 +80,17 @@ try {
   const desktopClosed = once(callback => desktop.subscribe(state => { if (state.status === 'closed') callback(state); }));
   mobile.close(); await desktopClosed; desktop.close();
 
+  // A collaboration visitor declares a bounded display identity inside the
+  // encrypted pairing request; the host sees it only before explicit approval.
+  const sharingDesktop = await createDesktopSession(relayUrl, bridge);
+  const sharingPending = once(callback => sharingDesktop.subscribe(state => { if (state.status === 'pending') callback(state); }));
+  const visitor = await createMobileSession(sharingDesktop.invitation, { name: 'Luke', role: 'visitor' });
+  await sharingPending;
+  assert.deepEqual(sharingDesktop.getPeer(), { name: 'Luke', role: 'visitor' });
+  await sharingDesktop.approve();
+  await once(callback => visitor.subscribe(state => { if (state.status === 'connected') callback(state); }));
+  visitor.close(); sharingDesktop.close();
+
   // v1 descriptors remain accepted for mobile compatibility with existing sessions.
   const legacy = await createMobileSession(JSON.stringify({ version: 1, relayUrl, room: 'abcdefghijklmnopqrstuv', secret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }));
   legacy.close();
