@@ -20,7 +20,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -61,6 +61,44 @@ struct RunRegistry {
     native_sessions: HashMap<String, String>,
 }
 
+/// The durable fields supplied by a harness when a tool needs a human
+/// decision. The service assigns the immutable ID and timestamps.
+#[derive(Debug, Clone)]
+pub(crate) struct CreateApprovalRequest {
+    pub task_id: String,
+    pub provider: String,
+    pub run_id: String,
+    pub tool: String,
+    pub summary: String,
+    pub detail: String,
+    pub risk: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalDecision {
+    ApproveOnce,
+    Deny,
+}
+
+impl ApprovalDecision {
+    fn from_stored(value: &str) -> Result<Self, String> {
+        match value {
+            "approve_once" => Ok(Self::ApproveOnce),
+            "deny" => Ok(Self::Deny),
+            _ => Err("Approval decision must be approve_once or deny.".into()),
+        }
+    }
+
+    fn stored(self) -> &'static str {
+        match self {
+            Self::ApproveOnce => "approve_once",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+type ApprovalSignal = Result<ApprovalDecision, String>;
+
 pub(crate) struct Service {
     app: Option<AppHandle>,
     store: store::Store,
@@ -74,6 +112,10 @@ pub(crate) struct Service {
     runtime_dir: PathBuf,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
     terminals: Mutex<HashMap<String, Arc<terminal::Session>>>,
+    // These channels deliberately are not persisted. A restart interrupts
+    // native runs, and a persisted request remains visible for audit/review
+    // without claiming a tool can be resumed after that interruption.
+    approval_waiters: Mutex<HashMap<String, Vec<mpsc::Sender<ApprovalSignal>>>>,
 }
 
 const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -134,6 +176,7 @@ impl Service {
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
+            approval_waiters: Mutex::new(HashMap::new()),
         });
         Ok(service)
     }
@@ -143,6 +186,169 @@ impl Service {
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())
             .map(|data| data.snapshot.clone())
+    }
+
+    /// Creates the durable pending request before the harness waits. Callers
+    /// should retain the returned ID and use `wait_for_approval` rather than
+    /// polling the snapshot.
+    pub(crate) fn create_approval_request(
+        &self,
+        input: CreateApprovalRequest,
+    ) -> Result<ApprovalRequest, String> {
+        if input.task_id.trim().is_empty()
+            || input.provider.trim().is_empty()
+            || input.run_id.trim().is_empty()
+            || input.tool.trim().is_empty()
+            || input.summary.trim().is_empty()
+        {
+            return Err("Approval task, provider, run, tool, and summary are required.".into());
+        }
+        if !matches!(input.risk.as_str(), "low" | "medium" | "high" | "unknown") {
+            return Err("Approval risk must be low, medium, high, or unknown.".into());
+        }
+        self.mutate(Some(input.task_id.clone()), |snapshot| {
+            let task = snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == input.task_id)
+                .ok_or("Task was not found.")?;
+            if task.provider != input.provider {
+                return Err("Approval provider does not match the task's saved provider.".into());
+            }
+            let approval = ApprovalRequest {
+                id: id(),
+                task_id: input.task_id,
+                provider: input.provider,
+                run_id: input.run_id,
+                tool: input.tool,
+                summary: input.summary,
+                detail: input.detail,
+                risk: input.risk,
+                status: "pending".into(),
+                created_at: now(),
+                resolved_at: None,
+                decision: None,
+            };
+            snapshot.approval_requests.push(approval.clone());
+            Ok(approval)
+        })
+    }
+
+    /// Waits for the matching UI decision without polling disk. `keep_waiting`
+    /// lets a runner stop promptly when its owned process is cancelled.
+    pub(crate) fn wait_for_approval<F>(
+        &self,
+        approval_id: &str,
+        keep_waiting: F,
+    ) -> Result<ApprovalDecision, String>
+    where
+        F: Fn() -> bool,
+    {
+        let (sender, receiver) = mpsc::channel();
+        // Hold the waiter registry while observing durable state. Resolution
+        // persists first and only then takes this same lock to notify, which
+        // prevents a decision from being missed between observation and
+        // subscription.
+        {
+            let mut waiters = self
+                .approval_waiters
+                .lock()
+                .map_err(|_| "Monitter approval waiter lock failed.".to_string())?;
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.".to_string())?;
+            let request = data
+                .snapshot
+                .approval_requests
+                .iter()
+                .find(|request| request.id == approval_id)
+                .ok_or("Approval request was not found.")?;
+            if request.status != "pending" {
+                return request
+                    .decision
+                    .as_deref()
+                    .map(ApprovalDecision::from_stored)
+                    .transpose()?
+                    .ok_or_else(|| format!("Approval request is {}.", request.status));
+            }
+            waiters.entry(approval_id.into()).or_default().push(sender);
+        }
+        loop {
+            if !keep_waiting() {
+                return Err("Approval request was interrupted before a decision.".into());
+            }
+            match receiver.recv_timeout(Duration::from_millis(250)) {
+                Ok(signal) => return signal,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Approval decision listener disconnected.".into())
+                }
+            }
+        }
+    }
+
+    fn notify_approval_waiters(&self, approval_id: &str, signal: ApprovalSignal) {
+        let waiters = self
+            .approval_waiters
+            .lock()
+            .ok()
+            .and_then(|mut waiters| waiters.remove(approval_id));
+        for waiter in waiters.unwrap_or_default() {
+            let _ = waiter.send(signal.clone());
+        }
+    }
+
+    fn resolve_approval_request(
+        &self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<Snapshot, String> {
+        let snapshot = self.mutate(None, |snapshot| {
+            let request = snapshot
+                .approval_requests
+                .iter_mut()
+                .find(|request| request.id == approval_id)
+                .ok_or("Approval request was not found.")?;
+            if request.status != "pending" {
+                return Err("Approval request is no longer pending.".into());
+            }
+            request.status = match decision {
+                ApprovalDecision::ApproveOnce => "approved",
+                ApprovalDecision::Deny => "denied",
+            }
+            .into();
+            request.resolved_at = Some(now());
+            request.decision = Some(decision.stored().into());
+            Ok(snapshot.clone())
+        })?;
+        // `mutate` has already persisted the decision before a runner can act
+        // on it, so an approval never authorizes a tool only in memory.
+        self.notify_approval_waiters(approval_id, Ok(decision));
+        Ok(snapshot)
+    }
+
+    /// Terminal handling for a runner that abandons an unanswered request
+    /// (for example after cancellation). This never changes a user decision.
+    pub(crate) fn expire_approval_request(&self, approval_id: &str) -> Result<Snapshot, String> {
+        let snapshot = self.mutate(None, |snapshot| {
+            let request = snapshot
+                .approval_requests
+                .iter_mut()
+                .find(|request| request.id == approval_id)
+                .ok_or("Approval request was not found.")?;
+            if request.status != "pending" {
+                return Err("Approval request is no longer pending.".into());
+            }
+            request.status = "expired".into();
+            request.resolved_at = Some(now());
+            Ok(snapshot.clone())
+        })?;
+        self.notify_approval_waiters(
+            approval_id,
+            Err("Approval request expired before a decision.".into()),
+        );
+        Ok(snapshot)
     }
 
     fn dispatch_startup_queues(self: &Arc<Self>) {
@@ -494,18 +700,65 @@ impl Service {
         }
     }
 
+    /// Deliver a turn to a live Claude stream-json process. `false` means this
+    /// task has no resident transport and should take the ordinary launch path;
+    /// it never means "start a one-shot --resume process".
+    fn send_to_resident(&self, task_id: &str, prompt: &str) -> Result<bool, String> {
+        let control = self
+            .runs
+            .lock()
+            .map_err(|_| "Monitter run registry lock failed.".to_string())?
+            .tasks
+            .get(task_id)
+            .cloned();
+        let Some(control) = control else {
+            return Ok(false);
+        };
+        if !control.is_resident() {
+            return Ok(false);
+        }
+        let frame = adapters::claude::user_frame(prompt).to_string();
+        control.send_control(&frame)?;
+        Ok(true)
+    }
+
+    fn has_resident_run(&self, task_id: &str) -> bool {
+        self.runs
+            .lock()
+            .ok()
+            .and_then(|runs| runs.tasks.get(task_id).cloned())
+            .map(|control| control.is_resident())
+            .unwrap_or(false)
+    }
+
     fn set_task_archived(&self, task_id: &str, archived: bool) -> Result<Snapshot, String> {
-        self.mutate(Some(task_id.into()), |snapshot| {
-            let task = snapshot
-                .tasks
-                .iter_mut()
-                .find(|task| task.id == task_id)
-                .ok_or_else(|| "Task was not found.".to_string())?;
-            if task.status == "running" {
-                return Err("Cancel a running task before changing its archive state.".into());
+        let stop_resident = archived && self.has_resident_run(task_id);
+        let snapshot = self.mutate(Some(task_id.into()), |snapshot| {
+            {
+                let task = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == task_id)
+                    .ok_or_else(|| "Task was not found.".to_string())?;
+                if task.status == "running" {
+                    return Err("Cancel a running task before changing its archive state.".into());
+                }
+                task.archived = archived;
+                if stop_resident {
+                    task.status = "interrupted".into();
+                }
+                task.updated_at = now();
             }
-            task.archived = archived;
-            task.updated_at = now();
+            if stop_resident {
+                snapshot.events.push(RunEvent {
+                    id: id(),
+                    task_id: task_id.into(),
+                    kind: "status".into(),
+                    title: "Resident Claude session stopped for archive".into(),
+                    detail: String::new(),
+                    created_at: now(),
+                });
+            }
             if archived {
                 for message in &mut snapshot.queued_messages {
                     if message.task_id == task_id && message.status == "queued" {
@@ -516,7 +769,11 @@ impl Service {
                 }
             }
             Ok(snapshot.clone())
-        })
+        })?;
+        if stop_resident {
+            self.abort_run(task_id);
+        }
+        Ok(snapshot)
     }
 
     fn save_project(&self, mut project: Project) -> Result<Snapshot, String> {
@@ -701,7 +958,7 @@ impl Service {
     }
 
     pub(crate) fn finish(self: &Arc<Self>, task_id: &str, status: &str, error: Option<String>) {
-        let should_route = self
+        let (should_route, expired_approvals) = self
             .mutate_data(Some(task_id.into()), |data| {
                 let final_status = {
                     let state = &mut data.snapshot;
@@ -735,10 +992,71 @@ impl Service {
                         created_at: now(),
                     });
                 }
-                Ok(final_status.0 == "completed" && final_status.1)
+                let resolved_at = now();
+                let expired_approvals = data
+                    .snapshot
+                    .approval_requests
+                    .iter_mut()
+                    .filter(|request| request.task_id == task_id && request.status == "pending")
+                    .map(|request| {
+                        request.status = "expired".into();
+                        request.resolved_at = Some(resolved_at);
+                        request.id.clone()
+                    })
+                    .collect::<Vec<_>>();
+                Ok((
+                    final_status.0 == "completed" && final_status.1,
+                    expired_approvals,
+                ))
+            })
+            .unwrap_or((false, vec![]));
+        for approval_id in expired_approvals {
+            self.notify_approval_waiters(
+                &approval_id,
+                Err("Approval request expired because its task ended.".into()),
+            );
+        }
+        self.release_run(task_id);
+        let routes = if should_route {
+            match self.mutate_data(Some(task_id.into()), |data| {
+                prepare_channel_mention_routes(data, task_id)
+            }) {
+                Ok(routes) => routes,
+                Err(error) => {
+                    self.record(task_id, "status", "Channel peer routing unavailable", error);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+        self.dispatch_queued(task_id);
+        for (target_task_id, _) in routes {
+            self.dispatch_queued(&target_task_id);
+        }
+    }
+
+    /// A resident Claude process has ended one turn but is still waiting for
+    /// its next stdin user frame. Do not release the process or native-session
+    /// writer lock here: doing so would turn the following message into a
+    /// separate `--resume` invocation.
+    pub(crate) fn complete_resident_turn(self: &Arc<Self>, task_id: &str) {
+        let should_route = self
+            .mutate_data(Some(task_id.into()), |data| {
+                let state = &mut data.snapshot;
+                let task = state
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == task_id)
+                    .ok_or_else(|| "Task was not found.".to_string())?;
+                let was_running = task.status == "running";
+                if task.status != "interrupted" {
+                    task.status = "completed".into();
+                }
+                task.updated_at = now();
+                Ok(was_running && task.status == "completed")
             })
             .unwrap_or(false);
-        self.release_run(task_id);
         let routes = if should_route {
             match self.mutate_data(Some(task_id.into()), |data| {
                 prepare_channel_mention_routes(data, task_id)
@@ -931,7 +1249,15 @@ impl Service {
             Ok(Some(append_attachment_paths(prompt, &attachments)))
         })?;
         if let Some(execution_prompt) = execution_prompt {
-            if let Err(error) = self.launch(task_id.clone(), execution_prompt) {
+            let launched = match self.send_to_resident(&task_id, &execution_prompt) {
+                Ok(true) => Ok(()),
+                Ok(false) => self.launch(task_id.clone(), execution_prompt),
+                Err(error) => {
+                    self.abort_run(&task_id);
+                    Err(error)
+                }
+            };
+            if let Err(error) = launched {
                 self.finish(&task_id, "error", Some(error));
             }
         }
@@ -1134,7 +1460,15 @@ impl Service {
                 &attachments,
             ))
         })?;
-        if let Err(error) = self.launch(queued.task_id.clone(), prompt) {
+        let launched = match self.send_to_resident(&queued.task_id, &prompt) {
+            Ok(true) => Ok(()),
+            Ok(false) => self.launch(queued.task_id.clone(), prompt),
+            Err(error) => {
+                self.abort_run(&queued.task_id);
+                Err(error)
+            }
+        };
+        if let Err(error) = launched {
             self.finish(&queued.task_id, "error", Some(error));
         }
         self.snapshot()
@@ -1180,13 +1514,14 @@ impl Service {
     }
 
     fn cancel(&self, task_id: &str) -> Result<Snapshot, String> {
-        self.mutate(Some(task_id.into()), |state| {
+        let resident = self.has_resident_run(task_id);
+        let expired_approvals = self.mutate(Some(task_id.into()), |state| {
             let ix = state
                 .tasks
                 .iter()
                 .position(|task| task.id == task_id)
                 .ok_or_else(|| "Task was not found.".to_string())?;
-            if state.tasks[ix].status != "running" {
+            if state.tasks[ix].status != "running" && !resident {
                 return Err("Task is not running.".into());
             }
             state.tasks[ix].status = "interrupted".into();
@@ -1207,8 +1542,25 @@ impl Service {
                     );
                 }
             }
-            Ok(state.clone())
+            let resolved_at = now();
+            let expired = state
+                .approval_requests
+                .iter_mut()
+                .filter(|request| request.task_id == task_id && request.status == "pending")
+                .map(|request| {
+                    request.status = "expired".into();
+                    request.resolved_at = Some(resolved_at);
+                    request.id.clone()
+                })
+                .collect::<Vec<_>>();
+            Ok(expired)
         })?;
+        for approval_id in expired_approvals {
+            self.notify_approval_waiters(
+                &approval_id,
+                Err("Approval request expired because its task was cancelled.".into()),
+            );
+        }
         if let Ok(runs) = self.runs.lock() {
             if let Some(control) = runs.tasks.get(task_id) {
                 control.cancel();
@@ -2089,6 +2441,17 @@ fn append_attachment_paths(prompt: String, attachments: &[attachments::Attachmen
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
     state.0.snapshot()
+}
+
+#[tauri::command]
+fn resolve_approval(
+    state: State<'_, AppState>,
+    id: String,
+    decision: String,
+) -> Result<Snapshot, String> {
+    state
+        .0
+        .resolve_approval_request(&id, ApprovalDecision::from_stored(&decision)?)
 }
 
 #[tauri::command]
@@ -3836,6 +4199,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            resolve_approval,
             finish_quit,
             read_attachment_file,
             store_attachment,
@@ -4963,6 +5327,93 @@ name@rafa.test",
             model_settings: None,
             sandbox: None,
         }
+    }
+
+    #[test]
+    fn approval_decision_persists_and_wakes_a_waiter() {
+        let dir = temp_dir("approval-decision");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(task_input(agent_id, "Approval", None))
+            .unwrap();
+        let approval = service
+            .create_approval_request(CreateApprovalRequest {
+                task_id: task.id.clone(),
+                provider: "codex".into(),
+                run_id: "run-1".into(),
+                tool: "shell".into(),
+                summary: "Write a file".into(),
+                detail: "The harness requested a workspace write.".into(),
+                risk: "medium".into(),
+            })
+            .unwrap();
+        let waiter = Arc::clone(&service);
+        let approval_id = approval.id.clone();
+        let waiting = thread::spawn(move || waiter.wait_for_approval(&approval_id, || true));
+        service
+            .resolve_approval_request(&approval.id, ApprovalDecision::ApproveOnce)
+            .unwrap();
+        assert_eq!(
+            waiting.join().unwrap().unwrap(),
+            ApprovalDecision::ApproveOnce
+        );
+        assert!(service
+            .resolve_approval_request(&approval.id, ApprovalDecision::Deny)
+            .is_err());
+        drop(service);
+
+        let reopened = Service::open(None, dir.clone()).unwrap();
+        let snapshot = reopened.snapshot().unwrap();
+        let restored = &snapshot.approval_requests[0];
+        assert_eq!(restored.status, "approved");
+        assert_eq!(restored.decision.as_deref(), Some("approve_once"));
+        assert!(restored.resolved_at.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancelling_a_task_expires_its_pending_approvals() {
+        let dir = temp_dir("approval-cancel");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(task_input(agent_id, "Approval", None))
+            .unwrap();
+        service
+            .mutate(Some(task.id.clone()), |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let approval = service
+            .create_approval_request(CreateApprovalRequest {
+                task_id: task.id.clone(),
+                provider: "codex".into(),
+                run_id: "run-2".into(),
+                tool: "shell".into(),
+                summary: "Write a file".into(),
+                detail: String::new(),
+                risk: "high".into(),
+            })
+            .unwrap();
+        service.cancel(&task.id).unwrap();
+        let request = service
+            .snapshot()
+            .unwrap()
+            .approval_requests
+            .into_iter()
+            .find(|item| item.id == approval.id)
+            .unwrap();
+        assert_eq!(request.status, "expired");
+        assert!(request.resolved_at.is_some());
+        assert_eq!(request.decision, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

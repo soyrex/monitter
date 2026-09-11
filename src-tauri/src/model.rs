@@ -193,6 +193,28 @@ pub struct QueuedMessage {
     #[serde(default)]
     pub origin: Option<String>,
 }
+
+/// A durable user decision requested by a harness tool. Runtime waiters are
+/// intentionally kept outside the snapshot: a restarted app has no process
+/// left that can safely resume an in-flight tool invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub task_id: String,
+    pub provider: String,
+    pub run_id: String,
+    pub tool: String,
+    pub summary: String,
+    pub detail: String,
+    pub risk: String,
+    pub status: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub resolved_at: Option<i64>,
+    #[serde(default)]
+    pub decision: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -332,6 +354,8 @@ pub struct Snapshot {
     pub collaborations: Vec<Collaboration>,
     #[serde(default)]
     pub queued_messages: Vec<QueuedMessage>,
+    #[serde(default)]
+    pub approval_requests: Vec<ApprovalRequest>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -486,6 +510,7 @@ pub fn default_snapshot() -> Snapshot {
         projects: vec![],
         collaborations: vec![],
         queued_messages: vec![],
+        approval_requests: vec![],
         settings: Settings {
             terminal_font_size: default_terminal_font_size(),
             chat_font_size: default_chat_font_size(),
@@ -623,6 +648,7 @@ mod task_migration_tests {
         assert_eq!(snapshot.settings.terminal_font_size, 14);
         assert_eq!(snapshot.settings.chat_font_size, 13);
         assert_eq!(snapshot.settings.interface_font_size, 14);
+        assert!(snapshot.approval_requests.is_empty());
     }
 
     #[test]

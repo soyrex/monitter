@@ -18,8 +18,8 @@ try {
   const open = name => page.locator('.sidebar .task-select').filter({ hasText:name }).click();
   await open('restore-a');
   await main.getByLabel('Task message', { exact:true }).fill('draft A survives reload');
-  await page.getByRole('button', { name:'Pane layout', exact:true }).click();
-  await page.getByRole('menuitem', { name:'Two columns', exact:true }).click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+p' : 'Control+p');
+  await page.getByRole('dialog', { name:'Controls', exact:true }).getByText('Two columns', { exact:true }).click();
   const second = page.locator('.pane-leaf').last();
   await second.click({ position:{ x:100, y:100 } });
   await open('restore-b');
@@ -27,14 +27,14 @@ try {
   const divider = page.getByRole('separator', { name:'Resize panes' }).first();
   await divider.focus();
   await divider.press((await divider.getAttribute('aria-orientation')) === 'vertical' ? 'ArrowRight' : 'ArrowDown');
-  await page.getByRole('button', { name:'Collapse main sidebar', exact:true }).click();
+  await page.getByRole('separator', { name:'Resize main sidebar', exact:true }).press('Enter');
   await page.waitForTimeout(20);
   await page.reload();
   await expect(page.locator('.pane-leaf')).toHaveCount(2);
   await expect(main.getByLabel('Task message', { exact:true })).toHaveValue('draft A survives reload');
   const restoredSecond = page.locator('.pane-leaf').last();
   await expect(restoredSecond.getByLabel('Task message', { exact:true })).toHaveValue('draft B survives reload');
-  await expect(page.getByRole('button', { name:'Expand main sidebar', exact:true })).toBeVisible();
+  await expect(page.getByRole('separator', { name:'Resize main sidebar', exact:true })).toHaveAttribute('aria-valuetext', /Collapsed/);
   await expect(page.getByRole('separator', { name:'Resize panes' }).first()).toHaveAttribute('aria-valuenow', '55');
   passed.push('reload restores pane layout ratio, selected pane tabs, drafts, and sidebar state');
   await restoredSecond.click({ position:{ x:100, y:100 } });

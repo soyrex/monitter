@@ -49,6 +49,7 @@ export interface MonitterBridge {
   cancelQueuedMessage(id: string): Promise<Snapshot>;
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
+  resolveApproval(approvalId: string, decision: 'approve_once' | 'deny'): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;
   saveChannel(channel: Channel): Promise<Snapshot>;
   setChannelAgentConversation(channelId: string, enabled: boolean, turnLimit: number): Promise<Snapshot>;
@@ -119,6 +120,7 @@ const nativeBridge: MonitterBridge = {
   cancelQueuedMessage: (id) => invoke<Snapshot>("cancel_queued_message", { id }),
   editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
   cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
+  resolveApproval: (approvalId, decision) => invoke<Snapshot>("resolve_approval", { approvalId, decision }),
   saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
   saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
   setChannelAgentConversation: (channelId, enabled, turnLimit) => invoke<Snapshot>("set_channel_agent_conversation", {channelId, enabled, turnLimit}),
@@ -158,6 +160,7 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   projects: [],
   collaborations: [],
   queuedMessages: [],
+  approvalRequests: [],
   settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125,
     showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard', busyMessageMode: 'queue' },
 });
@@ -189,6 +192,7 @@ const previewBridge: MonitterBridge = {
   cancelQueuedMessage: () => desktopOnly(),
   editQueuedMessage: () => desktopOnly(),
   cancelTask: () => desktopOnly(),
+  resolveApproval: () => desktopOnly(),
   saveSettings: () => desktopOnly(),
   saveChannel: () => desktopOnly(),
   setChannelAgentConversation: () => desktopOnly(),
@@ -252,6 +256,8 @@ export function getBridge(): MonitterBridge {
       editQueuedMessage: (id, text) => test.invoke("edit_queued_message", { id, text }) as Promise<Snapshot>,
       cancelTask: (taskId) =>
         test.invoke("cancel_task", { taskId }) as Promise<Snapshot>,
+      resolveApproval: (approvalId, decision) =>
+        test.invoke("resolve_approval", { approvalId, decision }) as Promise<Snapshot>,
       saveSettings: (settings) =>
         test.invoke("save_settings", { settings }) as Promise<Snapshot>,
       saveChannel: (channel) =>

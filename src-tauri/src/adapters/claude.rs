@@ -1,15 +1,19 @@
 use crate::{model::Task, runner::Parsed};
 use serde_json::Value;
 
-/// Build a non-interactive Claude Code command. With `-p`, Claude Code accepts
-/// a text prompt from a non-TTY stdin stream, so the shared local/SSH transport
-/// can supply the prompt without placing it in argv.
+/// Build Claude Code's headless, bidirectional transport. In stream-json mode
+/// the process deliberately remains alive after a result so its native context
+/// is available to the next user message on stdin.
 pub fn args(task: &Task) -> Vec<String> {
     let mut args = vec![
         "--print".into(),
+        "--input-format".into(),
+        "stream-json".into(),
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        "--permission-prompts".into(),
+        "host".into(),
     ];
     if task.sandbox == "yolo" {
         // Claude Code's documented non-interactive permission bypass.
@@ -22,6 +26,43 @@ pub fn args(task: &Task) -> Vec<String> {
         args.extend(["--model".into(), task.model.clone()]);
     }
     args
+}
+
+/// A new user turn on Claude Code's stream-json stdin protocol. `parent_tool_use_id`
+/// is required by the CLI schema even for ordinary top-level user turns.
+pub fn user_frame(prompt: &str) -> Value {
+    serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": prompt },
+        "parent_tool_use_id": Value::Null,
+    })
+}
+
+/// Answer the CLI-owned `can_use_tool` control request. The CLI validates both
+/// shapes strictly; classify the result so its audit telemetry reflects the
+/// actual desktop action rather than an inferred default.
+pub fn permission_response(request_id: &str, allow: bool, input: &Value) -> Value {
+    let response = if allow {
+        serde_json::json!({
+            "behavior": "allow",
+            "updatedInput": input,
+            "decisionClassification": "user_temporary",
+        })
+    } else {
+        serde_json::json!({
+            "behavior": "deny",
+            "message": "Denied by the Monitter user.",
+            "decisionClassification": "user_reject",
+        })
+    };
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": response,
+        }
+    })
 }
 
 fn session_id(value: &Value) -> Option<String> {
@@ -236,9 +277,13 @@ mod tests {
             args,
             vec![
                 "--print",
+                "--input-format",
+                "stream-json",
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--permission-prompts",
+                "host",
                 "--resume",
                 "abc123",
                 "--model",
@@ -247,6 +292,27 @@ mod tests {
         );
         assert!(!args.iter().any(|arg| arg.contains("skip-permissions")));
         assert!(!args.iter().any(|arg| arg == "acceptEdits"));
+    }
+
+    #[test]
+    fn frames_preserve_user_text_and_exact_permission_input() {
+        let user = user_frame("Continue this exact context.");
+        assert_eq!(user["type"], "user");
+        assert_eq!(user["message"]["content"], "Continue this exact context.");
+        assert!(user["parent_tool_use_id"].is_null());
+
+        let input = serde_json::json!({"command": "git status --short"});
+        let allow = permission_response("request-1", true, &input);
+        assert_eq!(allow["response"]["request_id"], "request-1");
+        assert_eq!(allow["response"]["response"]["behavior"], "allow");
+        assert_eq!(allow["response"]["response"]["updatedInput"], input);
+
+        let deny = permission_response("request-2", false, &input);
+        assert_eq!(deny["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            deny["response"]["response"]["decisionClassification"],
+            "user_reject"
+        );
     }
 
     #[test]

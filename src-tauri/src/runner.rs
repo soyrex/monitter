@@ -2,7 +2,7 @@ use crate::{
     adapters,
     collaboration_transport::SessionGrant,
     model::{valid_sandbox_for_provider, Host, Task},
-    Service,
+    ApprovalDecision, CreateApprovalRequest, Service,
 };
 use serde_json::Value;
 use std::{
@@ -633,7 +633,7 @@ fn build_command_with_options(
             args
         }
         "opencode" => adapters::opencode::args(task),
-        "hermes" => adapters::hermes::args(task, &host.hermes_path),
+        "hermes" => adapters::hermes::args(task, &host.hermes_path, host.kind == "local"),
         _ => {
             return Err(format!(
                 "Provider '{}' is not implemented in Monitter.",
@@ -957,6 +957,86 @@ pub struct Parsed {
     pub failed: bool,
 }
 
+/// Hermes' gateway exposes a request ID that must be echoed on its dedicated
+/// control pipe. Other adapters have their own transport work; do not infer a
+/// response protocol from a generic tool event.
+fn hermes_approval(parsed: &Parsed) -> Option<(String, String, String, String)> {
+    let (kind, _, detail) = parsed.event.as_ref()?;
+    if kind != "approval" {
+        return None;
+    }
+    let value: Value = serde_json::from_str(detail).ok()?;
+    let request_id = value.get("requestId")?.as_str()?.trim();
+    if request_id.is_empty() {
+        return None;
+    }
+    let tool = value
+        .get("tool")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Hermes tool")
+        .to_owned();
+    let summary = value
+        .get("summary")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Hermes requests approval")
+        .to_owned();
+    let detail = value
+        .get("detail")
+        .cloned()
+        .unwrap_or(Value::Null)
+        .to_string();
+    Some((request_id.into(), tool, summary, detail))
+}
+
+/// Claude Code's headless SDK transport emits permission prompts as a control
+/// request rather than as an assistant tool/result message. Preserve the exact
+/// input that Claude supplied: an approval response may carry it back as
+/// `updatedInput`, and rewriting it would authorize a different operation.
+fn claude_approval(value: &Value) -> Option<(String, String, Value, String, String, String)> {
+    if value.get("type").and_then(Value::as_str) != Some("control_request") {
+        return None;
+    }
+    let request_id = value.get("request_id")?.as_str()?.trim();
+    let request = value.get("request")?;
+    if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool")
+        || request_id.is_empty()
+    {
+        return None;
+    }
+    let tool = request
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("Claude tool")
+        .to_owned();
+    let input = request.get("input").cloned().unwrap_or(Value::Null);
+    let summary = request
+        .get("title")
+        .or_else(|| request.get("display_name"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Claude requests {tool}"));
+    let detail = serde_json::json!({
+        "input": input.clone(),
+        "description": request.get("description"),
+        "decisionReason": request.get("decision_reason"),
+        "decisionReasonType": request.get("decision_reason_type"),
+        "toolUseId": request.get("tool_use_id"),
+        "requiresUserInteraction": request.get("requires_user_interaction"),
+    })
+    .to_string();
+    let risk = match tool.as_str() {
+        "Bash" | "PowerShell" => "high",
+        "Write" | "Edit" | "NotebookEdit" => "medium",
+        _ => "unknown",
+    }
+    .to_owned();
+    Some((request_id.into(), tool, input, summary, detail, risk))
+}
+
 fn json_detail(value: Option<&Value>) -> String {
     value
         .map(|value| match value {
@@ -1129,6 +1209,10 @@ fn parse_codex_events(value: &Value) -> Vec<Parsed> {
 
 pub struct RunControl {
     cancelled: AtomicBool,
+    // A Claude stream-json process survives between user turns. It remains in
+    // the registry while its task is completed so a later message can use the
+    // same native context rather than creating a --resume subprocess.
+    resident: AtomicBool,
     child: Mutex<Option<Child>>,
     control_stdin: Mutex<Option<ChildStdin>>,
     auxiliary: Mutex<Vec<Child>>,
@@ -1139,6 +1223,7 @@ impl RunControl {
     pub fn new(remote_supervised: bool) -> Arc<Self> {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
+            resident: AtomicBool::new(false),
             child: Mutex::new(None),
             control_stdin: Mutex::new(None),
             auxiliary: Mutex::new(Vec::new()),
@@ -1160,6 +1245,35 @@ impl RunControl {
                 signal_child(child, libc::SIGINT);
             }
         }
+    }
+
+    /// Sends a provider control frame only while this run still owns an
+    /// intentionally persistent stdin channel. This is never used to inject
+    /// another user prompt into a completed or unrelated process.
+    pub(crate) fn send_control(&self, frame: &str) -> Result<(), String> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err("Task was stopped before the approval response could be sent.".into());
+        }
+        let mut stdin = self
+            .control_stdin
+            .lock()
+            .map_err(|_| "Monitter provider control lock failed.".to_string())?;
+        let stdin = stdin
+            .as_mut()
+            .ok_or("This provider run has no interactive approval channel.")?;
+        stdin
+            .write_all(frame.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .and_then(|_| stdin.flush())
+            .map_err(|error| format!("Could not send approval response to provider: {error}"))
+    }
+
+    pub(crate) fn mark_resident(&self) {
+        self.resident.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_resident(&self) -> bool {
+        self.resident.load(Ordering::SeqCst) && !self.cancelled.load(Ordering::SeqCst)
     }
 
     fn add_auxiliary(&self, mut child: Child) {
@@ -1540,6 +1654,16 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 return;
             }
         };
+        if task.provider == "claude" && host.kind != "local" {
+            service.finish(
+                &task_id,
+                "error",
+                Some(
+                    "Claude interactive sessions currently require a local desktop host. The SSH supervisor is not yet a full-duplex JSON transport, so Monitter will not fall back to a one-shot Claude run.".into(),
+                ),
+            );
+            return;
+        }
         if task.provider == "opencode" {
             if let Some(session_id) = task.native_session_id.clone() {
                 let directory = match opencode_export_directory(&host, &task, &session_id, &control)
@@ -1680,6 +1804,12 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                         .and_then(|_| stdin.write_all(prompt.as_bytes()))
                         .and_then(|_| stdin.flush())
                 }
+            } else if task.provider == "claude" {
+                let frame = adapters::claude::user_frame(&prompt).to_string();
+                stdin
+                    .write_all(frame.as_bytes())
+                    .and_then(|_| stdin.write_all(b"\n"))
+                    .and_then(|_| stdin.flush())
             } else {
                 stdin
                     .write_all(prompt.as_bytes())
@@ -1698,7 +1828,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 );
                 return;
             }
-            if remote_supervised {
+            if remote_supervised || matches!(task.provider.as_str(), "hermes" | "claude") {
                 Some(stdin)
             } else {
                 None
@@ -1730,6 +1860,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             service.finish(&task_id, "interrupted", None);
             return;
         }
+        if task.provider == "claude" {
+            control.mark_resident();
+        }
 
         let failed_event = Arc::new(AtomicBool::new(false));
         let assistant_seen = Arc::new(AtomicBool::new(false));
@@ -1738,6 +1871,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             let service = service.clone();
             let task = task_id.clone();
             let provider = task_provider.clone();
+            let control = control.clone();
             let failed_event = failed_event.clone();
             let assistant_seen = assistant_seen.clone();
             thread::spawn(move || {
@@ -1745,7 +1879,127 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                     match line {
                         Ok(line) => match serde_json::from_str(&line) {
                             Ok(value) => {
+                                if provider == "claude" {
+                                    if let Some((request_id, tool, input, summary, detail, risk)) =
+                                        claude_approval(&value)
+                                    {
+                                        let request = service.create_approval_request(
+                                            CreateApprovalRequest {
+                                                task_id: task.clone(),
+                                                provider: provider.clone(),
+                                                run_id: request_id.clone(),
+                                                tool,
+                                                summary,
+                                                detail,
+                                                risk,
+                                            },
+                                        );
+                                        let allow = match request.and_then(|request| {
+                                            let decision = service
+                                                .wait_for_approval(&request.id, || {
+                                                    !control.cancelled.load(Ordering::SeqCst)
+                                                });
+                                            if decision.is_err() {
+                                                let _ =
+                                                    service.expire_approval_request(&request.id);
+                                            }
+                                            decision
+                                        }) {
+                                            Ok(ApprovalDecision::ApproveOnce) => true,
+                                            Ok(ApprovalDecision::Deny) | Err(_) => false,
+                                        };
+                                        let frame = adapters::claude::permission_response(
+                                            &request_id,
+                                            allow,
+                                            &input,
+                                        );
+                                        if let Err(error) = control.send_control(&frame.to_string())
+                                        {
+                                            if !control.cancelled.load(Ordering::SeqCst) {
+                                                failed_event.store(true, Ordering::SeqCst);
+                                                service.record(
+                                                    &task,
+                                                    "error",
+                                                    "Could not apply Claude approval",
+                                                    error,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if value.get("type").and_then(Value::as_str) == Some("result") {
+                                        service.complete_resident_turn(&task);
+                                    }
+                                }
                                 for parsed in parse_events(&provider, &value) {
+                                    if provider == "hermes" {
+                                        if let Some((request_id, tool, summary, detail)) =
+                                            hermes_approval(&parsed)
+                                        {
+                                            let request = service.create_approval_request(
+                                                CreateApprovalRequest {
+                                                    task_id: task.clone(),
+                                                    provider: provider.clone(),
+                                                    run_id: request_id.clone(),
+                                                    tool,
+                                                    summary,
+                                                    detail,
+                                                    risk: "unknown".into(),
+                                                },
+                                            );
+                                            match request.and_then(|request| {
+                                                let decision = service
+                                                    .wait_for_approval(&request.id, || {
+                                                        !control.cancelled.load(Ordering::SeqCst)
+                                                    });
+                                                if decision.is_err() {
+                                                    let _ = service
+                                                        .expire_approval_request(&request.id);
+                                                }
+                                                decision
+                                            }) {
+                                                Ok(ApprovalDecision::ApproveOnce) => {
+                                                    let frame = serde_json::json!({
+                                                        "type": "approval_response",
+                                                        "request_id": request_id,
+                                                        "decision": "approve_once",
+                                                    });
+                                                    if let Err(error) =
+                                                        control.send_control(&frame.to_string())
+                                                    {
+                                                        failed_event.store(true, Ordering::SeqCst);
+                                                        service.record(
+                                                            &task,
+                                                            "error",
+                                                            "Could not apply approval",
+                                                            error,
+                                                        );
+                                                    }
+                                                }
+                                                Ok(ApprovalDecision::Deny) | Err(_) => {
+                                                    let frame = serde_json::json!({
+                                                        "type": "approval_response",
+                                                        "request_id": request_id,
+                                                        "decision": "deny",
+                                                    });
+                                                    if let Err(error) =
+                                                        control.send_control(&frame.to_string())
+                                                    {
+                                                        if !control.cancelled.load(Ordering::SeqCst)
+                                                        {
+                                                            failed_event
+                                                                .store(true, Ordering::SeqCst);
+                                                            service.record(
+                                                                &task,
+                                                                "error",
+                                                                "Could not deny approval",
+                                                                error,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     if parsed.failed {
                                         failed_event.store(true, Ordering::SeqCst);
                                     }
@@ -1876,6 +2130,31 @@ mod tests {
             sandbox: "read-only".into(),
             project_id: None,
         }
+    }
+
+    #[test]
+    fn reads_claude_permission_control_request_without_rewriting_input() {
+        let input = serde_json::json!({"command": "git status --short"});
+        let frame = serde_json::json!({
+            "type": "control_request",
+            "request_id": "permission-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "tool_use_id": "tool-1",
+                "input": input,
+                "decision_reason": "Command needs approval"
+            }
+        });
+        let parsed = claude_approval(&frame).expect("Claude permission request");
+        assert_eq!(parsed.0, "permission-1");
+        assert_eq!(parsed.1, "Bash");
+        assert_eq!(
+            parsed.2,
+            serde_json::json!({"command": "git status --short"})
+        );
+        assert_eq!(parsed.5, "high");
+        assert!(parsed.4.contains("Command needs approval"));
     }
 
     fn host(kind: &str) -> Host {

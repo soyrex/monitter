@@ -7,12 +7,12 @@ page.on('pageerror',e=>errors.push(e.message));
 try {
   await page.addInitScript({path:'scripts/ui-fixture.js'});
   await page.goto(process.env.MONITTER_TEST_URL||'http://127.0.0.1:18421');
-  await expect(page.getByRole('button',{name:'Monitter menu',exact:true})).toBeVisible();
+  await expect(page.getByLabel('Switch desktop workspace',{exact:true})).toBeVisible({timeout:30000});
   await page.evaluate(()=>{const q=window.__MONITTER_QA__,s=q.snapshot(),now=Date.now();for(const id of ['A','B'])s.tasks.push({id,agentId:'atlas',title:`Pane ${id}`,nativeSessionId:null,status:'idle',archived:false,createdAt:now,updatedAt:now,parentTaskId:null,channelId:null,projectId:null,hostId:'local',cwd:'/tmp/monitter-ui-test',provider:'codex',model:'',sandbox:'read-only'});q.setSnapshot(s)});
   const main=page.locator('.pane-leaf[data-pane-id="main"]');
   const open=async name=>page.locator('.sidebar .task-select').filter({hasText:name}).click();
   const tab=(pane,name)=>pane.locator('.tabs').getByRole('button',{name,exact:true});
-  const layout=async name=>{await main.getByRole('button',{name:'Pane layout',exact:true}).click();await page.getByRole('menu',{name:'Pane layout',exact:true}).getByRole('menuitem',{name,exact:true}).click()};
+  const layout=async name=>{await main.click({position:{x:100,y:100}});await page.keyboard.press(process.platform==='darwin'?'Meta+p':'Control+p');await page.getByRole('dialog',{name:'Controls',exact:true}).getByText(name,{exact:true}).click()};
   async function drag(source,target,edge='center') {
     const data=await page.evaluateHandle(()=>new DataTransfer());
     await source.dispatchEvent('dragstart',{dataTransfer:data});

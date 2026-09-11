@@ -61,11 +61,23 @@ impl Store {
         }
 
         let mut recovered = false;
+        let mut interrupted_task_ids = std::collections::HashSet::new();
         for task in &mut snapshot.tasks {
             if task.status == "running" {
                 task.status = "interrupted".into();
                 task.updated_at = now();
+                interrupted_task_ids.insert(task.id.clone());
                 recovered = true;
+            }
+        }
+        if !interrupted_task_ids.is_empty() {
+            let resolved_at = now();
+            for request in &mut snapshot.approval_requests {
+                if request.status == "pending" && interrupted_task_ids.contains(&request.task_id) {
+                    request.status = "expired".into();
+                    request.resolved_at = Some(resolved_at);
+                    recovered = true;
+                }
             }
         }
         for queued in &mut snapshot.queued_messages {

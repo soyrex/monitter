@@ -9,7 +9,7 @@ pub const BRIDGE_PROGRAM: &str = "python3";
 
 /// Build arguments for `python3`. `hermes_path` is the configured Hermes CLI
 /// path, or `hermes` when the host uses its PATH default.
-pub fn args(task: &Task, hermes_path: &str) -> Vec<String> {
+pub fn args(task: &Task, hermes_path: &str, approval_stdio: bool) -> Vec<String> {
     let mut args = vec![
         "-u".into(),
         "-c".into(),
@@ -33,6 +33,12 @@ pub fn args(task: &Task, hermes_path: &str) -> Vec<String> {
     }
     if !task.model.trim().is_empty() {
         args.extend(["--model".into(), task.model.trim().into()]);
+    }
+    // The bridge only offers a blocking stdin approval channel when Monitter
+    // owns that pipe for the whole turn. SSH still uses the one-shot remote
+    // supervisor today, so it must keep Hermes' existing safe-deny behavior.
+    if approval_stdio {
+        args.push("--approval-stdio".into());
     }
     args
 }
@@ -200,6 +206,21 @@ pub fn parse_event(value: &Value) -> Vec<Parsed> {
                 .get("request")
                 .and_then(Value::as_str)
                 .unwrap_or("request");
+            if request == "approval" && value.get("request_id").is_some() {
+                let detail = serde_json::json!({
+                    "requestId": value.get("request_id").cloned().unwrap_or(Value::Null),
+                    "tool": value.get("tool").cloned().unwrap_or(Value::String("Hermes tool".into())),
+                    "summary": value.get("summary").cloned().unwrap_or(Value::String("Hermes requests approval".into())),
+                    "detail": value.get("detail").cloned().unwrap_or(Value::Null),
+                });
+                return vec![event(
+                    native_session_id,
+                    "approval",
+                    "Hermes approval requested",
+                    detail.to_string(),
+                    false,
+                )];
+            }
             vec![event(
                 native_session_id,
                 "error",
@@ -266,6 +287,7 @@ mod tests {
         let args = args(
             &task(Some("session-123"), "model-name"),
             "~/.local/bin/hermes",
+            true,
         );
         assert_eq!(args[0], "-u");
         assert_eq!(args[1], "-c");
@@ -279,7 +301,8 @@ mod tests {
                 "--session",
                 "session-123",
                 "--model",
-                "model-name"
+                "model-name",
+                "--approval-stdio"
             ]
         );
         assert!(!args
@@ -326,11 +349,13 @@ mod tests {
         assert_eq!(goal[0].event.as_ref().unwrap().0, "goal");
         assert_eq!(goal[0].event.as_ref().unwrap().1, "Hermes goal");
 
-        let denial = parse_event(&serde_json::json!({
+        let approval = parse_event(&serde_json::json!({
             "type": "permission", "session_id": "session-123", "request": "approval",
-            "decision": "denied", "detail": {"command": "rm -rf example"}
+            "request_id": "approval-1", "tool": "Bash", "summary": "Run a command",
+            "detail": {"command": "rm -rf example"}
         }));
-        assert!(!denial[0].failed);
-        assert_eq!(denial[0].event.as_ref().unwrap().0, "error");
+        assert!(!approval[0].failed);
+        assert_eq!(approval[0].event.as_ref().unwrap().0, "approval");
+        assert!(approval[0].event.as_ref().unwrap().2.contains("approval-1"));
     }
 }

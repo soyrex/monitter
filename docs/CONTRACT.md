@@ -94,8 +94,9 @@ from the sidebar restores it. Tab selection is window UI state, separate from pe
 
 New chat opens a local draft tab with message, agent and project choices, starter suggestions,
 and optional title/native session attachment. No task or harness process is created before the
-first message is sent. Draft fields survive navigation within this window; drafts are not durable
-across app restart. Closed draft tabs remain discoverable through Cmd-K until the window closes. A failed send after task creation reuses that task on retry. A delayed send
+first message is sent. Draft fields, unsent text and attachment references are saved with the desktop
+workspace and survive navigation and restart. Closed draft tabs remain discoverable through Cmd-K.
+A failed send after task creation reuses that task on retry. A delayed send
 completion must not replace the conversation the user has navigated to.
 
 ## Projects and sidebar views
@@ -126,7 +127,10 @@ transcript import and live takeover of another Desktop/TUI process are not impli
 Codex event stream is JSONL item/turn events; do not promise token deltas unavailable in exec mode.
 Use real CLI account/config; do not copy auth or change global config. Resolve local CLI paths even
 when launched by Finder with limited PATH (user local bin, Homebrew, standard dirs).
-Claude uses `--print --output-format stream-json --verbose` and `--resume`; OpenCode uses
+Claude uses one resident `--print --input-format stream-json --output-format stream-json --verbose`
+process per local desktop chat. It receives subsequent user turns and permission decisions over the
+same JSON-lines stdin, retaining its native context; `--resume` is only a controlled process-recovery
+or explicit handoff bootstrap, never the normal next-message path. OpenCode uses
 `run --format json --thinking --dir <folder>` and `--session`. Before resuming OpenCode,
 a bounded read-only `export <session>` lookup verifies the native ID and restores the original
 session folder into the task snapshot, before collaboration setup. This prevents inherited PWD
@@ -150,8 +154,21 @@ per-agent choice, captured in each newly created task's snapshot and off by defa
 OpenCode and Hermes reject `yolo`: OpenCode's `--auto` still respects explicit denials, and the
 Hermes bridge has no verified per-invocation bypass. Other providers require `harness-configured`;
 do not describe their host permission rules as an OS sandbox.
-Noninteractive exec cannot answer approval prompts: show actual tool failures and allow changing policy
-for a new task; do not present nonfunctional Approve buttons. No auto-resubmission after errors.
+Approval requests are durable task records, not generic tool activity. A request contains the provider,
+provider run/request ID, proposed tool/action summary, provider detail, risk label, timestamp and an
+explicit one-time approve or deny decision. Pending requests remain prominent in the owning chat and
+their resolved history is retained. A stopped task, expired response channel, restart or unsupported
+provider transport resolves a pending request safely without authorizing work. Never render an approval
+denial as a successful `Tool result`, and never render an enabled approval control unless that live
+provider run can receive the decision.
+
+Current interactive approval transports are Hermes' local full-duplex gateway and Claude's local
+stream-json host protocol. A Claude `can_use_tool` request creates one durable desktop approval and the
+chosen one-time allow or deny is returned to that exact control request ID with the provider's original
+tool input preserved. SSH Hermes and SSH Claude remain safe-deny/unsupported until their remote
+supervisor supports the same persistent full-duplex channel. Codex `exec` and OpenCode `run` still need
+their dedicated app-server/ACP adapters before an approval button is shown. No auto-resubmission after
+errors.
 
 SSH host port 0 means use the existing SSH config/default (omit `-p`). An empty user/identity path
 also preserves the SSH config. Expand remote `~/` relative to the remote home, never the local home.
@@ -306,6 +323,33 @@ chat/channel, drafts and right sidebar. Dividers resize with pointer dragging or
 between panes; dropping toward a pane edge previews and creates a split, up to four panes. Collapsing
 the layout merges tabs and preserves drafts and uploaded references. Layout changes wait while a send
 acknowledgement or attachment upload is pending. Pane layout and unsent drafts are window-local.
+
+### Agent and project workspaces
+
+The desktop has an All workspace plus a workspace for each agent and project. Selecting an agent
+or project changes the entire right-hand area, including every split pane. Each workspace remembers
+its open tabs, selected tab, split layout, active pane and terminal references. Chats are opened on
+demand; entering a workspace does not open all matching chats. Agent workspaces show that agent's
+chats across projects; project workspaces show the project's chats across agents. Unassigned chats
+have a No project workspace. Activity opens All; cross-agent channels open there as well.
+
+These are views of shared task IDs, not copies of conversations or harness sessions. The same chat
+can have a tab in its agent, project and All workspaces. Closing a chat tab changes only that view.
+Switching workspace never sends a prompt, resumes/stops a harness or closes a terminal. Existing
+chat composer text and attachments follow the chat across workspaces. New chat inherits the agent
+or project scope; choosing a different owner routes the draft to a compatible workspace.
+
+The selected workspace remains visible independently of the selected chat. Agent/project sidebar
+badges and the global approval entry surface pending approvals even in hidden workspaces. Opening
+an approval navigates to the shared owning chat. Global search can cross workspaces; tab cycling and
+split/move operations act only inside the current workspace.
+
+UI persistence uses `monitter.workspaces.v2` with an active workspace key and a collection of the
+existing pane snapshots. Migration retains `monitter.workspace.v1` and imports its complete layout
+into All. A failed or unsupported saved-workspace read must not overwrite the stored data. Hidden
+workspace terminal references are preserved too; reload reuses live shells, while app restart can
+open fresh shells at their saved host/folder, as described in Terminal tabs. Deleted/reassigned chats
+are reconciled against current agent/project membership without deleting their history or drafts.
 
 The main sidebar can collapse to agent avatars with chat popovers. Its single view menu selects
 Standard, Activity or Projects; nonstandard chat rows include the owning agent's avatar. Chat archive

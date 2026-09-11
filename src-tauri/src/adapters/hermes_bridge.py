@@ -6,11 +6,13 @@ import argparse
 import json
 import os
 from pathlib import Path
+import select
 import shlex
 import shutil
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 
@@ -144,7 +146,7 @@ def locate_gateway(raw: str) -> tuple[Path, Path]:
 
 
 class Gateway:
-    def __init__(self, root: Path, python: Path, cwd: Path):
+    def __init__(self, root: Path, python: Path, cwd: Path, approval_stdio: bool):
         environment = os.environ.copy()
         environment["HERMES_PYTHON_SRC_ROOT"] = str(root)
         old_pythonpath = environment.get("PYTHONPATH", "")
@@ -172,6 +174,7 @@ class Gateway:
         self.live_session_id = ""
         self.durable_session_id = ""
         self.cwd = cwd
+        self.approval_stdio = approval_stdio
         self.terminal_status: str | None = None
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
@@ -232,6 +235,30 @@ class Gateway:
     def _detail(self, event_type: str, payload: Any) -> dict[str, Any]:
         return {"event": event_type, "payload": payload}
 
+    def _approval_choice(self, request_id: Any) -> str:
+        """Wait for one explicit desktop decision, with deny as every fallback."""
+        if not self.approval_stdio:
+            return "deny"
+        expected = str(request_id or "")
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.25)
+            if not readable:
+                continue
+            line = sys.stdin.readline()
+            if not line:
+                return "deny"
+            try:
+                response = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(response, dict) or response.get("type") != "approval_response":
+                continue
+            if str(response.get("request_id") or "") != expected:
+                continue
+            return "once" if response.get("decision") == "approve_once" else "deny"
+        return "deny"
+
     def handle_event(self, frame: dict[str, Any]) -> str:
         params = frame.get("params") or {}
         event_type = str(params.get("type") or "")
@@ -247,17 +274,32 @@ class Gateway:
             # compression-continuation chain to the current tip internally.
             return event_type
         if event_type == "approval.request":
-            deny = {"session_id": live_sid, "choice": "deny"}
-            if payload_obj.get("request_id"):
-                deny["request_id"] = payload_obj["request_id"]
-            self.send("approval.respond", deny)
+            if not self.approval_stdio:
+                deny = {"session_id": live_sid, "choice": "deny"}
+                if payload_obj.get("request_id"):
+                    deny["request_id"] = payload_obj["request_id"]
+                self.send("approval.respond", deny)
+                emit(
+                    "permission",
+                    session_id=durable_sid,
+                    request="approval",
+                    decision="denied",
+                    detail=self._detail(event_type, payload),
+                )
+                return event_type
             emit(
                 "permission",
                 session_id=durable_sid,
                 request="approval",
-                decision="denied",
+                request_id=payload_obj.get("request_id"),
+                tool=str(payload_obj.get("name") or payload_obj.get("tool") or "Hermes tool"),
+                summary=str(payload_obj.get("reason") or payload_obj.get("summary") or "Hermes requests approval"),
                 detail=self._detail(event_type, payload),
             )
+            response = {"session_id": live_sid, "choice": self._approval_choice(payload_obj.get("request_id"))}
+            if payload_obj.get("request_id"):
+                response["request_id"] = payload_obj["request_id"]
+            self.send("approval.respond", response)
             return event_type
         if event_type in {"clarify.request", "sudo.request", "secret.request"}:
             response_method = event_type.replace(".request", ".respond")
@@ -385,7 +427,7 @@ def run(options: argparse.Namespace, prompt: str) -> int:
     cwd = Path(os.path.expanduser(options.cwd)).resolve()
     if not cwd.is_dir():
         raise BridgeError(f"Task folder does not exist: {cwd}")
-    gateway = Gateway(root, python, cwd)
+    gateway = Gateway(root, python, cwd, options.approval_stdio)
     try:
         gateway.wait_ready()
         if options.session:
@@ -439,8 +481,11 @@ def main() -> int:
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--session", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument("--approval-stdio", action="store_true")
     options = parser.parse_args()
-    prompt = sys.stdin.read()
+    # Keep stdin open for explicit desktop approval replies. The ordinary
+    # one-shot adapter writes a single newline-terminated prompt.
+    prompt = sys.stdin.readline()
     if prompt.endswith("\n"):
         prompt = prompt[:-1]
     if not prompt.strip():

@@ -14,6 +14,8 @@
     "build:mac": "node scripts/build-macos.mjs",
     "install:mac": "node scripts/install-macos.mjs",
     "test:ui": "node scripts/ui-smoke.mjs",
+    "test:workspaces": "node scripts/workspace-persistence-test.mjs",
+    "test:workspaces:ui": "node scripts/ui-scoped-workspaces-smoke.mjs",
     "test:native": "node scripts/native-smoke.mjs",
     "build:mac:local": "node scripts/build-macos.mjs --debug",
     "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py",

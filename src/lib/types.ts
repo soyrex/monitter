@@ -59,6 +59,14 @@ export interface QueuedMessage {
   attachmentIds: string[]; createdAt: number; status: 'queued' | 'sending' | 'error'; error?: string | null;
   senderAgentId?: string | null; origin?: string | null;
 }
+export interface ApprovalRequest {
+  id: string; taskId: string; provider: Provider; runId: string; tool: string;
+  summary: string; detail: string;
+  risk: 'low' | 'medium' | 'high' | 'unknown';
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'unsupported';
+  createdAt: number; resolvedAt: number | null;
+  decision: 'approve_once' | 'deny' | null;
+}
 export interface Settings {
   shortcutMode?: 'standard' | 'vim';
   showTabCloseButtons?: boolean;
@@ -76,6 +84,7 @@ export interface Snapshot {
   hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
   collaborations: Collaboration[]; queuedMessages: QueuedMessage[];
+  approvalRequests: ApprovalRequest[];
 }
 export interface ProbeResult { ok: boolean; versions: Record<string, string>; message: string; }
 export interface CreateTaskInput {
