@@ -343,8 +343,10 @@ or project scope; choosing a different owner routes the draft to a compatible wo
 
 The selected workspace remains visible independently of the selected chat. Agent/project sidebar
 badges and the global approval entry surface pending approvals even in hidden workspaces. Opening
-an approval navigates to the shared owning chat. Global search can cross workspaces; tab cycling and
-split/move operations act only inside the current workspace.
+an approval navigates to the shared owning chat. The left sidebar is always global: its Standard,
+Activity, Projects and collapsed-rail chat lists show chats from every workspace. Selecting one routes
+the right-hand area to its owning agent or project workspace before opening the chat. Global search can
+cross workspaces; tab cycling and split/move operations act only inside the current workspace.
 
 UI persistence uses `monitter.workspaces.v2` with an active workspace key and a collection of the
 existing pane snapshots. Migration retains `monitter.workspace.v1` and imports its complete layout

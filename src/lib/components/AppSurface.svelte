@@ -2847,8 +2847,8 @@
         >
       </div>
       {#if snapshot?.agents.length}{#each sidebarSorted(snapshot.agents,'agents') as agent}{@const agentTasks =
-            sidebarSorted(snapshot.tasks.filter(
-              (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId && !task.archived && taskBelongsToWorkspace(task, activeWorkspaceKey),
+            sidebarSorted(activeTasks.filter(
+              (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId,
             ),`agent-chats:${agent.id}`)}
           <section class="agent-group" class:has-chats={agentTasks.length > 0 && !collapsedAgents[agent.id]}>
             <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
@@ -2890,11 +2890,11 @@
       {:else if sidebarView === 'activity'}
         <div class="section-label"><span>ACTIVITY</span><button aria-label="New chat" title="New chat" onclick={()=>openTaskComposer()}><Plus size={15}/></button></div>
         <p class="view-hint">Running first, then most recent.</p>
-        <div class="activity-list">{#each scopedActivityTasks as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}</div>
+        <div class="activity-list">{#each activityTasks as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}</div>
       {:else}
         <div class="section-label"><span>PROJECTS</span><button aria-label="New project" title="New project" onclick={()=>editProject()}><Plus size={15}/></button></div>
         {#each sidebarSorted(projects,'projects') as project (project.id)}
-          {@const projectTasks = sidebarSorted(scopedActivityTasks.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
+          {@const projectTasks = sidebarSorted(activityTasks.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
           {@const ProjectIcon = projectIconComponent(project.icon)}
           <section class="project-group" aria-label={`Project ${project.name}`}>
             <div use:sidebarReorder={{group:'projects',id:project.id,move:moveSidebar}} class="project-row" class:current={focusedProjectId === project.id || selectedTask?.projectId === project.id}>
@@ -2915,7 +2915,7 @@
             {#if collapsedProjects.unassigned}<ChevronRight size={13}/>{:else}<ChevronDown size={13}/>{/if}<Folder size={14}/><span>No project</span><small>{activityTasks.filter(task=>!task.projectId).length}</small>
           </button>
           {#if !collapsedProjects.unassigned}<div class="task-tree">
-            {#each sidebarSorted(scopedActivityTasks.filter(task=>!task.projectId),'project-chats:unassigned') as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">All chats are organised.</p>{/each}
+            {#each sidebarSorted(activityTasks.filter(task=>!task.projectId),'project-chats:unassigned') as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">All chats are organised.</p>{/each}
           </div>{/if}
         </section>
       {/if}
@@ -2951,7 +2951,7 @@
     </nav>{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
-      <div class="rail-chat-list">{#each sidebarSorted(scopedActivityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`) as task (task.id)}{@render sidebarChat(task)}{:else}<p class="detail-empty">No chats yet.</p>{/each}</div>
+      <div class="rail-chat-list">{#each sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`) as task (task.id)}{@render sidebarChat(task)}{:else}<p class="detail-empty">No chats yet.</p>{/each}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
     <footer class="sidebar-footer" aria-label="Workspace controls">

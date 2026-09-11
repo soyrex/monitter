@@ -112,11 +112,19 @@ try {
   };
 
   await workspace.selectOption('agent:north');
-  await expect.poll(titles).toEqual(['Overlap chat', 'North harbor chat']);
+  await expect.poll(titles).toEqual(['Overlap chat', 'North harbor chat', 'South beacon chat', 'Approval needed']);
   await workspace.selectOption('project:beacon');
-  await expect.poll(titles).toEqual(['Overlap chat', 'South beacon chat']);
+  await expect.poll(titles).toEqual(['Overlap chat', 'North harbor chat', 'South beacon chat', 'Approval needed']);
   await expect(rows().filter({ hasText: 'Overlap chat' })).toHaveCount(1);
-  passed.push('agent and project scopes show only matching chats, including one shared task ID');
+  passed.push('the sidebar remains global across agent and project workspaces');
+
+  // A globally visible chat can jump directly from another agent's workspace
+  // to its owner, while each workspace keeps its separate tab layout.
+  await workspace.selectOption('agent:north');
+  await page.locator('.activity-list .task-select').filter({ hasText: 'South beacon chat' }).click();
+  await expect(workspace).toHaveValue('agent:south');
+  await expect(page.getByRole('heading', { name: /South beacon chat/ })).toBeVisible();
+  passed.push('a global sidebar chat switches directly to its owning agent workspace');
 
   // Create UI-only state in North, then make sure the other scope cannot overwrite it.
   await workspace.selectOption('agent:north');
@@ -209,17 +217,16 @@ try {
   await page.getByRole('button', { name: 'Activity view', exact: true }).click();
   passed.push('global channel opens All activity and approval routing remains visible while sidebar is collapsed');
 
-  // Backend-style reassignment changes just visibility; all unrelated task metadata stays intact.
+  // Backend-style reassignment removes the task tab only from its old
+  // right-hand workspace, without changing unrelated task metadata.
   const original = await page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks.find(item => item.id === 'overlap'));
   await page.evaluate(() => { const qa = window.__MONITTER_QA__, state = qa.snapshot(); state.tasks.find(item => item.id === 'overlap').projectId = 'harbor'; qa.setSnapshot(state); });
   await workspace.selectOption('project:beacon');
-  await expect(rows().filter({ hasText: 'Overlap chat' })).toHaveCount(0);
   await expect(page.locator('[data-tab-kind="task"][data-tab-id="overlap"]')).toHaveCount(0);
   await workspace.selectOption('project:harbor');
-  await expect(rows().filter({ hasText: 'Overlap chat' })).toHaveCount(1);
   const reassigned = await page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks.find(item => item.id === 'overlap'));
   expect({ ...reassigned, projectId: original.projectId }).toEqual(original);
-  passed.push('project reassignment removes a tab only from its old scope and preserves task metadata');
+  passed.push('project reassignment removes only an old scoped tab and preserves task metadata');
 
   // Inactive scope state is durable across a browser reload, including the old North layout and draft.
   await workspace.selectOption('agent:north');
