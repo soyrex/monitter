@@ -4,7 +4,7 @@
   import { toolFamily, isShellActivity } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
   import Markdown from './Markdown.svelte';
-  let { event, events = [], compressed = false }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean } = $props();
+  let { event, events = [], compressed = false, running = false }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
   const primary = $derived(items[0]);
   const latest = $derived(items.at(-1));
@@ -12,7 +12,19 @@
   const reasoning = $derived(primary?.kind === 'reasoning');
   const family = $derived(compressed && grouped ? 'Tool calls' : primary ? toolFamily(primary) : 'Tool activity');
   const shell = $derived(items.length > 0 && items.every(isShellActivity));
-  const description = $derived(compressed && grouped ? `${items.length} tool calls` : shell ? (grouped ? 'Ran commands' : 'Ran command') : latest?.title || 'Tool activity');
+  function action(event: RunEvent, inProgress: boolean) {
+    const family = toolFamily(event);
+    if (isShellActivity(event)) return inProgress ? 'Running commands' : 'Ran commands';
+    if (family === 'gmail') return inProgress ? 'Working in Gmail' : 'Worked in Gmail';
+    if (family.includes('file_change') || /(?:write|edit|patch|apply)/i.test(event.title)) return inProgress ? 'Editing files' : 'Edited files';
+    if (family.includes('web')) return inProgress ? 'Searching the web' : 'Searched the web';
+    if (/(?:read|view|find|list)/i.test(`${family} ${event.title}`)) return inProgress ? 'Reading files' : 'Read files';
+    if (/search/i.test(`${family} ${event.title}`)) return inProgress ? `Searching ${family}` : `Searched ${family}`;
+    const name = family.replaceAll(/[_-]/g, ' ');
+    return inProgress ? `Using ${name}` : `Used ${name}`;
+  }
+  const actions = $derived([...new Set(items.map(item => action(item, running)))]);
+  const description = $derived(compressed && grouped ? `${actions.join(', ')} · ${items.length} tool calls` : shell ? (grouped ? 'Ran commands' : 'Ran command') : latest?.title || 'Tool activity');
   const elapsed = $derived.by(() => {
     const seconds = Math.max(0, ((latest?.createdAt ?? 0) - (primary?.createdAt ?? 0)) / 1000);
     if (seconds < 60) return `${seconds.toFixed(1)}s`;
@@ -69,7 +81,7 @@
   .activity{margin:12px 0 28px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{border:1px solid var(--line);border-radius:8px;background:var(--panel)}
   summary,.activity-trigger{display:flex;align-items:center;gap:8px;padding:11px 12px;color:var(--muted);cursor:pointer;list-style:none;text-align:left}
   .activity-trigger{width:100%;font:inherit;padding:8px 0;background:transparent}.activity-trigger:hover{color:var(--ink)}
-  summary::-webkit-details-marker{display:none}summary:focus-visible,.activity-trigger:focus-visible{outline:2px solid var(--accent-ink);outline-offset:2px}
+  summary::-webkit-details-marker{display:none}
   summary span,.activity-trigger span{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
   .compressed .activity-trigger span{flex:0 1 auto}.compressed time{margin-left:auto}
   time{flex-shrink:0;font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}:global(.activity svg){flex-shrink:0}

@@ -1,6 +1,7 @@
 use crate::{
     model::{CatalogModel, Host, ModelCatalog, ModelCatalogCurrent, ReasoningEffortOption},
-    runner::{add_ssh_options, remote_path, resolve_local, ssh_target},
+    probe_output,
+    runner::{add_ssh_options, remote_path, resolve_local, resolve_local_provider, ssh_target},
 };
 use serde_json::{json, Value};
 use std::{
@@ -21,6 +22,74 @@ pub(crate) fn read_codex_catalog(host: &Host, cwd: &str) -> Result<ModelCatalog,
     let result = read_from_child(&mut child);
     stop_child(&mut child);
     result
+}
+
+/// Read provider-qualified models from the installed OpenCode CLI. This keeps
+/// the picker aligned with the models and providers available on this host.
+pub(crate) fn read_opencode_catalog(host: &Host, cwd: &str) -> Result<ModelCatalog, String> {
+    let mut command = if host.kind == "local" {
+        let mut command = Command::new(resolve_local_provider("opencode", &host.opencode_path)?);
+        command.current_dir(cwd);
+        command
+    } else if host.kind == "ssh" {
+        let cli = if host.opencode_path.trim().is_empty() {
+            "opencode"
+        } else {
+            host.opencode_path.trim()
+        };
+        let mut command = Command::new("ssh");
+        add_ssh_options(&mut command, host);
+        command.arg(ssh_target(host)?).arg(format!(
+            "cd {} && exec {} models",
+            remote_path(cwd),
+            remote_path(cli)
+        ));
+        command
+    } else {
+        return Err("Host kind must be local or ssh.".into());
+    };
+    if host.kind == "local" {
+        command.arg("models");
+    }
+    let models = parse_opencode_models(&probe_output(command)?);
+    if models.is_empty() {
+        return Err("OpenCode returned no provider-qualified models. Check its configured providers and sign-in.".into());
+    }
+    Ok(ModelCatalog {
+        models,
+        current: ModelCatalogCurrent { model: String::new(), reasoning_effort: None, fast_mode: None },
+        source: "opencode models".into(),
+        warning: Some("OpenCode controls model capabilities; reasoning effort and Fast mode are unavailable for this harness.".into()),
+    })
+}
+
+fn parse_opencode_models(output: &str) -> Vec<CatalogModel> {
+    let mut ids = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.split_once('/').is_some_and(|(provider, model)| {
+                !provider.is_empty() && !model.is_empty() && !line.contains(char::is_whitespace)
+            })
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids.into_iter()
+        .map(|id| CatalogModel {
+            name: id.clone(),
+            description: id
+                .split_once('/')
+                .map(|(provider, _)| format!("{provider} via OpenCode"))
+                .unwrap_or_default(),
+            id,
+            reasoning_efforts: vec![],
+            default_effort: None,
+            supports_fast: false,
+            fast_description: None,
+        })
+        .collect()
 }
 
 fn app_server_command(host: &Host, cwd: &str) -> Result<Command, String> {
@@ -286,6 +355,21 @@ mod tests {
         let model = parse_model(&json!({"model":"older","displayName":"Older","description":"","supportedReasoningEfforts":[],"defaultReasoningEffort":"medium","serviceTiers":[]})).unwrap();
         assert!(!model.supports_fast);
         assert_eq!(model.fast_description, None);
+    }
+
+    #[test]
+    fn parses_provider_qualified_opencode_models() {
+        let models = parse_opencode_models(
+            "opencode-go/mimo-v2.5\nopenai/gpt-5.6-luna\nnot a model\nopencode-go/mimo-v2.5\n",
+        );
+        assert_eq!(models.len(), 2);
+        assert!(models
+            .iter()
+            .any(|model| model.id == "opencode-go/mimo-v2.5"));
+        assert!(models.iter().any(|model| model.id == "openai/gpt-5.6-luna"));
+        assert!(models
+            .iter()
+            .all(|model| model.reasoning_efforts.is_empty()));
     }
 
     #[test]

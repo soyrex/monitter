@@ -3,7 +3,7 @@ export type Sandbox = 'read-only' | 'workspace-write' | 'harness-configured' | '
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
 export interface Project {
-  id: string; name: string; description: string;
+  id: string; name: string; description: string; icon: string; color: string;
   workspaces: { hostId: string; cwd: string }[];
 }
 export interface Host {
@@ -65,6 +65,7 @@ export interface Settings {
   tintUserMessages?: boolean;
   compressToolCalls?: boolean;
   terminalFontSize?: number; chatFontSize?: number; interfaceFontSize?: number;
+  chatLineHeight?: number; terminalLineHeight?: number;
   terminalFont?: string; chatFont?: string; interfaceFont?: string;
   dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
@@ -79,7 +80,7 @@ export interface Snapshot {
 export interface ProbeResult { ok: boolean; versions: Record<string, string>; message: string; }
 export interface CreateTaskInput {
   agentId: string; title: string; nativeSessionId?: string | null;
-  parentTaskId?: string | null; channelId?: string | null; projectId?: string | null;
+  parentTaskId?: string | null; channelId?: string | null; projectId?: string | null; cwd?: string | null;
   modelSettings?: ModelSettings | null;
   sandbox?: Sandbox | null;
 }

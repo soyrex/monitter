@@ -5,6 +5,7 @@
   type Category = "appearance" | "typography" | "behaviour" | "conversation" | "agents" | "directory";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
+  type LineHeightKey = "chatLineHeight" | "terminalLineHeight";
 
   let {
     settings,
@@ -56,6 +57,11 @@
   }
 
   function saveNumber(event: Event, key: FontSizeKey, fallback: number) {
+    const input = event.currentTarget as HTMLInputElement;
+    if (input.checkValidity()) void save({ [key]: Number(input.value || fallback) });
+  }
+
+  function saveLineHeight(event: Event, key: LineHeightKey, fallback: number) {
     const input = event.currentTarget as HTMLInputElement;
     if (input.checkValidity()) void save({ [key]: Number(input.value || fallback) });
   }
@@ -158,6 +164,12 @@
           <datalist id="terminal-font-choices">{#each ["IBM Plex Mono", "Menlo", "Monaco", "Courier New", "SF Mono", "JetBrains Mono", "Fira Code"] as name}<option value={name}></option>{/each}</datalist>
           <p class="hint">Base sizes are before interface scaling. Use a monospace font for terminals; unavailable fonts fall back to the default.</p>
         </section>
+        <section class="setting-card" aria-labelledby="line-height-heading">
+          <div class="card-heading"><h2 id="line-height-heading">Line height</h2><p>Control the vertical space in chat messages and terminal output.</p></div>
+          <label class="range-setting">Chat line height <strong>{(settings.chatLineHeight ?? 1.65).toFixed(2)}×</strong><input class="range" type="range" aria-label="Chat line height" min="1" max="2.5" step="0.05" value={settings.chatLineHeight ?? 1.65} onchange={(event) => saveLineHeight(event, "chatLineHeight", 1.65)} /></label>
+          <label class="range-setting">Terminal line height <strong>{(settings.terminalLineHeight ?? 1).toFixed(2)}×</strong><input class="range" type="range" aria-label="Terminal line height" min="1" max="2.5" step="0.05" value={settings.terminalLineHeight ?? 1} onchange={(event) => saveLineHeight(event, "terminalLineHeight", 1)} /></label>
+          <p class="hint">These values are relative to each surface’s chosen font size. Terminal changes refit open terminal tabs immediately.</p>
+        </section>
       </div>
     {:else if activeCategory === "behaviour"}
       <div class="section-stack">
@@ -205,7 +217,7 @@
   .settings-nav button:hover { color:var(--ink); background:color-mix(in srgb, var(--accent) 7%, transparent); }
   .settings-nav button.active { color:var(--accent-ink, var(--accent)); background:color-mix(in srgb, var(--accent) 13%, transparent); }
   .settings-nav span { display:grid; gap:2px; min-width:0; }.settings-nav strong { font-size:calc(12px * var(--interface-font-ratio, 1)); font-weight:600; }.settings-nav small { overflow:hidden; color:var(--muted); font-size:calc(10px * var(--interface-font-ratio, 1)); text-overflow:ellipsis; white-space:nowrap; }
-  .settings-content { min-width:0; min-height:0; overflow:auto; padding:clamp(18px, 4cqi, 38px); }
+  .settings-content { --scroll-fade:20px; -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); min-width:0; min-height:0; overflow:auto; padding:clamp(18px, 4cqi, 38px); }
   .settings-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; max-width:760px; margin:0 auto 24px; }.settings-header p { margin:0 0 4px; color:var(--muted); font:600 calc(10px * var(--interface-font-ratio, 1)) var(--mono, monospace); letter-spacing:.09em; text-transform:uppercase; }.settings-header h1 { margin:0; font-size:calc(24px * var(--interface-font-ratio, 1)); letter-spacing:-.03em; }.save-state { display:flex; flex:none; align-items:center; gap:5px; margin-top:4px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); white-space:nowrap; }.save-error { color:#b84c44; }.save-state :global(svg.spin) { animation:spin .85s linear infinite; }
   .section-stack { display:grid; gap:14px; max-width:760px; margin:0 auto; }.setting-card { display:grid; gap:16px; padding:18px; border:1px solid var(--line); border-radius:10px; background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.025); }.card-heading h2 { margin:0 0 4px; font-size:calc(14px * var(--interface-font-ratio, 1)); }.card-heading p,.hint { margin:0; color:var(--muted); font-size:calc(11.5px * var(--interface-font-ratio, 1)); line-height:1.5; }.inline-heading { display:flex; align-items:start; justify-content:space-between; gap:12px; }.inline-heading > strong { color:var(--accent-ink, var(--accent)); font:600 calc(13px * var(--interface-font-ratio, 1)) var(--mono, monospace); }
   .segmented { display:flex; padding:3px; border:1px solid var(--line); border-radius:7px; background:var(--soft); }.segmented button { flex:1; padding:7px 8px; border:0; border-radius:4px; color:var(--muted); background:transparent; font:calc(11.5px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-transform:capitalize; cursor:pointer; }.segmented button.chosen { color:var(--ink); background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.08); }

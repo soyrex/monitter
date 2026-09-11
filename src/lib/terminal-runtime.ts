@@ -56,7 +56,7 @@ async function ensureTerminal(runtime: Runtime, host: HTMLElement, generation: n
     if (!runtime.initPromise) runtime.initPromise = Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).then(([{ Terminal }, { FitAddon }]) => {
       if (runtime.closing || runtimes.get(runtime.session.id) !== runtime || !runtime.desiredHost) return;
       const mount = runtime.desiredHost;
-      const terminal = new Terminal({ cursorBlink: true, scrollback: 10_000, convertEol: true, allowProposedApi: false, fontSize: terminalFontSize(), fontFamily: terminalFont(), theme: theme() });
+      const terminal = new Terminal({ cursorBlink: true, scrollback: 10_000, convertEol: true, allowProposedApi: false, fontSize: terminalFontSize(), fontFamily: terminalFont(), lineHeight: terminalLineHeight(), theme: theme() });
     const fit = new FitAddon(); terminal.loadAddon(fit);
     terminal.attachCustomKeyEventHandler(event => {
       const key = event.key.toLowerCase();
@@ -67,10 +67,11 @@ async function ensureTerminal(runtime: Runtime, host: HTMLElement, generation: n
       runtime.terminal = terminal; runtime.fit = fit; terminal.open(mount);
     runtime.themeObserver = new MutationObserver(() => { if (runtime.terminal) {
       runtime.terminal.options.theme = theme();
-      const font = terminalFont(), size = terminalFontSize();
-      if (runtime.terminal.options.fontFamily !== font || runtime.terminal.options.fontSize !== size) {
+      const font = terminalFont(), size = terminalFontSize(), lineHeight = terminalLineHeight();
+      if (runtime.terminal.options.fontFamily !== font || runtime.terminal.options.fontSize !== size || runtime.terminal.options.lineHeight !== lineHeight) {
         runtime.terminal.options.fontSize = size;
         runtime.terminal.options.fontFamily = font;
+        runtime.terminal.options.lineHeight = lineHeight;
         requestAnimationFrame(() => refit(runtime));
         void document.fonts.load(`${size}px ${font}`).then(() => { if (runtime.host && !runtime.closing) refit(runtime); });
       }
@@ -84,6 +85,7 @@ async function ensureTerminal(runtime: Runtime, host: HTMLElement, generation: n
 }
 function terminalFontSize() { return Math.max(8, Math.min(32, Number(getComputedStyle(document.documentElement).getPropertyValue('--terminal-font-size')) || 14)); }
 function terminalFont() { return getComputedStyle(document.documentElement).getPropertyValue('--terminal-font').trim() || '"IBM Plex Mono", Menlo, monospace'; }
+function terminalLineHeight() { return Math.max(1, Math.min(2.5, Number(getComputedStyle(document.documentElement).getPropertyValue('--terminal-line-height')) || 1)); }
 function theme() { const css = getComputedStyle(document.documentElement); return { background: css.getPropertyValue('--terminal-background').trim() || '#090b0d', foreground: css.getPropertyValue('--terminal-foreground').trim() || '#e5e7eb', cursor: css.getPropertyValue('--accent').trim() || '#77b58b', selectionBackground: '#2b3940' }; }
 function queueWrite(runtime: Runtime, data: string) {
   runtime.writeChain = runtime.writeChain.then(async () => {

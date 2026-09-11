@@ -202,6 +202,10 @@ pub struct Settings {
     pub chat_font_size: u8,
     #[serde(default = "default_interface_font_size")]
     pub interface_font_size: u8,
+    #[serde(default = "default_chat_line_height")]
+    pub chat_line_height: f64,
+    #[serde(default = "default_terminal_line_height")]
+    pub terminal_line_height: f64,
     #[serde(default)]
     pub terminal_font: String,
     #[serde(default)]
@@ -253,6 +257,12 @@ fn default_chat_font_size() -> u8 {
 fn default_interface_font_size() -> u8 {
     14
 }
+fn default_chat_line_height() -> f64 {
+    1.65
+}
+fn default_terminal_line_height() -> f64 {
+    1.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -267,8 +277,19 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default = "default_project_icon")]
+    pub icon: String,
+    #[serde(default = "default_project_color")]
+    pub color: String,
     #[serde(default)]
     pub workspaces: Vec<ProjectWorkspace>,
+}
+
+fn default_project_icon() -> String {
+    "folder".into()
+}
+fn default_project_color() -> String {
+    "#3f9d6a".into()
 }
 
 fn default_interface_scale() -> u8 {
@@ -322,6 +343,8 @@ pub struct CreateTaskInput {
     pub channel_id: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
     #[serde(default)]
     pub model_settings: Option<ModelSettings>,
     #[serde(default)]
@@ -467,6 +490,8 @@ pub fn default_snapshot() -> Snapshot {
             terminal_font_size: default_terminal_font_size(),
             chat_font_size: default_chat_font_size(),
             interface_font_size: default_interface_font_size(),
+            chat_line_height: default_chat_line_height(),
+            terminal_line_height: default_terminal_line_height(),
             terminal_font: String::new(),
             chat_font: String::new(),
             interface_font: String::new(),
@@ -499,6 +524,8 @@ mod tests {
             serde_json::from_str(r##"{"accent":"#3f9d6a","theme":"system"}"##).unwrap();
 
         assert_eq!(settings.interface_scale, 125);
+        assert_eq!(settings.chat_line_height, 1.65);
+        assert_eq!(settings.terminal_line_height, 1.0);
         assert!(settings.show_tool_activity);
         assert!(settings.show_reasoning_summaries);
         assert!(!settings.send_with_enter);
@@ -514,6 +541,8 @@ mod tests {
         let value = serde_json::to_value(default_snapshot().settings).unwrap();
 
         assert_eq!(value["interfaceScale"], 125);
+        assert_eq!(value["chatLineHeight"], 1.65);
+        assert_eq!(value["terminalLineHeight"], 1.0);
         assert_eq!(value["showToolActivity"], true);
         assert_eq!(value["showReasoningSummaries"], true);
         assert_eq!(value["sendWithEnter"], false);
@@ -606,6 +635,34 @@ mod task_migration_tests {
     }
 
     #[test]
+    fn task_from_agent_uses_explicit_working_folder() {
+        let snapshot = default_snapshot();
+        let task = task_from_agent(
+            &snapshot.agents[0],
+            &CreateTaskInput {
+                agent_id: snapshot.agents[0].id.clone(),
+                title: "Task".into(),
+                native_session_id: None,
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                cwd: Some("/chosen/folder".into()),
+                model_settings: None,
+                sandbox: None,
+            },
+        );
+        assert_eq!(task.cwd, "/chosen/folder");
+    }
+
+    #[test]
+    fn old_projects_default_to_folder_icon_and_accent_colour() {
+        let project: Project =
+            serde_json::from_str(r##"{"id":"p","name":"Project","description":""}"##).unwrap();
+        assert_eq!(project.icon, "folder");
+        assert_eq!(project.color, "#3f9d6a");
+    }
+
+    #[test]
     fn projects_and_task_links_round_trip_in_camel_case() {
         let mut snapshot = default_snapshot();
         let project_id = "project-1".to_string();
@@ -613,6 +670,8 @@ mod task_migration_tests {
             id: project_id.clone(),
             name: "Project".into(),
             description: "Description".into(),
+            icon: "folder".into(),
+            color: "#3f9d6a".into(),
             workspaces: vec![ProjectWorkspace {
                 host_id: snapshot.hosts[0].id.clone(),
                 cwd: "/workspace".into(),
@@ -627,6 +686,7 @@ mod task_migration_tests {
                 parent_task_id: None,
                 channel_id: None,
                 project_id: Some(project_id),
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             },
@@ -656,7 +716,7 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
         parent_task_id: input.parent_task_id.clone(),
         channel_id: input.channel_id.clone(),
         host_id: agent.host_id.clone(),
-        cwd: agent.cwd.clone(),
+        cwd: input.cwd.clone().unwrap_or_else(|| agent.cwd.clone()),
         provider: agent.provider.clone(),
         model: input
             .model_settings

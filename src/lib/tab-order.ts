@@ -1,4 +1,4 @@
-export type TabKind = 'task' | 'draft' | 'channel' | 'terminal' | 'settings';
+export type TabKind = 'task' | 'draft' | 'channel' | 'terminal' | 'settings' | 'empty';
 export type TabKey = { kind: TabKind; id: string };
 
 export const tabKey = (tab: TabKey) => `${tab.kind}:${tab.id}`;

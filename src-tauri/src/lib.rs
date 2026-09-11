@@ -76,8 +76,20 @@ pub(crate) struct Service {
     terminals: Mutex<HashMap<String, Arc<terminal::Session>>>,
 }
 
+const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
+
 fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
     format!("{}:{}:{}", task.provider, host.id, native)
+}
+
+fn provider_name(provider: &str) -> String {
+    match provider {
+        "codex" => "Codex".into(),
+        "opencode" => "OpenCode".into(),
+        "claude" => "Claude".into(),
+        "hermes" => "Hermes".into(),
+        other => other.to_string(),
+    }
 }
 
 fn task_descendants(snapshot: &Snapshot, roots: &[String]) -> Vec<String> {
@@ -158,26 +170,30 @@ impl Service {
         provider: &str,
         cwd: &str,
     ) -> Result<ModelCatalog, String> {
-        let key = format!(
-            "{provider}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            host.id,
-            host.kind,
-            host.address,
-            host.user,
-            host.port,
-            host.identity_file,
-            host.codex_path,
-            cwd
-        );
+        let key = [
+            provider.to_owned(),
+            host.id.clone(),
+            host.kind.clone(),
+            host.address.clone(),
+            host.user.clone(),
+            host.port.to_string(),
+            host.identity_file.clone(),
+            host.codex_path.clone(),
+            host.opencode_path.clone(),
+            cwd.to_owned(),
+        ]
+        .join("\u{1f}");
         if let Ok(cache) = self.model_catalogs.lock() {
             if let Some((when, catalog)) = cache.get(&key) {
-                if when.elapsed() < Duration::from_secs(60) {
+                if when.elapsed() < MODEL_CATALOG_CACHE_TTL {
                     return Ok(catalog.clone());
                 }
             }
         }
         let catalog = if provider == "codex" {
             models::read_codex_catalog(host, cwd)?
+        } else if provider == "opencode" {
+            models::read_opencode_catalog(host, cwd)?
         } else {
             ModelCatalog {
                 models: vec![],
@@ -700,20 +716,21 @@ impl Service {
                     }
                     state.tasks[ix].updated_at = now();
                     let final_status = state.tasks[ix].status.clone();
+                    let provider = state.tasks[ix].provider.clone();
                     Service::complete_collaborations(
                         state,
                         task_id,
                         &final_status,
                         error.as_deref(),
                     );
-                    (final_status, was_running)
+                    (final_status, was_running, provider)
                 };
                 if let Some(detail) = error {
                     data.snapshot.events.push(RunEvent {
                         id: id(),
                         task_id: task_id.into(),
                         kind: "error".into(),
-                        title: "Codex process failed".into(),
+                        title: format!("{} process failed", provider_name(&final_status.2)),
                         detail,
                         created_at: now(),
                     });
@@ -770,22 +787,25 @@ impl Service {
                     .find(|host| host.id == agent.host_id)
                     .cloned()
                     .ok_or("Agent host was not found.")?;
-                let cwd = if let Some(project_id) = input.project_id.as_deref() {
-                    let project = data
-                        .snapshot
-                        .projects
-                        .iter()
-                        .find(|project| project.id == project_id)
-                        .ok_or("Project was not found.")?;
-                    project
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.host_id == agent.host_id)
-                        .map(|workspace| workspace.cwd.clone())
-                        .unwrap_or_else(|| agent.cwd.clone())
-                } else {
-                    agent.cwd.clone()
-                };
+                let cwd =
+                    if let Some(cwd) = input.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+                        cwd.to_string()
+                    } else if let Some(project_id) = input.project_id.as_deref() {
+                        let project = data
+                            .snapshot
+                            .projects
+                            .iter()
+                            .find(|project| project.id == project_id)
+                            .ok_or("Project was not found.")?;
+                        project
+                            .workspaces
+                            .iter()
+                            .find(|workspace| workspace.host_id == agent.host_id)
+                            .map(|workspace| workspace.cwd.clone())
+                            .unwrap_or_else(|| agent.cwd.clone())
+                    } else {
+                        agent.cwd.clone()
+                    };
                 let cwd = if cwd.trim().is_empty() {
                     host.default_cwd.clone()
                 } else {
@@ -1838,6 +1858,7 @@ fn prepare_channel_mention_routes(
                     parent_task_id: None,
                     channel_id: Some(channel_id.into()),
                     project_id: None,
+                    cwd: None,
                     model_settings: None,
                     sandbox: None,
                 },
@@ -2375,6 +2396,43 @@ fn delete_agent(state: State<'_, AppState>, id: String) -> Result<Snapshot, Stri
 }
 
 #[tauri::command]
+fn choose_local_folder(initial: String) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = if initial.trim().is_empty() {
+            "try
+POSIX path of (choose folder with prompt \"Choose a working folder\")
+on error number -128
+return \"\"
+end try"
+                .to_string()
+        } else {
+            let escaped = initial.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("try
+POSIX path of (choose folder with prompt \"Choose a working folder\" default location POSIX file \"{escaped}\")
+on error number -128
+return \"\"
+end try")
+        };
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|error| format!("Could not open folder chooser: {error}"))?;
+        if !output.status.success() {
+            return Err("Could not open folder chooser.".into());
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!path.is_empty()).then_some(path));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = initial;
+        Err("Folder browsing is currently available on macOS only.".into())
+    }
+}
+
+#[tauri::command]
 async fn create_task(state: State<'_, AppState>, input: CreateTaskInput) -> Result<Task, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || service.create_task(input))
@@ -2385,6 +2443,27 @@ async fn create_task(state: State<'_, AppState>, input: CreateTaskInput) -> Resu
 fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String> {
     if project.name.trim().is_empty() {
         return Err("Project name is required.".into());
+    }
+    if !matches!(
+        project.icon.as_str(),
+        "folder"
+            | "briefcase"
+            | "code"
+            | "rocket"
+            | "globe"
+            | "palette"
+            | "database"
+            | "wrench"
+            | "layers"
+    ) {
+        return Err("Choose an available project icon.".into());
+    }
+    let colour = project.color.trim();
+    if colour.len() != 7
+        || !colour.starts_with('#')
+        || !colour[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Project icon colour must be a hex colour.".into());
     }
     let mut workspace_hosts = std::collections::HashSet::new();
     for workspace in &project.workspaces {
@@ -2862,6 +2941,13 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     {
         return Err("Font sizes must be between 8 and 32 pixels.".into());
     }
+    if !settings.chat_line_height.is_finite()
+        || !(1.0..=2.5).contains(&settings.chat_line_height)
+        || !settings.terminal_line_height.is_finite()
+        || !(1.0..=2.5).contains(&settings.terminal_line_height)
+    {
+        return Err("Line heights must be between 1.0 and 2.5.".into());
+    }
     if !matches!(settings.theme.as_str(), "light" | "dark" | "system") {
         return Err("Theme must be light, dark, or system.".into());
     }
@@ -2906,7 +2992,9 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Snaps
         // focus update cannot leave Escape consumed in standard mode.
         state.0.set_native_escape_shield(false);
     }
-    state.0.apply_shortcut_mode(&snapshot.settings.shortcut_mode)?;
+    state
+        .0
+        .apply_shortcut_mode(&snapshot.settings.shortcut_mode)?;
     Ok(snapshot)
 }
 
@@ -3054,6 +3142,7 @@ fn send_channel_message(
                     parent_task_id: None,
                     channel_id: Some(channel_id.clone()),
                     project_id: None,
+                    cwd: None,
                     model_settings: None,
                     sandbox: None,
                 };
@@ -3245,6 +3334,7 @@ pub fn smoke_provider_sequence(
         parent_task_id: None,
         channel_id: None,
         project_id: None,
+        cwd: None,
         model_settings: None,
         sandbox: None,
     })?;
@@ -3559,9 +3649,11 @@ async fn wait_for_task_git_marker(
     detector_session: String,
 ) -> Result<String, String> {
     let (task, host) = state.0.task_and_host(&task_id)?;
-    tauri::async_runtime::spawn_blocking(move || git::wait_for_marker(&host, &task.cwd, &detector_session))
-        .await
-        .map_err(|error| format!("Git marker watcher failed: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        git::wait_for_marker(&host, &task.cwd, &detector_session)
+    })
+    .await
+    .map_err(|error| format!("Git marker watcher failed: {error}"))?
 }
 
 #[tauri::command]
@@ -3653,22 +3745,44 @@ fn install_macos_escape_shield(app: AppHandle, service: Arc<Service>) {
 
     let handler = RcBlock::new(move |event: NonNull<NSEvent>| {
         const ESCAPE_KEY_CODE: u16 = 53;
+        const W_KEY_CODE: u16 = 13;
         let event = unsafe { event.as_ref() };
         let main_window = app
             .get_webview_window("main")
             .and_then(|window| window.ns_window().ok())
             .and_then(|window| unsafe { window.cast::<NSWindow>().as_ref() });
         let is_main_window = main_window
-            .map(|window| window.windowNumber() == event.windowNumber() && window.attachedSheet().is_none())
+            .map(|window| {
+                window.windowNumber() == event.windowNumber() && window.attachedSheet().is_none()
+            })
             .unwrap_or(false);
         let app_modifier = NSEventModifierFlags::Control
             | NSEventModifierFlags::Option
             | NSEventModifierFlags::Command;
+        let modifiers = event.modifierFlags();
+        let standard_shortcuts = service
+            .snapshot()
+            .map(|snapshot| snapshot.settings.shortcut_mode == menu::STANDARD_SHORTCUT_MODE)
+            .unwrap_or(false);
         if is_main_window
-            && !event.modifierFlags().intersects(app_modifier)
+            && standard_shortcuts
+            && modifiers.contains(NSEventModifierFlags::Command)
+            && !modifiers.intersects(
+                NSEventModifierFlags::Control
+                    | NSEventModifierFlags::Option
+                    | NSEventModifierFlags::Shift,
+            )
+            && event.keyCode() == W_KEY_CODE
+        {
+            if let Err(error) = app.emit("monitter-close-tab", ()) {
+                eprintln!("Could not dispatch native close-tab action: {error}");
+            }
+            std::ptr::null_mut()
+        } else if is_main_window
+            && !modifiers.intersects(app_modifier)
             && service
-            .native_escape_shield
-            .load(std::sync::atomic::Ordering::Acquire)
+                .native_escape_shield
+                .load(std::sync::atomic::Ordering::Acquire)
             && event.keyCode() == ESCAPE_KEY_CODE
         {
             if let Err(error) = app.emit("monitter-native-escape", ()) {
@@ -3731,6 +3845,7 @@ pub fn run() {
             save_agent,
             delete_agent,
             create_task,
+            choose_local_folder,
             save_project,
             delete_project,
             set_task_project,
@@ -4038,6 +4153,8 @@ name@rafa.test",
         settings.interface_font_size = 18;
         settings.chat_font_size = 20;
         settings.terminal_font_size = 16;
+        settings.chat_line_height = 1.8;
+        settings.terminal_line_height = 1.2;
         let restored: Settings =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored, settings);
@@ -4053,6 +4170,19 @@ name@rafa.test",
                 assert!(validate_settings(&invalid).is_err());
             }
         }
+    }
+
+    #[test]
+    fn line_height_settings_validate_bounds() {
+        let mut settings = default_snapshot().settings;
+        settings.chat_line_height = 1.0;
+        settings.terminal_line_height = 2.5;
+        assert!(validate_settings(&settings).is_ok());
+        settings.chat_line_height = 0.99;
+        assert!(validate_settings(&settings).is_err());
+        settings.chat_line_height = 1.65;
+        settings.terminal_line_height = 2.51;
+        assert!(validate_settings(&settings).is_err());
     }
 
     #[test]
@@ -4132,6 +4262,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -4173,6 +4304,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -4227,6 +4359,7 @@ name@rafa.test",
                     parent_task_id: None,
                     channel_id: None,
                     project_id: None,
+                    cwd: None,
                     model_settings: None,
                     sandbox: None,
                 })
@@ -4282,6 +4415,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -4350,6 +4484,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -4424,6 +4559,7 @@ name@rafa.test",
                     parent_task_id: None,
                     channel_id: None,
                     project_id: None,
+                    cwd: None,
                     model_settings: None,
                     sandbox: None,
                 })
@@ -4468,6 +4604,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: Some("workspace-write".into()),
             })
@@ -4520,13 +4657,14 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
             .unwrap();
         let (task_snapshot, host) = service.task_and_host(&task.id).unwrap();
         let key = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             task_snapshot.provider,
             host.id,
             host.kind,
@@ -4535,6 +4673,7 @@ name@rafa.test",
             host.port,
             host.identity_file,
             host.codex_path,
+            host.opencode_path,
             task_snapshot.cwd
         );
         let catalog = ModelCatalog {
@@ -4589,6 +4728,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -4649,6 +4789,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             },
@@ -4670,6 +4811,7 @@ name@rafa.test",
                         parent_task_id: None,
                         channel_id: None,
                         project_id: None,
+                        cwd: None,
                         model_settings: None,
                         sandbox: None,
                     }
@@ -4693,6 +4835,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -4737,6 +4880,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -4798,6 +4942,8 @@ name@rafa.test",
             id: id.into(),
             name: "  Product work  ".into(),
             description: "Shared work area".into(),
+            icon: "folder".into(),
+            color: "#3f9d6a".into(),
             workspaces: vec![ProjectWorkspace {
                 host_id: host_id.into(),
                 cwd: cwd.into(),
@@ -4813,6 +4959,7 @@ name@rafa.test",
             parent_task_id: None,
             channel_id: None,
             project_id: project_id.map(str::to_owned),
+            cwd: None,
             model_settings: None,
             sandbox: None,
         }
@@ -4831,6 +4978,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: None,
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             })
@@ -5260,6 +5408,7 @@ name@rafa.test",
                 parent_task_id: None,
                 channel_id: Some("channel".into()),
                 project_id: None,
+                cwd: None,
                 model_settings: None,
                 sandbox: None,
             };
@@ -5377,6 +5526,8 @@ name@rafa.test",
                     id: "project".into(),
                     name: "project".into(),
                     description: String::new(),
+                    icon: "folder".into(),
+                    color: "#3f9d6a".into(),
                     workspaces: vec![ProjectWorkspace {
                         host_id: host_id.clone(),
                         cwd: "/project-workspace".into(),

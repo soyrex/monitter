@@ -37,6 +37,7 @@ export interface MonitterBridge {
   saveAgent(agent: Agent): Promise<Snapshot>;
   deleteAgent(id: string): Promise<Snapshot>;
   createTask(input: CreateTaskInput): Promise<Task>;
+  chooseLocalFolder(initial?: string): Promise<string | null>;
   renameTask(id: string, title: string): Promise<Snapshot>;
   autoname(target: AutonameTarget): Promise<Snapshot>;
   deleteTask(id: string): Promise<Snapshot>;
@@ -105,6 +106,7 @@ const nativeBridge: MonitterBridge = {
   saveAgent: (agent) => invoke<Snapshot>("save_agent", { agent }),
   deleteAgent: (id) => invoke<Snapshot>("delete_agent", { id }),
   createTask: (input) => invoke<Task>("create_task", { input }),
+  chooseLocalFolder: (initial = '') => invoke<string | null>("choose_local_folder", { initial }),
   renameTask: (id, title) => invoke<Snapshot>("rename_task", { id, title }),
   autoname: target => invoke<Snapshot>("autoname", { target }),
   deleteTask: (id) => invoke<Snapshot>("delete_task", { id }),
@@ -175,6 +177,7 @@ const previewBridge: MonitterBridge = {
   saveAgent: () => desktopOnly(),
   deleteAgent: () => desktopOnly(),
   createTask: () => desktopOnly(),
+  chooseLocalFolder: () => desktopOnly(),
   renameTask: () => desktopOnly(),
   autoname: () => desktopOnly(),
   deleteTask: () => desktopOnly(),
@@ -233,6 +236,7 @@ export function getBridge(): MonitterBridge {
         test.invoke("delete_agent", { id }) as Promise<Snapshot>,
       createTask: (input) =>
         test.invoke("create_task", { input }) as Promise<Task>,
+      chooseLocalFolder: (initial = '') => test.invoke("choose_local_folder", { initial }) as Promise<string | null>,
       renameTask: (id, title) =>
         test.invoke("rename_task", { id, title }) as Promise<Snapshot>,
       autoname: target => test.invoke("autoname", { target }) as Promise<Snapshot>,

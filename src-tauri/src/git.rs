@@ -164,7 +164,9 @@ pub fn wait_for_marker(host: &Host, cwd: &str, session: &str) -> Result<String, 
     // A failed Git probe can still have a `.git` entry (for example a broken
     // remote worktree). That is not a creation event and must never re-arm a
     // probe loop.
-    if has_marker(host, cwd)? { return Ok("already-present".into()); }
+    if has_marker(host, cwd)? {
+        return Ok("already-present".into());
+    }
     let found = if host.kind == "local" {
         wait_local_for_marker(cwd)
     } else if host.kind == "ssh" {
@@ -852,7 +854,10 @@ mod tests {
         fs::remove_dir(root.join(".git")).unwrap();
         fs::write(root.join(".git"), "gitdir: /elsewhere/worktrees/task\n").unwrap();
         assert!(local_has_marker(nested.to_str().unwrap()));
-        assert_eq!(wait_for_marker(&host(), nested.to_str().unwrap(), "test").unwrap(), "already-present");
+        assert_eq!(
+            wait_for_marker(&host(), nested.to_str().unwrap(), "test").unwrap(),
+            "already-present"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

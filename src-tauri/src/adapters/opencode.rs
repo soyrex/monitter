@@ -20,8 +20,16 @@ pub fn args(task: &Task) -> Vec<String> {
     if let Some(session_id) = &task.native_session_id {
         args.extend(["--session".into(), session_id.clone()]);
     }
-    if !task.model.trim().is_empty() {
-        args.extend(["--model".into(), task.model.clone()]);
+    // OpenCode requires its provider-qualified `provider/model` identifier.
+    // Older Monitter tasks stored a bare model name (for example `mimo-v2.5`),
+    // which OpenCode rejects before it can start a session. In that case, omit
+    // the flag and let the user's configured OpenCode default select a model.
+    let model = task.model.trim();
+    if model
+        .split_once('/')
+        .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
+    {
+        args.extend(["--model".into(), model.into()]);
     }
     args
 }
@@ -186,6 +194,13 @@ mod tests {
             ]
         );
         assert!(!args.iter().any(|arg| arg == "--auto"));
+    }
+
+    #[test]
+    fn args_omit_legacy_unqualified_model_name() {
+        let args = args(&task(None, "mimo-v2.5"));
+
+        assert!(!args.iter().any(|arg| arg == "--model"));
     }
 
     #[test]

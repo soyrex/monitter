@@ -11,7 +11,7 @@
 <style>
   .mention-composer { position:relative; min-width:0; }
   .mention-overlay { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
-  .mention-text, textarea { margin:0; padding:2px; box-sizing:border-box; font-family:var(--chat-font,"IBM Plex Sans",system-ui,sans-serif); font-size:var(--chat-font-size,13px); line-height:1.5; letter-spacing:normal; white-space:pre-wrap; overflow-wrap:break-word; tab-size:8; }
+  .mention-text, textarea { margin:0; padding:2px; box-sizing:border-box; font-family:var(--chat-font,"IBM Plex Sans",system-ui,sans-serif); font-size:var(--chat-font-size,13px); line-height:var(--chat-line-height,1.65); letter-spacing:normal; white-space:pre-wrap; overflow-wrap:break-word; tab-size:8; }
   .mention-text { color:var(--ink); }
   textarea { position:relative; display:block; width:100%; min-height:52px; max-height:25vh; resize:vertical; border:0; outline:0; background:transparent; color:transparent; caret-color:var(--ink); }
   textarea::placeholder { color:var(--muted); }

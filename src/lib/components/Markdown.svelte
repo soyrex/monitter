@@ -49,7 +49,7 @@
     padding: 10px 12px;
     border-radius: 7px;
     background: var(--code);
-    font: calc(12px * var(--chat-font-ratio, 1))/1.55 var(--mono);
+    font: calc(12px * var(--chat-font-ratio, 1))/var(--chat-line-height, 1.65) var(--mono);
   }
   .markdown :global(code) {
     font: calc(12px * var(--chat-font-ratio, 1)) var(--mono);
