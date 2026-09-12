@@ -45,7 +45,7 @@ async function run(width, mobile) {
     });
   }
   await page.goto(testUrl, { timeout: 90000 });
-  await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 60000 });
+  await expect(page.getByRole('complementary', { name: 'Agents and tasks', exact: true })).toBeVisible({ timeout: 60000 });
   const initial = await page.evaluate(() => window.__MONITTER_QA__.snapshot());
   await page.evaluate(value => window.__MONITTER_QA__.setSnapshot(value), fixture(initial));
 
