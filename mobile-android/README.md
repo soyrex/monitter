@@ -51,3 +51,13 @@ The matching host-side concurrency and fast send-receipt changes must be include
 in the next desktop build to remove the older host's sequential-request bottleneck.
 The APK remains compatible with that older host; building it does not install or
 restart the desktop app.
+
+Version 0.4.0 adds remembered phone approval, automatic foreground/restart
+reconnection, and an inactivity policy in desktop Remote control. Access is
+indefinite by default; a positive day count renews on each authenticated access.
+The panel lists saved phones and can revoke each one. Install the matching desktop
+changes as well: the APK alone cannot preserve an old desktop's memory-only trust.
+The app retains its private non-extractable CryptoKey in IndexedDB at its existing
+secure origin. Updating with the same signing key preserves this data; uninstalling
+or clearing app data does not. Android Back backgrounds the app after navigating
+out of its current view; it does not explicitly disconnect the paired phone.

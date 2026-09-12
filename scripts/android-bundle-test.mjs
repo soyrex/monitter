@@ -43,12 +43,18 @@ try {
     settings: { accent: '#709cde', theme: 'dark', sidebarView: 'standard' },
   };
   let sends = 0, completedReads = 0, holdSnapshot = false, snapshotWaiting = false, releaseSnapshot, holdSend = false, sendWaiting = false, releaseSend;
-  desktop = await createDesktopSession(relayUrl, {
+  const rememberedKeys = new Set();
+  const persistentOptions = process.argv[3] ? undefined : {
+    identity: {room: Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString('base64url'), keyPair: await crypto.subtle.generateKey({name:'ECDH', namedCurve:'P-256'}, false, ['deriveBits'])},
+    isTrustedController: key => rememberedKeys.has(key),
+  };
+  const bridge = {
     getSnapshot: async () => { if (holdSnapshot) { snapshotWaiting = true; await new Promise(resolve => releaseSnapshot = resolve); } completedReads++; return snapshot; },
     sendMessage: async (id, text) => { if (holdSend) { sendWaiting = true; await new Promise(resolve => releaseSend = resolve); } sends++; snapshot.messages.push({ id: 'm', taskId: id, text, role: 'user', createdAt: Date.now() }); return snapshot; },
     cancelTask: async () => snapshot, resumeTask: async () => snapshot,
     listTerminals: async () => [], readTerminal: async () => ({ chunks: [], nextSeq: 0, status: 'exited', exitCode: 0, truncated: false }),
-  });
+  };
+  desktop = await createDesktopSession(relayUrl, bridge, persistentOptions);
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage({ viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true });
   // The production app uses WSS; this test alone connects to a loopback relay.
@@ -69,6 +75,7 @@ try {
   await page.evaluate(invitation => window.dispatchEvent(new CustomEvent('monitter:qr', { detail: invitation })), desktop.invitation);
   try { await expect.poll(() => desktop.getStatus()).toBe('pending'); } catch(error) { console.log(await page.locator('body').innerText()); await page.screenshot({path:'verification/android-pairing-error.png'}); throw error; }
   await expect(page.getByText(desktop.getVerificationCode(), { exact: true })).toBeVisible();
+  if (persistentOptions) rememberedKeys.add(desktop.getPeerControllerPublicKey());
   await desktop.approve();
   await expect(page.getByRole('tab', { name: 'Standard view', exact: true })).toBeVisible();
   holdSnapshot = true;
@@ -98,10 +105,28 @@ try {
   await expect(page.getByText('Message from packaged APK', { exact: true })).toBeVisible();
   assert.equal(sends, 1);
   await page.screenshot({ path: 'verification/android-production.png' });
+  if (persistentOptions) {
+    // The packaged route must restore its IDB identity after a page teardown,
+    // and reconnect to a recreated host without another approval click.
+    desktop.close();
+    desktop = await createDesktopSession(relayUrl, bridge, persistentOptions);
+    await page.reload();
+    await expect.poll(() => desktop.getStatus()).toBe('connected');
+    await expect(page.getByRole('button', { name: /APK verification chat/ })).toBeVisible();
+    assert.equal(sends, 1, 'Reload must not replay the delivered mutation');
+    desktop.close();
+    desktop = await createDesktopSession(relayUrl, bridge, persistentOptions);
+    await page.evaluate(() => window.dispatchEvent(new Event('monitter:resume')));
+    await expect.poll(() => desktop.getStatus()).toBe('connected');
+    await expect(page.locator('header small')).toHaveText('connected');
+    assert.equal(sends, 1, 'Foreground reconnect must not replay mutations');
+  }
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Connect to desktop', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Connect to desktop', exact: true })).toBeVisible();
   assert.deepEqual(errors, []);
-  console.log('APK assets: secure pairing, sidebar modes, stalled refresh/send navigation, draft retention, bounded history, single send and disconnect passed.');
+  console.log('APK assets: secure pairing, sidebar modes, stalled refresh/send navigation, draft retention, bounded history, single send, cold route reload, foreground reconnect and explicit forgetting passed.');
 } finally {
   await browser?.close(); desktop?.close(); relay?.kill('SIGTERM');
   await rm(directory, { recursive: true, force: true });

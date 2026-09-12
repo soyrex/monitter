@@ -117,10 +117,21 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
+        // The SPA owns in-app navigation. If there is no mobile destination to
+        // close, background the task rather than destroying its WebView/session.
+        webView.evaluateJavascript("Boolean(window.monitterHandleBack && window.monitterHandleBack())",
+                result -> {
+                    if (!"true".equals(result)) {
+                        moveTaskToBack(true);
+                    }
+                });
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            dispatchToPage("monitter:resume", "");
         }
     }
 

@@ -1,0 +1,3 @@
+import { mkdtemp, rm } from 'node:fs/promises'; import { tmpdir } from 'node:os'; import { join } from 'node:path'; import { execFileSync } from 'node:child_process'; import { fileURLToPath } from 'node:url';
+const root=fileURLToPath(new URL('../',import.meta.url)), dir=await mkdtemp(join(tmpdir(),'monitter-resumable-'));
+try { const out=join(dir,'test.mjs'); execFileSync(join(root,'node_modules/.bin/rolldown'),['scripts/resumable-transport-test.mjs','--platform','node','--format','esm','--file',out,'--logLevel','silent'],{cwd:root,stdio:'inherit'}); execFileSync(process.execPath,[out],{cwd:root,stdio:'inherit'}); } finally { await rm(dir,{recursive:true,force:true}); }

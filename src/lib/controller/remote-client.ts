@@ -1,5 +1,5 @@
 import { ControllerDispatcher } from './dispatcher';
-import { CONTROLLER_PROTOCOL_VERSION, type ControllerRequest, type ControllerResponse, type ControllerResult, type ControllerSendReceipt } from './protocol';
+import { CONTROLLER_PROTOCOL_VERSION, parseControllerRequest, type ControllerRequest, type ControllerResponse, type ControllerResult, type ControllerSendReceipt } from './protocol';
 import { SecureChannel, base64urlToBytes, bytesToBase64url, deriveDirectionalKeys, deriveEcdhSecret, exportPairingPublicKey, generatePairingKeyPair, pairingCommitment, randomBytes, verificationCode, type SecureEnvelope } from './secure-session';
 import type { Snapshot, TerminalRead, TerminalSession } from '../types';
 import type { ControllerClient } from './protocol';
@@ -11,11 +11,23 @@ export interface ControllerInvitationV1 { readonly version: 1; readonly relayUrl
 export interface ControllerInvitationV2 { readonly version: 2; readonly relayUrl: string; readonly room: string; readonly publicKey: string; }
 export type ControllerInvitation = ControllerInvitationV1 | ControllerInvitationV2;
 export interface DesktopBridge extends ControllerClient {}
+export interface PersistentDesktopIdentity { readonly keyPair: CryptoKeyPair; readonly room: string; }
+export interface PersistentMobileIdentity { readonly keyPair: CryptoKeyPair; }
+export interface PersistentDesktopSessionOptions {
+  readonly identity: PersistentDesktopIdentity;
+  /** Checked only after the fresh ECDH handshake and encrypted pair request. */
+  readonly isTrustedController?: (publicKey: string) => boolean | Promise<boolean>;
+  /** Called for authenticated approved-controller activity; callers persist policy state. */
+  readonly onControllerAccess?: (publicKey: string) => void | Promise<void>;
+}
+export interface PersistentMobileSessionOptions { readonly identity: PersistentMobileIdentity; }
 export interface DesktopSession {
   readonly invitation: string;
   getStatus(): RemoteConnectionStatus;
   getVerificationCode(): string | null;
   getPeer(): CollaboratorIdentity | null;
+  /** Pinned v2 controller identity after a verified ECDH handshake. */
+  getPeerControllerPublicKey(): string | null;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   onPendingPeer(listener: () => void): () => void;
   approve(): Promise<void>;
@@ -25,6 +37,8 @@ export interface DesktopSession {
 export interface MobileSession {
   getStatus(): RemoteConnectionStatus;
   getVerificationCode(): string | null;
+  /** True only when this connected desktop advertised durable device trust. */
+  supportsRememberedDevices(): boolean;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   getSnapshot(): Promise<Snapshot>;
   sendMessage(taskId: string, text: string): Promise<Snapshot | ControllerSendReceipt>;
@@ -49,6 +63,7 @@ const MAX_INVITATION_BYTES = 1024;
 const PAIRING_TIMEOUT_MS = 5 * 60_000;
 const MAX_CONCURRENT_DESKTOP_RPCS = 32;
 const SEND_RECEIPT_CAPABILITY = 'send-receipt-v1';
+const REMEMBERED_DEVICE_CAPABILITY = 'remembered-device-v1';
 
 function uuid(): string { return crypto.randomUUID(); }
 function validRelayUrl(value: string): boolean {
@@ -77,6 +92,7 @@ class PairingConnection {
   protected channel: SecureChannel | null = null;
   protected readonly nonce = randomBytes(16);
   protected peerNonce: Uint8Array | null = null;
+  protected peerPublicKey: Uint8Array | null = null;
   protected status: RemoteConnectionStatus = 'connecting';
   private readonly listeners = new Set<(state: RemoteConnectionState) => void>();
   private receiveQueue: Promise<void> = Promise.resolve();
@@ -169,6 +185,7 @@ class PairingConnection {
       if (!sameBytes(await pairingCommitment(peerRole, peerPublic, peerNonce), this.peerCommitment)) throw new Error('Pairing reveal does not match commitment.');
       if (this.pairingKeys.expectedPeerPublicKey && !sameBytes(peerPublic, this.pairingKeys.expectedPeerPublicKey)) throw new Error('Pinned desktop key mismatch.');
       this.peerNonce = peerNonce;
+      this.peerPublicKey = peerPublic;
       const desktopNonce = this.role === 'desktop' ? this.nonce : peerNonce;
       const mobileNonce = this.role === 'mobile' ? this.nonce : peerNonce;
       const sharedSecret = await deriveEcdhSecret(this.pairingKeys.privateKey, peerPublic);
@@ -188,13 +205,16 @@ class PairingConnection {
 }
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean { if (left.byteLength !== right.byteLength) return false; let mismatch = 0; for (let i = 0; i < left.byteLength; i += 1) mismatch |= left[i] ^ right[i]; return mismatch === 0; }
 
-export async function createDesktopSession(relayUrl: string, bridge: DesktopBridge): Promise<DesktopSession> {
+export async function createDesktopSession(relayUrl: string, bridge: DesktopBridge, options?: PersistentDesktopSessionOptions): Promise<DesktopSession> {
   if (!validRelayUrl(relayUrl)) throw new Error('Relay must use wss://, or ws:// only on loopback.');
-  const keyPair = await generatePairingKeyPair();
+  if (options && (!/^[A-Za-z0-9_-]{22,128}$/.test(options.identity.room) || !validPersistentKeyPair(options.identity.keyPair))) throw new Error('Invalid persistent controller identity.');
+  const keyPair = options?.identity.keyPair ?? await generatePairingKeyPair();
   const publicKey = await exportPairingPublicKey(keyPair.publicKey);
-  const invitationData: ControllerInvitationV2 = { version: 2, relayUrl, room: bytesToBase64url(randomBytes(18)), publicKey: bytesToBase64url(publicKey) };
+  const invitationData: ControllerInvitationV2 = { version: 2, relayUrl, room: options?.identity.room ?? bytesToBase64url(randomBytes(18)), publicKey: bytesToBase64url(publicKey) };
   const session = new class extends PairingConnection {
     private approved = false;
+    private authorizationEpoch = 0;
+    close() { this.approved = false; this.authorizationEpoch++; super.close(); }
     private peerSupportsSendReceipt = false;
     private pendingRpcs = 0;
     private peer: CollaboratorIdentity | null = null;
@@ -202,16 +222,31 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
     private readonly dispatcher = new ControllerDispatcher(bridge);
     readonly invitation = JSON.stringify(invitationData);
     getPeer() { return this.peer; }
+    getPeerControllerPublicKey() { return this.peerPublicKey ? bytesToBase64url(this.peerPublicKey) : null; }
     onPendingPeer(listener: () => void) { this.pendingListeners.add(listener); return () => this.pendingListeners.delete(listener); }
     async approve() {
       if (!this.channel || this.status !== 'pending') throw new Error('No pending paired device to approve.');
       try {
-        await this.sendSecure({ type: 'approved', ...(this.peerSupportsSendReceipt ? { capabilities: [SEND_RECEIPT_CAPABILITY] } : {}) });
-        this.approved = true; this.completePairing(); this.setStatus('connected');
+        const capabilities = [
+          ...(this.peerSupportsSendReceipt ? [SEND_RECEIPT_CAPABILITY] : []),
+          ...(options?.isTrustedController ? [REMEMBERED_DEVICE_CAPABILITY] : []),
+        ];
+        await this.sendSecure({ type: 'approved', ...(capabilities.length ? { capabilities } : {}) });
+        this.approved = true;
+        if (!this.peer && this.peerPublicKey) await options?.onControllerAccess?.(bytesToBase64url(this.peerPublicKey));
+        this.completePairing(); this.setStatus('connected');
       }
       catch (reason) { this.approved = false; this.close(); throw reason; }
     }
-    async reject() { if (!this.channel) throw new Error('No pending paired device to reject.'); await this.sendSecure({ type: 'rejected' }); this.setStatus('rejected'); this.socket?.close(); }
+    async reject() {
+      this.approved = false; this.authorizationEpoch++;
+      if (!this.channel) throw new Error('No pending paired device to reject.');
+      await this.sendSecure({ type: 'rejected' });
+      // Let the peer receive and acknowledge the terminal state by closing its
+      // socket. Closing here races the relay's peer_left frame ahead of the
+      // encrypted rejection on some WebSocket implementations.
+      this.setStatus('rejected');
+    }
     protected async onChannelReady() { /* A valid encrypted pair-request proves invitation-secret possession. */ }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value) throw new Error('Invalid paired message.');
@@ -221,7 +256,15 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
           if (!this.peer) throw new Error('Invalid collaborator identity.');
         }
         this.peerSupportsSendReceipt = hasSendReceiptCapability(value.capabilities);
-        this.setStatus('pending'); for (const listener of this.pendingListeners) listener(); return;
+        this.setStatus('pending'); for (const listener of this.pendingListeners) listener();
+        // Only controller sessions (never visitor/operator sessions) may resume
+        // a remembered approval, and only after this connection's ECDH proof and
+        // encrypted request. Recheck after an async trust lookup for revocation.
+        if (!this.peer && options?.isTrustedController && this.peerPublicKey) {
+          let known = false; try { known = await options.isTrustedController(bytesToBase64url(this.peerPublicKey)); } catch { /* Leave manual approval available. */ }
+          if (known && this.status === 'pending' && !this.approved && !this.peer) await this.approve();
+        }
+        return;
       }
       if (value.type !== 'rpc' || !this.approved || this.status !== 'connected' || typeof value.json !== 'string') throw new Error('Unapproved controller request.');
       // Keep authenticated opening and sealing ordered, but do not let a slow
@@ -236,8 +279,30 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
         return;
       }
       this.pendingRpcs += 1;
-      void this.dispatcher.dispatchJson(json, { authenticated: true, subject: `paired-room:${invitationData.room}` }, { allowSendReceipt: this.peerSupportsSendReceipt })
-        .then(response => this.sendSecure({ type: 'response', json: response }))
+      const authorizationEpoch = this.authorizationEpoch;
+      const stillApproved = () => this.approved && this.status === 'connected' && authorizationEpoch === this.authorizationEpoch;
+      void (async () => {
+        const controllerKey = !this.peer && this.peerPublicKey ? bytesToBase64url(this.peerPublicKey) : null;
+        // Trust is live policy, not a property cached at socket approval. An
+        // expired or revoked controller must not dispatch an RPC and then use
+        // that same RPC to renew its inactivity window.
+        if (controllerKey && options?.isTrustedController && !(await options.isTrustedController(controllerKey))) {
+          this.approved = false;
+          this.close();
+          return;
+        }
+        let validRequest = false;
+        try {
+          const input: unknown = JSON.parse(json);
+          validRequest = !('ok' in parseControllerRequest(input));
+        } catch { /* The dispatcher returns the protocol error below. */ }
+        // Renew when authenticated access arrives, even if the bridge operation is slow.
+        if (controllerKey && validRequest) await options?.onControllerAccess?.(controllerKey);
+        if (controllerKey && options?.isTrustedController && !(await options.isTrustedController(controllerKey))) { this.close(); return; }
+        if (!stillApproved()) return;
+        const response = await this.dispatcher.dispatchJson(json, { authenticated: true, subject: `paired-room:${invitationData.room}` }, { allowSendReceipt: this.peerSupportsSendReceipt });
+        if (stillApproved()) await this.sendSecure({ type: 'response', json: response });
+      })()
         // A close/revocation must never revive the socket. A failed response
         // write while the session is still live is a transport failure.
         .catch(() => { if (this.status === 'connected') this.close(); })
@@ -249,19 +314,23 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
 
 export function createMobileSession(invitation: string): Promise<MobileSession>;
 export function createMobileSession(invitation: string, operator: CollaboratorIdentity): Promise<CollaboratorMobileSession>;
-export async function createMobileSession(invitation: string, operator?: CollaboratorIdentity): Promise<MobileSession | CollaboratorMobileSession> {
+export function createMobileSession(invitation: string, operator: undefined, options: PersistentMobileSessionOptions): Promise<MobileSession>;
+export async function createMobileSession(invitation: string, operator?: CollaboratorIdentity, options?: PersistentMobileSessionOptions): Promise<MobileSession | CollaboratorMobileSession> {
   if (operator && !collaborator(operator)) throw new Error('Enter a collaborator name of 2-48 characters.');
   const invitationData = parseInvitation(invitation);
-  const keyPair = invitationData.version === 2 ? await generatePairingKeyPair() : null;
+  if (options && !validPersistentKeyPair(options.identity.keyPair)) throw new Error('Persistent controller sessions require a valid identity.');
+  const keyPair = invitationData.version === 2 ? (options?.identity.keyPair ?? await generatePairingKeyPair()) : null;
   const publicKey = keyPair ? await exportPairingPublicKey(keyPair.publicKey) : undefined;
   const expectedPeerPublicKey = invitationData.version === 2 ? base64urlToBytes(invitationData.publicKey) : undefined;
   const session = new class extends PairingConnection {
     private readonly pending = new Map<string, { resolve: (value: ControllerResult) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    private rememberedDevices = false;
+    supportsRememberedDevices() { return this.rememberedDevices; }
     protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request', capabilities: [SEND_RECEIPT_CAPABILITY] }); }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
       if (value.type === 'pair-request') return;
-      if (value.type === 'approved') { this.completePairing(); this.setStatus('connected'); return; }
+      if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
       if (value.type === 'rejected') { this.setStatus('rejected'); this.socket?.close(); return; }
       if (value.type !== 'response' || typeof value.json !== 'string') throw new Error('Unexpected paired response.');
       const response = JSON.parse(value.json) as ControllerResponse;
@@ -294,7 +363,11 @@ export async function createMobileSession(invitation: string, operator?: Collabo
 }
 
 function hasSendReceiptCapability(value: unknown): boolean {
-  return Array.isArray(value) && value.length <= 8 && value.every(item => typeof item === 'string' && item.length <= 64) && value.includes(SEND_RECEIPT_CAPABILITY);
+  return hasCapability(value, SEND_RECEIPT_CAPABILITY);
+}
+
+function hasCapability(value: unknown, capability: string): boolean {
+  return Array.isArray(value) && value.length <= 8 && value.every(item => typeof item === 'string' && item.length <= 64) && value.includes(capability);
 }
 
 function requestIdFromJson(json: string): string | null {
@@ -302,6 +375,11 @@ function requestIdFromJson(json: string): string | null {
     const request = JSON.parse(json);
     return request && typeof request === 'object' && typeof request.id === 'string' ? request.id : null;
   } catch { return null; }
+}
+
+function validPersistentKeyPair(keyPair: CryptoKeyPair): boolean {
+  return keyPair.privateKey.type === 'private' && keyPair.publicKey.type === 'public' &&
+    keyPair.privateKey.algorithm.name === 'ECDH' && keyPair.publicKey.algorithm.name === 'ECDH';
 }
 
 /**
