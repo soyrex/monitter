@@ -1,6 +1,33 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { Command, Search, X } from "@lucide/svelte";
+  import { Archive, Bot, Brain, Columns2, Command, CornerDownLeft, Folder, Grid2X2, MessageSquare, Monitor, Moon, MousePointer2, PanelRight, Radio, Search, Settings2, Sparkles, Square, SquareTerminal, Sun, Users, Wrench, X, ZoomIn, ZoomOut } from "@lucide/svelte";
+
+  function itemIcon(id: string) {
+    const kind = id.split(':')[0];
+    if (kind === 'task' || kind === 'draft' || id === 'new-task') return MessageSquare;
+    if (kind === 'terminal' || id === 'new-terminal' || id === 'vim-command') return SquareTerminal;
+    if (kind === 'channel' || id === 'new-channel') return Radio;
+    if (kind === 'agent' || id === 'new-agent' || id === 'steer-busy') return Bot;
+    if (kind === 'project' || id === 'new-project' || id === 'sidebar:projects') return Folder;
+    if (kind === 'settings' || id === 'appearance') return Settings2;
+    if (id === 'agent-directory') return Users;
+    if (id === 'archive' || id === 'archived') return Archive;
+    if (id === 'reasoning') return Brain;
+    if (id === 'tools') return Wrench;
+    if (id === 'autoname') return Sparkles;
+    if (id === 'stop' || id === 'layout:single') return Square;
+    if (id === 'layout:columns') return Columns2;
+    if (id === 'layout:grid') return Grid2X2;
+    if (id === 'focus-mouse') return MousePointer2;
+    if (id === 'enter') return CornerDownLeft;
+    if (id === 'scale-up') return ZoomIn;
+    if (id === 'scale-down') return ZoomOut;
+    if (id === 'theme:light') return Sun;
+    if (id === 'theme:dark') return Moon;
+    if (id === 'hosts' || id === 'theme:system' || id === 'scale-reset') return Monitor;
+    if (kind === 'sidebar' || id === 'detail' || id === 'dim-panes') return PanelRight;
+    return Command;
+  }
 
   export type CommandPaletteItem = {
     id: string;
@@ -192,6 +219,7 @@
               <h2>{group}</h2>
               {#each groupItems as item (item.id)}
                 {@const isActive = selectableItems[activeIndex]?.id === item.id}
+                {@const ItemIcon = itemIcon(item.id)}
                 <button
                   class:active={isActive}
                   class="result"
@@ -205,6 +233,7 @@
                     if (nextIndex >= 0) activeIndex = nextIndex;
                   }}
                 >
+                  <span class="result-icon" aria-hidden="true"><ItemIcon size={18}/></span>
                   <span class="copy">
                     <span class="label">{item.label}</span>
                     {#if item.detail}<span class="detail">{item.detail}</span>{/if}
@@ -227,7 +256,7 @@
 {/if}
 
 <style>
-  .backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgba(32, 27, 20, .42); backdrop-filter: blur(3px); }
+  .backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .3); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
   .palette { position: relative; inset: auto; box-sizing: border-box; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: min(620px, 100%); height: min(530px, calc(100vh - 40px)); min-height: min(340px, calc(100vh - 40px)); margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; color: var(--ink); background: var(--panel); box-shadow: 0 22px 70px rgba(40, 31, 18, .27); }
   header, footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-color: var(--line); background: var(--panel); }
   header { border-bottom: 1px solid var(--line); }
@@ -244,6 +273,8 @@
   .result { display: flex; align-items: center; width: 100%; min-height: 45px; gap: 12px; padding: 8px 9px; border-radius: 7px; text-align: left; }
   .result:hover, .result.active { background: color-mix(in srgb, var(--accent) 11%, var(--soft)); }
   .result.active { box-shadow: inset 2px 0 var(--accent); }
+  .result-icon { display:grid; place-items:center; flex:0 0 22px; width:22px; height:22px; color:var(--muted); }
+  .result.active .result-icon { color:var(--accent-ink); }
   .copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(13px * var(--interface-font-ratio, 1)); font-weight: 500; }
   .detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: calc(11px * var(--interface-font-ratio, 1)); }

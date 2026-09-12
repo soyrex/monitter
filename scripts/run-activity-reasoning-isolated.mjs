@@ -40,6 +40,11 @@ try {
   await expect.poll(() => page.evaluate(() => Boolean(window.__REASONING_QA__))).toBe(true);
   const pending = page.locator('.reasoning-pending');
   await expect(pending).toBeVisible();
+  const compaction = page.locator('.activity.compaction');
+  await expect(compaction).toHaveText('Compacting context...');
+  await expect(compaction.locator('.animated-title')).toHaveAttribute('aria-busy', 'true');
+  await expect(compaction.locator('.animated-title')).toHaveAttribute('title', 'Compacting context...');
+  expect(await compaction.locator('.animated-title').evaluate(node => getComputedStyle(node.parentElement).overflow)).toBe('visible');
   await expect(page.locator('details.reasoning')).toHaveCount(0);
   const inactiveLabel = await pending.textContent();
   await page.waitForTimeout(5_200);
@@ -58,6 +63,12 @@ try {
   await expect(page.locator('details.reasoning')).toBeVisible();
   await expect(page.locator('.activity-body')).toContainText('I checked the source and found the relevant path.');
   await expect(page.locator('body')).not.toContainText('"summary"');
+  await page.evaluate(() => window.__REASONING_QA__.completeCompaction());
+  await expect(compaction).toHaveText('Context compacted in: 15.3s');
+  await expect(compaction).not.toContainText('tool calls');
+  await page.evaluate(() => window.__REASONING_QA__.interruptCompaction());
+  await expect(compaction).toHaveText('Context compaction activity');
+  await expect(compaction.locator('.animated-title')).toHaveAttribute('aria-busy', 'false');
   expect(errors).toEqual([]);
   console.log('WebKit: inactive and historical reasoning stay still; active blank reasoning rotates; supplied summary is readable without raw JSON.');
 } finally {

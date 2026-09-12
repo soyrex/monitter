@@ -106,6 +106,13 @@ Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family
 Settings include `accent`, `theme`, `interfaceScale` (integer percent, 80–200, default 125),
 `showToolActivity` and `showReasoningSummaries` (default true), `sendWithEnter` (default false),
 and `sidebarView` (`standard`, `activity`, or `projects`; default `standard`).
+`tabStyle` is `classic` or `modern`, defaulting to `classic`; missing values from existing saved
+workspaces resolve to `classic`. It is a shared desktop/LAN appearance preference.
+Modern tabs use straight edges and fill a bar four pixels shorter than Classic's base bar height,
+with a 32px minimum. Right-sidebar tabs follow the same style and stay aligned to their sidebar
+column and header divider, with overflow confined to the tab list rather than the pane controls.
+Settings tabs display their active section as `Setting: Appearance`, `Setting: Typography`, etc.
+The horizontal tab, compact selector and workspace sidebar use the same section-aware title.
 Missing new fields receive these defaults when older saved workspaces load. Native WebView zoom
 scales the whole interface; window controls keep their native size and reserved header space.
 Cmd/Ctrl+plus (including Cmd+=) and Cmd/Ctrl+minus adjust the saved setting by five percentage
@@ -205,8 +212,9 @@ Hermes bridge has no verified per-invocation bypass. Other providers require `ha
 do not describe their host permission rules as an OS sandbox.
 Approval requests are durable task records, not generic tool activity. A request contains the provider,
 provider run/request ID, proposed tool/action summary, provider detail, risk label, timestamp and an
-explicit one-time approve or deny decision. Pending requests remain prominent in the owning chat and
-their resolved history is retained. A stopped task, expired response channel, restart or unsupported
+explicit one-time approve or deny decision. Pending requests stay pinned above the owning chat's
+composer. Resolved decisions appear as compact, timestamped transcript lines linking to their full
+records in the right sidebar's Approvals tab, not full cards in the chat. A stopped task, expired response channel, restart or unsupported
 provider transport resolves a pending request safely without authorizing work. Never render an approval
 denial as a successful `Tool result`, and never render an enabled approval control unless that live
 provider run can receive the decision.
@@ -252,6 +260,9 @@ RunEvent.kind additionally accepts `computer`, `goal`, and `log`. Computer detai
 `{id,phase:"started"|"completed",tool,summary}`. Only start records in the current user turn of a
 running owned task activate the compact panel. Matching completion or terminal state clears it;
 historical tool records cannot reactivate control. Stop cancels the task's owned process group.
+Codex `ContextCompaction` tool detail preserves its native `id` plus
+`monitterPhase:"started"|"completed"`. The UI may show a duration only for a matching pair;
+an interrupted or legacy lone record remains neutral rather than being described as completed.
 
 `get_task_goal` performs only the Codex app-server initialize/initialized/thread/goal/get handshake,
 with bounded cleanup. It neither resumes nor changes a thread. A null result hides the panel; API
@@ -398,7 +409,8 @@ or project scope; choosing a different owner routes the draft to a compatible wo
 
 The selected workspace remains visible independently of the selected chat. There is no workspace picker:
 selecting an agent or project changes context, while choosing Activity returns to All. The active agent
-avatar or project icon sits at the left of every tab bar; the overview is not a tab. Agent/project sidebar
+avatar sits in the desktop chat header, while the project icon remains in the tab bar; the overview
+is not a tab. Agent/project sidebar
 badges and the global approval entry surface pending approvals even in hidden workspaces. Opening an
 approval navigates to the shared owning chat. The left sidebar is always global: its Standard,
 Activity, Projects and collapsed-rail chat lists show chats from every workspace. Selecting one routes
@@ -488,15 +500,20 @@ Resume while the previous owned process is still active. Ordinary completed chat
 
 Every pane uses the same tab-bar height, including native macOS zoom compensation. Split separators
 paint a one-pixel line with a wider invisible drag target. Agent messages show the sending agent's
-small avatar. `Settings.dimInactivePanes` defaults to true and `inactivePaneOpacity` to 0.6; Preferences
+small avatar. Closing or successfully moving a pane's last tab removes that pane once in-flight
+actions finish; cancelled transfers preserve it and terminal transfers keep their live sessions.
+The sole remaining pane stays as the workspace's empty view, and newly created empty splits are
+not removed without a close or completed move.
+`Settings.dimInactivePanes` defaults to true and `inactivePaneOpacity` to 0.6; Preferences
 provides a toggle and 10–90% slider, with validation requiring a finite value from 0.1 to 0.9.
 Pointer or keyboard focus immediately marks the receiving pane active; its opacity is always 1.
 
 
 Dimmed panes also desaturate completely; focusing a pane or disabling dimming restores its colour.
-Task and channel title backgrounds use 80% opacity and a 14px backdrop blur, with opaque text.
-Titles remain sticky inside their own message scroller so actual conversation content passes behind
-them. The combined title/activity area has a bounded independent overflow for small panes.
+Task and channel title backgrounds are fully opaque with no backdrop blur. Both use 15px padding
+on every side, a compact title, and an avatar or group icon in the same left-hand slot.
+Headers sit above the message scroller and span the chat and its right sidebar. Mobile keeps its
+compact tab selector without adding a duplicate pane title header.
 
 Consecutive tool entries of the same tool or connector family share one muted, borderless row
 with extra spacing below. Connector methods such as `gmail.search_emails` and `gmail.read_email`
@@ -529,6 +546,20 @@ actual ring loss. Native buffers retain at most 1 MiB; each read is at most 256 
 bounded to 64 KiB per write, sizes to 10–500 columns and 4–300 rows. xterm retains 10,000 scrollback
 lines; UTF-8 decoding spans chunks. Reads/input are serialized and late mounts cannot steal a terminal
 from its current pane. Close failures stay visible and can be retried.
+
+Terminal titles start as `Terminal`. For local native PTYs, the backend reads only that PTY's
+foreground process group (never a process-wide job list): after the same foreground shell/process
+has remained for five seconds, an idle shell becomes `Terminal: <actual-shell>` and a foreground
+command becomes `Terminal: <process>`. Background jobs do not affect this title. Unknown process
+state keeps the existing truthful title rather than inventing an idle/command state. The monitor is
+backend-owned, so visible, hidden and sidebar terminal consumers receive the same state through
+ordinary `read_terminal`/`list_terminals` projections. `TerminalSession.title` is the display title;
+it also returns `autoTitle` and `customTitle`. An explicit terminal Auto-name is stored as
+`customTitle`, takes display precedence for that session, and is never overwritten by automatic
+process tracking; automatic tracking continues in `autoTitle`. Each terminal read includes its
+current TerminalSession projection.
+Process-group leaders can disappear before another member of a pipeline; when the native single-PID
+lookup cannot resolve a reliable leader, the existing title is retained rather than guessing.
 
 Shell Ctrl-C/Ctrl-P and other unshifted Ctrl combinations remain terminal input, except Ctrl-W on
 Windows/Linux, which closes the active Monitter tab. On macOS, Cmd-W closes the active Monitter tab;

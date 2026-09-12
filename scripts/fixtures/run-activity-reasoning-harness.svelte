@@ -5,6 +5,10 @@
 
   let running = $state(false);
   let detail = $state('{"content":[],"summary":[],"type":"reasoning"}');
+  let compactionRunning = $state(true);
+  let compactionEvents = $state<RunEvent[]>([
+    { id: 'compact-start', taskId: 'task-1', kind: 'tool', title: 'ContextCompaction', detail: '{"type":"ContextCompaction","id":"compact-1","monitterPhase":"started"}', createdAt: 1 },
+  ]);
   const event = $derived<RunEvent>({
     id: 'reasoning-1', taskId: 'task-1', kind: 'reasoning', title: 'Reasoning', detail, createdAt: 1,
   });
@@ -14,12 +18,14 @@
       activate: () => { running = true; },
       deactivate: () => { running = false; },
       summary: () => { detail = '{"type":"reasoning","summary":[{"type":"summary_text","text":"I checked the source and found the relevant path."}]}'; },
+      completeCompaction: () => { compactionEvents = [...compactionEvents, { id: 'compact-complete', taskId: 'task-1', kind: 'tool', title: 'ContextCompaction', detail: '{"type":"ContextCompaction","id":"compact-1","monitterPhase":"completed"}', createdAt: 15_301 }]; },
+      interruptCompaction: () => { compactionRunning = false; compactionEvents = [compactionEvents[0]]; },
     };
     return () => { delete (window as Window & { __REASONING_QA__?: unknown }).__REASONING_QA__; };
   });
 </script>
 
-<main><RunActivity {event} {running}/></main>
+<main><RunActivity {event} {running}/><RunActivity events={compactionEvents} running={compactionRunning}/></main>
 
 <style>
   :global(html, body, #app) { margin: 0; }

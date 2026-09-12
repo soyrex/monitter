@@ -85,6 +85,7 @@ export interface InteractionInput {
 export interface Settings {
   shortcutMode?: 'standard' | 'vim';
   showTabCloseButtons?: boolean;
+  tabStyle?: 'classic' | 'modern';
   tintUserMessages?: boolean;
   compressToolCalls?: boolean;
   terminalFontSize?: number; chatFontSize?: number; interfaceFontSize?: number;
@@ -165,6 +166,8 @@ export interface ModelCatalog {
 
 
 export interface TerminalTarget { cwd?: string; taskId?: string; agentId?: string; hostId?: string; projectId?: string | null; }
-export interface TerminalSession { id: string; title: string; hostId: string; cwd: string; status: 'running' | 'exited'; exitCode: number | null; }
-export interface TerminalRead { chunks: { seq: number; data: number[] }[]; nextSeq: number; status: 'running' | 'exited'; exitCode: number | null; truncated: boolean; }
+/** `title` is the display title. A custom title takes precedence over `autoTitle`. */
+export interface TerminalSession { id: string; title: string; autoTitle?: string | null; customTitle?: string | null; hostId: string; cwd: string; status: 'running' | 'exited'; exitCode: number | null; }
+/** `session` is optional for an older LAN desktop; normal native reads include it. */
+export interface TerminalRead { chunks: { seq: number; data: number[] }[]; nextSeq: number; status: 'running' | 'exited'; exitCode: number | null; truncated: boolean; session?: TerminalSession; }
 export interface AutonameTarget { taskId?: string; channelId?: string; terminalId?: string; content?: string; }

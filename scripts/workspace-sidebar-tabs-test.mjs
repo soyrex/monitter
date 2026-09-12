@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { collectWorkspaceSidebarTabs } from '../src/lib/workspace-sidebar-tabs.ts';
+import { collectWorkspaceSidebarTabs, settingsTabTitle } from '../src/lib/workspace-sidebar-tabs.ts';
 
 const terminal = (id, title) => ({ id, title, hostId: 'host', cwd: `/tmp/${id}`, status: 'running', exitCode: null });
 const terminals = { one: terminal('one', 'Build shell'), two: terminal('two', 'Server logs') };
@@ -12,7 +12,7 @@ const panes = [
 ];
 const result = collectWorkspaceSidebarTabs(panes, terminals);
 assert.deepEqual(result, [
-  { kind: 'settings', id: 'settings', title: 'Settings' },
+  { kind: 'settings', id: 'settings', title: 'Setting: Appearance' },
   { kind: 'terminal', id: 'two', title: 'Server logs' },
   { kind: 'draft', id: 'draft', title: 'Plan release' },
   { kind: 'empty', id: 'empty', title: 'New tab' },
@@ -44,11 +44,19 @@ assert.deepEqual(collectWorkspaceSidebarTabs(input, terminals), [
 assert.deepEqual(input, before, 'collector must not mutate persisted pane state');
 assert.deepEqual(collectWorkspaceSidebarTabs([], terminals), []);
 console.log('workspace sidebar tab collector assertions passed');
+for (const [category, label] of Object.entries({ appearance: 'Appearance', typography: 'Typography', behaviour: 'Permissions & behaviour', conversation: 'Conversation', agents: 'Agents', directory: 'Agent directory', lan: 'LAN access', remote: 'Remote control' })) {
+  assert.equal(settingsTabTitle(category), `Setting: ${label}`);
+  assert.equal(collectWorkspaceSidebarTabs([{ settingsOpen: true, settingsCategory: category }], {})[0].title, `Setting: ${label}`);
+}
+for (const category of [undefined, null, {}, 'unknown', 'toString']) assert.equal(settingsTabTitle(category), 'Setting: Appearance');
 
 // Exercise the real sidebar routing functions directly from AppSurface. This
 // keeps the test small without booting the Svelte application or copying its
 // focus algorithm into a fixture.
 const appSurface = readFileSync(new URL('../src/lib/components/AppSurface.svelte', import.meta.url), 'utf8');
+assert.ok(appSurface.includes("if (pane === 'settings') return settingsTabTitle(settingsCategory);"), 'compact selector follows the selected settings category');
+assert.ok(appSurface.includes('<span>{settingsTabTitle(settingsCategory)}</span>'), 'desktop settings tab follows the selected category');
+assert.ok(appSurface.includes('title={settingsTabTitle(settingsCategory)}'), 'truncated tabs expose the full settings section name');
 const block = (startMarker, endMarker) => {
   const start = appSurface.indexOf(startMarker);
   const end = appSurface.indexOf(endMarker, start);
