@@ -72,13 +72,21 @@ async function exerciseMobile(width) {
     await expect(toolbar).toBeVisible();
     await expect(toolbar.getByRole('button', { name: 'Back to chats', exact: true })).toBeVisible();
     await expect(toolbar.locator('.tab-picker-trigger')).toBeVisible();
-    await expect(toolbar.getByRole('button', { name: 'Open terminal', exact: true })).toBeVisible();
+    const sidebarToggle = toolbar.locator('.right-sidebar-control');
+    await expect(sidebarToggle).toBeVisible();
+    await expect(toolbar.getByRole('button', { name: 'Open terminal', exact: true })).toHaveCount(0);
     await expect(toolbar.locator('.workspace-context .avatar')).toHaveCount(0);
     await assertSameRow(page, [
       '.topbar button[aria-label="Back to chats"]',
       '.topbar .tab-picker-trigger',
-      '.topbar button[aria-label="Open terminal"]',
+      '.topbar .right-sidebar-control',
     ]);
+
+    if (await sidebarToggle.getAttribute('aria-pressed') === 'true') await sidebarToggle.click();
+    await toolbar.getByRole('button', { name: 'Show right sidebar', exact: true }).click();
+    await expect(page.getByRole('complementary', { name: 'Right sidebar', exact: true })).toBeVisible();
+    await toolbar.getByRole('button', { name: 'Hide right sidebar', exact: true }).click();
+    await expect(page.getByRole('complementary', { name: 'Right sidebar', exact: true })).toBeHidden();
 
     await page.getByRole('button', { name: 'Back to chats', exact: true }).click();
     await expect(page.getByRole('complementary', { name: 'Agents and tasks' })).toBeVisible();
@@ -89,7 +97,10 @@ async function exerciseMobile(width) {
     await expect(page.locator('.tab-picker-trigger')).toContainText('OpenChamber Permission Troubleshooting');
     if (width === 390) await page.screenshot({ path: 'verification/compact-mobile-toolbar.png' });
 
-    await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
+    await page.keyboard.press('Meta+p');
+    const controls = page.getByRole('dialog', { name: 'Controls', exact: true });
+    await expect(controls).toBeVisible();
+    await controls.getByText('New terminal', { exact: true }).click();
     await expect(page.locator('.terminal-pane')).toBeVisible();
     await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.some(call => call.method === 'openTerminal'))).toBe(true);
     expect(errors).toEqual([]);

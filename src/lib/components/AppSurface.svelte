@@ -29,7 +29,6 @@
     Search,
     ChevronDown,
     ChevronRight,
-    RotateCw,
     Cloud,
     Command,
     Folder,
@@ -2143,17 +2142,6 @@
       if (result) probe = result;
     }
   }
-  async function resumeTask() {
-    const task = selectedTask;
-    if (!task?.nativeSessionId || task.status === 'running' || task.archived || busy) return;
-    const key = `task:${task.id}`;
-    setComposerPending(key, true);
-    try {
-      if (await run(() => bridge.resumeTask(task.id))) {
-        if (selectedTaskId === task.id) scrollRevision += 1;
-      }
-    } finally { setComposerPending(key, false); }
-  }
   async function renameTask() {
     if (!selectedTask || !renameTitle.trim()) return;
     if (
@@ -2212,7 +2200,6 @@
     ...(pane === "task" ? [{ id: "project", label: "/project", detail: "Choose the project for this chat" }] : []),
     ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel) ? [{ id: "autoname", label: "/autoname", detail: "Generate a title from recent content" }] : []),
     ...(selectedTask?.status === "running" ? [{ id: "stop", label: "/stop", detail: "Stop this running task" }] : []),
-    ...(selectedTask?.nativeSessionId && selectedTask.status !== "running" && !selectedTask.archived ? [{ id: "resume", label: "/resume", detail: "Continue this native session in Monitter" }] : []),
     ...(selectedTask?.provider === "codex" && selectedTask.nativeSessionId ? [{ id: "goal", label: "/goal", detail: "Read this Codex goal" }] : []),
   ]);
   const slashVisibleItems = $derived(slashItems.filter(item => item.label.startsWith(composer.trim().toLowerCase()) || composer.trim() === "/"));
@@ -2261,7 +2248,6 @@
       else if (task) { renameTitle = task.title; modal = "taskSettings"; }
     } else if (item.id === "autoname") await autonameCurrentPane();
     else if (item.id === "stop" && task) await run(()=>bridge.cancelTask(task.id), "Stopping task…");
-    else if (item.id === "resume") await resumeTask();
     else if (item.id === "goal" && task) {
       try {
         const result = await bridge.getTaskGoal(task.id);
@@ -2709,8 +2695,10 @@
 {/snippet}
 
 {#snippet paneExpandControl()}
+  {#if !mobileSidebar}
   {@const label=focusStep===0?'Expand pane':'Restore pane layout'}
   <button class="icon pane-expand-control" aria-label={label} aria-pressed={focusStep>0} title={focusStep?label:`Expand pane (${modifierLabel}click to fill workspace)`} oncontextmenu={event=>{if(event.ctrlKey){event.preventDefault();expandTab(true)}}} onclick={event=>expandTab(event.metaKey||event.ctrlKey)}>{#if focusStep}<Minimize2 size={15}/>{:else}<MoveDiagonal size={15}/>{/if}</button>
+  {/if}
 {/snippet}
 
 {#snippet workspaceContext()}
@@ -2753,11 +2741,12 @@
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
               <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => selectTabPicker(() => openTask(task))} title={task.title}><span class={`dot ${task.status}`}></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
 
-              <button class="close-tab" aria-label={`Close tab ${task.title}`} onclick={() => {closeTaskTab(tab.id);tabPickerOpen=false;}}><X size={12} /></button>
+              <button class="edit-tab" aria-label={`Edit name for ${task.title}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openTask(task);renameTitle=task.title;taskProjectId=task.projectId??'';modal='taskSettings';}}><Pencil size={15}/></button>
+              <button class="close-tab" aria-label={`Close tab ${task.title}`} title="Close tab" onclick={() => {closeTaskTab(tab.id);tabPickerOpen=false;}}><X size={12} /></button>
             </div>
           {/if}
           {:else if tab.kind === 'channel'}{@const channel=snapshot?.channels.find(item=>item.id===tab.id)}{#if channel}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="edit-tab" aria-label={`Edit name for ${channel.name}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openChannel(channel);editActiveChannel();}}><Pencil size={15}/></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} title="Close tab" onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'terminal'}{@const session=$terminalSessions[tab.id]}{#if session}
             <div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><Terminal size={13}/><span><AnimatedTitle text={session.title} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
@@ -2774,7 +2763,11 @@
       </nav>
       <div class="top-actions" data-tauri-drag-region>
         {#if pane==='empty' && (embedded || paneIds(layout).length>1)}<button class="icon" aria-label="Close empty pane" title="Close pane" onclick={closeOverview}><X size={16}/></button>{/if}
-        <button class="icon" aria-label={terminalBusy?'Opening terminal':'Open terminal'} title="Open terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<Terminal size={16}/>{/if}</button>
+        {#if mobileSidebar && ((pane==='task' && selectedTask) || (pane==='channel' && activeChannel))}
+          {@render rightSidebarControl()}
+        {:else}
+          <button class="icon" aria-label={terminalBusy?'Opening terminal':'Open terminal'} title="Open terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<Terminal size={16}/>{/if}</button>
+        {/if}
 
 
       </div>
@@ -2796,7 +2789,7 @@
       <button class="pane-choice" disabled={busy} onclick={()=>snapshot?.agents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
       <button class="pane-choice" disabled={terminalBusy} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<Terminal size={22}/>{/if}<span>Terminal</span></button>
     </div></section>
-    {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface"><header class="terminal-pane-header">{@render paneExpandControl()}</header><TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
+    {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface">{#if !mobileSidebar}<header class="terminal-pane-header">{@render paneExpandControl()}</header>{/if}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
     {:else if pane === 'project' && focusedProject}
       {@const ProjectIcon = projectIconComponent(focusedProject.icon)}
       <section class="overview project-overview">
@@ -2892,10 +2885,9 @@
       </section>
     {:else if pane === "channel" && activeChannel}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}><section class="conversation">
         <MessagePane resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
-        {#snippet header()}<div class="conversation-head task-heading">
+        {#snippet header()}{#if !mobileSidebar}<div class="conversation-head task-heading">
           <h1 title={activeChannel.description || undefined}><AnimatedTitle text={activeChannel.name} active={$autonaming[`channel:${activeChannel.id}`]}/></h1>
           <div class="task-actions">
-            {#if activeChannelTasks.length}<button class="danger icon" aria-label="Stop channel agents" title="Stop channel agents" disabled={busy} onclick={stopChannel}><Square size={14}/></button>{/if}
             {@render paneExpandControl()}
               {@render rightSidebarControl()}
             <div class="task-overflow">
@@ -2906,7 +2898,7 @@
             </div>
           </div>
           </div>
-        {/snippet}
+        {/if}{/snippet}
           {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}{#each activeChannel.messages as message}<article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
@@ -3017,15 +3009,13 @@
           {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
           <button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>
         </div>{/snippet}
-        <div class="conversation-head task-heading pane-task-header">
+        {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header">
             <h1 class="task-title"><AnimatedTitle text={selectedTask.title} active={$autonaming[`task:${selectedTask.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={()=>{renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Pencil size={14}/></button></h1>
             <div class="task-actions">
-              {#if selectedTask.status === "running"}<button class="danger icon" aria-label="Stop" title="Stop" disabled={busy} onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={14}/></button>{/if}
-              {#if selectedTask.nativeSessionId && ["interrupted","error"].includes(selectedTask.status)}<button class="icon" aria-label="Resume session" disabled={busy || selectedTask.archived} title="Reconnect and resume this session" onclick={resumeTask}><RotateCw size={15}/></button>{/if}
               {@render paneExpandControl()}
               {@render rightSidebarControl()}
             </div>
-          </div>
+          </div>{/if}
         {#if showDetail && !compactDetail}{@render detailTabs()}{/if}
         <section class="conversation">
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
@@ -4030,7 +4020,6 @@
   .mobile-navigation :global(.composer) { max-height:none; }
   .mobile-navigation :global(.composer textarea) { min-height:36px; max-height:min(120px,20dvh); resize:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) { --pane-tabbar-height:52px; }
-  .mobile-navigation:global([data-keyboard-composer=true]) :global(.pane-task-header) { display:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-layout) { padding:8px 12px; align-content:start; mask-image:none; -webkit-mask-image:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-content > :not(.composer)) { display:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-composer.composer) { width:100%; margin:0; }
@@ -4338,6 +4327,7 @@
     scrollbar-width: none;
   }
   .tab-picker-trigger { display:none; }
+  .edit-tab { display:none; }
   .tab-picker-list { display:contents; }
   .tab {
     display: flex;
@@ -4379,14 +4369,19 @@
     .tab-picker-open .tab-picker-trigger :global(svg) { transform:rotate(180deg); }
     .tab-picker-list { position:absolute; z-index:40; top:calc(100% + 6px); left:0; right:0; display:grid; gap:3px; max-height:min(60vh,420px); padding:5px; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--panel); box-shadow:0 10px 26px #0003; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(-6px); transition:opacity .16s ease,transform .16s ease,visibility .16s step-end; }
     .tab-picker-open .tab-picker-list { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition:opacity .16s ease,transform .16s ease; }
-    .tab-picker-list .tab-entry { width:100%; min-height:36px; border:1px solid transparent; border-radius:5px; background:transparent; }
+    .tab-picker-list .tab-entry { width:100%; min-height:44px; border:1px solid transparent; border-radius:5px; background:transparent; }
     .tab-picker-list .tab-entry.active { border-color:var(--line); background:var(--soft); }
-    .tab-picker-list .tab { flex:1; width:100%; max-width:none; min-height:34px; padding-right:31px; border:0; border-radius:5px; }
-    .tab-picker-list .close-tab { opacity:1; pointer-events:auto; }
+    .tab-picker-list .tab { flex:1; width:0; min-width:0; max-width:none; min-height:44px; padding-right:8px; border:0; border-radius:5px; }
+    .tab-picker-list .edit-tab, .tab-picker-list .close-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:1; pointer-events:auto; }
+    .tab-picker-list .edit-tab:disabled { opacity:.5; }
+    .tab-picker-list .edit-tab:focus-visible, .tab-picker-list .close-tab:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
     .tab-picker-list .tab-entry:hover .tab { background:var(--soft); }
   }
+  .mobile-navigation .compact-tabs > .topbar { position:relative; }
+  .mobile-navigation .compact-tabs .tabs.tab-picker { position:static; }
+  .mobile-navigation .compact-tabs .tab-picker-list { top:100%; left:0; right:0; border-radius:0 0 8px 8px; }
   @media (prefers-reduced-motion:reduce) {
-    .tab-picker-trigger :global(svg),.tab-picker-list { transition:none; }
+    .compact-tabs .tab-picker-trigger :global(svg), .compact-tabs .tab-picker-list { transition:none; }
   }
   .conversation-head {
     background: color-mix(in srgb, var(--paper) 50%, transparent);
