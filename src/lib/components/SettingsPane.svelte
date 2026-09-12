@@ -156,7 +156,12 @@
         </section>
 
         <section class="setting-card" aria-labelledby="tabs-heading">
-          <div class="card-heading"><h2 id="tabs-heading">Tabs</h2><p>Choose which controls appear on tabs.</p></div>
+          <div class="card-heading"><h2 id="tabs-heading">Tabs</h2><p>Choose a classic rounded strip or a modern full-height straight-edge strip.</p></div>
+          <div class="segmented" aria-label="Tab style">
+            {#each ['classic', 'modern'] as tabStyle}
+              <button type="button" class:chosen={(settings.tabStyle ?? 'classic') === tabStyle} aria-pressed={(settings.tabStyle ?? 'classic') === tabStyle} onclick={() => void save({ tabStyle: tabStyle as NonNullable<Settings['tabStyle']> })}>{tabStyle}</button>
+            {/each}
+          </div>
           <label class="switch-row"><span><strong>Show tab close buttons</strong><small>Tabs can also be closed with your chosen keyboard shortcuts.</small></span><input type="checkbox" role="switch" aria-label="Show tab close buttons" checked={settings.showTabCloseButtons !== false} onchange={event=>void save({showTabCloseButtons:event.currentTarget.checked})}/></label>
         </section>
         <section class="setting-card" aria-labelledby="panes-heading">

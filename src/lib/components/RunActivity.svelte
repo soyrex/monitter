@@ -1,10 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Brain, ChevronRight, Terminal, SquareTerminal, X } from '@lucide/svelte';
+  import { Archive, Brain, ChevronRight, Terminal, SquareTerminal, X } from '@lucide/svelte';
   import type { RunEvent } from '$lib/types';
-  import { toolFamily, isShellActivity, reasoningSummary } from '$lib/activity-grouping';
+  import { contextCompactionId, contextCompactionPhase, isContextCompaction, toolFamily, isShellActivity, reasoningSummary } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
   import Markdown from './Markdown.svelte';
+  import AnimatedTitle from './AnimatedTitle.svelte';
   let { event, events = [], compressed = false, running = false }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
   const primary = $derived(items[0]);
@@ -21,6 +22,21 @@
   let thinkingLabel = $state(thinkingLabels[0]);
   const family = $derived(compressed && grouped ? 'Tool calls' : primary ? toolFamily(primary) : 'Tool activity');
   const shell = $derived(items.length > 0 && items.every(isShellActivity));
+  const compaction = $derived(items.length > 0 && items.every(isContextCompaction));
+  const compactionId = $derived(compaction ? contextCompactionId(primary!) : null);
+  const compactionPhases = $derived(items.map(contextCompactionPhase));
+  // The app-server gives us separate started and completed items. A pair is
+  // the only durable timing evidence available at this frontend boundary.
+  const compactionDurationKnown = $derived(
+    compaction && compactionId !== null && items.length === 2 &&
+    items.every(item => contextCompactionId(item) === compactionId) &&
+    latest!.createdAt >= primary!.createdAt &&
+    (compactionPhases.every(phase => phase === null) ||
+      (compactionPhases.includes('started') && compactionPhases.includes('completed'))),
+  );
+  const compactionActive = $derived(
+    compaction && compactionId !== null && running && items.length === 1 && compactionPhases[0] === 'started',
+  );
   function action(event: RunEvent, inProgress: boolean) {
     const family = toolFamily(event);
     if (isShellActivity(event)) return inProgress ? 'Running commands' : 'Ran commands';
@@ -40,6 +56,11 @@
     const minutes = Math.floor(seconds / 60);
     return minutes < 60 ? `${minutes}m ${Math.floor(seconds % 60)}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
   });
+  const compactionDescription = $derived(
+    compactionActive ? 'Compacting context...' :
+    compactionDurationKnown ? `Context compacted in: ${elapsed}` :
+    'Context compaction activity',
+  );
   let open = $state(false), anchor = $state<HTMLButtonElement>(), panel = $state<HTMLDivElement>();
   const formatTime = (at:number) => new Intl.DateTimeFormat(undefined, {hour:'2-digit',minute:'2-digit'}).format(at);
   function readableDetail(value:string) {
@@ -76,9 +97,10 @@
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning summary</span><time>{formatTime(primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if primary && latest}
-  <div class="activity" class:grouped class:compressed={compressed && grouped}>
-    <button class="activity-trigger" bind:this={anchor} aria-haspopup={compressed && grouped ? undefined : 'dialog'} aria-expanded={open} aria-label={`Tool activity: ${description}, ${items.length} ${items.length===1?'entry':'entries'}`} onclick={()=>open=!open}>
-      {#if shell}<SquareTerminal size={15}/>{:else}<ChevronRight size={13} class="chevron"/><Terminal size={14}/>{/if}<span>{description}</span>{#if grouped && compressed}<small title="Time between the first and latest recorded tool event">· {elapsed}</small>{:else if grouped}<small>{items.length} entries</small>{/if}<time>{formatTime(latest.createdAt)}</time>
+  <div class="activity" class:grouped class:compressed={compressed && grouped} class:compaction>
+    <button class="activity-trigger" bind:this={anchor} aria-haspopup={compressed && grouped ? undefined : 'dialog'} aria-expanded={open} aria-label={compaction ? compactionDescription : `Tool activity: ${description}, ${items.length} ${items.length===1?'entry':'entries'}`} onclick={()=>open=!open}>
+      {#if compaction}<Archive size={15}/><span><AnimatedTitle text={compactionDescription} active={compactionActive} activeTooltip="Compacting context..."/></span>
+      {:else if shell}<SquareTerminal size={15}/>{:else}<ChevronRight size={13} class="chevron"/><Terminal size={14}/>{/if}{#if !compaction}<span>{description}</span>{#if grouped && compressed}<small title="Time between the first and latest recorded tool event">· {elapsed}</small>{:else if grouped}<small>{items.length} entries</small>{/if}<time>{formatTime(latest.createdAt)}</time>{/if}
     </button>
     {#if open && compressed && grouped}<div bind:this={panel} class="activity-expanded" role="region" aria-label="Expanded tool calls">
       <div class="calls" aria-label="Tool activity entries">
@@ -108,6 +130,8 @@
   summary::-webkit-details-marker{display:none}
   summary span,.activity-trigger span{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
   .compressed .activity-trigger span{flex:0 1 auto}.compressed time{margin-left:auto}
+  .compaction .activity-trigger{color:var(--accent-ink)}.compaction .activity-trigger:hover{color:var(--accent-ink)}
+  .compaction .activity-trigger span{flex:1;min-width:0;overflow:visible}
   time{flex-shrink:0;font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}:global(.activity svg){flex-shrink:0}
   .activity[open] :global(.chevron),.activity-trigger[aria-expanded=true] :global(.chevron),.call[open] :global(.call-chevron){transform:rotate(90deg)}
   .reasoning summary :global(svg){color:var(--accent-ink)}small{flex-shrink:0;color:var(--muted);font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}

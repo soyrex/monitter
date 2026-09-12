@@ -10,11 +10,14 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_READ_BYTES: usize = 256 * 1024;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
+const TITLE_SETTLE: Duration = Duration::from_secs(5);
+const TITLE_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +38,12 @@ pub struct TerminalTarget {
 pub struct TerminalSession {
     pub id: String,
     pub title: String,
+    /// The automatic title is retained even when an explicit user/Auto-name
+    /// title is currently displayed.
+    pub auto_title: Option<String>,
+    /// A title set by Auto-name is an intentional opt-out from automatic
+    /// process titles for the life of this terminal session.
+    pub custom_title: Option<String>,
     pub host_id: String,
     pub cwd: String,
     pub status: String,
@@ -53,6 +62,7 @@ pub struct TerminalRead {
     pub status: String,
     pub exit_code: Option<i32>,
     pub truncated: bool,
+    pub session: TerminalSession,
 }
 struct OutputRing {
     chunks: VecDeque<TerminalChunk>,
@@ -67,6 +77,56 @@ pub struct Session {
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     output: Mutex<OutputRing>,
+    local_pty: bool,
+}
+
+struct TitleTracker {
+    observed: Option<ForegroundProcess>,
+    since: Instant,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct ForegroundProcess {
+    group: libc::pid_t,
+    name: String,
+}
+
+impl TitleTracker {
+    fn new(now: Instant) -> Self {
+        Self {
+            observed: None,
+            since: now,
+        }
+    }
+
+    /// Returns a new title only after the foreground process has been stable
+    /// for the settle window. This deliberately avoids terminal-tab flicker.
+    fn observe(&mut self, process: Option<ForegroundProcess>, now: Instant) -> Option<String> {
+        let process = match process {
+            Some(process) => process,
+            None => {
+                // An unknown interval must not count toward five continuous
+                // seconds of stability.
+                self.observed = None;
+                self.since = now;
+                return None;
+            }
+        };
+        if self.observed.as_ref() != Some(&process) {
+            self.observed = Some(process);
+            self.since = now;
+            return None;
+        }
+        (now.duration_since(self.since) >= TITLE_SETTLE).then(|| {
+            format!(
+                "Terminal: {}",
+                self.observed
+                    .as_ref()
+                    .map(|process| process.name.as_str())
+                    .unwrap_or_default()
+            )
+        })
+    }
 }
 
 pub fn open(
@@ -105,14 +165,15 @@ pub fn open(
         .slave
         .spawn_command(command)
         .map_err(|e| format!("Could not start terminal: {e}"))?;
+    let local_pty = host.kind == "local" && child.process_id().is_some();
     let session = Arc::new(Session {
         info: Mutex::new(TerminalSession {
             id,
-            title: if host.kind == "ssh" {
-                format!("{} shell", host.name)
-            } else {
-                "Local shell".into()
-            },
+            // Do not invent a shell/process title before it has actually been
+            // stable for five seconds.
+            title: "Terminal".into(),
+            auto_title: None,
+            custom_title: None,
             host_id: host.id.clone(),
             cwd,
             status: "running".into(),
@@ -128,6 +189,7 @@ pub fn open(
             dropped_before: 0,
             reader_eof: false,
         }),
+        local_pty,
     });
     let reader_session = Arc::clone(&session);
     thread::spawn(move || read_output(reader, reader_session));
@@ -139,7 +201,28 @@ pub fn open(
             info.exit_code = status.map(|s| s.exit_code() as i32);
         }
     });
+    if session.local_pty {
+        let title_session = Arc::clone(&session);
+        thread::spawn(move || monitor_title(title_session));
+    }
     Ok(session)
+}
+
+fn monitor_title(session: Arc<Session>) {
+    let mut tracker = TitleTracker::new(Instant::now());
+    loop {
+        if session
+            .snapshot()
+            .map(|info| info.status != "running")
+            .unwrap_or(true)
+        {
+            return;
+        }
+        if let Some(title) = tracker.observe(session.foreground_name(), Instant::now()) {
+            let _ = session.set_auto_title(title);
+        }
+        thread::sleep(TITLE_POLL);
+    }
 }
 
 fn build_command(host: &Host, cwd: &str) -> Result<CommandBuilder, String> {
@@ -236,8 +319,52 @@ impl Session {
             .info
             .lock()
             .map_err(|_| "Terminal session lock failed.".to_string())?;
+        // Auto-name is a user-requested title, not a transient process label.
+        // Keep it separate so the monitor can continue tracking truth without
+        // ever overwriting the user's chosen display title.
+        info.custom_title = Some(title.clone());
         info.title = title;
         Ok(info.clone())
+    }
+
+    fn set_auto_title(&self, title: String) -> Result<(), String> {
+        let mut info = self
+            .info
+            .lock()
+            .map_err(|_| "Terminal session lock failed.".to_string())?;
+        info.auto_title = Some(title);
+        info.title = display_title(info.custom_title.as_deref(), info.auto_title.as_deref());
+        Ok(())
+    }
+
+    /// The terminal driver reports the foreground process group. That lets us
+    /// ignore background jobs without enumerating unrelated system processes.
+    fn foreground_name(&self) -> Option<ForegroundProcess> {
+        #[cfg(unix)]
+        {
+            if !self.local_pty {
+                return None;
+            }
+            let fd = self.master.lock().ok()?.as_raw_fd()?;
+            // SAFETY: fd is borrowed from the live native PTY master for this call.
+            let foreground_group = unsafe { libc::tcgetpgrp(fd) };
+            if foreground_group <= 0 {
+                return None;
+            }
+            // Query even when the shell owns the foreground group: `exec vim` or
+            // an exec'd nested shell can retain that PID while changing executable.
+            // We never infer "idle" solely from a matching process group.
+            Some(ForegroundProcess {
+                group: foreground_group,
+                name: process_name(foreground_group)?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            // No portable foreground-process-group API exists here; retain
+            // the default title instead of inventing a process state.
+            None
+        }
     }
     pub fn snapshot(&self) -> Result<TerminalSession, String> {
         self.info
@@ -301,12 +428,13 @@ impl Session {
             chunks,
             next_seq,
             status: if finished {
-                info.status
+                info.status.clone()
             } else {
                 "running".into()
             },
             exit_code: if finished { info.exit_code } else { None },
             truncated,
+            session: info,
         })
     }
     pub fn close(&self) -> Result<(), String> {
@@ -340,9 +468,49 @@ impl Session {
     }
 }
 
+fn display_title(custom: Option<&str>, automatic: Option<&str>) -> String {
+    custom
+        .or(automatic)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Terminal")
+        .into()
+}
+
+fn process_name(pid: libc::pid_t) -> Option<String> {
+    // `proc_name` is a bounded, single-PID macOS lookup. It does not launch a
+    // command, enumerate processes, or observe background jobs.
+    #[cfg(target_os = "macos")]
+    {
+        let mut name = [0u8; libc::MAXCOMLEN as usize + 1];
+        let length = unsafe {
+            // SAFETY: the buffer is valid for MAXCOMLEN+1 bytes as required by proc_name.
+            libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32)
+        };
+        if length <= 0 {
+            return None;
+        }
+        return std::str::from_utf8(&name[..length as usize])
+            .ok()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn foreground(group: libc::pid_t, name: &str) -> Option<ForegroundProcess> {
+        Some(ForegroundProcess {
+            group,
+            name: name.into(),
+        })
+    }
     fn local_host() -> Host {
         Host {
             id: "local".into(),
@@ -395,6 +563,101 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("working directory"));
+    }
+
+    #[test]
+    fn title_waits_five_seconds_and_does_not_flicker() {
+        let start = Instant::now();
+        let mut tracker = TitleTracker::new(start);
+        assert_eq!(tracker.observe(foreground(10, "zsh"), start), None);
+        assert_eq!(
+            tracker.observe(foreground(10, "zsh"), start + Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(
+            tracker.observe(foreground(10, "zsh"), start + TITLE_SETTLE),
+            Some("Terminal: zsh".into())
+        );
+        // A foreground command has to settle independently; the last title
+        // remains in place during that window instead of flickering.
+        assert_eq!(
+            tracker.observe(foreground(20, "sleep"), start + Duration::from_secs(6)),
+            None
+        );
+        assert_eq!(
+            tracker.observe(foreground(20, "sleep"), start + Duration::from_secs(10)),
+            None
+        );
+        assert_eq!(
+            tracker.observe(foreground(20, "sleep"), start + Duration::from_secs(11)),
+            Some("Terminal: sleep".into())
+        );
+    }
+
+    #[test]
+    fn title_returns_to_shell_after_foreground_command_and_custom_wins() {
+        let start = Instant::now();
+        let mut tracker = TitleTracker::new(start);
+        tracker.observe(foreground(20, "sleep"), start);
+        assert_eq!(
+            tracker.observe(foreground(20, "sleep"), start + TITLE_SETTLE),
+            Some("Terminal: sleep".into())
+        );
+        assert_eq!(
+            tracker.observe(foreground(10, "zsh"), start + Duration::from_secs(6)),
+            None
+        );
+        assert_eq!(
+            tracker.observe(foreground(10, "zsh"), start + Duration::from_secs(11)),
+            Some("Terminal: zsh".into())
+        );
+        assert_eq!(
+            display_title(Some("Investigating logs"), Some("Terminal: zsh")),
+            "Investigating logs"
+        );
+        assert_eq!(display_title(None, Some("Terminal: zsh")), "Terminal: zsh");
+    }
+
+    #[test]
+    fn unknown_gap_and_same_name_new_group_restart_stability() {
+        let start = Instant::now();
+        let mut tracker = TitleTracker::new(start);
+        tracker.observe(foreground(20, "node"), start);
+        assert_eq!(tracker.observe(None, start + Duration::from_secs(3)), None);
+        assert_eq!(
+            tracker.observe(foreground(20, "node"), start + Duration::from_secs(5)),
+            None
+        );
+        assert_eq!(
+            tracker.observe(foreground(20, "node"), start + Duration::from_secs(10)),
+            Some("Terminal: node".into())
+        );
+        // A new foreground group with the same executable is a new command.
+        assert_eq!(
+            tracker.observe(foreground(21, "node"), start + Duration::from_secs(11)),
+            None
+        );
+    }
+
+    #[test]
+    fn native_pty_projects_custom_and_auto_titles_through_exit() {
+        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24).unwrap();
+        assert_eq!(session.snapshot().unwrap().title, "Terminal");
+        session.set_auto_title("Terminal: zsh".into()).unwrap();
+        session.rename("Build logs".into()).unwrap();
+        let before_exit = session.snapshot().unwrap();
+        assert_eq!(before_exit.title, "Build logs");
+        assert_eq!(before_exit.auto_title.as_deref(), Some("Terminal: zsh"));
+        assert_eq!(before_exit.custom_title.as_deref(), Some("Build logs"));
+        session.write(b"exit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while session.snapshot().unwrap().status == "running" && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(session.snapshot().unwrap().status, "exited");
+        let read = session.read(0).unwrap();
+        assert_eq!(read.session.status, "exited");
+        assert_eq!(read.session.title, "Build logs");
     }
 
     #[test]

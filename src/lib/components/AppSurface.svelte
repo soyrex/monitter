@@ -2,7 +2,7 @@
   import { localUuid, isLanBrowser } from '$lib/lan';
   import { workspaceShareOpen } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
-  import { collectWorkspaceSidebarTabs, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
+  import { collectWorkspaceSidebarTabs, settingsTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import "../../app.css";
   import AnimatedTitle from "./AnimatedTitle.svelte";
   import { autonaming } from "$lib/autoname-state";
@@ -62,6 +62,7 @@
     Share2,
     Square,
     Terminal,
+    SquareTerminal,
     Trash2,
     Wifi,
     X,
@@ -106,6 +107,7 @@
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { paneIds } from '$lib/panes';
+  import { paneRemovalDecision, paneTabCount, remapPromotedPaneId, remapQueuedPaneRemovals } from '$lib/pane-lifecycle';
   import { insertTab, normalizeTabOrder, type TabKey } from '$lib/tab-order';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
   import ModelPicker from '$lib/components/ModelPicker.svelte';
@@ -126,8 +128,9 @@
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
   type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
-  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
+  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
+  let pendingEmptyPaneIds = $state<string[]>([]);
   let tabOrder = $state<TabKey[]>([]);
   let expandedPaneId=$state<string|null>(null), focusStep=$state<0|1|2>(0), focusTarget=$state('');
   const workspaceExpansion=$derived(embedded?parentExpandedPaneId:expandedPaneId);
@@ -280,7 +283,7 @@
   let railAgentId = $state<string | null>(null);
   let railAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
-  let detailTab = $state<'run' | 'git' | 'timeline'>('run');
+  let detailTab = $state<'run' | 'git' | 'timeline' | 'approvals'>('run');
   let timelinePages = $state<Record<string, { events: RunEvent[]; nextBefore: number | null; loading: boolean; error: string; loadedOlder: boolean }>>({});
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
   let gitPane = $state<GitPane>();
@@ -481,15 +484,6 @@
     const timer = setInterval(() => { if (timelinePages[taskId] && !timelinePages[taskId].loading) void loadTimeline(taskId); }, 15000);
     return () => clearInterval(timer);
   });
-  const taskOptimisticMessages = $derived(optimisticMessages.filter(message => message.kind === 'task' && message.targetId === selectedTaskId));
-  const conversationItems = $derived(groupConversationActivity(
-    [...messages, ...taskOptimisticMessages.map(message => ({
-      id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
-      createdAt: message.createdAt, attachments: message.attachments,
-    }))],
-    visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning"),
-    snapshot?.settings.compressToolCalls === true,
-  ));
   const selectedApprovalRequests = $derived(
     selectedTask ? (snapshot?.approvalRequests ?? []).filter(request => request.taskId === selectedTask.id) : [],
   );
@@ -499,6 +493,34 @@
   const resolvedApprovalRequests = $derived(selectedApprovalRequests
     .filter(request => request.status !== 'pending')
     .sort((left, right) => (left.resolvedAt ?? left.createdAt) - (right.resolvedAt ?? right.createdAt)));
+  const taskOptimisticMessages = $derived(optimisticMessages.filter(message => message.kind === 'task' && message.targetId === selectedTaskId));
+  const conversationItems = $derived(groupConversationActivity(
+    [...messages, ...taskOptimisticMessages.map(message => ({
+      id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
+      createdAt: message.createdAt, attachments: message.attachments,
+    }))],
+    visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning"),
+    snapshot?.settings.compressToolCalls === true,
+    resolvedApprovalRequests,
+  ));
+  function approvalSubject(request: ApprovalRequest) {
+    const summary = (request.summary || request.tool).trim().replace(/^allow\s+/i, '').replace(/[?。]\s*$/, '');
+    return summary || request.tool;
+  }
+  function approvalEventText(request: ApprovalRequest) {
+    const subject = approvalSubject(request);
+    if (request.status === 'approved') return request.input ? `Submitted input for ${subject}` : `Approved ${subject}`;
+    if (request.status === 'denied') return `Denied ${subject}`;
+    if (request.status === 'expired') return `Approval expired for ${subject}`;
+    return `Approval unavailable for ${subject}`;
+  }
+  function openApprovalHistory(request: ApprovalRequest) {
+    showDetail = true; detailTab = 'approvals';
+    void tick().then(() => {
+      const record = document.getElementById(`approval-history-${paneId}-${request.id}`);
+      record?.scrollIntoView({ block: 'center' }); record?.focus({ preventScroll: true });
+    });
+  }
   let resolvingApprovalId = $state<string | null>(null);
   const globalPendingApprovals = $derived((snapshot?.approvalRequests ?? []).filter(request => request.status === 'pending')
     .map(request => ({ request, task: snapshot?.tasks.find(task => task.id === request.taskId) ?? null }))
@@ -799,7 +821,7 @@
       attachmentContexts: saved.attachmentContexts && typeof saved.attachmentContexts === 'object' ? saved.attachmentContexts : fallback.attachmentContexts,
       channelRecipients: saved.channelRecipients && typeof saved.channelRecipients === 'object' ? saved.channelRecipients : fallback.channelRecipients,
       pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
-      detailTab: ['run', 'git', 'timeline'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
+      detailTab: ['run', 'git', 'timeline', 'approvals'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
     };
     const taskIds = new Set(snapshot?.tasks.filter(task => !task.archived && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
     const channelIds = new Set(snapshot?.channels.map(channel => channel.id) ?? []);
@@ -910,6 +932,15 @@
     untrack(() => { if (embedded) onWorkspaceChange?.(); else persistWorkspace(); });
   });
   function layoutPending() { return hasPending() || paneIds(layout).some(id=>paneRefs[id]?.hasPending()); }
+  function tabCount(state: Pick<PaneState, 'openTaskIds'|'openDraftIds'|'openChannelIds'|'openTerminalIds'|'openEmptyIds'|'settingsOpen'>) { return paneTabCount(state); }
+  function queueEmptyPaneRemoval(id: string) {
+    if (!pendingEmptyPaneIds.includes(id)) pendingEmptyPaneIds = [...pendingEmptyPaneIds, id];
+  }
+  function collapseTablessPane() {
+    if (orderedTabs().length) return;
+    if (embedded) onClosePane?.(paneId);
+    else queueEmptyPaneRemoval(paneId);
+  }
   export function takeTab(tab: PaneTabTransfer): TabPayload | null {
     saveCurrentDraft();
     if (composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`]) return null;
@@ -921,7 +952,7 @@
     }
     if(tab.kind==='settings') {
       if(!settingsOpen)return null;
-      const category=settingsCategory,settingsEditor:AgentEditorState=JSON.parse(JSON.stringify({draft:agentDraft,edits:agentEdits}));closeSettings();forgetTab(tab);return {tab,settingsCategory:category,settingsEditor};
+      const category=settingsCategory,settingsEditor:AgentEditorState=JSON.parse(JSON.stringify({draft:agentDraft,edits:agentEdits}));closeSettings(false);forgetTab(tab);return {tab,settingsCategory:category,settingsEditor};
     }
     if(tab.kind==='terminal') {
       if(terminalBusy || !openTerminalIds.includes(tab.id))return null;
@@ -935,12 +966,12 @@
       const draft = taskDrafts[tab.id];
       if (!draft) return null;
       const payload = {tab,draft:{...draft},text:draft.text,attachments,attachmentContext};
-      closeTaskDraft(tab.id); delete taskDrafts[tab.id]; delete drafts[`draft:${tab.id}`];
+      closeTaskDraft(tab.id, false); delete taskDrafts[tab.id]; delete drafts[`draft:${tab.id}`];
       forgetTab(tab);
       return payload;
     }
     const key = `${tab.kind}:${tab.id}`, text = drafts[key] ?? '';
-    if (tab.kind === 'task') closeTaskTab(tab.id);
+    if (tab.kind === 'task') closeTaskTab(tab.id, false);
     else {
       openChannelIds = openChannelIds.filter(id=>id!==tab.id);
       if (selectedChannelId === tab.id) openOverview();
@@ -1050,7 +1081,7 @@
     } finally {workspaceTransition=false;persistWorkspace();}
     if(moved){
       const remaining=tab.sourcePaneId==='main'?captureState():paneRefs[tab.sourcePaneId]?.captureState();
-      if(remaining && !remaining.overviewOpen && !(remaining.openTaskIds.length+remaining.openDraftIds.length+remaining.openChannelIds.length+remaining.openTerminalIds.length+(remaining.settingsOpen?1:0)))await removeEmptyPane(tab.sourcePaneId);
+      if (remaining && tabCount(remaining) === 0) await removeEmptyPane(tab.sourcePaneId);
     }
   }
 
@@ -1612,11 +1643,12 @@
       else openOverview();
     });
   });
-  async function closeTerminalTab(id:string) {
+  async function closeTerminalTab(id:string, collapse = true) {
     if(terminalBusy)return;
     terminalBusy=true;
     try {await closeTerminalSession(id);openTerminalIds=openTerminalIds.filter(value=>value!==id);forgetTab({kind:'terminal',id});
       if(pane==='terminal' && selectedTerminalId===id) {const next=openTerminalIds.at(-1);if(next)openTerminalTab(next);else openOverview();}
+      if (collapse) collapseTablessPane();
     } catch(reason){error=`Could not close terminal: ${text(reason)}`;}
     finally{terminalBusy=false;}
   }
@@ -1644,9 +1676,31 @@
   }
   async function removeEmptyPane(id:string) {
     if(embedded){onClosePane?.(id);return;}
+    queueEmptyPaneRemoval(id);
+    await drainEmptyPaneRemovals();
+  }
+  function paneState(id: string): PaneState | null {
+    if (!paneIds(layout).includes(id)) return null;
+    return id === 'main' ? captureState() : paneRefs[id]?.captureState() ?? null;
+  }
+  async function drainEmptyPaneRemovals() {
+    if (embedded || workspaceTransition || !pendingEmptyPaneIds.length) return;
+    for (const id of [...pendingEmptyPaneIds]) {
+      const state = paneState(id);
+      const decision = state ? paneRemovalDecision(state, paneIds(layout).length, layoutPending()) : 'keep';
+      if (decision === 'keep') {
+        pendingEmptyPaneIds = pendingEmptyPaneIds.filter(candidate => candidate !== id);
+        continue;
+      }
+      if (decision === 'defer') continue;
+      pendingEmptyPaneIds = pendingEmptyPaneIds.filter(candidate => candidate !== id);
+      await removeEmptyPaneNow(id);
+    }
+  }
+  async function removeEmptyPaneNow(id:string) {
     const ids=paneIds(layout);
     if(ids.length===1 || !ids.includes(id))return;
-    if(workspaceTransition || layoutPending()){notice='Wait for the current action before closing this pane.';return;}
+    if(workspaceTransition || layoutPending()){queueEmptyPaneRemoval(id);return;}
     if((id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).length)return;
     const states:Record<string,PaneState>={main:captureState(),...captureChildren()};
     function prune(node:PaneLayout):PaneLayout|null {
@@ -1667,7 +1721,20 @@
       for(const remaining of paneIds(next))if(remaining!=='main' && states[remaining])paneRefs[remaining]?.restoreState(states[remaining]);
       if(activePaneId===id)activePaneId=promoted?'main':paneIds(next)[0];
       else if(activePaneId===promoted)activePaneId='main';
+      pendingEmptyPaneIds=remapQueuedPaneRemovals(pendingEmptyPaneIds,id,promoted);
+      expandedPaneId=expandedPaneId===null?null:remapPromotedPaneId(expandedPaneId,id,promoted);
     }finally{workspaceTransition=false;persistWorkspace();}
+  }
+  $effect(() => {
+    pendingEmptyPaneIds;
+    layout;
+    terminalBusy;
+    workspaceTransition;
+    if (!embedded) void drainEmptyPaneRemovals();
+  });
+  function handleChildWorkspaceChange() {
+    persistWorkspace();
+    void drainEmptyPaneRemovals();
   }
   function openOverview() {
     saveCurrentDraft();
@@ -1696,13 +1763,14 @@
     pane = "task";
     scrollRevision += 1;
   }
-  function closeTaskTab(id: string) {
+  function closeTaskTab(id: string, collapse = true) {
     openTaskIds = openTaskIds.filter(openId => openId !== id);
     forgetTab({kind:'task',id});
     if (selectedTaskId === id) {
       const next = openTasks.at(-1);
       if (next) openTask(next); else openOverview();
     }
+    if (collapse) collapseTablessPane();
   }
   export function openChannel(channel: Channel) {
     if (activeWorkspaceKey !== 'all') { workspaceNavigation.channel(channel); return; }
@@ -1728,9 +1796,10 @@
     focusedAgentId = null; focusedProjectId = null; composer = ''; pane = 'empty';
     rememberTab({ kind: 'empty', id });
   }
-  function closeEmptyTab(id: string) {
+  function closeEmptyTab(id: string, collapse = true) {
     openEmptyIds = openEmptyIds.filter(item => item !== id); forgetTab({ kind: 'empty', id });
     if (selectedEmptyId === id) { selectedEmptyId = null; openOverview(); }
+    if (collapse) collapseTablessPane();
   }
   export function openTaskComposer(parentId: string | null = null, agentId: string | null = null, projectId?: string | null) {
     saveCurrentDraft();
@@ -1767,7 +1836,7 @@
     const key = `draft:${draft.id}`;
     await workspaceNavigation.draft({ tab: { kind: 'draft', id: draft.id, sourcePaneId: paneId }, draft: { ...draft }, text: composer, attachments: queuedAttachments[key], attachmentContext: attachmentContexts[key] });
   }
-  function closeTaskDraft(id: string) { saveCurrentDraft(); openDraftIds = openDraftIds.filter(item => item !== id); forgetTab({kind:'draft',id}); if (currentDraftId === id) { currentDraftId = null; const next = openDrafts.at(-1); if (next) openTaskDraft(next); else openOverview(); } }
+  function closeTaskDraft(id: string, collapse = true) { saveCurrentDraft(); openDraftIds = openDraftIds.filter(item => item !== id); forgetTab({kind:'draft',id}); if (currentDraftId === id) { currentDraftId = null; const next = openDrafts.at(-1); if (next) openTaskDraft(next); else openOverview(); } if (collapse) collapseTablessPane(); }
   export function openSettings(category?:string) {
     if(category)settingsCategory=category;
     saveCurrentDraft(); settingsOpen=true; rememberTab({kind:'settings',id:'settings'}); pane='settings';
@@ -1781,13 +1850,14 @@
     activePaneId=owner;
     if(owner==='main')openSettings(category);else paneRefs[owner]?.openSettings(category);
   }
-  function closeSettings() {
-    settingsOpen=false;forgetTab({kind:'settings',id:'settings'});if(pane!=='settings')return;
+  function closeSettings(collapse = true) {
+    settingsOpen=false;forgetTab({kind:'settings',id:'settings'});if(pane!=='settings'){if (collapse) collapseTablessPane();return;}
     const task=openTasks.at(-1), draft=openDrafts.at(-1);
     const channel=snapshot?.channels.find(item=>item.id===openChannelIds.at(-1));
     const terminal=openTerminalIds.at(-1);
     if(task)openTask(task);else if(draft)openTaskDraft(draft);else if(channel)openChannel(channel);
     else if(terminal)openTerminalTab(terminal);else openOverview();
+    if (collapse) collapseTablessPane();
   }
   async function savePreference(patch:Partial<Settings>) {
     error='';
@@ -1811,6 +1881,7 @@
       openChannelIds = openChannelIds.filter(id => id !== selectedChannelId);
       forgetTab({kind:'channel',id:selectedChannelId});
       openOverview();
+      collapseTablessPane();
     }
   }
 
@@ -2348,7 +2419,7 @@
     if (pane === 'channel') return activeChannel?.name || 'Channel';
     if (pane === 'terminal') return selectedTerminal?.title || 'Terminal';
     if (pane === 'empty') return 'New tab';
-    if (pane === 'settings') return 'Settings';
+    if (pane === 'settings') return settingsTabTitle(settingsCategory);
     if (pane === 'agent') return focusedAgent?.name || 'Agent';
     if (pane === 'project') return focusedProject?.name || 'Project';
     return 'Workspace';
@@ -2740,7 +2811,7 @@
   {#each sidebarWorkspaceTabs[agentId] ?? [] as tab (`${tab.kind}:${tab.id}`)}
     <div class="task-row workspace-tab-row" class:current={activeWorkspaceKey === `agent:${agentId}` && selectedSidebarTab?.kind === tab.kind && selectedSidebarTab?.id === tab.id} data-workspace-tab-kind={tab.kind} data-workspace-tab-id={tab.id} data-workspace-agent={agentId}>
       <button class="task-select" disabled={tab.disabled} aria-label={`Open ${tab.title}`} title={tab.title} onclick={() => void openAgentWorkspaceTab(agentId, tab)}>
-        <span class="workspace-tab-icon" aria-hidden="true">{#if tab.kind === 'terminal'}<Terminal size={14}/>{:else if tab.kind === 'settings'}<Settings2 size={14}/>{:else if tab.kind === 'draft'}<MessageSquare size={14}/>{:else}<Plus size={14}/>{/if}</span><span>{tab.title}</span>
+        <span class="workspace-tab-icon" aria-hidden="true">{#if tab.kind === 'terminal'}<SquareTerminal size={14}/>{:else if tab.kind === 'settings'}<Settings2 size={14}/>{:else if tab.kind === 'draft'}<MessageSquare size={14}/>{:else}<Plus size={14}/>{/if}</span><span>{tab.title}</span>
       </button>
     </div>
   {/each}
@@ -2762,10 +2833,7 @@
 
 {#snippet workspaceContext()}
   <div class="workspace-context" data-workspace-context data-workspace-key={activeWorkspaceKey} aria-label={`Current workspace: ${workspaceLabel}`} title={`Workspace: ${workspaceLabel}`}>
-    {#if activeWorkspaceKey.startsWith('agent:')}
-      {@const agent=snapshot?.agents.find(item=>item.id===activeWorkspaceKey.slice(6))}
-      <span class="avatar">{@render avatarVisual(agent, 16)}</span>
-    {:else if activeWorkspaceKey.startsWith('project:') && activeWorkspaceKey.slice(8) !== 'unassigned'}
+    {#if activeWorkspaceKey.startsWith('project:') && activeWorkspaceKey.slice(8) !== 'unassigned'}
       {@const project=projects.find(item=>item.id===activeWorkspaceKey.slice(8))}
       {@const ProjectIcon=project ? projectIconComponent(project.icon) : Folder}
       <ProjectIcon size={16} style={project ? `color:${project.color}` : undefined}/>
@@ -2782,11 +2850,11 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <section class="workspace" class:compact-tabs={mobileSidebar || compactTabs} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
+  <section class="workspace" class:compact-tabs={mobileSidebar || compactTabs} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
     <header class="topbar" data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
-      {:else}
+      {:else if !activeWorkspaceKey.startsWith('agent:')}
         {@render workspaceContext()}
       {/if}
       <nav class="tabs tab-picker" class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
@@ -2806,15 +2874,15 @@
             </div>
           {/if}
           {:else if tab.kind === 'channel'}{@const channel=snapshot?.channels.find(item=>item.id===tab.id)}{#if channel}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="edit-tab" aria-label={`Edit name for ${channel.name}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openChannel(channel);editActiveChannel();}}><Pencil size={15}/></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} title="Close tab" onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="edit-tab" aria-label={`Edit name for ${channel.name}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openChannel(channel);editActiveChannel();}}><Pencil size={15}/></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} title="Close tab" onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();collapseTablessPane();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'terminal'}{@const session=$terminalSessions[tab.id]}{#if session}
-            <div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><Terminal size={13}/><span><AnimatedTitle text={session.title} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><span class="tab-kind-icon" aria-hidden="true"><SquareTerminal size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={session.title} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'empty'}
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}><Plus size={13}/><span>New tab</span></button><button class="close-tab" aria-label="Close empty tab" onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {:else if tab.kind === 'settings'}
-            <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} onclick={()=>selectTabPicker(()=>openSettings())}><Settings2 size={13}/><span>Settings</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={()=>{closeSettings();tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} title={settingsTabTitle(settingsCategory)} onclick={()=>selectTabPicker(()=>openSettings())}><span class="tab-kind-icon" aria-hidden="true"><Settings2 size={13}/><span class="tab-shortcut"></span></span><span>{settingsTabTitle(settingsCategory)}</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={()=>{closeSettings();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
         {/each}
         {#if pane === "agent" && focusedAgent}<div class="tab-entry active"><button class="tab active" aria-pressed="true"><Bot size={13}/>{focusedAgent.name}</button></div>{/if}
@@ -2826,7 +2894,7 @@
         {#if mobileSidebar && ((pane==='task' && selectedTask) || (pane==='channel' && activeChannel))}
           {@render rightSidebarControl()}
         {:else}
-          <button class="icon" aria-label={terminalBusy?'Opening terminal':'Open terminal'} title="Open terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<Terminal size={16}/>{/if}</button>
+          <button class="icon" aria-label={terminalBusy?'Opening terminal':'Open terminal'} title="Open terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
         {/if}
 
 
@@ -2847,7 +2915,7 @@
       </div>
     {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
       <button class="pane-choice" disabled={busy} onclick={()=>snapshot?.agents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
-      <button class="pane-choice" disabled={terminalBusy} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<Terminal size={22}/>{/if}<span>Terminal</span></button>
+      <button class="pane-choice" disabled={terminalBusy} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<SquareTerminal size={22}/>{/if}<span>Terminal</span></button>
     </div></section>
     {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface">{#if !mobileSidebar}<div class="terminal-pane-overlay">{@render paneExpandControl()}</div>{/if}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
     {:else if pane === 'project' && focusedProject}
@@ -2943,22 +3011,24 @@
             </section>{/each}
         </div>
       </section>
-    {:else if pane === "channel" && activeChannel}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}><section class="conversation">
-        <MessagePane resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
-        {#snippet header()}{#if !mobileSidebar}<div class="conversation-head task-heading">
+    {:else if pane === "channel" && activeChannel}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
+        {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header">
+          <span class="avatar task-header-avatar" aria-label="Group chat"><Radio size={18}/></span>
           <h1 title={activeChannel.description || undefined}><AnimatedTitle text={activeChannel.name} active={$autonaming[`channel:${activeChannel.id}`]}/></h1>
           <div class="task-actions">
-            {@render paneExpandControl()}
-              {@render rightSidebarControl()}
             <div class="task-overflow">
               <button bind:this={taskMenuAnchor} class="icon" aria-label="Channel actions" aria-haspopup="menu" aria-expanded={taskMenu} onclick={()=>taskMenu=!taskMenu}><MoreHorizontal size={17}/></button>
               {#if taskMenu && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Channel actions">
                 <button role="menuitem" onclick={editActiveChannel}><Settings2 size={15}/>Edit channel</button>
               </div>{/if}
             </div>
+            {@render paneExpandControl()}
+            {@render rightSidebarControl()}
           </div>
           </div>
-        {/if}{/snippet}
+        {/if}
+        <section class="conversation">
+        <MessagePane resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
           {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}{#each activeChannel.messages as message}<article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
@@ -3067,16 +3137,22 @@
         {#snippet detailTabs(showClose = true)}<div class="detail-tabs" role="tablist" aria-label="Run detail views">
           <div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Run detail</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>Approvals</button></div>
           {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
           {#if showClose}<button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>{/if}
         </div>{/snippet}
         {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header" class:has-detail-tabs={showDetail && !compactDetail}>
+          <div class="task-heading-identity">
+            <span class="avatar task-header-avatar" aria-label={selectedAgent?.name ?? 'Agent'}>{@render avatarVisual(selectedAgent, 18)}</span>
             <h1 class="task-title"><AnimatedTitle text={selectedTask.title} active={$autonaming[`task:${selectedTask.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={()=>{renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Pencil size={14}/></button></h1>
+          </div>
+          <div class="task-heading-sidebar">
             {#if showDetail && !compactDetail}{@render detailTabs(false)}{/if}
             <div class="task-actions">
               {@render paneExpandControl()}
               {@render rightSidebarControl()}
             </div>
+          </div>
           </div>{/if}
         {#if mobileSidebar && showDetail && !compactDetail}{@render detailTabs()}{/if}
         <section class="conversation">
@@ -3086,6 +3162,7 @@
               {#if item.type === "activity"}<RunActivity event={item.value} />
               {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length} />
               {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
+              {:else if item.type === "approval"}{@const approvalText=approvalEventText(item.value)}<button class={`approval-inline ${item.value.status}`} onclick={() => openApprovalHistory(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{date(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
               {:else}{@const message = item.value}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
@@ -3102,7 +3179,7 @@
                   </div>
                   <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
                   {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
-                </article>{/if}{/each}{:else if !pendingApprovalRequests.length && !resolvedApprovalRequests.length}<div class="blank-conversation">
+                </article>{/if}{/each}{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
                 <Terminal size={24} />
                 <h2>No messages yet</h2>
                 <p>
@@ -3110,10 +3187,6 @@
                   will appear here.
                 </p>
               </div>{/if}
-            {#if resolvedApprovalRequests.length}<section class="approval-history" aria-label="Approval history">
-              <h2>Approval history</h2>
-              {#each resolvedApprovalRequests as request (request.id)}<ApprovalRequestCard {request}/>{/each}
-            </section>{/if}
             {#if selectedTask.status === 'running' || selectedTaskStarting}
               {@render agentWaiting(selectedAgent, selectedTask.status !== 'running')}
             {/if}
@@ -3148,7 +3221,11 @@
               <GitPane bind:this={gitPane} taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} onStatus={value=>{gitState=value}}/>
             </div>
             <div class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
-            <div class="detail-scroll" class:hidden={detailTab==='timeline' || (detailTab==='git' && gitState.repository===true)}>
+            <section class="detail-scroll approval-history-panel" class:hidden={detailTab!=='approvals'} aria-label="Approval history">
+              <header><h2>Approvals</h2><p>Resolved requests for this chat.</p></header>
+              {#each resolvedApprovalRequests as request (request.id)}<div id={`approval-history-${paneId}-${request.id}`} tabindex="-1"><ApprovalRequestCard {request}/></div>{:else}<p class="detail-empty">No resolved approvals for this chat.</p>{/each}
+            </section>
+            <div class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || (detailTab==='git' && gitState.repository===true)}>
               <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
               <dl>
                 <div>
@@ -3340,7 +3417,7 @@
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
         <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} workspaceKey={activeWorkspaceKey}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
-          onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={persistWorkspace} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
+          onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={handleChildWorkspaceChange} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}
     </PaneGrid>
   </div>{/if}
@@ -4138,7 +4215,6 @@
     background: linear-gradient(var(--line), var(--line)) left bottom / 100% 1px no-repeat, var(--sidebar);
   }
   .workspace-context { display:grid; place-items:center; flex:none; width:30px; padding-bottom:.5em; color:var(--muted); }
-  .workspace-context .avatar { width:24px; height:24px; }
   .top-actions {
     display: flex;
     align-items: center;
@@ -4383,8 +4459,10 @@
   .task-layout > .run-detail { grid-column: 2; grid-row: 2; }
   .task-layout > .detail-tabs { grid-column: 2; grid-row: 1; }
   .pane-task-header > .task-actions { margin-left:auto; }
-  .pane-task-header.has-detail-tabs { padding-top:0; padding-bottom:0; min-height:56px; }
-  .pane-task-header > .detail-tabs { min-width:0; overflow-x:auto; border-bottom:0; background:transparent; }
+  .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
+  .task-heading-sidebar { display:flex; align-items:center; min-width:0; flex-shrink:0; }
+  .task-heading-sidebar > .task-actions { flex:none; flex-wrap:nowrap; }
+  .task-heading-sidebar > .detail-tabs { flex:1; min-width:0; min-height:30px; padding:15px 0 0; align-self:stretch; overflow-x:auto; border-bottom:0; background:transparent; scrollbar-width:none; }
   .compact-detail > .pane-task-header { position:relative; z-index:13; }
   .conversation {
     --chat-content-max-width: 900px;
@@ -4474,13 +4552,21 @@
   .mobile-navigation .compact-tabs > .topbar { position:relative; }
   .mobile-navigation .compact-tabs .tabs.tab-picker { position:static; }
   .mobile-navigation .compact-tabs .tab-picker-list { top:100%; left:0; right:0; border-radius:0 0 8px 8px; }
+  .workspace.modern-tabs:not(.compact-tabs) > .topbar { height:max(32px, calc(var(--pane-tabbar-height,52px) - 4px)); padding:0; gap:0; }
+  .modern-tabs:not(.compact-tabs) .tabs { gap:0; }
+  .modern-tabs:not(.compact-tabs) .tab-entry { border:0; border-right:1px solid var(--line); border-radius:0; }
+  .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
+  .modern-tabs:not(.compact-tabs) .tab-entry:hover { background:var(--soft); }
+  .modern-tabs:not(.compact-tabs) .tab-entry .tab:hover { background:transparent; }
+  .modern-tabs:not(.compact-tabs) .workspace-context { padding:0; }
+  .modern-tabs:not(.compact-tabs) .top-actions { padding:0 8px; }
   @media (prefers-reduced-motion:reduce) {
     .compact-tabs .tab-picker-trigger :global(svg), .compact-tabs .tab-picker-list { transition:none; }
   }
   .conversation-head {
-    background: color-mix(in srgb, var(--paper) 50%, transparent);
-    -webkit-backdrop-filter: blur(14px);
-    backdrop-filter: blur(14px);
+    background: var(--paper);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     display: flex;
     flex-shrink: 0;
     overflow: visible;
@@ -4512,9 +4598,12 @@
     max-width: 100%;
     margin: 0 0 24px;
   }
-  .approval-history { margin: 14px 0 24px; padding-top: 13px; border-top: 1px solid var(--line); }
-  .approval-history h2 { margin: 0 0 7px; color: var(--muted); font: 600 calc(10px * var(--interface-font-ratio, 1)) var(--mono); letter-spacing: .06em; text-transform: uppercase; }
-  .approval-history :global(.approval-request) { margin-bottom: 10px; }
+  .approval-inline { display:flex; align-items:baseline; width:100%; min-height:30px; gap:8px; margin:0 0 4px; padding:4px 2px; border:0; color:var(--muted); background:transparent; text-align:left; font:calc(11px * var(--interface-font-ratio, 1)) var(--interface-font,"IBM Plex Sans",sans-serif); }
+  .approval-inline > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .approval-inline:hover, .approval-inline:focus-visible { color:var(--ink); text-decoration:underline; text-decoration-color:var(--accent); text-underline-offset:3px; }
+  .approval-inline time { margin-left:auto; flex:none; color:var(--muted); font:calc(9px * var(--interface-font-ratio, 1)) var(--mono); }
+  .approval-inline.denied { color:#a54c44; }
+  @media (hover:none), (pointer:coarse) { .approval-inline { min-height:44px; padding-block:8px; } }
   .message.user.tinted { background:color-mix(in srgb, var(--accent) 16%, var(--panel)); }
   .message.user {
     margin-left: auto;
@@ -4722,6 +4811,11 @@
   .detail-tab-entry.active { position:relative; z-index:1; margin-bottom:-1px; color: var(--ink); border-color: var(--line); background: var(--sidebar); }
   .detail-tab-entry.active .detail-tab { color: var(--ink); }
   .detail-tab-entry.active .detail-tab:hover { background: var(--sidebar); }
+  .modern-tabs .detail-tabs { padding:0; gap:0; align-items:stretch; }
+  .modern-tabs .task-layout > .detail-tabs { min-height:max(32px, calc(var(--pane-tabbar-height,52px) - 4px)); }
+  .modern-tabs .task-heading-sidebar > .detail-tabs { padding:0; }
+  .modern-tabs .detail-tab-entry { align-self:stretch; margin-bottom:0; border:0; border-right:1px solid var(--line); border-radius:0; }
+  .modern-tabs .detail-tab { border-radius:0; }
   .detail-tabs .detail-close {
     width: 30px;
     min-height: 30px;
@@ -4744,6 +4838,11 @@
     min-height: 0;
     padding: 17px 14px;
   }
+  .approval-history-panel > header { margin:0 0 12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
+  .approval-history-panel h2 { margin:0; color:var(--ink); font-size:calc(14px * var(--interface-font-ratio, 1)); }
+  .approval-history-panel header p { margin:4px 0 0; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
+  .approval-history-panel :global(.approval-request) { margin:0 0 11px; }
+  .approval-history-panel > div:focus { outline:2px solid var(--accent); outline-offset:3px; border-radius:8px; }
   .run-detail dl {
     display: grid;
     gap: 8px;
@@ -5138,13 +5237,22 @@
   .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
   .task-heading { align-items: center; padding-top: 13px; padding-bottom: 13px; }
   .task-heading > h1 { margin: 0; }
+  .conversation-head.pane-task-header { padding:15px; gap:10px; }
+  .conversation-head.pane-task-header.has-detail-tabs { display:grid; grid-template-columns:subgrid; padding:0; gap:0; align-items:stretch; }
+  .has-detail-tabs > .task-heading-identity { padding:15px; }
+  .has-detail-tabs > .task-heading-sidebar { border-left:1px solid var(--line); padding-right:15px; }
+  .has-detail-tabs > .task-heading-sidebar > .task-actions { margin-left:10px; }
+  .pane-task-header > h1 { font-size:calc(13.2px * var(--interface-font-ratio, 1)); }
+  .pane-task-header > .task-header-avatar { flex:none; width:30px; height:30px; }
+  .task-heading-identity > h1 { font-size:calc(13.2px * var(--interface-font-ratio, 1)); }
+  .task-heading-identity > .task-header-avatar { flex:none; width:30px; height:30px; }
   .tabs.hide-tab-close .close-tab { display:none; }
   .tabs { counter-reset: tab-index; }
   .tabs > .tab-picker-list > .tab-entry { counter-increment: tab-index; }
-  .tabs.show-tab-index > .tab-picker-list > .tab-entry:not([data-tab-kind='task']):not([data-tab-kind='draft'])::after { content: counter(tab-index); position:absolute; right:5px; top:50%; transform:translateY(-50%); z-index:3; min-width:18px; height:18px; display:grid; place-items:center; border-radius:4px; background:var(--panel); color:var(--accent-ink); border:1px solid var(--line); font:11px var(--mono); pointer-events:none; }
-  .tabs.show-tab-index > .tab-picker-list > .tab-entry.task-tab .tab-kind-icon :global(svg) { opacity:0; }
-  .tabs.show-tab-index > .tab-picker-list > .tab-entry.task-tab .tab-shortcut { position:absolute; inset:-3px; display:grid; place-items:center; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--accent-ink); font:11px var(--mono); }
-  .tabs.show-tab-index > .tab-picker-list > .tab-entry.task-tab .tab-shortcut::after { content:counter(tab-index); }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry:not([data-tab-kind='task']):not([data-tab-kind='draft']):not([data-tab-kind='terminal']):not([data-tab-kind='settings'])::after { content: counter(tab-index); position:absolute; right:5px; top:50%; transform:translateY(-50%); z-index:3; min-width:18px; height:18px; display:grid; place-items:center; border-radius:4px; background:var(--panel); color:var(--accent-ink); border:1px solid var(--line); font:11px var(--mono); pointer-events:none; }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry .tab-kind-icon :global(svg) { opacity:0; }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry .tab-shortcut { position:absolute; inset:-3px; display:grid; place-items:center; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--accent-ink); font:11px var(--mono); }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry .tab-shortcut::after { content:counter(tab-index); }
   .task-title { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
   .task-title-edit { flex: none; opacity: 0; color: var(--muted); transition: opacity .12s ease, color .12s ease; }
   .task-title:focus-within .task-title-edit { opacity: 1; }
@@ -5160,8 +5268,8 @@
   @media (hover:hover) and (pointer:fine) { .identity-avatar-button:hover .avatar-edit-overlay { opacity:1; } }
   @media (hover:none), (pointer:coarse) {
     .chat-actions, .close-tab, .task-title-edit { opacity:1; pointer-events:auto; }
-    .tab-status, .tab-picker-list .tab-status { opacity:0; }
-    .tab-picker-list .close-tab { opacity:1; pointer-events:auto; }
+    .tab-status, .compact-tabs .tab-picker-list .tab-status { opacity:0; }
+    .compact-tabs .tab-picker-list .close-tab { opacity:1; pointer-events:auto; }
     .avatar-toggle-overlay, .avatar-edit-overlay { display:none; }
     button, .app-shell :global(a), summary { touch-action:manipulation; }
   }
