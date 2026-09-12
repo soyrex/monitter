@@ -127,19 +127,20 @@ try {
   await expect(panel).toBeVisible();
   const policyInput = panel.getByLabel('Inactivity limit (days)');
   await expect(policyInput).toHaveValue('14');
+  await expect(panel.getByRole('status')).toContainText('pending');
+  await expect(phone.getByText(/Compare this number with your desktop/)).toBeVisible();
+  await panel.getByRole('button', { name: /approve phone/i }).click();
+
+  await expect(phone.getByRole('heading', { name: 'Your workspace', exact: true })).toBeVisible();
+  await expect(phone.locator('header small')).toContainText('connected');
+  await expect(panel.getByText('Phone 1', { exact: true })).toBeVisible();
+  await expect(panel.getByText(/connected · Last access/)).toBeVisible();
   await policyInput.fill('');
   await panel.getByRole('button', { name: 'Save policy', exact: true }).click();
   await expect.poll(() => desktop.evaluate(async () => (await import('/test-pairing-modules.js')).loadDesktopPairing().then(record => record.inactivityDays))).toBe(null);
   await policyInput.fill('14');
   await panel.getByRole('button', { name: 'Save policy', exact: true }).click();
   await expect.poll(() => desktop.evaluate(async () => (await import('/test-pairing-modules.js')).loadDesktopPairing().then(record => record.inactivityDays))).toBe(14);
-  await expect(panel.getByRole('status')).toContainText('pending');
-  await expect(phone.getByText(/Compare this number with your desktop/)).toBeVisible();
-  await panel.getByRole('button', { name: /approve phone/i }).click();
-
-  await expect(phone.getByText('Your workspace', { exact: true })).toBeVisible();
-  await expect(panel.getByText('Phone 1', { exact: true })).toBeVisible();
-  await expect(panel.getByText(/connected · Last access/)).toBeVisible();
   const approved = await desktop.evaluate(async mobilePublicKey => {
     const store = await import('/test-pairing-modules.js');
     const record = await store.loadDesktopPairing();
@@ -162,7 +163,8 @@ try {
   await desktop.reload({ waitUntil: 'commit' });
   await desktop.getByRole('button', { name: 'Remote control', exact: true }).click();
   const restoredPanel = desktop.getByRole('dialog', { name: 'Remote control' });
-  await expect(phone.getByText('Your workspace', { exact: true })).toBeVisible();
+  await expect(phone.getByRole('heading', { name: 'Your workspace', exact: true })).toBeVisible();
+  await expect(phone.locator('header small')).toContainText('connected');
   await expect(restoredPanel.getByText('Phone 1', { exact: true })).toBeVisible();
   await expect(restoredPanel.getByRole('status')).toContainText('connected');
   await expect(restoredPanel.getByRole('button', { name: /approve phone/i })).toHaveCount(0);
@@ -177,7 +179,8 @@ try {
   // A cold phone route reload reads its persisted key and reconnects without a
   // QR, device key, or another approval click.
   await phone.reload({ waitUntil: 'commit' });
-  await expect(phone.getByText('Your workspace', { exact: true })).toBeVisible();
+  await expect(phone.getByRole('heading', { name: 'Your workspace', exact: true })).toBeVisible();
+  await expect(phone.locator('header small')).toContainText('connected');
   await expect(restoredPanel.getByRole('status')).toContainText('connected');
   await expect(restoredPanel.getByRole('button', { name: /approve phone/i })).toHaveCount(0);
 
