@@ -61,6 +61,7 @@ interface PairingKeys { readonly privateKey?: CryptoKey; readonly publicKey?: Ui
 const MAX_RELAY_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_INVITATION_BYTES = 1024;
 const PAIRING_TIMEOUT_MS = 5 * 60_000;
+const RELAY_CONNECT_TIMEOUT_MS = 15_000;
 const MAX_CONCURRENT_DESKTOP_RPCS = 32;
 const SEND_RECEIPT_CAPABILITY = 'send-receipt-v1';
 const REMEMBERED_DEVICE_CAPABILITY = 'remembered-device-v1';
@@ -98,19 +99,22 @@ class PairingConnection {
   private receiveQueue: Promise<void> = Promise.resolve();
   private sendQueue: Promise<void> = Promise.resolve();
   private readonly pairingTimer: ReturnType<typeof setTimeout>;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastError: string | undefined;
   private closed = false;
   private verification: string | null = null;
   private commitmentSent = false;
   private revealSent = false;
   private peerCommitment: Uint8Array | null = null;
   constructor(protected readonly invitationData: ControllerInvitation, protected readonly role: Role, private readonly pairingKeys: PairingKeys = {}, private readonly socketFactory: SocketFactory = url => new WebSocket(url)) {
-    this.pairingTimer = setTimeout(() => { if (!this.closed) this.fail(); }, PAIRING_TIMEOUT_MS);
+    this.pairingTimer = setTimeout(() => { if (!this.closed) this.fail('Pairing timed out. Reconnect and try pairing again.'); }, PAIRING_TIMEOUT_MS);
     this.connect();
   }
   getStatus() { return this.status; }
   getVerificationCode() { return this.verification; }
-  subscribe(listener: (state: RemoteConnectionState) => void) { this.listeners.add(listener); listener({ status: this.status, ...(this.verification ? { verificationCode: this.verification } : {}) }); return () => this.listeners.delete(listener); }
-  protected setStatus(status: RemoteConnectionStatus, error?: string) { if (this.status === status && !error) return; this.status = status; for (const listener of this.listeners) listener({ status, ...(error ? { error } : {}), ...(this.verification ? { verificationCode: this.verification } : {}) }); }
+  subscribe(listener: (state: RemoteConnectionState) => void) { this.listeners.add(listener); listener({ status: this.status, ...(this.lastError ? { error: this.lastError } : {}), ...(this.verification ? { verificationCode: this.verification } : {}) }); return () => this.listeners.delete(listener); }
+  protected setStatus(status: RemoteConnectionStatus, error?: string) { if (this.status === status && !error) return; this.status = status; this.lastError = error; for (const listener of this.listeners) listener({ status, ...(error ? { error } : {}), ...(this.verification ? { verificationCode: this.verification } : {}) }); }
+  private clearConnectTimer() { if (this.connectTimer) clearTimeout(this.connectTimer); this.connectTimer = null; }
   protected connect() {
     try {
       const endpoint = new URL(this.invitationData.relayUrl);
@@ -119,11 +123,16 @@ class PairingConnection {
       endpoint.searchParams.set('role', this.role);
       this.socket = this.socketFactory(endpoint.href);
     }
-    catch { this.setStatus('error'); return; }
-    this.socket.onopen = () => this.sendRaw({ type: 'join', room: this.invitationData.room, role: this.role });
+    catch { this.closed = true; clearTimeout(this.pairingTimer); this.setStatus('error', 'Could not open a secure connection to the pairing relay. Check your network connection.'); return; }
+    // Bound both the socket handshake and relay join. Browsers can otherwise
+    // sit in CONNECTING for minutes when the resolved server is unreachable.
+    this.connectTimer = setTimeout(() => {
+      if (!this.closed) this.fail(`Could not connect to the pairing relay at ${new URL(this.invitationData.relayUrl).hostname}. Check your network connection and try again.`);
+    }, RELAY_CONNECT_TIMEOUT_MS);
+    this.socket.onopen = () => { if (!this.closed) this.sendRaw({ type: 'join', room: this.invitationData.room, role: this.role }); };
     this.socket.onmessage = event => { this.receiveQueue = this.receiveQueue.then(() => this.receive(event.data)).catch(() => this.fail()); };
-    this.socket.onerror = () => this.setStatus('error');
-    this.socket.onclose = () => { this.closed = true; clearTimeout(this.pairingTimer); if (this.status !== 'rejected') this.setStatus('closed'); this.channel = null; this.peerNonce = null; this.onDisconnected(); };
+    this.socket.onerror = () => { if (!this.closed) this.fail('The secure connection to the pairing relay failed. Check your network connection and try again.'); };
+    this.socket.onclose = () => { this.closed = true; this.clearConnectTimer(); clearTimeout(this.pairingTimer); if (this.status !== 'rejected' && this.status !== 'error') this.setStatus('closed'); this.channel = null; this.peerNonce = null; this.onDisconnected(); };
   }
   protected sendRaw(value: unknown) { if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(value)); }
   protected sendSecure(value: unknown): Promise<void> {
@@ -138,7 +147,7 @@ class PairingConnection {
     if (typeof raw !== 'string' || raw.length > MAX_RELAY_FRAME_BYTES) return this.fail();
     let message: unknown; try { message = JSON.parse(raw); } catch { return this.fail(); }
     const data = asObject(message); if (!data || typeof data.type !== 'string') return this.fail();
-    if (data.type === 'joined') { this.setStatus('waiting_for_peer'); return; }
+    if (data.type === 'joined') { this.clearConnectTimer(); this.setStatus('waiting_for_peer'); return; }
     if (data.type === 'peer') {
       if (this.invitationData.version === 1) this.sendRaw({ type: 'hello', nonce: bytesToBase64url(this.nonce) });
       else await this.sendV2Commit();
@@ -196,12 +205,12 @@ class PairingConnection {
       await this.onChannelReady();
     } catch { this.fail(); }
   }
-  protected fail() { this.closed = true; clearTimeout(this.pairingTimer); this.setStatus('error'); this.socket?.close(); }
+  protected fail(error?: string) { this.closed = true; this.clearConnectTimer(); clearTimeout(this.pairingTimer); this.channel = null; this.peerNonce = null; this.setStatus('error', error); this.socket?.close(); this.onDisconnected(); }
   protected async onChannelReady(): Promise<void> {}
   protected async onSecure(_message: unknown): Promise<void> {}
   protected onDisconnected(): void {}
   protected completePairing() { clearTimeout(this.pairingTimer); }
-  close() { this.closed = true; clearTimeout(this.pairingTimer); this.setStatus('closed'); this.socket?.close(); }
+  close() { this.closed = true; this.clearConnectTimer(); clearTimeout(this.pairingTimer); this.setStatus('closed'); this.socket?.close(); }
 }
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean { if (left.byteLength !== right.byteLength) return false; let mismatch = 0; for (let i = 0; i < left.byteLength; i += 1) mismatch |= left[i] ^ right[i]; return mismatch === 0; }
 

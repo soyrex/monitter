@@ -21,9 +21,10 @@ export interface ResumableMobileSession extends MobileSession { reconnectNow(): 
 export async function createResumableDesktopSession(options: ResumableDesktopOptions): Promise<ResumableDesktopSession> {
   let current: DesktopSession | null = null, permanentlyClosed = false, attempt = 0, opening: Promise<void> | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null, generation = 0;
+  let lastState: RemoteConnectionState = { status: 'connecting' };
   let unsubscribeState: (() => void) | null = null, unsubscribePending: (() => void) | null = null;
   const listeners = new Set<(state: RemoteConnectionState) => void>(), pending = new Set<() => void>();
-  const notify = (state: RemoteConnectionState) => listeners.forEach(listener => listener(state));
+  const notify = (state: RemoteConnectionState) => { lastState = state; listeners.forEach(listener => listener(state)); };
   const cancelRetry = () => { if (retryTimer) clearTimeout(retryTimer); retryTimer = null; };
   const detach = () => { unsubscribeState?.(); unsubscribePending?.(); unsubscribeState = null; unsubscribePending = null; };
   const scheduleRetry = (ownedGeneration: number) => {
@@ -64,7 +65,7 @@ export async function createResumableDesktopSession(options: ResumableDesktopOpt
     get invitation() { return invitation; },
     getStatus: () => current?.getStatus() ?? 'closed', getVerificationCode: () => current?.getVerificationCode() ?? null,
     getPeer: () => current?.getPeer() ?? null, getPeerControllerPublicKey: () => current?.getPeerControllerPublicKey() ?? null,
-    subscribe(listener) { listeners.add(listener); listener({ status: current?.getStatus() ?? 'closed', ...(current?.getVerificationCode() ? { verificationCode: current.getVerificationCode()! } : {}) }); return () => listeners.delete(listener); },
+    subscribe(listener) { listeners.add(listener); listener(lastState); return () => listeners.delete(listener); },
     onPendingPeer(listener) { pending.add(listener); return () => pending.delete(listener); },
     approve: () => current?.approve() ?? Promise.reject(new Error('Controller connection is unavailable.')),
     reject: () => current?.reject() ?? Promise.reject(new Error('Controller connection is unavailable.')),
@@ -75,16 +76,17 @@ export async function createResumableDesktopSession(options: ResumableDesktopOpt
       if (opening) return opening;
       generation += 1; detach(); const previous = current; current = null; previous?.close(); await open();
     },
-    close: () => { permanentlyClosed = true; generation += 1; cancelRetry(); detach(); const previous = current; current = null; previous?.close(); },
+    close: () => { permanentlyClosed = true; generation += 1; cancelRetry(); detach(); const previous = current; current = null; previous?.close(); notify({ status: 'closed' }); },
   };
 }
 
 export async function createResumableMobileSession(options: ResumableMobileOptions): Promise<ResumableMobileSession> {
   let current: MobileSession | null = null, permanentlyClosed = false, attempt = 0, opening: Promise<void> | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null, generation = 0;
+  let lastState: RemoteConnectionState = { status: 'connecting' };
   let unsubscribeState: (() => void) | null = null;
   const listeners = new Set<(state: RemoteConnectionState) => void>();
-  const notify = (state: RemoteConnectionState) => listeners.forEach(listener => listener(state));
+  const notify = (state: RemoteConnectionState) => { lastState = state; listeners.forEach(listener => listener(state)); };
   const cancelRetry = () => { if (retryTimer) clearTimeout(retryTimer); retryTimer = null; };
   const scheduleRetry = (ownedGeneration: number) => {
     if (permanentlyClosed || retryTimer || ownedGeneration !== generation) return;
@@ -121,13 +123,13 @@ export async function createResumableMobileSession(options: ResumableMobileOptio
   return {
     getStatus: () => current?.getStatus() ?? 'closed', getVerificationCode: () => current?.getVerificationCode() ?? null,
     supportsRememberedDevices: () => current?.supportsRememberedDevices() ?? false,
-    subscribe(listener) { listeners.add(listener); listener({ status: current?.getStatus() ?? 'closed', ...(current?.getVerificationCode() ? { verificationCode: current.getVerificationCode()! } : {}) }); return () => listeners.delete(listener); },
+    subscribe(listener) { listeners.add(listener); listener(lastState); return () => listeners.delete(listener); },
     reconnectNow: async () => {
       cancelRetry();
       if (opening) return opening;
       generation += 1; unsubscribeState?.(); unsubscribeState = null; const previous = current; current = null; previous?.close(); await open();
     },
-    close: () => { permanentlyClosed = true; generation += 1; cancelRetry(); unsubscribeState?.(); unsubscribeState = null; const previous = current; current = null; previous?.close(); },
+    close: () => { permanentlyClosed = true; generation += 1; cancelRetry(); unsubscribeState?.(); unsubscribeState = null; const previous = current; current = null; previous?.close(); notify({ status: 'closed' }); },
     getSnapshot: () => requireCurrent().getSnapshot(), sendMessage: (id, text) => requireCurrent().sendMessage(id, text) as Promise<Snapshot | ControllerSendReceipt>,
     cancelTask: id => requireCurrent().cancelTask(id), resumeTask: id => requireCurrent().resumeTask(id), listTerminals: () => requireCurrent().listTerminals(), readTerminal: (id, seq) => requireCurrent().readTerminal(id, seq),
   };

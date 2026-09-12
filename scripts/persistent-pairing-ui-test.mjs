@@ -55,7 +55,7 @@ async function openRemoteControl(page) {
   await page.getByRole('button', { name: 'Preferences', exact: true }).click();
   const settings = page.getByRole('region', { name: 'Settings' });
   await settings.getByRole('button', { name: 'Remote control', exact: true }).click();
-  await page.getByRole('button', { name: 'Open Remote control', exact: true }).click();
+  return settings;
 }
 
 let browser, desktop, phone, moduleDirectory, staticServer;
@@ -127,18 +127,31 @@ try {
   }, relayUrl);
 
   await desktop.reload({ waitUntil: 'commit' });
-  await gotoReady(phone, new URL('mobile', baseUrl).href);
-  await openRemoteControl(desktop);
-  const panel = desktop.getByRole('dialog', { name: 'Remote control' });
+  const settings = await openRemoteControl(desktop);
+  const panel = settings.getByRole('region', { name: 'Remote control' });
   await expect(panel).toBeVisible();
+  await expect(desktop.getByRole('dialog', { name: 'Remote control' })).toHaveCount(0);
+  await expect(panel).toHaveCount(1);
+  await expect(panel.getByRole('status')).toContainText('Ready for a phone');
+  await panel.getByRole('button', { name: 'Create pairing code', exact: true }).click();
+  const qr = panel.getByAltText('Mobile pairing QR code');
+  await expect(qr).toBeVisible();
+  assert.equal(await qr.evaluate((image) => {
+    const panel = image.closest('.remote-panel');
+    const imageWidth = image.getBoundingClientRect().width;
+    const panelWidth = panel?.getBoundingClientRect().width ?? 0;
+    return imageWidth <= 280.5 && imageWidth <= panelWidth + .5;
+  }), true, 'Pairing QR must fit the embedded Settings region.');
+
+  await gotoReady(phone, new URL('mobile', baseUrl).href);
   const policyInput = panel.getByLabel('Inactivity limit (days)');
   await expect(policyInput).toHaveValue('14');
-  await expect(panel.getByRole('status')).toContainText('pending');
+  await expect(panel.getByRole('status')).toContainText('Waiting for phone approval');
   await expect(phone.getByText(/Compare this number with your desktop/)).toBeVisible();
   await policyInput.fill('7');
   await panel.getByRole('button', { name: 'Save policy', exact: true }).click();
   await expect.poll(() => desktop.evaluate(async () => (await import('/test-pairing-modules.js')).loadDesktopPairing().then(record => record.inactivityDays))).toBe(7);
-  await expect(panel.getByRole('status')).toContainText('pending');
+  await expect(panel.getByRole('status')).toContainText('Waiting for phone approval');
   await expect(phone.locator('header small')).toContainText('awaiting approval');
   await panel.getByRole('button', { name: /approve phone/i }).click();
 
@@ -146,6 +159,28 @@ try {
   await expect(phone.locator('header small')).toContainText('connected');
   await expect(panel.getByText('Phone 1', { exact: true })).toBeVisible();
   await expect(panel.getByText(/connected · Last access/)).toBeVisible();
+
+  // Moving away from the remote category removes the portal target, not the
+  // root-owned listener. Returning restores the same connected controller.
+  await settings.getByRole('button', { name: 'Appearance', exact: true }).click();
+  await expect(desktop.locator('.remote-panel')).toBeHidden();
+  await expect(phone.locator('header small')).toContainText('connected');
+  await settings.getByRole('button', { name: 'Remote control', exact: true }).click();
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole('status')).toContainText('Phone connected');
+  await expect(phone.locator('header small')).toContainText('connected');
+
+  // Closing the Settings tab removes the target altogether. Reopening it must
+  // reattach the existing controller rather than creating a new approval flow.
+  await desktop.getByRole('button', { name: 'Close Settings tab', exact: true }).click();
+  await expect(desktop.getByRole('region', { name: 'Settings' })).toHaveCount(0);
+  await expect(desktop.locator('.remote-panel')).toBeHidden();
+  await expect(phone.locator('header small')).toContainText('connected');
+  const restoredSettings = await openRemoteControl(desktop);
+  const reattachedPanel = restoredSettings.getByRole('region', { name: 'Remote control' });
+  await expect(reattachedPanel).toBeVisible();
+  await expect(reattachedPanel.getByRole('status')).toContainText('Phone connected');
+  await expect(reattachedPanel.getByRole('button', { name: /approve phone/i })).toHaveCount(0);
   await policyInput.fill('');
   await panel.getByRole('button', { name: 'Save policy', exact: true }).click();
   await expect.poll(() => desktop.evaluate(async () => (await import('/test-pairing-modules.js')).loadDesktopPairing().then(record => record.inactivityDays))).toBe(null);
@@ -172,8 +207,8 @@ try {
   // Recreating the desktop page restores its saved identity and room. The live
   // phone reconnects without returning to manual approval.
   await desktop.reload({ waitUntil: 'commit' });
-  await openRemoteControl(desktop);
-  const restoredPanel = desktop.getByRole('dialog', { name: 'Remote control' });
+  const reloadSettings = await openRemoteControl(desktop);
+  const restoredPanel = reloadSettings.getByRole('region', { name: 'Remote control' });
   await expect(phone.getByRole('heading', { name: 'Your workspace', exact: true })).toBeVisible();
   await expect(phone.locator('header small')).toContainText('connected');
   await expect(restoredPanel.getByText('Phone 1', { exact: true })).toBeVisible();

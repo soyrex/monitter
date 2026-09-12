@@ -6,6 +6,15 @@ opt-in through the desktop Remote control panel; nothing connects by default.
 
 ## Current development build
 
+Pairing controls now live directly in **Settings → Remote control**, including the
+QR/device key, number comparison, saved phones and inactivity policy. Closing
+Settings or changing category hides only these controls; the root-owned listener
+stays alive. This does not keep the listener alive after quitting the desktop app.
+The relay must report ready before a new QR/code is offered. A socket/join attempt
+is bounded to 15 seconds and remembered sessions retry with backoff; HTTP pairing
+requests show readable timeout/network failures and never automatically retry a
+one-use creation or claim. Scanning a QR still requires a working relay connection.
+
 - `npm run relay`: starts the opaque development relay on 127.0.0.1:8789.
 - Open Remote control in desktop Monitter, create a QR invitation, scan it on mobile, or enter the nine-digit one-use device key, then compare
   the six-digit verification numbers and approve on desktop. V2 invitations contain a room and desktop public key. Version 0.4.0 and its matching desktop build remember approved phones across app closure and reconnect automatically.

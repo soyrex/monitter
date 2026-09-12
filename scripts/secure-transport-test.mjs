@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mock } from 'node:test';
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
 import { createDesktopSession, createMobileSession } from '../src/lib/controller/remote-client.ts';
@@ -44,6 +45,54 @@ const rejectionProbe = async (relayUrl, bridge, mode) => {
   await rejected;
   peer.close(); desktop.close();
 };
+
+// A dead TCP route or a socket that opens without joining must not leave either
+// endpoint spinning for the browser's multi-minute connection timeout.
+const stalledSockets=[];
+class StalledSocket {
+  static OPEN=1;
+  readyState=0;
+  sent=[];
+  constructor(){stalledSockets.push(this);}
+  send(value){this.sent.push(value);}
+  close(){this.readyState=3;this.onclose?.();}
+}
+globalThis.WebSocket=StalledSocket;
+mock.timers.enable({apis:['setTimeout']});
+try {
+  const desktop=await createDesktopSession('wss://relay.example/relay',{});
+  const mobile=await createMobileSession(desktop.invitation);
+  const states=[];
+  desktop.subscribe(state=>states.push(state));
+  const [desktopSocket,mobileSocket]=stalledSockets;
+  mobileSocket.readyState=1;mobileSocket.onopen();
+  assert.equal(mobileSocket.sent.length,1);
+  mock.timers.tick(14999);
+  assert.equal(desktop.getStatus(),'connecting');
+  mock.timers.tick(1);
+  assert.equal(desktop.getStatus(),'error');
+  assert.equal(mobile.getStatus(),'error');
+  assert.match(states.at(-1).error,/Could not connect to the pairing relay at relay.example/);
+  let replay;desktop.subscribe(state=>{replay=state;});
+  assert.equal(replay.error,states.at(-1).error);
+  // Late events from the timed-out attempt cannot advertise a usable invitation.
+  desktopSocket.readyState=1;desktopSocket.onopen();
+  desktopSocket.onmessage({data:JSON.stringify({type:'joined'})});
+  await Promise.resolve();
+  assert.equal(desktopSocket.sent.length,0);
+  assert.equal(desktop.getStatus(),'error');
+  desktop.close();mobile.close();
+
+  const healthy=await createDesktopSession('wss://relay.example/relay',{});
+  const healthySocket=stalledSockets.at(-1);
+  healthySocket.readyState=1;healthySocket.onopen();
+  healthySocket.onmessage({data:JSON.stringify({type:'joined'})});
+  await Promise.resolve();
+  assert.equal(healthy.getStatus(),'waiting_for_peer');
+  mock.timers.tick(15000);
+  assert.equal(healthy.getStatus(),'waiting_for_peer');
+  healthy.close();
+} finally {mock.timers.reset();globalThis.WebSocket=WebSocket;}
 
 // Directional keys must decrypt only in their intended direction and refuse replay.
 const secret = randomBytes(32), desktopNonce = randomBytes(16), mobileNonce = randomBytes(16);
