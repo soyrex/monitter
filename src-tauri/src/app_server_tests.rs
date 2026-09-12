@@ -16,6 +16,30 @@ mod tests {
         std::env::temp_dir().join(format!("monitter-app-server-{name}-{}", crate::id()))
     }
 
+    struct FixtureCleanup {
+        service: Option<Arc<Service>>,
+        task_id: String,
+        state_dir: PathBuf,
+        executable: PathBuf,
+    }
+
+    impl Drop for FixtureCleanup {
+        fn drop(&mut self) {
+            if let Some(service) = self.service.take() {
+                let control = service
+                    .runs
+                    .lock()
+                    .ok()
+                    .and_then(|runs| runs.tasks.get(&self.task_id).cloned());
+                if let Some(control) = control {
+                    control.terminate_owned();
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.state_dir);
+            let _ = std::fs::remove_file(&self.executable);
+        }
+    }
+
     fn running_task(service: &Arc<Service>, fixture: &str) -> Task {
         let agent = service.snapshot().unwrap().agents[0].id.clone();
         let task = service
@@ -62,9 +86,13 @@ mod tests {
         panic!("timed out waiting for app-server fixture state for {task_id}");
     }
 
-    fn resolve_fixture_requests(service: &Arc<Service>, task_id: &str) {
+    fn resolve_fixture_requests_with_timeout(
+        service: &Arc<Service>,
+        task_id: &str,
+        timeout: Duration,
+    ) {
         for _ in 0..3 {
-            wait_until(service, task_id, Duration::from_secs(5), |snapshot| {
+            wait_until(service, task_id, timeout, |snapshot| {
                 snapshot
                     .approval_requests
                     .iter()
@@ -90,6 +118,10 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    fn resolve_fixture_requests(service: &Arc<Service>, task_id: &str) {
+        resolve_fixture_requests_with_timeout(service, task_id, Duration::from_secs(5));
     }
 
     #[test]
@@ -203,6 +235,147 @@ mod tests {
             .app_server_message(&task.id, &stale, "turn-1", "item-1", "stale", true)
             .is_err());
         let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
+    }
+
+    #[test]
+    fn restart_resumes_saved_thread_once_with_required_collaboration_helper() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/fixtures/codex-app-server/mock.mjs");
+        let executable = std::env::temp_dir().join(format!(
+            "monitter-app-server-restart-fixture-{}",
+            crate::id()
+        ));
+        let script = format!(
+            "#!/bin/sh\nMONITTER_FIXTURE_DELAY_THREAD_RESUME_MS=21000 exec /usr/bin/env node {}\n",
+            crate::runner::posix_quote(&root.to_string_lossy())
+        );
+        std::fs::write(&executable, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let state_dir = dir("restart-resume");
+        let service = Service::open(None, state_dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        service
+            .mutate(None, |snapshot| {
+                snapshot.agents[0].collaboration_enabled = true;
+                Ok(())
+            })
+            .unwrap();
+        let task = service
+            .create_task(CreateTaskInput {
+                agent_id,
+                title: "restart fixture".into(),
+                native_session_id: None,
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                cwd: None,
+                model_settings: None,
+                sandbox: None,
+            })
+            .unwrap();
+        let mut cleanup = FixtureCleanup {
+            service: Some(service.clone()),
+            task_id: task.id.clone(),
+            state_dir: state_dir.clone(),
+            executable: executable.clone(),
+        };
+        service
+            .mutate_data(None, |data| {
+                data.task_hosts.get_mut(&task.id).unwrap().codex_path =
+                    executable.to_string_lossy().into();
+                Ok(())
+            })
+            .unwrap();
+        service
+            .send_fast(task.id.clone(), "first prompt".into(), vec![])
+            .unwrap();
+        resolve_fixture_requests(&service, &task.id);
+        wait_until(&service, &task.id, Duration::from_secs(5), |snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .any(|item| item.id == task.id && item.status == "completed")
+        });
+        let first = service.snapshot().unwrap();
+        let native = first
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .unwrap()
+            .native_session_id
+            .clone()
+            .unwrap();
+        assert_eq!(native, "00000000-0000-7000-8000-000000000001");
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .filter(|item| item.task_id == task.id && item.role == "assistant")
+                .count(),
+            1
+        );
+        service.cancel(&task.id).unwrap();
+        let stop_deadline = Instant::now() + Duration::from_secs(5);
+        while service.runs.lock().unwrap().tasks.contains_key(&task.id) {
+            assert!(
+                Instant::now() < stop_deadline,
+                "fixture process did not stop before restart"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        drop(service);
+        cleanup.service = None;
+
+        let reopened = Service::open(None, state_dir.clone()).unwrap();
+        cleanup.service = Some(reopened.clone());
+        reopened
+            .send_fast(task.id.clone(), "second prompt".into(), vec![])
+            .unwrap();
+        resolve_fixture_requests_with_timeout(&reopened, &task.id, Duration::from_secs(35));
+        wait_until(&reopened, &task.id, Duration::from_secs(35), |snapshot| {
+            snapshot
+                .messages
+                .iter()
+                .filter(|item| item.task_id == task.id && item.role == "assistant")
+                .count()
+                == 2
+        });
+        let resumed = reopened.snapshot().unwrap();
+        let task_after = resumed
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .unwrap();
+        assert_eq!(
+            task_after.native_session_id.as_deref(),
+            Some(native.as_str())
+        );
+        let user_prompts = resumed
+            .messages
+            .iter()
+            .filter(|item| item.task_id == task.id && item.role == "user")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_prompts
+                .iter()
+                .filter(|item| item.text == "first prompt")
+                .count(),
+            1
+        );
+        assert_eq!(
+            user_prompts
+                .iter()
+                .filter(|item| item.text == "second prompt")
+                .count(),
+            1
+        );
+        assert_eq!(user_prompts.len(), 2);
+        let control = reopened.resident_control(&task.id).unwrap().unwrap();
+        control.terminate_owned();
     }
 
     #[test]

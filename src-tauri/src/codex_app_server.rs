@@ -28,8 +28,72 @@ const FIRST_TURN_ID: i64 = 3;
 const MAX_SERVER_REQUESTS: usize = 16;
 const MAX_RPC_LINE: usize = 2 * 1024 * 1024;
 const MAX_DELTA_TEXT: usize = 2 * 1024 * 1024;
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(20);
+// Resuming a thread can require every configured MCP server to initialize.
+// Keep this bounded, but accommodate the documented 120-second MCP timeout.
+const THREAD_TIMEOUT: Duration = Duration::from_secs(150);
+const TURN_START_TIMEOUT: Duration = Duration::from_secs(20);
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestStage {
+    Initialize,
+    Thread,
+    InitialTurn,
+    SubsequentTurn,
+}
+
+impl RequestStage {
+    fn timeout(self) -> Duration {
+        match self {
+            Self::Initialize => INITIALIZE_TIMEOUT,
+            Self::Thread => THREAD_TIMEOUT,
+            Self::InitialTurn | Self::SubsequentTurn => TURN_START_TIMEOUT,
+        }
+    }
+
+    fn timeout_error(self) -> &'static str {
+        match self {
+            Self::Initialize => "Codex app-server initialize request timed out.",
+            Self::Thread => "Codex app-server thread start/resume request timed out.",
+            Self::InitialTurn => "Codex app-server initial turn/start request timed out.",
+            Self::SubsequentTurn => "Codex app-server subsequent turn/start request timed out.",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StageClock {
+    stage: RequestStage,
+    started_at: Instant,
+}
+
+impl StageClock {
+    fn start(stage: RequestStage) -> Self {
+        Self {
+            stage,
+            started_at: Instant::now(),
+        }
+    }
+
+    fn deadline(self) -> Instant {
+        self.started_at + self.stage.timeout()
+    }
+
+    fn expired_at(self, now: Instant) -> bool {
+        now >= self.deadline()
+    }
+}
+
+fn observe_subsequent_turn_clock(
+    started: bool,
+    control: &RunControl,
+    stage_clock: &mut Option<StageClock>,
+) {
+    if started && stage_clock.is_none() && control.has_app_server_turn_request() {
+        *stage_clock = Some(StageClock::start(RequestStage::SubsequentTurn));
+    }
+}
 
 struct BufferedMessage {
     text: String,
@@ -173,6 +237,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             }
         });
     }
+    let mut stage_clock = Some(StageClock::start(RequestStage::Initialize));
     if let Err(error) = send(&control, initialize()) {
         service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
         return;
@@ -202,43 +267,50 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             }
         }
     });
-    let startup_deadline = Instant::now() + STARTUP_TIMEOUT;
-    let mut pending_turn_since: Option<Instant> = None;
     loop {
         if control.is_cancelled() {
             terminal = true;
             break;
         }
-        let pending_turn = started && control.has_app_server_turn_request();
-        if pending_turn {
-            pending_turn_since.get_or_insert_with(Instant::now);
-        } else {
-            pending_turn_since = None;
+        // `recv_timeout` returns immediately while the pipe has queued
+        // notifications. Check absolute expiry before accepting another frame
+        // so notification noise cannot starve a request-stage timeout.
+        if stage_clock.is_some_and(|clock| clock.expired_at(Instant::now())) {
+            service.complete_app_server_turn(
+                &task_id,
+                &control,
+                None,
+                "error",
+                Some(
+                    stage_clock
+                        .map(|clock| clock.stage.timeout_error())
+                        .unwrap_or("Codex app-server request timed out.")
+                        .into(),
+                ),
+            );
+            terminal = true;
+            break;
         }
-        let deadline = if !started {
-            Some(startup_deadline)
-        } else {
-            pending_turn_since.map(|since| since + STARTUP_TIMEOUT)
-        };
+        // A resident connection starts later turns outside this reader.  Begin
+        // their own clock when the outstanding request is observed; only its
+        // matching response clears it. Notifications never extend a clock.
+        observe_subsequent_turn_clock(started, &control, &mut stage_clock);
+        let deadline = stage_clock.map(StageClock::deadline);
         let poll = deadline
-            .map(|deadline| {
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(250))
-            })
-            .unwrap_or(Duration::from_millis(250));
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_millis(250))
+            .min(Duration::from_millis(250));
         let received = match output_rx.recv_timeout(poll) {
             Ok(value) => Ok(value),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err("Codex app-server output closed.".into())
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    Err(if started {
-                        "Codex app-server turn request timed out.".into()
-                    } else {
-                        "Codex app-server startup timed out.".into()
-                    })
+                if stage_clock.is_some_and(|clock| clock.expired_at(Instant::now())) {
+                    Err(stage_clock
+                        .map(|clock| clock.stage.timeout_error())
+                        .unwrap_or("Codex app-server request timed out.")
+                        .into())
                 } else {
                     continue;
                 }
@@ -272,6 +344,10 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 break;
             }
         };
+        // A later turn can be marked and responded to while this reader is in
+        // recv_timeout. Observe again after waking, before correlating the
+        // frame, so an immediate valid response cannot look out of order.
+        observe_subsequent_turn_clock(started, &control, &mut stage_clock);
         // Server-to-client requests also have JSON-RPC ids.  Dispatch them
         // before considering client response correlation; never mistake one
         // for a late turn/start acknowledgement.
@@ -316,6 +392,17 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 break;
             }
             if id == INITIALIZE_ID {
+                if stage_clock.map(|clock| clock.stage) != Some(RequestStage::Initialize) {
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        None,
+                        "error",
+                        Some("Codex app-server returned initialize out of order.".into()),
+                    );
+                    terminal = true;
+                    break;
+                }
                 if send(&control, json!({"method":"initialized"}))
                     .and_then(|_| {
                         send(
@@ -335,7 +422,19 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     terminal = true;
                     break;
                 }
+                stage_clock = Some(StageClock::start(RequestStage::Thread));
             } else if id == THREAD_ID {
+                if stage_clock.map(|clock| clock.stage) != Some(RequestStage::Thread) {
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        None,
+                        "error",
+                        Some("Codex app-server returned thread start/resume out of order.".into()),
+                    );
+                    terminal = true;
+                    break;
+                }
                 let Some(thread_id) = value.pointer("/result/thread/id").and_then(Value::as_str)
                 else {
                     service.complete_app_server_turn(
@@ -384,11 +483,39 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     terminal = true;
                     break;
                 }
+                stage_clock = Some(StageClock::start(RequestStage::InitialTurn));
             } else if is_turn_request {
+                let expected = if started {
+                    RequestStage::SubsequentTurn
+                } else {
+                    RequestStage::InitialTurn
+                };
+                if stage_clock.map(|clock| clock.stage) != Some(expected) {
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        None,
+                        "error",
+                        Some("Codex app-server returned turn/start out of order.".into()),
+                    );
+                    terminal = true;
+                    break;
+                }
                 if let Some(turn_id) = value.pointer("/result/turn/id").and_then(Value::as_str) {
                     control.set_app_server_turn(turn_id.into());
                     started = true;
+                } else {
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        None,
+                        "error",
+                        Some("Codex app-server turn response omitted its ID.".into()),
+                    );
+                    terminal = true;
+                    break;
                 }
+                stage_clock = None;
             }
             continue;
         }
@@ -1306,6 +1433,10 @@ fn thread_request(task: &Task, helper: Option<&str>, has_grant: bool) -> Value {
     {
         let mut resume = params.as_object().cloned().unwrap_or_default();
         resume.insert("threadId".into(), Value::String(id.into()));
+        // The desktop transcript is Monitter's durable UI projection. Avoid
+        // receiving an unbounded native history during resume; new events are
+        // still correlated to this owned connection and turn.
+        resume.insert("excludeTurns".into(), Value::Bool(true));
         json!({"id":THREAD_ID,"method":"thread/resume","params":Value::Object(resume)})
     } else {
         json!({"id":THREAD_ID,"method":"thread/start","params":params})
@@ -1372,5 +1503,103 @@ mod tests {
             value.pointer("/params/capabilities/requestAttestation"),
             Some(&Value::Bool(false))
         );
+    }
+
+    #[test]
+    fn stage_clock_uses_the_bound_for_its_request_stage() {
+        let now = Instant::now();
+        let initialize = StageClock {
+            stage: RequestStage::Initialize,
+            started_at: now,
+        };
+        let thread = StageClock {
+            stage: RequestStage::Thread,
+            started_at: now,
+        };
+        assert_eq!(initialize.deadline(), now + INITIALIZE_TIMEOUT);
+        assert_eq!(thread.deadline(), now + THREAD_TIMEOUT);
+        assert_eq!(RequestStage::InitialTurn.timeout(), TURN_START_TIMEOUT);
+        assert_eq!(RequestStage::SubsequentTurn.timeout(), TURN_START_TIMEOUT);
+    }
+
+    #[test]
+    fn stage_clock_expires_only_at_its_own_deadline() {
+        let now = Instant::now();
+        let clock = StageClock {
+            stage: RequestStage::InitialTurn,
+            started_at: now,
+        };
+        assert!(!clock.expired_at(now + TURN_START_TIMEOUT - Duration::from_millis(1)));
+        assert!(clock.expired_at(now + TURN_START_TIMEOUT));
+    }
+
+    #[test]
+    fn notifications_do_not_extend_a_stage_clock() {
+        let now = Instant::now();
+        let clock = StageClock {
+            stage: RequestStage::Thread,
+            started_at: now,
+        };
+        let deadline_before_notification = clock.deadline();
+        // Receiving a notification intentionally does not construct a new
+        // clock; only a correlated response advances the request stage.
+        let deadline_after_notification = clock.deadline();
+        assert_eq!(deadline_after_notification, deadline_before_notification);
+        assert!(clock.expired_at(deadline_before_notification));
+    }
+
+    #[test]
+    fn expired_stage_stays_expired_when_notifications_arrive() {
+        let now = Instant::now();
+        let clock = StageClock {
+            stage: RequestStage::Thread,
+            started_at: now,
+        };
+        let notification_arrived_at = clock.deadline() + Duration::from_millis(1);
+        assert!(clock.expired_at(notification_arrived_at));
+        assert_eq!(
+            clock.stage.timeout_error(),
+            "Codex app-server thread start/resume request timed out."
+        );
+    }
+
+    #[test]
+    fn resume_request_excludes_stored_turns() {
+        let task: Task = serde_json::from_value(json!({
+            "id":"task", "agentId":"agent", "title":"task",
+            "nativeSessionId":"thread", "status":"idle", "archived":false,
+            "createdAt":0, "updatedAt":0, "parentTaskId":null, "channelId":null,
+            "hostId":"host", "cwd":"/tmp", "provider":"codex", "model":"",
+            "modelSettings":null, "sandbox":"read-only", "projectId":null
+        }))
+        .unwrap();
+        let request = thread_request(&task, None, false);
+        assert_eq!(request["method"], "thread/resume");
+        assert_eq!(request["params"]["excludeTurns"], Value::Bool(true));
+    }
+
+    #[test]
+    fn observes_consecutive_immediate_resident_turn_responses() {
+        let control = RunControl::new(false);
+        let mut stage_clock = None;
+
+        control.mark_app_server_turn_request(10).unwrap();
+        // This models a response waking the reader before its next loop-top
+        // observation of the just-sent resident turn.
+        observe_subsequent_turn_clock(true, &control, &mut stage_clock);
+        assert_eq!(
+            stage_clock.map(|clock| clock.stage),
+            Some(RequestStage::SubsequentTurn)
+        );
+        assert!(control.take_app_server_turn_request(10));
+        stage_clock = None;
+
+        control.mark_app_server_turn_request(11).unwrap();
+        observe_subsequent_turn_clock(true, &control, &mut stage_clock);
+        assert_eq!(
+            stage_clock.map(|clock| clock.stage),
+            Some(RequestStage::SubsequentTurn)
+        );
+        assert!(control.take_app_server_turn_request(11));
     }
 }

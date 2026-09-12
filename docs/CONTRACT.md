@@ -152,6 +152,9 @@ Local Codex chats use one owned `codex app-server` process per task over private
 JSON-RPC. Initialize once, create/resume the saved native thread, and start each user turn on that
 connection. No HTTP/WebSocket listener is exposed. SSH Codex retains `exec --json` and
 `exec resume --json <id>` and does not advertise interactive approvals.
+Codex app-server bounds initialize to 20 seconds, thread start/resume to 150 seconds, and each
+turn start to 20 seconds with independent clocks; notifications never extend a pending request.
+Resume requests exclude stored native turns because Monitter preserves the local transcript.
 Resume is explicit by native session ID. Users may attach an existing idle native session by ID; old
 transcript import and live takeover of another Desktop/TUI process are not implied.
 Local Codex replies use item text deltas and authoritative completed items. The same durable

@@ -138,7 +138,7 @@ fn live_codex_app_server_two_turns_preserve_context() {
         agent.cwd = directory.to_string_lossy().into_owned();
         agent.model = "gpt-5.6-luna".into();
         agent.sandbox = "read-only".into();
-        agent.collaboration_enabled = false;
+        agent.collaboration_enabled = true;
         agent.instructions = "You are testing Monitter's Codex adapter. Reply briefly; do not use any tools or make any changes.".into();
         Ok(())
     }).unwrap();
@@ -157,7 +157,7 @@ fn live_codex_app_server_two_turns_preserve_context() {
         .unwrap();
     let token = format!("monitter-{}", id());
     let wait = || {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_secs(210);
         loop {
             let snapshot = service.snapshot().unwrap();
             let task = snapshot.tasks.iter().find(|t| t.id == task.id).unwrap();
@@ -261,6 +261,23 @@ fn live_codex_app_server_two_turns_preserve_context() {
         .collect::<Vec<_>>();
     assert_eq!(replies.len(), 3);
     assert_eq!(replies.last().unwrap().text.trim(), token);
+    let user_prompts = resumed
+        .messages
+        .iter()
+        .filter(|m| m.task_id == task.id && m.role == "user")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        user_prompts.len(),
+        3,
+        "restart must not replay a prior user prompt"
+    );
+    assert_eq!(
+        user_prompts
+            .iter()
+            .filter(|m| m.text.contains("Remember this token"))
+            .count(),
+        1
+    );
     eprintln!(
         "Live Codex resident-turn and Stop/resume smoke passed; isolated test state: {}",
         directory.display()

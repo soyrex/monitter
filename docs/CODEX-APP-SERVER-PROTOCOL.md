@@ -8,10 +8,18 @@ supported CLI version changes; do not hand-copy the complete generated bundle.
 ## Supported lifecycle
 
 The adapter sends `initialize`, `initialized`, `thread/start` or
-`thread/resume`, then `turn/start`. A turn is complete only after
+`thread/resume`, then `turn/start`. Resume includes `excludeTurns: true` so
+Monitter retains its own durable transcript without loading an unbounded native
+history. A turn is complete only after
 `turn/completed`; `turn/interrupt` accepts `{threadId, turnId}` and yields an
 interrupted completion. Agent text arrives through
 `item/agentMessage/delta`; completed items arrive through `item/completed`.
+
+Each request stage has an independent, non-extendable deadline: `initialize`
+has 20 seconds, `thread/start` or `thread/resume` has 150 seconds (to allow a
+configured MCP server's bounded startup), and every `turn/start` has 20
+seconds. Notifications and unrelated server requests never refresh these
+clocks; only the exact correlated response advances the lifecycle.
 
 The local fixture at `scripts/fixtures/codex-app-server/mock.mjs` exercises this
 lifecycle and correlated command, permission and question responses. Run it with:

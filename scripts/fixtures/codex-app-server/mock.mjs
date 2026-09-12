@@ -62,7 +62,15 @@ rl.on('line', (line) => {
   if (request.method === 'initialize') return response(request.id, { userAgent: 'monitter-protocol-fixture', codexHome: process.cwd(), platformFamily: 'unix', platformOs: 'macos' });
   if (request.method === 'initialized') return;
   if (request.method === 'thread/start') return response(request.id, { thread: thread(), model: 'fixture-model', modelProvider: 'openai', serviceTier: null, cwd: process.cwd(), instructionSources: [], approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, reasoningEffort: null });
-  if (request.method === 'thread/resume') return response(request.id, { thread: thread(request.params?.threadId || threadId), model: 'fixture-model', modelProvider: 'openai', serviceTier: null, cwd: process.cwd(), instructionSources: [], approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, reasoningEffort: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null });
+  if (request.method === 'thread/resume') {
+    const config = request.params?.config || {};
+    if (request.params?.excludeTurns !== true || config['mcp_servers.monitter.required'] !== true || config['mcp_servers.monitter.command'] !== 'python3') {
+      return rpcError(request.id, -32602, 'fixture requires excludeTurns and the required Monitter helper');
+    }
+    const result = () => response(request.id, { thread: thread(request.params?.threadId || threadId), model: 'fixture-model', modelProvider: 'openai', serviceTier: null, cwd: process.cwd(), instructionSources: [], approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, reasoningEffort: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null });
+    const delay = Number(process.env.MONITTER_FIXTURE_DELAY_THREAD_RESUME_MS || 0);
+    return delay > 0 ? setTimeout(result, delay) : result();
+  }
   if (request.method === 'turn/start') return beginTurn(request.id, request.params);
   if (request.method === 'turn/interrupt') {
     if (!activeTurn) return rpcError(request.id, -32602, 'No active fixture turn');
