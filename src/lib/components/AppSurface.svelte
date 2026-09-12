@@ -43,6 +43,7 @@
     HardDrive,
     LoaderCircle,
     MessageSquare,
+    MessageSquarePlus,
     MoreHorizontal,
     MoveDiagonal,
     Minimize2,
@@ -3159,12 +3160,7 @@
       </div>{/if}
       {#if sidebarView === 'standard'}
       <div class="section-label">
-        <span>AGENTS</span><button
-          aria-label="New chat"
-          title="New chat"
-          disabled={busy || !snapshot?.agents.length}
-          onclick={() => openTaskComposer()}><Plus size={15} /></button
-        >
+        <span>AGENTS</span>
       </div>
       {#if snapshot?.agents.length}{#each sidebarSorted(snapshot.agents,'agents') as agent}{@const agentTasks =
             sidebarSorted(activeTasks.filter(
@@ -3186,12 +3182,11 @@
                     ? ` · ${agent.model}`
                     : ""}</small
                 ></button
-              >{#if !openTasks.some(task=>task.agentId===agent.id && !task.channelId)}<button class="quiet" aria-label={`New chat with ${agent.name}`} title="New chat" onclick={() => routeDraft(agent.id)}><Plus size={15}/></button>{/if}<button
-                class="quiet"
-                aria-label={`Edit ${agent.name}`}
-                onclick={() => {
-                  routeAgentSettings({ ...agent });
-                }}><MoreHorizontal size={15} /></button
+              ><button
+                class="quiet agent-new-chat"
+                aria-label={`New chat with ${agent.name}`}
+                title="New chat"
+                onclick={() => routeDraft(agent.id)}><MessageSquarePlus size={15} /></button
               >
             </div>
             <div class="task-tree" id={`agent-chats-${agent.id}`} hidden={collapsedAgents[agent.id]}>
@@ -3897,6 +3892,8 @@
     border-radius: 5px;
     color: var(--muted);
   }
+  .agent-new-chat { flex: none; }
+  .mobile-navigation .agent-new-chat { width: 44px; height: 44px; }
   .agent-group { --thread-axis: 16.5px; }
   .agent-group > .agent-row { position: relative; }
   .agent-group.has-chats > .agent-row::after {
