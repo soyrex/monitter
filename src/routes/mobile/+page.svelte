@@ -4,6 +4,7 @@
   import type { Snapshot } from '$lib/types';
   import { createMobileSession } from '$lib/controller/remote-client';
   import { redeemPairingCode } from '$lib/controller/pairing-code';
+  import MessageMeta from '$lib/components/MessageMeta.svelte';
   let deviceKey=$state(''), verificationCode=$state(''), connecting=$state(false);
   let connectionGeneration=0;
   let status=$state('disconnected'), error=$state('');
@@ -51,7 +52,7 @@
   });
 </script>
 <svelte:head><title>Monitter Remote</title><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" /></svelte:head>
-<div class="mobile">
+<div class="mobile" style:--interface-font-ratio={(snapshot?.settings.interfaceFontSize ?? 14) / 14}>
 <header>{#if selected}<button aria-label="Back to chats" onclick={()=>selectChat(null)}><ArrowLeft size={22}/></button>{/if}<div><strong>{task?.title??'monitter'}</strong><small><span class:online={status==='connected'}></span>{status.replaceAll('_',' ')}</small></div>{#if session}<button aria-label="Refresh" onclick={refresh}><RefreshCw size={20}/></button><button aria-label="Disconnect" onclick={disconnect}><Unplug size={20}/></button>{/if}</header>
 {#if error}<div class="error" role="alert">{error}</div>{/if}
 {#if !snapshot}
@@ -72,7 +73,7 @@
 {:else if !selected}
 <main class="chats"><h1>Your workspace</h1><p class="muted">{snapshot.tasks.filter(t=>t.status==='running').length} running · {snapshot.agents.length} agents</p>{#each snapshot.agents as agent}<section><h2>{agent.name}<small>{agent.provider}</small></h2>{#each snapshot.tasks.filter(t=>t.agentId===agent.id&&!t.archived&&!t.channelId).sort((a,b)=>b.updatedAt-a.updatedAt) as chat}<button class="chat" onclick={()=>selectChat(chat.id)}><span class="dot" class:running={chat.status==='running'}></span><div><b>{chat.title||'Untitled chat'}</b><small>{chat.status}</small></div><span>›</span></button>{:else}<p class="muted">No open chats</p>{/each}</section>{/each}</main>
 {:else}
-<main class="thread" bind:this={thread} onscroll={()=>{if(thread)atBottom=thread.scrollHeight-thread.scrollTop-thread.clientHeight<60;}}>{#each messages as message}<article class:user={message.role==='user'}><small>{message.role==='user'?'You':snapshot.agents.find(a=>a.id===task?.agentId)?.name??message.role}</small><div>{message.text}</div></article>{/each}{#if task?.status==='running'}<p class="working">Agent is working…</p>{/if}</main>
+<main class="thread" bind:this={thread} onscroll={()=>{if(thread)atBottom=thread.scrollHeight-thread.scrollTop-thread.clientHeight<60;}}>{#each messages as message}<article class:user={message.role==='user'}><MessageMeta name={message.role==='user'?'You':snapshot.agents.find(a=>a.id===task?.agentId)?.name??message.role} createdAt={message.createdAt}/><div>{message.text}</div></article>{/each}{#if task?.status==='running'}<p class="working">Agent is working…</p>{/if}</main>
 <form onsubmit={event=>{event.preventDefault();void send();}}><textarea aria-label="Message" placeholder="Message your agent…" bind:value={text} rows="2"></textarea>{#if task?.status==='running'}<button type="button" aria-label="Stop agent" onclick={stop}><Square size={20}/></button>{/if}<button class="send" aria-label="Send message" disabled={busy||!text.trim()||status!=='connected'}><ArrowUp size={24}/></button></form>
 {/if}
 </div>

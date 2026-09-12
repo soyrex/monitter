@@ -5,6 +5,7 @@
   import { collectWorkspaceSidebarTabs, settingsTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import "../../app.css";
   import AnimatedTitle from "./AnimatedTitle.svelte";
+  import MessageMeta from "./MessageMeta.svelte";
   import { autonaming } from "$lib/autoname-state";
   import { getContext, setContext, onMount, tick, untrack } from "svelte";
   import { sidebarReorder } from "$lib/sidebar-reorder";
@@ -3034,20 +3035,15 @@
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                 class="message"
               >
-                <div class="message-meta">
-                  {@render messageAvatar(snapshot.agents.find(agent=>agent.id===message.agentId))}
-                  <span
-                    >{message.role === "user"
-                      ? "You"
-                      : (snapshot.agents.find((a) => a.id === message.agentId)
-                          ?.name ?? "Agent")}</span
-                  ><time>{date(message.createdAt)}</time>{#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
-                </div>
+                <MessageMeta name={message.role === "user" ? "You" : (snapshot.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
+                  {#snippet avatar()}{@render messageAvatar(snapshot.agents.find(agent=>agent.id===message.agentId))}{/snippet}
+                  {#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
+                </MessageMeta>
                 <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
               </article>{/each}
               {#each optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel.id) as message (message.id)}
                 <article class="message user optimistic-message" data-delivery-status={message.status}>
-                  <div class="message-meta"><span>You</span><time>{date(message.createdAt)}</time>{@render deliveryStatus(message)}</div>
+                  <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
                   <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
                 </article>
               {/each}{:else}<div class="blank-conversation">
@@ -3108,7 +3104,7 @@
           {#if taskFormAgent && !taskProjectId}<label class="task-workspace-editor"><span><Folder size={13}/>Working folder</span><div><input aria-label="Working folder" bind:value={taskCwd} placeholder={inheritedTaskCwd || '/path/to/project'} disabled={busy || !!currentTaskDraft.createdTaskId}/>{#if snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.kind === 'local'}<button class="icon" aria-label="Browse working folder" title="Choose folder" disabled={busy || !!currentTaskDraft.createdTaskId} onclick={browseTaskFolder}><Folder size={15}/></button>{/if}</div></label>{:else if taskFormAgent}<p class="task-workspace-preview"><Folder size={13}/><span><b>{snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.name ?? 'Host'}</b><code>{taskFormCwd}</code></span></p>{/if}
           {#each optimisticMessages.filter(message => message.kind === 'draft' && message.targetId === currentDraftId) as message (message.id)}
             <article class="message user optimistic-message" data-delivery-status={message.status}>
-              <div class="message-meta"><span>You</span><time>{date(message.createdAt)}</time>{@render deliveryStatus(message)}</div>
+              <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
               <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
             </article>
           {/each}
@@ -3171,12 +3167,10 @@
                   class="message"
                   data-delivery-status={optimistic?.status}
                 >
-                  <div class="message-meta">
-                    {#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}
-                    <span
-                      >{senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")}</span
-                    ><time>{date(message.createdAt)}</time>{#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
-                  </div>
+                  <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
+                    {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}
+                    {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
+                  </MessageMeta>
                   <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
                   {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
                 </article>{/if}{/each}{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
@@ -4615,19 +4609,6 @@
     padding-left: 12px;
     border-left: 2px solid var(--line);
     color: var(--muted);
-  }
-  .message-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 7px;
-    font-size: calc(11.5px * var(--interface-font-ratio, 1));
-    font-weight: 600;
-  }
-  .message-meta time {
-    color: var(--muted);
-    font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
-    font-weight: 400;
   }
   .optimistic-message { border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
   .delivery-status { margin-left:auto; color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
