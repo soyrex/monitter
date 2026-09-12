@@ -35,7 +35,11 @@
       getSnapshot: async () => sharedSnapshot(await bridge.getSnapshot(), share()),
       sendMessage: async (taskId: string, text: string) => {
         await allowed(taskId);
-        return sharedSnapshot(await bridge.sendMessage(taskId, formatOperatorMessage([share().primary, share().visitor], share().visitor, text)), share());
+        const result = await bridge.sendMessage(taskId, formatOperatorMessage([share().primary, share().visitor], share().visitor, text));
+        // Remote-controller protocol requires a snapshot. A desktop fast ack
+        // deliberately does not contain one, so refresh only at this boundary.
+        const next = 'tasks' in result ? result : await bridge.getSnapshot();
+        return sharedSnapshot(next, share());
       },
       cancelTask: async () => { throw new Error('Collaborators cannot stop a shared agent.'); },
       resumeTask: async () => { throw new Error('Collaborators cannot resume a shared agent.'); },

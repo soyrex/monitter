@@ -6,7 +6,9 @@ export function sidebarReorder(node: HTMLElement, initial: {group:string; id:str
   attributes();
   const nativeDrag=(event:DragEvent)=>{if(config.group)event.preventDefault();};
   const down=(event:PointerEvent)=>{
-    if(!config.group || event.button!==0 || !(event.target instanceof Element) || event.target.closest('.quiet,.chat-actions,.folder-toggle'))return;
+    // Reordering is mouse-only. On touch, a little movement while tapping or
+    // scrolling could cross the drag threshold and suppress the native click.
+    if(event.pointerType!=='mouse' || !config.group || event.button!==0 || !(event.target instanceof Element) || event.target.closest('.quiet,.chat-actions,.folder-toggle'))return;
     cleanup();
     const x=event.clientX,y=event.clientY,pointer=event.pointerId,previousCursor=document.body.style.cursor;
     let dragging=false,target:HTMLElement|null=null,after=false;

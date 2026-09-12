@@ -8,6 +8,16 @@ No fake conversations, progress, token counts, host connections or model replies
 ## Commands (Tauri invoke names and JSON argument keys)
 
 - `get_snapshot {}` -> Snapshot
+- `get_ui_snapshot { revision?: string }` -> `{ revision: string, snapshot: Snapshot | null }`
+  Shared desktop/LAN UI projection. An unchanged launch-scoped revision returns null; changed
+  snapshots contain at most 300 recent activity events (60 per task), omit output/log payloads,
+  and bound details to 1,000 bytes (300 for error summaries) rather than full diagnostic history.
+- `get_task_events { taskId: string, before?: number, limit?: number }` ->
+  `{ events: RunEvent[], nextBefore: number | null }`. On-demand diagnostic pages are newest-first;
+  `before` is an exclusive per-task array index, not a timestamp. Pages are bounded and any
+  truncated detail is explicitly labelled. Each page has at most 100 events and 128 KiB of
+  detail. Original diagnostics remain stored locally. The UI refreshes these pages only while
+  the timeline is visible; this traffic is independent of ordinary chat refreshes.
 - `save_host { host: Host }` -> Snapshot (empty id creates)
 - `delete_host { id: string }` -> Snapshot (reject referenced/default local host)
 - `probe_host { host: Host }` -> ProbeResult (unsaved settings allowed; versions keyed provider)
@@ -26,6 +36,10 @@ No fake conversations, progress, token counts, host connections or model replies
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
 - `delete_task { id: string }` -> Snapshot (archived only; reject running; preserve native CLI history)
 - `send_message { taskId: string, text: string, attachmentIds?: string[] }` -> Snapshot (starts asynchronously)
+- `send_message_fast { taskId: string, text: string, attachmentIds?: string[] }` -> `{ accepted: true }`
+  Same durable acceptance and execution semantics, without a full-history acknowledgement payload.
+  Provider startup/control delivery follows acceptance; failures appear through task state and
+  diagnostics. Native snapshot, diagnostic-page and fast-send commands run off the UI thread.
 - `cancel_task { taskId: string }` -> Snapshot
 - `list_terminals {}` -> `TerminalSession[]`
 - `finish_quit {}` completes a native quit only after `monitter-before-quit` lets the frontend save workspace state
@@ -40,6 +54,8 @@ No fake conversations, progress, token counts, host connections or model replies
 - `send_channel_message { channelId: string, text: string, agentIds: string[], attachmentIds?: string[] }` -> Snapshot
   Explicit selected/mentioned recipients only. Each recipient has a dedicated task under channelId;
   initial/follow-up prompt includes recent channel context. Final replies mirror into channel messages.
+- `send_channel_message_fast { channelId: string, text: string, agentIds: string[], attachmentIds?: string[] }`
+  -> `{ accepted: true }`, using the same durable channel delivery path.
 - `resume_task { taskId: string }` -> Snapshot (continue the existing native session asynchronously in this chat)
 
 Event `monitter:changed` payload `{ taskId?: string }` tells UI to reload snapshot (debounce <=150ms).
@@ -47,6 +63,17 @@ The backend is authoritative; listen before initial snapshot. Errors reject with
 Frontend may show a labelled browser design preview when Tauri isn't available, but never simulate an agent reply.
 
 ## Busy messages
+
+Chat sends render a frontend-local outgoing message immediately and clear the captured composer
+text/attachments while the command is in flight. Sending, Sent and Not confirmed distinguish
+transport progress from agent execution; Sent means Monitter accepted the message, not that the
+agent read or completed it. New typing is never cleared by a delayed acknowledgement.
+Snapshot reconciliation replaces the local echo with the persisted message or queue entry without
+duplicating it. A transport failure retains the outgoing content and offers explicit retry; retry
+first refreshes the snapshot and will not resend while acceptance cannot be checked. These delivery
+indicators are window-local UI state, not new provider messages or simulated assistant output.
+The per-pane outbox is retained in sessionStorage where available; reloading changes an in-flight
+item to Not confirmed and never automatically replays it.
 
 `Settings.busyMessageMode` defaults to `queue`. `Snapshot.queuedMessages` persists FIFO records per
 task, including the original text, attachment IDs, optional channel, status and error. A busy direct
@@ -136,16 +163,26 @@ a bounded read-only `export <session>` lookup verifies the native ID and restore
 session folder into the task snapshot, before collaboration setup. This prevents inherited PWD
 or a mismatched attachment folder from silently losing the CLI event stream. Export contents
 are not imported into the chat or logged. Hermes runs the installed TUI gateway with a Python
-bridge: session.create/resume, prompt.submit, durable stored_session_id, normalized JSONL events,
+bridge: session.create/resume, length-framed multiline prompt.submit, durable stored_session_id, normalized JSONL events,
 explicit denial of interactive requests, and owned child cleanup. An explicit Hermes `provider/model`
 selection is passed as separate session-scoped provider and model fields; unqualified models retain
 Hermes' configured provider. Never silently substitute a harness.
+Provider stderr is diagnostic-only: routine trace, debug, info and warning output is discarded.
+At most one concise actionable provider error may appear in a chat's activity, while process/event
+failures remain visible through their normal task status.
 Host.claudePath defaults to an empty string for older stored host snapshots. Task.archived defaults
 false; archiving preserves messages/events/native IDs and hides the chat from ordinary navigation.
 Cmd-K explicitly restores archived chats. Channel sends start a new task instead of reusing an
 archived one. Permanent deletion is available only after archiving. The confirmation preserves CLI history by default; an optional switch requests verified native session file cleanup as described below.
 
 Persist configuration and transcript in the Tauri app data directory, private permissions, atomic writes.
+`state.json` stores core chat/configuration state and an `_eventJournal` generation/committed-count
+pointer. Historical events live in a private append-only JSONL journal instead of being serialized
+again on every send. New events are flushed before the atomic core-state commit; uncommitted tails
+are ignored during recovery. Editing/removing historical events creates a new journal generation.
+Legacy embedded events migrate at startup with the original state preserved in a `state.legacy-*.json`
+backup. Missing or corrupt referenced history fails explicitly rather than silently loading empty
+events. Keep state and its journals together when backing up or recovering the workspace.
 Recover formerly running tasks as interrupted after restart. One active turn per task and provider/host/native-session key.
 Store task host/cwd/provider/model/sandbox as a snapshot when created; agent edits affect new tasks.
 An idle, unarchived task may change its saved sandbox through `set_task_sandbox`; its next native
@@ -341,12 +378,31 @@ Switching workspace never sends a prompt, resumes/stops a harness or closes a te
 chat composer text and attachments follow the chat across workspaces. New chat inherits the agent
 or project scope; choosing a different owner routes the draft to a compatible workspace.
 
-The selected workspace remains visible independently of the selected chat. Agent/project sidebar
-badges and the global approval entry surface pending approvals even in hidden workspaces. Opening
-an approval navigates to the shared owning chat. The left sidebar is always global: its Standard,
+The selected workspace remains visible independently of the selected chat. There is no workspace picker:
+selecting an agent or project changes context, while choosing Activity returns to All. The active agent
+avatar or project icon sits at the left of every tab bar; the overview is not a tab. Agent/project sidebar
+badges and the global approval entry surface pending approvals even in hidden workspaces. Opening an
+approval navigates to the shared owning chat. The left sidebar is always global: its Standard,
 Activity, Projects and collapsed-rail chat lists show chats from every workspace. Selecting one routes
 the right-hand area to its owning agent or project workspace before opening the chat. Global search can
 cross workspaces; tab cycling and split/move operations act only inside the current workspace.
+
+Agent/project sidebar subnavigation and collapsed-agent popovers list chats with open tabs first,
+counting tabs in every pane and workspace. Other chats appear below a “Recents:” divider with a
+subtle dimming; hover/focus restores full contrast. Existing ordering is preserved within each
+group. Opening/closing a tab updates grouping without archiving or removing chat history.
+At viewport widths of 760px or less, navigation uses two screens: the full sidebar list,
+then the selected workspace. “Back to chats” returns to the list without closing tabs or
+discarding drafts. This responsive state does not overwrite the saved desktop collapse preference.
+Mobile screen changes slide horizontally; inactive screens are inert, and Reduce Motion disables
+the animation. Screens stay mounted so draft and scroll state survive Back navigation.
+Narrow workspace headers use the current tab title as a toggle for an open-tab picker;
+selecting a tab closes the picker. Desktop keeps its horizontal tab strip.
+Touch screens do not use hover-to-reveal actions: secondary controls remain available,
+avatar hover overlays are disabled, and mouse-style sidebar/tab dragging does not consume
+touch gestures. Mouse hover affordances remain on fine-pointer devices.
+Mobile shells follow VisualViewport height/offset as Safari browser controls and the keyboard
+move, include safe-area padding, and use at least 16px editable text to avoid focus auto-zoom.
 
 UI persistence uses `monitter.workspaces.v2` with an active workspace key and a collection of the
 existing pane snapshots. Migration retains `monitter.workspace.v1` and imports its complete layout
@@ -387,6 +443,13 @@ Persisted chat/channel messages show a file type icon or bounded embedded image 
 and unsent text survive navigation and tab movement within the window. Failed uploads/sends remain
 visible and preserve successfully queued files. Thumbnails are at most 192 pixels and 256 KiB; missing
 image previews fall back to a file icon.
+
+Codex Computer Use MCP result images are distinct from user-uploaded `local_image` records.
+Supported PNG/JPEG/WebP result bytes can be retained inline on the following assistant reply,
+bounded to four pending images and 512 KiB per encoded data URL. Invalid or oversized images
+produce a visible error; finishing a run clears any unassociated pending images. No arbitrary
+host filesystem reader is exposed to LAN clients. Persisted image attachments display at chat
+width, while removable composer attachments remain compact previews.
 
 ## Composer models and pane appearance
 
@@ -531,6 +594,41 @@ automatic deliveries. Enabling does not replay old channel history.
 Queued peer requests use `origin: "channel-agent-mention"` and `senderAgentId`. They
 show their originating agent and recipient in the queue and can be removed, but not
 rewritten as if the agent authored new text. User-authored queued messages remain editable.
+
+## LAN browser access
+
+The desktop app owns an internal HTTP server on port 18436. It prefers live web assets
+in the app data folder's `lan-web` directory, with bundled assets as a fallback.
+On macOS, `npm run build` builds and publishes there without rebuilding Rust or restarting
+Monitter. `npm run publish:lan` publishes an already completed build. Publication installs
+assets before atomically replacing `index.html`, retaining old hashed chunks for open tabs.
+Refresh the browser to load the new interface. This updates LAN browsers only; the desktop
+webview remains bundled. Backend/API changes still require a matching app rebuild.
+Settings → LAN access displays local addresses and a random
+per-process six-digit access code (`get_lan_server_info {}` -> `{urls, token, error, accessCodeRequired}`;
+the `token` string preserves leading zeros). Five incorrect guesses lock API access
+for five minutes across all clients; successful polling does not reset the counter. The server
+starts with the app and stops with it. A bind failure is shown in Settings.
+
+During LAN-only prototyping, `REQUIRE_ACCESS_CODE` is false: the code gate and guess
+limiter are bypassed, while private/loopback peer, literal local Host and same-origin checks
+remain enforced. `GET /api/access` returns `{required:false}` so browsers skip the gate.
+Anyone on the trusted LAN has owner-level access, including terminals. The code and limiter
+implementation remain available to re-enable later; this is intentionally not Internet-facing.
+
+Browser API calls use `POST /api/invoke {command, args}` with a Bearer access code;
+responses are `{ok: true, result}` or `{ok: false, error}`. The browser sign-in gate
+stores the code in sessionStorage. Access links place the code in a fragment, which is
+removed after loading. Static assets are public; workspace data and commands require
+authentication and same-origin requests. The code grants owner-level workspace control,
+including terminals; this is distinct from limited visitor sharing. HTTP is unencrypted
+and intended for a trusted LAN. Restarting the app invalidates browser access codes.
+
+The full interface uses the same compact revision-based UI protocol as the desktop. Browser
+refreshes are coalesced so slow requests cannot overlap; unchanged revisions do not replace
+the UI state. Send acknowledgements do not wait for a subsequent snapshot fetch. Native filesystem
+pickers, arbitrary native file reads, and quitting the host app are not browser actions;
+uploads use browser file bytes. Work executes on the host Mac or its configured SSH hosts.
 
 ## Mobile controller
 

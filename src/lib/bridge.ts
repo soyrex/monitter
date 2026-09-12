@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+import { isLanBrowser, lanInvoke } from './lan';
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Agent,
@@ -26,11 +27,16 @@ import type {
   AttachmentTarget,
   AttachmentFileData,
   Sandbox,
+  RunEvent,
+  UiSnapshotResponse,
+  TaskEventsPage,
+  SendAccepted,
 } from "./types";
 
 export interface MonitterBridge {
   available: boolean;
   getSnapshot(): Promise<Snapshot>;
+  getTaskEvents(taskId: string, before?: number, limit?: number): Promise<TaskEventsPage>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
   probeHost(host: Host): Promise<ProbeResult>;
@@ -45,7 +51,7 @@ export interface MonitterBridge {
   saveProject(project: Project): Promise<Snapshot>;
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
-  sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot>;
+  sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | SendAccepted>;
   cancelQueuedMessage(id: string): Promise<Snapshot>;
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
@@ -60,7 +66,7 @@ export interface MonitterBridge {
     text: string,
     agentIds: string[],
     attachmentIds?: string[],
-  ): Promise<Snapshot>;
+  ): Promise<Snapshot | SendAccepted>;
   resumeTask(taskId: string): Promise<Snapshot>;
   listTerminals(): Promise<TerminalSession[]>;
   openTerminal(target: TerminalTarget, cols: number, rows: number): Promise<TerminalSession>;
@@ -96,11 +102,103 @@ declare global {
   }
 }
 
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return isLanBrowser() ? lanInvoke<T>(command, args) : nativeInvoke<T>(command, args);
+}
+
+function isUnknownCommand(error: unknown) {
+  const value = String(error).toLowerCase();
+  return value.includes('unknown command') || value.includes('unknown invoke command') ||
+    value.includes('command not found') || value.includes('command `get_ui_snapshot`') ||
+    value.includes('command get_ui_snapshot') || value.includes('command `send_message_fast`') ||
+    value.includes('command send_message_fast') || value.includes('command `send_channel_message_fast`') ||
+    value.includes('command send_channel_message_fast') ||
+    value.includes("lan command 'get_ui_snapshot' is not available");
+}
+
+// The installed desktop app can lag the web bundle. Only an explicit missing
+// command is safe to retry with the legacy protocol: mutations must never be
+// replayed after an arbitrary transport or server failure.
+let uiProtocol: 'unknown' | 'revisioned' | 'legacy' = 'unknown';
+let cachedSnapshot: Snapshot | null = null;
+let cachedRevision: string | undefined;
+let snapshotRequest: Promise<Snapshot> | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+const changedSubscribers = new Set<() => void>();
+
+function rememberSnapshot(snapshot: Snapshot, revision?: string) {
+  cachedSnapshot = snapshot;
+  if (revision !== undefined) cachedRevision = revision;
+  return snapshot;
+}
+
+async function getRevisionedSnapshot(): Promise<Snapshot> {
+  const result = await invoke<UiSnapshotResponse>('get_ui_snapshot', cachedRevision ? { revision: cachedRevision } : {});
+  uiProtocol = 'revisioned';
+  return result.snapshot ? rememberSnapshot(result.snapshot, result.revision) : (cachedSnapshot ?? (() => { throw new Error('Monitter reported an unchanged snapshot before a snapshot was loaded.'); })());
+}
+
+function getCachedSnapshot(): Promise<Snapshot> {
+  if (snapshotRequest) return snapshotRequest;
+  snapshotRequest = (async () => {
+    if (uiProtocol === 'legacy') return rememberSnapshot(await invoke<Snapshot>('get_snapshot'));
+    try { return await getRevisionedSnapshot(); }
+    catch (reason) {
+      if (!isUnknownCommand(reason)) throw reason;
+      uiProtocol = 'legacy';
+      return rememberSnapshot(await invoke<Snapshot>('get_snapshot'));
+    }
+  })().finally(() => { snapshotRequest = null; });
+  return snapshotRequest;
+}
+
+function scheduleSnapshotRefresh() {
+  // Coalesce bursts without continually pushing the refresh out forever.
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = undefined;
+    // The subscribed UI owns the one coalesced read. Fetching here and then
+    // asking it to reload would double every LAN/native change notification.
+    changedSubscribers.forEach(handler => handler());
+  }, 100);
+}
+
+async function chooseSendProtocol(): Promise<'fast' | 'legacy'> {
+  // Probe once, before any mutation. Established revisioned sessions already
+  // have the capability and cache, so a send never waits for a snapshot read.
+  if (uiProtocol === 'legacy') return 'legacy';
+  if (uiProtocol === 'revisioned' && cachedSnapshot) return 'fast';
+  await getCachedSnapshot();
+  return uiProtocol === 'revisioned' && cachedSnapshot ? 'fast' : 'legacy';
+}
+
+async function fastSend(command: 'send_message_fast' | 'send_channel_message_fast', args: Record<string, unknown>): Promise<SendAccepted> {
+  const receipt = await invoke<SendAccepted>(command, args);
+  scheduleSnapshotRefresh();
+  return receipt;
+}
+
+async function sendMessageWithProtocol(taskId: string, text: string, attachmentIds: string[]): Promise<Snapshot | SendAccepted> {
+  const protocol = await chooseSendProtocol();
+  if (protocol === 'legacy') return rememberSnapshot(await invoke<Snapshot>('send_message', { taskId, text, attachmentIds }));
+  // No catch here: after invoking a mutation, even a command-looking error is
+  // ambiguous and must never cause a duplicate legacy send.
+  return fastSend('send_message_fast', { taskId, text, attachmentIds });
+}
+
+async function sendChannelMessageWithProtocol(channelId: string, text: string, agentIds: string[], attachmentIds: string[]): Promise<Snapshot | SendAccepted> {
+  const protocol = await chooseSendProtocol();
+  if (protocol === 'legacy') return rememberSnapshot(await invoke<Snapshot>('send_channel_message', { channelId, text, agentIds, attachmentIds }));
+  // See direct-send equivalent: mutation errors are surfaced as-is.
+  return fastSend('send_channel_message_fast', { channelId, text, agentIds, attachmentIds });
+}
+
 const nativeBridge: MonitterBridge = {
   available:
     typeof window !== "undefined" &&
-    Boolean((window as any).__TAURI_INTERNALS__),
-  getSnapshot: () => invoke<Snapshot>("get_snapshot"),
+    (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
+  getSnapshot: () => getCachedSnapshot(),
+  getTaskEvents: (taskId, before, limit) => invoke<TaskEventsPage>('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
   deleteHost: (id) => invoke<Snapshot>("delete_host", { id }),
   probeHost: (host) => invoke<ProbeResult>("probe_host", { host }),
@@ -115,8 +213,7 @@ const nativeBridge: MonitterBridge = {
   saveProject: project => invoke<Snapshot>("save_project", {project}),
   deleteProject: id => invoke<Snapshot>("delete_project", {id}),
   setTaskProject: (taskId, projectId) => invoke<Snapshot>("set_task_project", {taskId, projectId}),
-  sendMessage: (taskId, text, attachmentIds = []) =>
-    invoke<Snapshot>("send_message", { taskId, text, attachmentIds }),
+  sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
   cancelQueuedMessage: (id) => invoke<Snapshot>("cancel_queued_message", { id }),
   editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
   cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
@@ -127,8 +224,7 @@ const nativeBridge: MonitterBridge = {
   stopChannelAgentConversation: (channelId) => invoke<Snapshot>("stop_channel_agent_conversation", {channelId}),
   setChannelMembership: (channelId, agentId, member) =>
     invoke<Snapshot>("set_channel_membership", { channelId, agentId, member }),
-  sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) =>
-    invoke<Snapshot>("send_channel_message", { channelId, text, agentIds, attachmentIds }),
+  sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) => sendChannelMessageWithProtocol(channelId, text, agentIds, attachmentIds),
   resumeTask: (taskId) => invoke<Snapshot>("resume_task", { taskId }),
   listTerminals: () => invoke<TerminalSession[]>('list_terminals'),
   openTerminal: (target, cols, rows) => invoke<TerminalSession>('open_terminal', {target,cols,rows}),
@@ -147,7 +243,16 @@ const nativeBridge: MonitterBridge = {
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
   storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, previewDataUrl, sourceId}),
   readAttachmentFile: sourcePath => invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
-  onChanged: async (handler) => listen("monitter:changed", handler),
+  onChanged: async (handler) => {
+    changedSubscribers.add(handler);
+    const changed = () => scheduleSnapshotRefresh();
+    if (!isLanBrowser()) {
+      const unlisten = await listen("monitter:changed", changed);
+      return () => { changedSubscribers.delete(handler); unlisten(); };
+    }
+    const timer = setInterval(changed, 1500);
+    return () => { changedSubscribers.delete(handler); clearInterval(timer); };
+  },
 };
 
 const emptyPreviewSnapshot = (): Snapshot => ({
@@ -174,6 +279,7 @@ async function desktopOnly<T>(): Promise<T> {
 const previewBridge: MonitterBridge = {
   available: false,
   getSnapshot: async () => emptyPreviewSnapshot(),
+  getTaskEvents: async () => ({ events: [], nextBefore: null }),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
   probeHost: () => desktopOnly(),
@@ -228,6 +334,7 @@ export function getBridge(): MonitterBridge {
     return {
       available: true,
       getSnapshot: () => test.invoke("get_snapshot") as Promise<Snapshot>,
+      getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,
       deleteHost: (id) =>

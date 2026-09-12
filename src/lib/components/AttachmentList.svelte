@@ -9,8 +9,9 @@
 </script>
 {#if unique.length}<div class="attachments" aria-label="Attached files">
   {#each unique as attachment (attachment.id)}{@const Icon=icon(attachment)}
-    <div class="attachment" title={`${attachment.name}\n${attachment.path}`}>
-      {#if preview(attachment)}<img src={preview(attachment)!} alt={`Preview of ${attachment.name}`}/>{:else}<span class="file-icon"><Icon size={23}/></span>{/if}
+    {@const image=preview(attachment)}
+    <div class:message-image={!onremove && !!image} class="attachment" title={`${attachment.name}\n${attachment.path}`}>
+      {#if image}<img src={image} alt={`Preview of ${attachment.name}`}/>{:else}<span class="file-icon"><Icon size={23}/></span>{/if}
       <span class="file-info"><b>{attachment.name}</b><small>{size(attachment.size)}</small></span>
       {#if onremove}<button class="remove" aria-label={`Remove attachment ${attachment.name}`} onclick={()=>onremove?.(attachment.id)}><X size={13}/></button>{/if}
     </div>
@@ -19,4 +20,5 @@
 <style>
   .attachments{display:flex;gap:8px;flex-wrap:wrap;min-width:0;margin:8px 0}.attachment{position:relative;display:flex;align-items:center;gap:8px;max-width:100%;min-width:0;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
   .attachment img{width:56px;height:46px;object-fit:contain;border-radius:4px;background:var(--soft)}.file-icon{display:grid;place-items:center;width:34px;height:42px;color:var(--muted)}.file-info{display:grid;gap:3px;min-width:0}.file-info b{font-size:calc(11px * var(--interface-font-ratio, 1));max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}.file-info small{color:var(--muted);font:calc(9px * var(--interface-font-ratio, 1)) var(--mono)}.remove{display:grid;place-items:center;width:22px;height:24px;padding:0;border-radius:5px;color:var(--muted)}.remove:hover{background:var(--soft);color:var(--ink)}
+  .attachment.message-image{display:grid;grid-template-columns:minmax(0,1fr);width:min(720px,100%);padding:8px}.attachment.message-image img{width:100%;height:auto;max-height:min(70vh,720px);object-fit:contain;border-radius:5px}.attachment.message-image .file-info{grid-template-columns:minmax(0,1fr) auto;align-items:baseline}.attachment.message-image .file-info small{grid-column:2}.attachment.message-image .file-info b{max-width:none}
 </style>

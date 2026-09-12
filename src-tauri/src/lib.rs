@@ -6,6 +6,8 @@ mod collaboration_transport;
 mod deletion;
 mod git;
 mod goals;
+mod lan;
+mod lan_sync;
 mod menu;
 pub mod model;
 mod models;
@@ -53,6 +55,9 @@ struct ServiceData {
     // while cancellation reaches it. This is deliberately runtime-only: after a
     // restart no owned process survives, so there is no stale delivery to block.
     blocked_channel_deliveries: HashSet<String>,
+    // Runtime-only revision counter. It advances only after a durable store
+    // write succeeds while this same data lock is held.
+    revision: u64,
 }
 
 #[derive(Default)]
@@ -104,6 +109,9 @@ pub(crate) struct Service {
     store: store::Store,
     data: Mutex<ServiceData>,
     runs: Mutex<RunRegistry>,
+    // A real CUA image result is held only until the same run emits its next
+    // assistant message. It is never a path reader or a persisted capability.
+    pending_codex_images: Mutex<HashMap<String, Vec<attachments::Attachment>>>,
     collaboration: Mutex<Option<collaboration_transport::Broker>>,
     collaboration_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     collaboration_started: std::sync::atomic::AtomicBool,
@@ -112,6 +120,9 @@ pub(crate) struct Service {
     runtime_dir: PathBuf,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
     terminals: Mutex<HashMap<String, Arc<terminal::Session>>>,
+    lan: Mutex<Option<lan::Server>>,
+    lan_error: Mutex<Option<String>>,
+    revision_epoch: String,
     // These channels deliberately are not persisted. A restart interrupts
     // native runs, and a persisted request remains visible for audit/review
     // without claiming a tool can be resumed after that interruption.
@@ -166,8 +177,10 @@ impl Service {
                 task_hosts,
                 attachments,
                 blocked_channel_deliveries: HashSet::new(),
+                revision: 0,
             }),
             runs: Mutex::new(RunRegistry::default()),
+            pending_codex_images: Mutex::new(HashMap::new()),
             collaboration: Mutex::new(None),
             collaboration_grants: Mutex::new(HashMap::new()),
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
@@ -176,6 +189,9 @@ impl Service {
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
+            lan: Mutex::new(None),
+            lan_error: Mutex::new(None),
+            revision_epoch: uuid::Uuid::new_v4().to_string(),
             approval_waiters: Mutex::new(HashMap::new()),
         });
         Ok(service)
@@ -186,6 +202,462 @@ impl Service {
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())
             .map(|data| data.snapshot.clone())
+    }
+
+    fn ui_snapshot(&self, revision: Option<&str>) -> Result<lan_sync::UiSnapshot, String> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let current = format!("{}:{}", self.revision_epoch, data.revision);
+        if revision == Some(current.as_str()) {
+            return Ok(lan_sync::UiSnapshot {
+                revision: current,
+                snapshot: None,
+            });
+        }
+        Ok(lan_sync::UiSnapshot {
+            revision: current,
+            snapshot: Some(lan_sync::compact_snapshot(&data.snapshot)),
+        })
+    }
+
+    fn task_events(
+        &self,
+        task_id: &str,
+        before: Option<i64>,
+        limit: Option<u32>,
+    ) -> Result<lan_sync::TaskEventsPage, String> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        if !data.snapshot.tasks.iter().any(|task| task.id == task_id) {
+            return Err("Task was not found.".into());
+        }
+        Ok(lan_sync::task_events(
+            &data.snapshot,
+            task_id,
+            before,
+            limit,
+        ))
+    }
+
+    fn start_lan(self: &Arc<Self>, roots: Vec<PathBuf>) -> Result<(), String> {
+        match lan::Server::start(Arc::clone(self), roots) {
+            Ok(server) => {
+                *self
+                    .lan
+                    .lock()
+                    .map_err(|_| "LAN server lock failed.".to_string())? = Some(server)
+            }
+            Err(error) => {
+                *self
+                    .lan_error
+                    .lock()
+                    .map_err(|_| "LAN server lock failed.".to_string())? = Some(error)
+            }
+        }
+        Ok(())
+    }
+
+    fn lan_info(&self) -> lan::Info {
+        self.lan
+            .lock()
+            .ok()
+            .and_then(|server| server.as_ref().map(lan::Server::info))
+            .unwrap_or(lan::Info {
+                urls: vec![],
+                token: String::new(),
+                access_code_required: lan::REQUIRE_ACCESS_CODE,
+                error: self
+                    .lan_error
+                    .lock()
+                    .ok()
+                    .and_then(|error| error.clone())
+                    .or_else(|| Some("LAN server is unavailable.".into())),
+            })
+    }
+
+    /// The LAN listener uses this small explicit allow-list rather than
+    /// reflecting Tauri commands. Keep native-only file pickers, file reads,
+    /// and quit operations out of this owner-token capability.
+    pub(crate) fn lan_invoke(
+        self: &Arc<Self>,
+        command: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        fn arg<T: serde::de::DeserializeOwned>(
+            args: &serde_json::Value,
+            name: &str,
+        ) -> Result<T, String> {
+            serde_json::from_value(
+                args.get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("Missing {name}."))?,
+            )
+            .map_err(|_| format!("Invalid {name}."))
+        }
+        fn value<T: serde::Serialize>(result: T) -> Result<serde_json::Value, String> {
+            serde_json::to_value(result).map_err(|e| format!("Could not encode response: {e}"))
+        }
+        fn snapshot_value(snapshot: Snapshot) -> Result<serde_json::Value, String> {
+            // Keep full snapshots inside the service for its own invariants,
+            // but never serialize the historical diagnostic transcript over
+            // the owner LAN bridge.
+            value(lan_sync::compact_snapshot(&snapshot))
+        }
+        match command {
+            "get_snapshot" => value(self.snapshot()?),
+            "get_ui_snapshot" => {
+                value(self.ui_snapshot(args.get("revision").and_then(|value| value.as_str()))?)
+            }
+            "get_task_events" => value(
+                self.task_events(
+                    &arg::<String>(&args, "taskId")?,
+                    args.get("before")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid before.")?,
+                    args.get("limit")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid limit.")?,
+                )?,
+            ),
+            "save_host" => {
+                let mut host: Host = arg(&args, "host")?;
+                self.mutate(None, |s| {
+                    if host.id.trim().is_empty() {
+                        host.id = id()
+                    }
+                    if host.name.trim().is_empty() {
+                        return Err("Host name is required.".into());
+                    }
+                    if !matches!(host.kind.as_str(), "local" | "ssh") {
+                        return Err("Host kind must be local or ssh.".into());
+                    }
+                    if host.kind == "ssh" && host.address.trim().is_empty() {
+                        return Err("SSH host needs an address or configured alias.".into());
+                    }
+                    if let Some(current) = s.hosts.iter_mut().find(|x| x.id == host.id) {
+                        *current = host
+                    } else {
+                        s.hosts.push(host)
+                    }
+                    Ok(s.clone())
+                })
+                .and_then(snapshot_value)
+            }
+            "delete_host" => {
+                let id: String = arg(&args, "id")?;
+                self.mutate(None, |s| {
+                    let host = s
+                        .hosts
+                        .iter()
+                        .find(|h| h.id == id)
+                        .ok_or("Host was not found.")?;
+                    let default = s
+                        .hosts
+                        .iter()
+                        .find(|h| h.kind == "local")
+                        .map(|h| h.id.as_str());
+                    if host.kind == "local" && default == Some(id.as_str()) {
+                        return Err("The default local host cannot be deleted.".into());
+                    }
+                    if s.agents.iter().any(|a| a.host_id == id)
+                        || s.tasks.iter().any(|t| t.host_id == id)
+                        || s.projects
+                            .iter()
+                            .any(|p| p.workspaces.iter().any(|w| w.host_id == id))
+                    {
+                        return Err(
+                            "Host is referenced by an agent, task, or project workspace.".into(),
+                        );
+                    }
+                    s.hosts.retain(|h| h.id != id);
+                    Ok(s.clone())
+                })
+                .and_then(snapshot_value)
+            }
+            "save_agent" => {
+                let mut agent: Agent = arg(&args, "agent")?;
+                validate_agent_avatar(agent.avatar.as_deref())?;
+                validate_collaboration_profile(&agent)?;
+                self.mutate(None, |s| {
+                    if agent.id.trim().is_empty() {
+                        agent.id = id()
+                    }
+                    if agent.name.trim().is_empty() {
+                        return Err("Agent name is required.".into());
+                    }
+                    if !known_provider(&agent.provider)
+                        || !valid_sandbox_for_provider(&agent.provider, &agent.sandbox)
+                    {
+                        return Err("Agent provider or sandbox is not supported.".into());
+                    }
+                    if !s.hosts.iter().any(|h| h.id == agent.host_id) {
+                        return Err("Agent host was not found.".into());
+                    }
+                    if let Some(current) = s.agents.iter_mut().find(|x| x.id == agent.id) {
+                        *current = agent
+                    } else {
+                        s.agents.push(agent)
+                    }
+                    Ok(s.clone())
+                })
+                .and_then(snapshot_value)
+            }
+            "delete_agent" => {
+                let id: String = arg(&args, "id")?;
+                self.mutate(None, |s| {
+                    if s.tasks.iter().any(|t| t.agent_id == id) {
+                        return Err("Agent has tasks and cannot be deleted.".into());
+                    }
+                    if !s.agents.iter().any(|a| a.id == id) {
+                        return Err("Agent was not found.".into());
+                    }
+                    s.agents.retain(|a| a.id != id);
+                    for c in &mut s.channels {
+                        c.agent_ids.retain(|a| a != &id)
+                    }
+                    Ok(s.clone())
+                })
+                .and_then(snapshot_value)
+            }
+            "create_task" => value(self.create_task(arg(&args, "input")?)?),
+            "autoname" => value(self.autoname(arg(&args, "target")?)?),
+            "rename_task" => {
+                let id: String = arg(&args, "id")?;
+                let title: String = arg(&args, "title")?;
+                self.mutate(Some(id.clone()), |s| {
+                    if title.trim().is_empty() {
+                        return Err("Task title is required.".into());
+                    }
+                    let task = s
+                        .tasks
+                        .iter_mut()
+                        .find(|t| t.id == id)
+                        .ok_or("Task was not found.")?;
+                    task.title = title.trim().into();
+                    task.updated_at = now();
+                    Ok(s.clone())
+                })
+                .and_then(snapshot_value)
+            }
+            "delete_task" => {
+                let id: String = arg(&args, "id")?;
+                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
+                snapshot_value(delete_task(app.state(), id)?)
+            }
+            "delete_archived_task" => {
+                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
+                snapshot_value(delete_archived_task(
+                    app.state(),
+                    arg(&args, "taskId")?,
+                    arg(&args, "removeNativeFiles")?,
+                )?)
+            }
+            "set_task_archived" => snapshot_value(
+                self.set_task_archived(&arg::<String>(&args, "taskId")?, arg(&args, "archived")?)?,
+            ),
+            "save_project" => snapshot_value(self.save_project(arg(&args, "project")?)?),
+            "delete_project" => snapshot_value(self.delete_project(&arg::<String>(&args, "id")?)?),
+            "set_task_project" => snapshot_value(
+                self.set_task_project(&arg::<String>(&args, "taskId")?, arg(&args, "projectId")?)?,
+            ),
+            "send_message" => snapshot_value(
+                self.send(
+                    arg(&args, "taskId")?,
+                    arg(&args, "text")?,
+                    args.get("attachmentIds")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid attachmentIds.")?
+                        .unwrap_or_default(),
+                )?,
+            ),
+            "send_message_fast" => {
+                self.send_fast(
+                    arg(&args, "taskId")?,
+                    arg(&args, "text")?,
+                    args.get("attachmentIds")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid attachmentIds.")?
+                        .unwrap_or_default(),
+                )?;
+                value(lan_sync::Accepted { accepted: true })
+            }
+            "cancel_task" => snapshot_value(self.cancel(&arg::<String>(&args, "taskId")?)?),
+            "resume_task" => snapshot_value(self.resume(arg(&args, "taskId")?)?),
+            "cancel_queued_message" => {
+                snapshot_value(self.cancel_queued_message(&arg::<String>(&args, "id")?)?)
+            }
+            "edit_queued_message" => snapshot_value(
+                self.edit_queued_message(&arg::<String>(&args, "id")?, arg(&args, "text")?)?,
+            ),
+            "resolve_approval" => snapshot_value(self.resolve_approval_request(
+                &arg::<String>(&args, "approvalId")?,
+                ApprovalDecision::from_stored(&arg::<String>(&args, "decision")?)?,
+            )?),
+            "save_settings" => {
+                let settings: Settings = arg(&args, "settings")?;
+                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
+                snapshot_value(save_settings(app.state(), settings)?)
+            }
+            "save_channel" => snapshot_value(self.save_channel(arg(&args, "channel")?)?),
+            "set_channel_membership" => snapshot_value(self.set_channel_membership(
+                &arg::<String>(&args, "channelId")?,
+                &arg::<String>(&args, "agentId")?,
+                arg(&args, "member")?,
+            )?),
+            "set_channel_agent_conversation" => {
+                snapshot_value(self.set_channel_agent_conversation(
+                    &arg::<String>(&args, "channelId")?,
+                    arg(&args, "enabled")?,
+                    arg(&args, "turnLimit")?,
+                )?)
+            }
+            "stop_channel_agent_conversation" => snapshot_value(
+                self.stop_channel_agent_conversation(&arg::<String>(&args, "channelId")?)?,
+            ),
+            "send_channel_message" => {
+                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
+                snapshot_value(send_channel_message(
+                    app.state(),
+                    arg(&args, "channelId")?,
+                    arg(&args, "text")?,
+                    arg(&args, "agentIds")?,
+                    args.get("attachmentIds")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid attachmentIds.")?,
+                )?)
+            }
+            "send_channel_message_fast" => {
+                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
+                send_channel_message_accepted(
+                    app.state::<AppState>().0.clone(),
+                    arg(&args, "channelId")?,
+                    arg(&args, "text")?,
+                    arg(&args, "agentIds")?,
+                    args.get("attachmentIds")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid attachmentIds.")?,
+                )?;
+                value(lan_sync::Accepted { accepted: true })
+            }
+            "probe_host" => value(tauri::async_runtime::block_on(probe_host(arg(
+                &args, "host",
+            )?))?),
+            "get_model_catalog" => {
+                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
+                value(tauri::async_runtime::block_on(get_model_catalog(
+                    app.state(),
+                    arg(&args, "target")?,
+                ))?)
+            }
+            "set_task_model_settings" => snapshot_value(self.set_task_model_settings(
+                &arg::<String>(&args, "taskId")?,
+                arg(&args, "settings")?,
+            )?),
+            "set_task_sandbox" => snapshot_value(
+                self.set_task_sandbox(&arg::<String>(&args, "taskId")?, arg(&args, "sandbox")?)?,
+            ),
+            "list_terminals" => value(self.list_terminals()?),
+            "open_terminal" => value(self.open_terminal(
+                arg(&args, "target")?,
+                arg(&args, "cols")?,
+                arg(&args, "rows")?,
+            )?),
+            "write_terminal" => {
+                self.write_terminal(&arg::<String>(&args, "id")?, arg(&args, "data")?)?;
+                Ok(serde_json::Value::Null)
+            }
+            "resize_terminal" => {
+                self.resize_terminal(
+                    &arg::<String>(&args, "id")?,
+                    arg(&args, "cols")?,
+                    arg(&args, "rows")?,
+                )?;
+                Ok(serde_json::Value::Null)
+            }
+            "read_terminal" => {
+                value(self.read_terminal(&arg::<String>(&args, "id")?, arg(&args, "afterSeq")?)?)
+            }
+            "close_terminal" => {
+                self.close_terminal(&arg::<String>(&args, "id")?)?;
+                Ok(serde_json::Value::Null)
+            }
+            "get_task_goal" => {
+                let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
+                if task.provider != "codex" {
+                    Ok(serde_json::Value::Null)
+                } else {
+                    value(goals::read_goal(&host, &task)?)
+                }
+            }
+            "get_task_git_status" => {
+                let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
+                value(git::detect_status(
+                    &host,
+                    &task.cwd,
+                    args.get("detectorSession")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                ))
+            }
+            "get_task_git_diff" => {
+                let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
+                value(git::diff(
+                    &host,
+                    &task.cwd,
+                    &arg::<String>(&args, "path")?,
+                    &arg::<String>(&args, "scope")?,
+                )?)
+            }
+            "wait_for_task_git_marker" => {
+                let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
+                value(git::wait_for_marker(
+                    &host,
+                    &task.cwd,
+                    args.get("detectorSession")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                )?)
+            }
+            "preview_task_deletion" => {
+                let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
+                value(deletion::preview(&self.snapshot()?, &task, &host))
+            }
+            "store_attachment" => value(
+                self.store_attachment(
+                    arg(&args, "target")?,
+                    arg(&args, "filename")?,
+                    arg(&args, "mimeType")?,
+                    arg(&args, "dataBase64")?,
+                    args.get("previewDataUrl")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid previewDataUrl.")?,
+                    args.get("sourceId")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid sourceId.")?,
+                )?,
+            ),
+            _ => Err(format!("LAN command '{command}' is not available.")),
+        }
     }
 
     /// Creates the durable pending request before the harness waits. Callers
@@ -556,6 +1028,7 @@ impl Service {
                     &candidate.task_hosts,
                     &candidate.attachments,
                 )?;
+                candidate.revision = data.revision.saturating_add(1);
                 *data = candidate;
             }
             (output, changed)
@@ -731,6 +1204,80 @@ impl Service {
             .unwrap_or(false)
     }
 
+    fn resident_control(&self, task_id: &str) -> Result<Option<Arc<runner::RunControl>>, String> {
+        Ok(self
+            .runs
+            .lock()
+            .map_err(|_| "Monitter run registry lock failed.".to_string())?
+            .tasks
+            .get(task_id)
+            .cloned()
+            .filter(|control| control.is_resident()))
+    }
+
+    fn finish_if_current_run(
+        &self,
+        task_id: &str,
+        control: &Arc<runner::RunControl>,
+        error: String,
+    ) {
+        // Lock order matches reserve_run (data, then runs). Holding both makes
+        // pointer ownership and the durable terminal transition one operation:
+        // an old resident writer cannot fail over a newer run for this task.
+        let changed = (|| -> Result<bool, String> {
+            let mut data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.".to_string())?;
+            let mut runs = self
+                .runs
+                .lock()
+                .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+            if !runs
+                .tasks
+                .get(task_id)
+                .is_some_and(|current| Arc::ptr_eq(current, control))
+                || control.is_cancelled()
+            {
+                return Ok(false);
+            }
+            let mut candidate = data.clone();
+            let task = candidate
+                .snapshot
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .ok_or("Task was not found.")?;
+            if task.status != "running" {
+                return Ok(false);
+            }
+            task.status = "error".into();
+            task.updated_at = now();
+            candidate.snapshot.events.push(RunEvent {
+                id: id(),
+                task_id: task_id.into(),
+                kind: "error".into(),
+                title: "Message delivery failed".into(),
+                detail: error,
+                created_at: now(),
+            });
+            self.store.save(
+                &candidate.snapshot,
+                &candidate.task_hosts,
+                &candidate.attachments,
+            )?;
+            candidate.revision = data.revision.saturating_add(1);
+            *data = candidate;
+            runs.tasks.remove(task_id);
+            runs.native_sessions.retain(|_, owner| owner != task_id);
+            Ok(true)
+        })()
+        .unwrap_or(false);
+        if changed {
+            self.changed(Some(task_id.into()));
+        }
+    }
+
     fn set_task_archived(&self, task_id: &str, archived: bool) -> Result<Snapshot, String> {
         let stop_resident = archived && self.has_resident_run(task_id);
         let snapshot = self.mutate(Some(task_id.into()), |snapshot| {
@@ -857,10 +1404,47 @@ impl Service {
     }
 
     pub(crate) fn apply_event(&self, task_id: &str, parsed: Parsed) -> Result<(), String> {
-        if let Some(native) = parsed.native_session_id.as_deref() {
+        let Parsed {
+            native_session_id,
+            assistant,
+            event,
+            failed: _,
+        } = parsed;
+        if let Some(native) = native_session_id.as_deref() {
             let (task, host) = self.task_and_host(task_id)?;
             self.claim_native_session(task_id, &task, &host, native)?;
         }
+        let generated_image = event
+            .as_ref()
+            .and_then(|(kind, _, detail)| (kind == "computer_image").then_some(detail.as_str()));
+        if let Some(data_base64) = generated_image {
+            match attachments::generated_image(data_base64) {
+                Ok(image) => {
+                    let mut pending = self
+                        .pending_codex_images
+                        .lock()
+                        .map_err(|_| "Generated image state lock failed.")?;
+                    let images = pending.entry(task_id.into()).or_default();
+                    if images.len() < 4 {
+                        images.push(image);
+                    }
+                }
+                Err(error) => self.record(task_id, "error", "Generated image unavailable", error),
+            }
+            return Ok(());
+        }
+        let assistant_images = if assistant
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            self.pending_codex_images
+                .lock()
+                .map_err(|_| "Generated image state lock failed.")?
+                .remove(task_id)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
         self.mutate_data(Some(task_id.into()), |data| {
             let state = &mut data.snapshot;
             let ix = state
@@ -868,7 +1452,7 @@ impl Service {
                 .iter()
                 .position(|task| task.id == task_id)
                 .ok_or_else(|| "Task was not found.".to_string())?;
-            if let Some(native) = parsed.native_session_id {
+            if let Some(native) = native_session_id {
                 match state.tasks[ix].native_session_id.as_deref() {
                     Some(existing) if existing != native => {
                         return Err("Codex changed native session ID during a task.".into())
@@ -878,7 +1462,7 @@ impl Service {
                 }
             }
             state.tasks[ix].updated_at = now();
-            if let Some((kind, title, detail)) = parsed.event {
+            if let Some((kind, title, detail)) = event {
                 state.events.push(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
@@ -888,7 +1472,7 @@ impl Service {
                     created_at: now(),
                 });
             }
-            if let Some(text) = parsed.assistant.filter(|text| !text.trim().is_empty()) {
+            if let Some(text) = assistant.filter(|text| !text.trim().is_empty()) {
                 state.messages.push(Message {
                     sender_agent_id: None,
                     collaboration_id: None,
@@ -897,7 +1481,7 @@ impl Service {
                     role: "assistant".into(),
                     text: text.clone(),
                     created_at: now(),
-                    attachments: vec![],
+                    attachments: assistant_images.clone(),
                 });
                 let channel_id = state.tasks[ix].channel_id.clone();
                 let agent_id = state.tasks[ix].agent_id.clone();
@@ -958,6 +1542,9 @@ impl Service {
     }
 
     pub(crate) fn finish(self: &Arc<Self>, task_id: &str, status: &str, error: Option<String>) {
+        if let Ok(mut pending) = self.pending_codex_images.lock() {
+            pending.remove(task_id);
+        }
         let (should_route, expired_approvals) = self
             .mutate_data(Some(task_id.into()), |data| {
                 let final_status = {
@@ -1156,12 +1743,12 @@ impl Service {
         self.mutate_data(None, |data| create_task_in_data(data, input))
     }
 
-    fn send(
+    fn accept_send(
         self: &Arc<Self>,
         task_id: String,
         text: String,
         attachment_ids: Vec<String>,
-    ) -> Result<Snapshot, String> {
+    ) -> Result<Option<String>, String> {
         if text.trim().is_empty() && attachment_ids.is_empty() {
             return Err("Message cannot be empty.".into());
         }
@@ -1248,6 +1835,10 @@ impl Service {
             };
             Ok(Some(append_attachment_paths(prompt, &attachments)))
         })?;
+        Ok(execution_prompt)
+    }
+
+    fn launch_accepted(self: &Arc<Self>, task_id: String, execution_prompt: Option<String>) {
         if let Some(execution_prompt) = execution_prompt {
             let launched = match self.send_to_resident(&task_id, &execution_prompt) {
                 Ok(true) => Ok(()),
@@ -1261,6 +1852,67 @@ impl Service {
                 self.finish(&task_id, "error", Some(error));
             }
         }
+    }
+
+    fn send_accepted(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let execution_prompt = self.accept_send(task_id.clone(), text, attachment_ids)?;
+        self.launch_accepted(task_id, execution_prompt);
+        Ok(())
+    }
+
+    fn send_fast(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let execution_prompt = self.accept_send(task_id.clone(), text, attachment_ids)?;
+        let Some(prompt) = execution_prompt else {
+            return Ok(());
+        };
+        // Reserve the exact run before acknowledging. Cancellation addresses
+        // this control directly, so an old background launch cannot attach to
+        // a later send for the same task.
+        if let Some(control) = self.resident_control(&task_id)? {
+            let service = Arc::clone(self);
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Err(error) =
+                    control.send_control(&adapters::claude::user_frame(&prompt).to_string())
+                {
+                    service.finish_if_current_run(&task_id, &control, error);
+                }
+            });
+        } else {
+            match self.reserve_run(&task_id) {
+                Ok(control) => {
+                    let service = Arc::clone(self);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        runner::start(service, task_id, prompt, control);
+                    });
+                }
+                Err(error) => {
+                    // Acceptance is already durable. Surface launch failure in
+                    // the task rather than turning it into a false transport
+                    // rejection after the message was accepted.
+                    self.finish(&task_id, "error", Some(error));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn send(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+    ) -> Result<Snapshot, String> {
+        self.send_accepted(task_id, text, attachment_ids)?;
         self.snapshot()
     }
 
@@ -1967,6 +2619,9 @@ impl Service {
     }
 
     fn cleanup(&self) {
+        if let Ok(mut server) = self.lan.lock() {
+            server.take();
+        }
         self.stopping
             .store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut broker) = self.collaboration.lock() {
@@ -2441,6 +3096,37 @@ fn append_attachment_paths(prompt: String, attachments: &[attachments::Attachmen
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
     state.0.snapshot()
+}
+
+#[tauri::command]
+async fn get_ui_snapshot(
+    state: State<'_, AppState>,
+    revision: Option<String>,
+) -> Result<lan_sync::UiSnapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.ui_snapshot(revision.as_deref()))
+        .await
+        .map_err(|error| format!("Snapshot worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_task_events(
+    state: State<'_, AppState>,
+    task_id: String,
+    before: Option<i64>,
+    limit: Option<u32>,
+) -> Result<lan_sync::TaskEventsPage, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.task_events(&task_id, before, limit))
+        .await
+        .map_err(|error| format!("Task event worker failed: {error}"))?
+}
+
+/// The token is generated in memory on each app launch and is never written to
+/// the workspace. It is intentionally returned only to the native renderer.
+#[tauri::command]
+fn get_lan_server_info(state: State<'_, AppState>) -> lan::Info {
+    state.0.lan_info()
 }
 
 #[tauri::command]
@@ -3250,6 +3936,22 @@ fn send_message(
 }
 
 #[tauri::command]
+async fn send_message_fast(
+    state: State<'_, AppState>,
+    task_id: String,
+    text: String,
+    attachment_ids: Option<Vec<String>>,
+) -> Result<lan_sync::Accepted, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.send_fast(task_id, text, attachment_ids.unwrap_or_default())
+    })
+    .await
+    .map_err(|error| format!("Send worker failed: {error}"))??;
+    Ok(lan_sync::Accepted { accepted: true })
+}
+
+#[tauri::command]
 fn resume_task(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
     state.0.resume(task_id)
 }
@@ -3391,16 +4093,26 @@ fn send_channel_message(
     state: State<'_, AppState>,
     channel_id: String,
     text: String,
-    mut agent_ids: Vec<String>,
+    agent_ids: Vec<String>,
     attachment_ids: Option<Vec<String>>,
 ) -> Result<Snapshot, String> {
+    send_channel_message_accepted(state.0.clone(), channel_id, text, agent_ids, attachment_ids)?;
+    state.0.snapshot()
+}
+
+fn send_channel_message_accepted(
+    service: Arc<Service>,
+    channel_id: String,
+    text: String,
+    mut agent_ids: Vec<String>,
+    attachment_ids: Option<Vec<String>>,
+) -> Result<(), String> {
     let attachment_ids = attachment_ids.unwrap_or_default();
     if (text.trim().is_empty() && attachment_ids.is_empty()) || agent_ids.is_empty() {
         return Err("Choose at least one recipient and enter a message.".into());
     }
     agent_ids.sort();
     agent_ids.dedup();
-    let service = state.0.clone();
     let user_text = text.trim().to_string();
     let runs = service.mutate_data(None, |data| {
         let state = &mut data.snapshot;
@@ -3600,7 +4312,24 @@ fn send_channel_message(
             service.finish(&task_id, "error", Some(error));
         }
     }
-    service.snapshot()
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_channel_message_fast(
+    state: State<'_, AppState>,
+    channel_id: String,
+    text: String,
+    agent_ids: Vec<String>,
+    attachment_ids: Option<Vec<String>>,
+) -> Result<lan_sync::Accepted, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        send_channel_message_accepted(service, channel_id, text, agent_ids, attachment_ids)
+    })
+    .await
+    .map_err(|error| format!("Channel send worker failed: {error}"))??;
+    Ok(lan_sync::Accepted { accepted: true })
 }
 
 #[tauri::command]
@@ -4181,13 +4910,37 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("Cannot resolve app data folder: {e}"))?;
+            // A successful frontend publish writes this persistent directory
+            // atomically, allowing the LAN view to update without restarting
+            // the native app. It must precede every bundled fallback root.
+            let live_lan_root = dir.join("lan-web");
             let service = Service::open(Some(app.handle().clone()), dir)?;
+            // Bundled assets remain a safe fallback if no successful live
+            // publish exists. Tauri places them in Resources (the root or
+            // `_up_`, depending on bundle layout); development uses local build.
+            let mut lan_roots = vec![live_lan_root];
+            if let Ok(resources) = app.path().resource_dir() {
+                lan_roots.push(resources.join("lan-web"));
+                lan_roots.push(resources.clone());
+                lan_roots.push(resources.join("_up_"));
+            }
+            if cfg!(debug_assertions) {
+                // A dev binary has no bundle resources. A packaged debug app
+                // does, and resource roots above take precedence over source.
+                lan_roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../build"));
+            }
             service.apply_shortcut_mode(&service.snapshot()?.settings.shortcut_mode)?;
             #[cfg(target_os = "macos")]
             install_macos_escape_shield(app.handle().clone(), Arc::clone(&service));
             service.initialize_collaboration()?;
             service.dispatch_startup_queues();
             app.manage(AppState(service));
+            // The listener may immediately dispatch through app.state(), so it
+            // starts only after the Tauri state has been registered.
+            let service = app.state::<AppState>().0.clone();
+            service
+                .start_lan(lan_roots)
+                .map_err(|error| format!("Cannot initialize LAN server: {error}"))?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -4199,6 +4952,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_ui_snapshot,
+            get_task_events,
+            get_lan_server_info,
             resolve_approval,
             finish_quit,
             read_attachment_file,
@@ -4220,6 +4976,7 @@ pub fn run() {
             delete_archived_task,
             set_task_archived,
             send_message,
+            send_message_fast,
             resume_task,
             cancel_task,
             cancel_queued_message,
@@ -4231,6 +4988,7 @@ pub fn run() {
             save_channel,
             set_channel_membership,
             send_channel_message,
+            send_channel_message_fast,
             get_resume_command,
             get_model_catalog,
             set_task_model_settings,
@@ -6069,5 +6827,256 @@ name@rafa.test",
                 .count(),
             60
         );
+    }
+
+    #[test]
+    fn cua_result_image_attaches_to_the_following_assistant_message_and_clears_on_finish() {
+        let dir = temp_dir("generated-image");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(task_input(agent_id, "image", None))
+            .unwrap();
+        service
+            .apply_event(
+                &task.id,
+                Parsed {
+                    native_session_id: Some("native-image-session".into()),
+                    assistant: None,
+                    event: Some((
+                        "computer_image".into(),
+                        "Computer screenshot".into(),
+                        "/9j/2Q==".into(),
+                    )),
+                    failed: false,
+                },
+            )
+            .unwrap();
+        service
+            .apply_event(
+                &task.id,
+                Parsed {
+                    native_session_id: Some("native-image-session".into()),
+                    assistant: Some("Here is the screenshot.".into()),
+                    event: None,
+                    failed: false,
+                },
+            )
+            .unwrap();
+        let snapshot = service.snapshot().unwrap();
+        let message = snapshot
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.task_id == task.id && message.role == "assistant")
+            .unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].mime_type, "image/jpeg");
+        service
+            .apply_event(
+                &task.id,
+                Parsed {
+                    native_session_id: Some("native-image-session".into()),
+                    assistant: None,
+                    event: Some((
+                        "computer_image".into(),
+                        "Computer screenshot".into(),
+                        "/9j/2Q==".into(),
+                    )),
+                    failed: false,
+                },
+            )
+            .unwrap();
+        service.finish(&task.id, "completed", None);
+        assert!(service
+            .pending_codex_images
+            .lock()
+            .unwrap()
+            .get(&task.id)
+            .is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn responsive_snapshot_and_fast_send_do_not_return_diagnostic_history() {
+        let dir = temp_dir("responsive-lan-history");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let mut task_ids = Vec::new();
+        for index in 0..24 {
+            task_ids.push(
+                service
+                    .create_task(task_input(agent_id.clone(), &format!("task {index}"), None))
+                    .unwrap()
+                    .id,
+            );
+        }
+        let fast_task = task_ids[0].clone();
+        service
+            .mutate(None, |snapshot| {
+                for task in &mut snapshot.tasks {
+                    task.status = "running".into();
+                }
+                // 800 x 10 KiB: representative historical provider stderr/log
+                // that must remain durable but must not enter a polling response.
+                for index in 0..800 {
+                    snapshot.events.push(RunEvent {
+                        id: id(),
+                        task_id: task_ids[index % task_ids.len()].clone(),
+                        kind: "log".into(),
+                        title: "Provider diagnostic".into(),
+                        detail: "x".repeat(10 * 1024),
+                        created_at: index as i64,
+                    });
+                }
+                Ok(())
+            })
+            .unwrap();
+        let legacy_start = Instant::now();
+        let legacy_bytes = serde_json::to_vec(&service.snapshot().unwrap()).unwrap();
+        let legacy_elapsed = legacy_start.elapsed();
+        let compact_start = Instant::now();
+        let first = service.ui_snapshot(None).unwrap();
+        let compact_bytes = serde_json::to_vec(&first).unwrap();
+        let compact_elapsed = compact_start.elapsed();
+        let unchanged_start = Instant::now();
+        let unchanged = service.ui_snapshot(Some(&first.revision)).unwrap();
+        let unchanged_bytes = serde_json::to_vec(&unchanged).unwrap();
+        let unchanged_elapsed = unchanged_start.elapsed();
+        let send_start = Instant::now();
+        service
+            .send_fast(fast_task.clone(), "queue this".into(), vec![])
+            .unwrap();
+        let accepted_bytes = serde_json::to_vec(&lan_sync::Accepted { accepted: true }).unwrap();
+        let send_elapsed = send_start.elapsed();
+        println!("responsive snapshot timings legacy={legacy_elapsed:?} compact={compact_elapsed:?} unchanged={unchanged_elapsed:?} fast_send={send_elapsed:?}; bytes legacy={} compact={} unchanged={} accepted={}", legacy_bytes.len(), compact_bytes.len(), unchanged_bytes.len(), accepted_bytes.len());
+        assert!(legacy_bytes.len() > 7_500_000);
+        assert!(compact_bytes.len() < 500 * 1024);
+        assert!(unchanged_bytes.len() < 200);
+        assert!(accepted_bytes.len() < 100);
+        let durable = service.snapshot().unwrap();
+        assert_eq!(durable.events.len(), 800);
+        assert!(durable
+            .messages
+            .iter()
+            .all(|message| message.text != "queue this"));
+        assert!(durable
+            .queued_messages
+            .iter()
+            .any(|message| message.task_id == fast_task && message.text == "queue this"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resident_delivery_failure_never_finishes_a_replaced_or_cancelled_run() {
+        let dir = temp_dir("resident-delivery-guard");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(task_input(agent_id, "guard", None))
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|candidate| candidate.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let stale = runner::RunControl::new(false);
+        let replacement = runner::RunControl::new(false);
+        service
+            .runs
+            .lock()
+            .unwrap()
+            .tasks
+            .insert(task.id.clone(), replacement.clone());
+        service.finish_if_current_run(&task.id, &stale, "stale write".into());
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == task.id)
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert!(Arc::ptr_eq(
+            service.runs.lock().unwrap().tasks.get(&task.id).unwrap(),
+            &replacement
+        ));
+        replacement.cancel();
+        service.finish_if_current_run(&task.id, &replacement, "cancelled write".into());
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .tasks
+                .iter()
+                .find(|candidate| candidate.id == task.id)
+                .unwrap()
+                .status,
+            "running"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fast_send_keeps_durable_acceptance_when_run_reservation_fails() {
+        let dir = temp_dir("fast-send-reservation-failure");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let first = service
+            .create_task(task_input(agent_id.clone(), "first", None))
+            .unwrap();
+        let second = service
+            .create_task(task_input(agent_id, "second", None))
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                let native = "shared-native".to_string();
+                for task in &mut snapshot.tasks {
+                    if task.id == first.id || task.id == second.id {
+                        task.native_session_id = Some(native.clone());
+                    }
+                }
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == first.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        service.reserve_run(&first.id).unwrap();
+        assert!(service
+            .send_fast(
+                second.id.clone(),
+                "accepted despite launch failure".into(),
+                vec![]
+            )
+            .is_ok());
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|message| message.task_id == second.id
+                && message.text == "accepted despite launch failure"));
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == second.id)
+                .unwrap()
+                .status,
+            "error"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

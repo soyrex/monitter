@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { localUuid } from '$lib/lan';
   import "../../app.css";
   import AnimatedTitle from "./AnimatedTitle.svelte";
   import { autonaming } from "$lib/autoname-state";
   import { getContext, setContext, onMount, tick, untrack } from "svelte";
   import { sidebarReorder } from "$lib/sidebar-reorder";
+  import { mobileViewport } from '$lib/mobile-viewport';
   import SidebarResize from "./SidebarResize.svelte";
   import PaneNotice from "./PaneNotice.svelte";
   import SettingsPane from "./SettingsPane.svelte";
@@ -21,6 +23,7 @@
     Bot,
     Archive,
     Activity,
+    Clock,
     ArrowUp,
     Search,
     ChevronDown,
@@ -39,7 +42,6 @@
     Briefcase,
     HardDrive,
     LoaderCircle,
-    LayoutDashboard,
     MessageSquare,
     MoreHorizontal,
     MoveDiagonal,
@@ -79,6 +81,7 @@
     AttachmentFileData,
     ApprovalRequest,
     Sandbox,
+    RunEvent,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
   import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage } from '$lib/operator-sharing';
@@ -200,16 +203,76 @@
     composer = $state(""),
     composerPending = $state<Record<string, boolean>>({}),
     taskTitle = $state("");
+  type OptimisticMessage = {
+    id: string;
+    kind: 'task' | 'channel' | 'draft';
+    targetId: string;
+    text: string;
+    displayText: string;
+    attachments: Attachment[];
+    createdAt: number;
+    status: 'sending' | 'sent' | 'not-confirmed';
+    error?: string;
+    baselineIds: Set<string>;
+    baselineQueuedIds: Set<string>;
+    recipientIds?: string[];
+  };
+  // send_message starts a native run asynchronously, so its returned snapshot
+  // may predate the persisted user message. Keep this UI-only record until a
+  // later snapshot proves the message exists (or exposes its queued record).
+  let optimisticMessages = $state<OptimisticMessage[]>([]);
+  let confirmedDeliveryIds = $state<Record<string, true>>({});
+  let optimisticOutboxRestored = $state(false);
+  const optimisticOutboxKey = untrack(() => `monitter.optimistic-outbox.v1:${paneId}`);
+  type StoredOptimisticMessage = Omit<OptimisticMessage, 'baselineIds' | 'baselineQueuedIds'> & { baselineIds: string[]; baselineQueuedIds: string[] };
+  function persistOptimisticOutbox() {
+    if (typeof sessionStorage === 'undefined') return;
+    try {
+      if (!optimisticMessages.length) { sessionStorage.removeItem(optimisticOutboxKey); return; }
+      const stored: StoredOptimisticMessage[] = optimisticMessages.map(message => ({ ...message, baselineIds: [...message.baselineIds], baselineQueuedIds: [...message.baselineQueuedIds] }));
+      sessionStorage.setItem(optimisticOutboxKey, JSON.stringify(stored));
+    } catch { /* Session recovery is best-effort; never block a send for it. */ }
+  }
+  onMount(() => {
+    try {
+      const raw = sessionStorage.getItem(optimisticOutboxKey);
+      const stored = raw ? JSON.parse(raw) as StoredOptimisticMessage[] : [];
+      if (Array.isArray(stored)) optimisticMessages = stored.filter(message => message && typeof message.id === 'string' && typeof message.text === 'string' && ['task', 'channel', 'draft'].includes(message.kind)).map(message => ({
+        ...message,
+        // A page reload can interrupt a request after acceptance. Never replay
+        // it; force an explicit refresh-backed retry instead.
+        status: 'not-confirmed',
+        error: message.status === 'sending' ? 'Delivery was interrupted by a reload. Refresh before retrying.' : message.error,
+        attachments: Array.isArray(message.attachments) ? message.attachments : [],
+        baselineIds: new Set(Array.isArray(message.baselineIds) ? message.baselineIds : []),
+        baselineQueuedIds: new Set(Array.isArray(message.baselineQueuedIds) ? message.baselineQueuedIds : []),
+      }));
+    } catch { /* Ignore a corrupt recovery record and leave other drafts intact. */ }
+    optimisticOutboxRestored = true;
+  });
+  $effect(() => { optimisticMessages; if (optimisticOutboxRestored) persistOptimisticOutbox(); });
   const canSend=$derived(Boolean(composer.trim() || currentAttachments.length) && !filesBusy);
   let scaleQueued = $state<number | null>(null), scaleInFlight = $state<number | null>(null), scaleSaving = false;
   let slashOpen = $state(false), slashIndex = $state(0);
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
+  let mobileSidebar = $state(false);
+  let mobileMain = $state(false);
+  const sidebarCompressed = $derived(sidebarCollapsed && !mobileSidebar);
+  onMount(() => {
+    if (embedded) return;
+    const viewport = window.matchMedia('(max-width: 760px)');
+    const update = () => { mobileSidebar = viewport.matches; railAgentId = null; };
+    update();
+    viewport.addEventListener('change', update);
+    return () => viewport.removeEventListener('change', update);
+  });
   let collapsedAgents = $state<Record<string, boolean>>({});
   let railAgentId = $state<string | null>(null);
   let railAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
   let detailTab = $state<'run' | 'git' | 'timeline'>('run');
+  let timelinePages = $state<Record<string, { events: RunEvent[]; nextBefore: number | null; loading: boolean; error: string; loadedOlder: boolean }>>({});
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
   let gitPane = $state<GitPane>();
   const railAgent = $derived(snapshot?.agents.find(agent => agent.id === railAgentId) ?? null);
@@ -254,6 +317,7 @@
     taskCwd = $state(""),
     renameTitle = $state("");
   let palette = $state<"switch" | "controls" | null>(null);
+  let tabPickerOpen = $state(false);
   let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
   let vimCommandInput = $state<HTMLInputElement>();
   let vimArmed = $state(false);
@@ -303,6 +367,10 @@
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let snapshotIssued = 0,
     snapshotApplied = 0;
+  // Svelte deeply proxies `$state` objects, so `snapshot === bridgeCache` is
+  // not reliable. Retain the unproxied bridge object separately to recognize
+  // an unchanged revision without replacing local optimistic/synthetic state.
+  let lastBridgeSnapshot: Snapshot | null = null;
   let appliedScale = 0;
   let openTaskIds = $state<string[]>([]);
   let scrollRevision = $state(0);
@@ -365,9 +433,51 @@
     (event.kind !== "tool" || snapshot?.settings.showToolActivity !== false) &&
     (event.kind !== "reasoning" || snapshot?.settings.showReasoningSummaries !== false),
   ));
-  const timelineEvents = $derived([...visibleEvents].sort((a, b) => b.createdAt - a.createdAt));
+  const timelinePage = $derived(selectedTask ? timelinePages[selectedTask.id] : undefined);
+  const timelineEvents = $derived([...(timelinePage?.events ?? visibleEvents)].sort((a, b) => b.createdAt - a.createdAt));
+  async function loadTimeline(taskId: string, before?: number) {
+    const current = timelinePages[taskId];
+    if (current?.loading) return;
+    timelinePages = { ...timelinePages, [taskId]: { events: current?.events ?? [], nextBefore: current?.nextBefore ?? null, loading: true, error: '', loadedOlder: current?.loadedOlder ?? false } };
+    try {
+      const page = await bridge.getTaskEvents(taskId, before, 100);
+      const previous = timelinePages[taskId];
+      const existing = before === undefined ? (previous?.events ?? []) : (previous?.events ?? []);
+      const ids = new Set(existing.map(event => event.id));
+      const events = before === undefined
+        ? [...page.events, ...existing.filter(event => !page.events.some(fresh => fresh.id === event.id))]
+        : [...existing, ...page.events.filter(event => !ids.has(event.id))];
+      // Keep a cursor that already represents pages the reader loaded. A fresh
+      // newest-page read is only for new diagnostics, not permission to throw
+      // away the reader's older history.
+      const loadedOlder = (previous?.loadedOlder ?? false) || before !== undefined;
+      timelinePages = { ...timelinePages, [taskId]: { events, nextBefore: before === undefined && loadedOlder ? (previous ? previous.nextBefore : page.nextBefore) : page.nextBefore, loading: false, error: '', loadedOlder } };
+    } catch (reason) {
+      const page = timelinePages[taskId];
+      timelinePages = { ...timelinePages, [taskId]: { events: page?.events ?? [], nextBefore: page?.nextBefore ?? null, loading: false, error: `Could not load full activity: ${text(reason)}`, loadedOlder: page?.loadedOlder ?? false } };
+    }
+  }
+  const timelineVisible = $derived(showDetail && pane === 'task' && detailTab === 'timeline' && Boolean(selectedTask));
+  $effect(() => { const taskId = selectedTask?.id; if (timelineVisible && taskId && !timelinePages[taskId]) void loadTimeline(taskId); });
+  const compactTimelineKey = $derived(timelineVisible && selectedTask ? `${selectedTask.id}:${(snapshot?.events ?? []).filter(event => event.taskId === selectedTask.id).map(event => event.id).join(',')}` : '');
+  $effect(() => {
+    const taskId = selectedTask?.id;
+    if (!compactTimelineKey || !taskId || !untrack(() => timelinePages[taskId])) return;
+    const timer = setTimeout(() => void loadTimeline(taskId), 175);
+    return () => clearTimeout(timer);
+  });
+  $effect(() => {
+    const taskId = timelineVisible ? selectedTask?.id : undefined;
+    if (!taskId) return;
+    const timer = setInterval(() => { if (timelinePages[taskId] && !timelinePages[taskId].loading) void loadTimeline(taskId); }, 15000);
+    return () => clearInterval(timer);
+  });
+  const taskOptimisticMessages = $derived(optimisticMessages.filter(message => message.kind === 'task' && message.targetId === selectedTaskId));
   const conversationItems = $derived(groupConversationActivity(
-    messages,
+    [...messages, ...taskOptimisticMessages.map(message => ({
+      id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
+      createdAt: message.createdAt, attachments: message.attachments,
+    }))],
     visibleEvents.filter(event => event.kind === "tool" ||
       (event.kind === "reasoning" && event.detail.trim())),
     snapshot?.settings.compressToolCalls === true,
@@ -430,22 +540,26 @@
     return true;
   }
   function routeTask(task: Task) {
+    mobileMain = true;
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openTask(task); else openTask(task);
   }
   function routeChannel(channel: Channel) {
+    mobileMain = true;
     if (embedded) { workspaceNavigation.channel(channel); return; }
     if (activeWorkspaceKey !== 'all') { void switchWorkspace('all').then(changed => { if (changed) routeChannel(channel); }); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openChannel(channel); else openChannel(channel);
   }
   function routeDraft(agentId: string) {
+    mobileMain = true;
     const scope = `agent:${agentId}` as WorkspaceKey;
     if (!embedded && scope !== activeWorkspaceKey) { void switchWorkspace(scope).then(changed => { if (changed) routeDraft(agentId); }); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openTaskComposer(null, agentId); else openTaskComposer(null, agentId);
   }
   function routeProjectDraft(projectId: string) {
+    mobileMain = true;
     const scope = `project:${projectId}` as WorkspaceKey;
     if (!embedded && scope !== activeWorkspaceKey) { void switchWorkspace(scope).then(changed => { if (changed) routeProjectDraft(projectId); }); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
@@ -479,6 +593,23 @@
   export function allTabs(): PaneTabTransfer[] {
     return orderedTabs().map(tab=>({sourcePaneId:paneId,...tab}));
   }
+  const sidebarOpenTaskIds = $derived.by(() => {
+    const ids = new Set(openTaskIds);
+    for (const id of paneIds(layout)) {
+      if (id !== 'main') for (const tab of paneRefs[id]?.allTabs() ?? []) {
+        if (tab.kind === 'task') ids.add(tab.id);
+      }
+    }
+    for (const [key, workspace] of Object.entries(workspaceSet?.workspaces ?? {})) {
+      if (key === activeWorkspaceKey) continue;
+      for (const pane of [workspace.main, ...Object.values(workspace.panes)]) {
+        if (Array.isArray(pane.openTaskIds)) for (const id of pane.openTaskIds) {
+          if (typeof id === 'string') ids.add(id);
+        }
+      }
+    }
+    return ids;
+  });
   export function reorderTab(tab: PaneTabTransfer, before?: TabKey) { tabOrder=insertTab(orderedTabs(),tab,before); }
   export function swapActiveTab(direction: 1 | -1) {
     const current = currentVimTab(), tabs = orderedTabs();
@@ -713,11 +844,6 @@
     } finally { workspaceTransition = false; persistWorkspace(); }
     return activeWorkspaceKey === next;
   }
-  async function chooseWorkspace(event: Event) {
-    const select = event.currentTarget as HTMLSelectElement;
-    await switchWorkspace(select.value as WorkspaceKey);
-    select.value = activeWorkspaceKey;
-  }
   function routeTaskWorkspace(task: Task) {
     if (embedded) { workspaceNavigation.task(task); return; }
     const target = workspaceForTask(task, activeWorkspaceKey);
@@ -795,12 +921,12 @@
     const saved=captureChildren();
     const existing = paneIds(layout), count = mode==='single'?1:mode==='columns'?2:4;
     const ids = ['main',...existing.filter(id=>id!=='main')].slice(0,count);
-    while(ids.length<count) ids.push(crypto.randomUUID());
+    while(ids.length<count) ids.push(localUuid());
     for (const id of existing.filter(id=>!ids.includes(id))) {
       const source = paneRefs[id];
       for (const tab of source?.allTabs() ?? []) { const payload=source.takeTab(tab); if(payload) receiveTab(payload); }
     }
-    const pair = (first: PaneLayout, second: PaneLayout, axis: 'horizontal'|'vertical' = 'horizontal'): PaneLayout => ({id:crypto.randomUUID(),axis,ratio:.5,first,second});
+    const pair = (first: PaneLayout, second: PaneLayout, axis: 'horizontal'|'vertical' = 'horizontal'): PaneLayout => ({id:localUuid(),axis,ratio:.5,first,second});
     layout = count===1 ? {id:'main'} : count===2 ? pair({id:ids[0]},{id:ids[1]})
       : pair(pair({id:ids[0]},{id:ids[1]}),pair({id:ids[2]},{id:ids[3]}),'vertical');
     if(!ids.includes(activePaneId)) activePaneId='main';
@@ -814,10 +940,10 @@
     if (paneIds(layout).length >= 4) { error = 'Monitter supports up to four panes.'; return; }
     saveCurrentDraft();
     const saved = captureChildren();
-    const fresh = crypto.randomUUID();
+    const fresh = localUuid();
     const insert = (node: PaneLayout): PaneLayout => {
       if ('axis' in node) return { ...node, first: insert(node.first), second: insert(node.second) };
-      return node.id === id ? { id: crypto.randomUUID(), axis, ratio: .5, first: node, second: { id: fresh } } : node;
+      return node.id === id ? { id: localUuid(), axis, ratio: .5, first: node, second: { id: fresh } } : node;
     };
     persistWorkspace(); workspaceTransition = true;
     try {
@@ -848,12 +974,12 @@
       const saved=edge!=='center'?captureChildren():{};
       let destination=targetId;
       if(edge!=='center') {
-        destination=crypto.randomUUID();
+        destination=localUuid();
         function insert(node:PaneLayout):PaneLayout {
           if('axis' in node)return {...node,first:insert(node.first),second:insert(node.second)};
           if(node.id!==targetId)return node;
           const fresh={id:destination}, before=edge==='left'||edge==='top';
-          return {id:crypto.randomUUID(),axis:edge==='left'||edge==='right'?'horizontal':'vertical',ratio:.5,first:before?fresh:node,second:before?node:fresh};
+          return {id:localUuid(),axis:edge==='left'||edge==='right'?'horizontal':'vertical',ratio:.5,first:before?fresh:node,second:before?node:fresh};
         }
         layout=insert(layout);
       }
@@ -882,8 +1008,10 @@
     event.dataTransfer.setData('application/x-monitter-tab',JSON.stringify({sourcePaneId:paneId,kind,id}));
   }
   function startTabPointer(event: PointerEvent, kind: PaneTabTransfer['kind'], id: string) {
-    if (event.button !== 0 || terminalBusy || composerPending[`${kind}:${id}`] || pendingUploads[`${kind}:${id}`]) return;
-    event.preventDefault();
+    if (event.pointerType === 'touch' || event.button !== 0 || terminalBusy || composerPending[`${kind}:${id}`] || pendingUploads[`${kind}:${id}`]) return;
+    // Do not cancel the initial press: Safari may then suppress the button's
+    // synthetic click, turning ordinary tab activation into a second tap.
+    // PaneGrid only prevents the pointer event once its drag threshold is met.
     const tab={sourcePaneId:paneId,kind,id};
     if (embedded) { onTabPointerStart?.(event,tab); return; }
     pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY};
@@ -928,7 +1056,7 @@
     try {
       for(const item of items) {
         const file:AttachmentFileData=typeof item==='string'?await bridge.readAttachmentFile(item):await readBrowserFile(item);
-        const preview=await thumbnail(typeof item==='string'?nativeBlob(file):item), sourceId=crypto.randomUUID();
+        const preview=await thumbnail(typeof item==='string'?nativeBlob(file):item), sourceId=localUuid();
         const uploaded:Attachment[]=[];
         for(const {target} of targets) uploaded.push(await bridge.storeAttachment(target,file,preview,sourceId));
         attachmentContexts[key]=scope;
@@ -1162,11 +1290,59 @@
       });
     }
   }
-  function applySnapshot(next: Snapshot, ticket: number) {
+  function applySnapshot(next: Snapshot, ticket: number, fromBridge = true) {
     if (ticket < snapshotApplied) return;
     snapshotApplied = ticket;
+    // Revision-aware bridge snapshots retain object identity when unchanged.
+    // Avoid unnecessary appearance and workspace work on a poll no-op.
+    if (fromBridge && next === lastBridgeSnapshot) return;
+    if (fromBridge) lastBridgeSnapshot = next;
+    reconcileOptimisticMessages(next);
     snapshot = next;
     if(embedded) onSnapshot?.(next); else { applyAppearance(next.settings); untrack(pruneWorkspaceScope); }
+  }
+  function sameAttachments(left: Attachment[], right: string[]) {
+    return left.length === right.length && left.every(item => right.includes(item.id));
+  }
+  function sameMessageAttachments(left: Attachment[], right: Attachment[] | undefined) {
+    return sameAttachments(left, (right ?? []).map(item => item.id));
+  }
+  function confirmedMessageId(message: OptimisticMessage, next: Snapshot, used: Set<string>) {
+    if (message.kind === 'draft') return undefined;
+    if (message.kind === 'task') {
+      return next.messages.find(item => item.taskId === message.targetId && item.role === 'user'
+        && !used.has(item.id) && !message.baselineIds.has(item.id) && item.text === message.text && sameMessageAttachments(message.attachments, item.attachments));
+    }
+    const channel = next.channels.find(item => item.id === message.targetId);
+    return channel?.messages.find(item => item.role === 'user' && !used.has(item.id) && !message.baselineIds.has(item.id) && item.text === message.text && sameMessageAttachments(message.attachments, item.attachments));
+  }
+  function messageQueued(message: OptimisticMessage, next: Snapshot, used: Set<string>) {
+    if (message.kind === 'draft') return undefined;
+    return next.queuedMessages.find(item => !used.has(item.id) && (message.kind === 'task' ? item.taskId === message.targetId : item.channelId === message.targetId)
+      && !message.baselineQueuedIds.has(item.id) && item.text === message.text && sameAttachments(message.attachments, item.attachmentIds));
+  }
+  function reconcileOptimisticMessages(next: Snapshot) {
+    // A response has no request ID. Consume each newly-observed server message
+    // at most once so two identical quick sends cannot both vanish on one ack.
+    const used = new Set<string>();
+    const confirmedOptimistic = new Set<string>();
+    const confirmed = optimisticMessages.flatMap(message => {
+      const match = confirmedMessageId(message, next, used);
+      if (!match || used.has(match.id)) return [];
+      used.add(match.id);
+      confirmedOptimistic.add(message.id);
+      return [match.id];
+    });
+    if (confirmed.length) confirmedDeliveryIds = { ...confirmedDeliveryIds, ...Object.fromEntries(confirmed.map(id => [id, true] as const)) };
+    const usedQueued = new Set<string>();
+    const remaining = optimisticMessages.filter(message => {
+      if (confirmedOptimistic.has(message.id)) return false;
+      const queued = messageQueued(message, next, usedQueued);
+      if (!queued) return true;
+      usedQueued.add(queued.id);
+      return false;
+    });
+    if (remaining.length !== optimisticMessages.length) optimisticMessages = remaining.map(message => ({...message, baselineIds: new Set([...message.baselineIds, ...used]), baselineQueuedIds: new Set([...message.baselineQueuedIds, ...usedQueued])}));
   }
   async function reload() {
     const ticket = ++snapshotIssued;
@@ -1206,8 +1382,10 @@
     }
   }
   function debouncedReload() {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(reload, 125);
+    // A busy native event stream must not starve polling by resetting this
+    // deadline for every event. bridge.getSnapshot coalesces the actual read.
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => { refreshTimer = undefined; void reload(); }, 125);
   }
   onMount(() => {
     if(!embedded)try{const saved=JSON.parse(localStorage.getItem('monitter.sidebar-order.v1')??'{}');if(saved && typeof saved==='object' && !Array.isArray(saved))sidebarOrder=Object.fromEntries(Object.entries(saved).filter(([,ids])=>Array.isArray(ids)&&ids.every(id=>typeof id==='string')) as [string,string[]][]);}catch{/* Use original order if storage is unavailable. */}
@@ -1350,6 +1528,9 @@
   }
   export function openTerminalTab(id:string) {
     if(!$terminalSessions[id])return;
+    // Opening a terminal is navigation just like opening a chat. Keep the
+    // mobile sidebar from remaining over the newly-selected pane.
+    mobileMain = true;
     saveCurrentDraft();if(!openTerminalIds.includes(id))openTerminalIds=[...openTerminalIds,id];
     rememberTab({kind:'terminal',id});
     selectedTerminalId=id;selectedEmptyId=null;selectedTaskId=null;selectedChannelId=null;currentDraftId=null;
@@ -1382,6 +1563,7 @@
   }
   function routeTerminal(id:string) {
     if(embedded){onTerminalSelect?.(id);return;}
+    mobileMain = true;
     const owner=paneIds(layout).find(candidate=>(candidate==='main'?allTabs():paneRefs[candidate]?.allTabs()??[]).some(tab=>tab.kind==='terminal'&&tab.id===id));
     if (!owner) {
       const scope = Object.entries(workspaceSet?.workspaces ?? {}).find(([key, workspace]) => key !== activeWorkspaceKey && workspace.terminals.some(terminal => terminal.id === id))?.[0] as WorkspaceKey | undefined;
@@ -1481,7 +1663,7 @@
   }
   export function openEmptyTab() {
     saveCurrentDraft();
-    const id = crypto.randomUUID();
+    const id = localUuid();
     openEmptyIds = [...openEmptyIds, id];
     selectedEmptyId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; currentDraftId = null;
     focusedAgentId = null; focusedProjectId = null; composer = ''; pane = 'empty';
@@ -1493,7 +1675,7 @@
   }
   export function openTaskComposer(parentId: string | null = null, agentId: string | null = null, projectId?: string | null) {
     saveCurrentDraft();
-    const id = crypto.randomUUID();
+    const id = localUuid();
     const scopedProject = activeWorkspaceKey.startsWith('project:') ? activeWorkspaceKey.slice(8) === 'unassigned' ? '' : activeWorkspaceKey.slice(8) : '';
     const scopedAgent = activeWorkspaceKey.startsWith('agent:') ? activeWorkspaceKey.slice(6) : '';
     const project = projectId === undefined ? (parentId ? snapshot?.tasks.find(task=>task.id===parentId)?.projectId ?? '' : focusedProjectId ?? selectedTask?.projectId ?? scopedProject) : projectId ?? '';
@@ -1534,6 +1716,7 @@
     focusedAgentId=null;focusedProjectId=null;composer='';modal=null;palette=null;
   }
   function routeSettings(category?:string) {
+    mobileMain = true;
     if(embedded){onSettingsSelect?.(category);return;}
     const owner=paneIds(layout).find(id=>(id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).some(tab=>tab.kind==='settings')) ?? activePaneId;
     activePaneId=owner;
@@ -1657,7 +1840,7 @@
       if(ids.length<2)return;
       const prune=(node:PaneLayout):PaneLayout|null=>{if(!('axis'in node))return node.id===current?null:node;const first=prune(node.first),second=prune(node.second);return first&&second?{...node,first,second}:first??second;};
       const rest=prune(layout)!;const leading=command.edge==='left'||command.edge==='top';
-      await restoreLayout({id:crypto.randomUUID(),axis:command.edge==='left'||command.edge==='right'?'horizontal':'vertical',ratio:.5,first:leading?{id:current}:rest,second:leading?rest:{id:current}});return;
+      await restoreLayout({id:localUuid(),axis:command.edge==='left'||command.edge==='right'?'horizontal':'vertical',ratio:.5,first:leading?{id:current}:rest,second:leading?rest:{id:current}});return;
     }
     if(command.kind==='resize-pane') {
       let nearest:{node:Extract<PaneLayout,{axis:string}>;first:boolean}|undefined;
@@ -1732,9 +1915,56 @@
     const taskId = selectedTask.id;
     const sentDraft = composer;
     const key = `task:${taskId}`, attachmentIds=currentAttachments.map(item=>item.id);
-    setComposerPending(key, true);
-    try { const result = await run(() => bridge.sendMessage(taskId, operatorPrompt(taskId, promptText(sentDraft)),attachmentIds)); if (result) {clearSentDraft(key, sentDraft);clearAttachments(key,attachmentIds);}  }
-    finally { setComposerPending(key, false); }
+    const sentText = operatorPrompt(taskId, promptText(sentDraft));
+    startOptimisticSend({ kind: 'task', targetId: taskId, text: sentText, displayText: sentDraft, attachments: [...currentAttachments], baselineIds: new Set(messages.map(message => message.id)), baselineQueuedIds: new Set((snapshot?.queuedMessages ?? []).filter(message => message.taskId === taskId).map(message => message.id)) }, () => bridge.sendMessage(taskId, sentText, attachmentIds));
+    // Capture and clear synchronously: typing a follow-up must never mutate the
+    // request currently in flight.
+    clearSentDraft(key, sentDraft); clearAttachments(key, attachmentIds);
+  }
+  function beginOptimisticMessage(input: Omit<OptimisticMessage, 'id' | 'createdAt' | 'status'>) {
+    const message: OptimisticMessage = { ...input, id: `optimistic:${localUuid()}`, createdAt: Date.now(), status: 'sending' };
+    optimisticMessages = [...optimisticMessages, message];
+    scrollRevision += 1;
+    return message;
+  }
+  function updateOptimisticMessage(id: string, patch: Partial<OptimisticMessage>) {
+    optimisticMessages = optimisticMessages.map(message => message.id === id ? { ...message, ...patch } : message);
+  }
+  async function refreshForOptimisticRetry(message: OptimisticMessage) {
+    try {
+      const ticket = ++snapshotIssued;
+      const fresh = await bridge.getSnapshot();
+      // Reconcile with this exact fresh response even if a later event already
+      // owns the visual snapshot ticket.
+      reconcileOptimisticMessages(fresh);
+      applySnapshot(fresh, ticket);
+      return !optimisticMessages.some(item => item.id === message.id);
+    } catch (reason) {
+      updateOptimisticMessage(message.id, { status: 'not-confirmed', error: `Could not refresh before retrying: ${text(reason)}` });
+      return true;
+    }
+  }
+  function startOptimisticSend(input: Omit<OptimisticMessage, 'id' | 'createdAt' | 'status'>, action: () => Promise<Snapshot | { accepted: true }>, existing?: OptimisticMessage) {
+    const message = existing ?? beginOptimisticMessage(input);
+    updateOptimisticMessage(message.id, { status: 'sending', error: undefined });
+    setComposerPending(`${message.kind}:${message.targetId}`, true);
+    void action().then(result => {
+      if (isSnapshot(result)) applySnapshot(result, ++snapshotIssued);
+      if (optimisticMessages.some(item => item.id === message.id)) updateOptimisticMessage(message.id, { status: 'sent' });
+    }).catch(reason => {
+      // The transport may have failed after the backend accepted the command.
+      // Do not claim it was not sent and never automatically submit again.
+      updateOptimisticMessage(message.id, { status: 'not-confirmed', error: text(reason) });
+    }).finally(() => setComposerPending(`${message.kind}:${message.targetId}`, false));
+  }
+  async function retryOptimisticMessage(id: string) {
+    const message = optimisticMessages.find(item => item.id === id);
+    if (!message || message.status === 'sending') return;
+    const confirmedOrUnknown = await refreshForOptimisticRetry(message);
+    if (confirmedOrUnknown) return;
+    if (message.kind === 'task') startOptimisticSend(message, () => bridge.sendMessage(message.targetId, message.text, message.attachments.map(item => item.id)), message);
+    else if (message.kind === 'channel') startOptimisticSend(message, () => bridge.sendChannelMessage(message.targetId, message.text, message.recipientIds ?? [], message.attachments.map(item => item.id)), message);
+    else updateOptimisticMessage(message.id, { status: 'not-confirmed', error: 'The chat was not created. Keep or edit this draft, then send it again.' });
   }
   function clearSentDraft(key: string, sentDraft: string) {
     if (currentDraftKey() === key) scrollRevision += 1;
@@ -1757,6 +1987,10 @@
     const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId, cwd: taskCwd };
     const values = { modelSettings:draftModelSettings, sandbox:draftSandbox, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null, cwd: captured.projectId ? null : captured.cwd.trim() || null };
     taskDrafts[draftId] = { ...draft, ...captured };
+    // The draft itself retains a recovery copy if task creation fails, while
+    // the visible composer is ready for the next thought immediately.
+    composer = '';
+    const optimistic = beginOptimisticMessage({ kind: 'draft', targetId: draftId, text: textToSend, displayText: captured.text, attachments: [...currentAttachments], baselineIds: new Set(), baselineQueuedIds: new Set() });
     let taskId = draft.createdTaskId;
     busy = true; error = ''; notice = '';
     setComposerPending(`draft:${draftId}`, true);
@@ -1764,11 +1998,22 @@
       if (!taskId) {
         const task = await bridge.createTask(values);
         taskId = task.id;
+        // LAN/native create_task returns the task before the next changed event.
+        // Insert it locally so the first optimistic bubble has a transcript to
+        // render in rather than leaving the user on an empty draft.
+        if (snapshot && !snapshot.tasks.some(item => item.id === task.id)) applySnapshot({ ...snapshot, tasks: [...snapshot.tasks, task] }, ++snapshotIssued, false);
         if (taskDrafts[draftId]) taskDrafts[draftId] = { ...taskDrafts[draftId], createdTaskId: taskId };
       }
-      const result = await bridge.sendMessage(taskId, textToSend,attachmentIds);
+      if (!taskId) throw new Error('Task creation did not return an ID.');
+      const resolvedTaskId = taskId;
+      const baselineIds = new Set(snapshot?.messages.filter(message => message.taskId === resolvedTaskId).map(message => message.id) ?? []);
+      updateOptimisticMessage(optimistic.id, { kind: 'task', targetId: resolvedTaskId, baselineIds, baselineQueuedIds: new Set((snapshot?.queuedMessages ?? []).filter(message => message.taskId === resolvedTaskId).map(message => message.id)) });
+      const migrated = optimisticMessages.find(message => message.id === optimistic.id) ?? optimistic;
+      // Task creation itself is still a normal foreground operation. Once a
+      // task exists, the first message follows the same non-blocking path as
+      // every subsequent message.
+      startOptimisticSend(migrated, () => bridge.sendMessage(resolvedTaskId, textToSend, attachmentIds), migrated);
       clearAttachments(`draft:${draftId}`,attachmentIds);
-      if (isSnapshot(result)) applySnapshot(result, ++snapshotIssued);
       const latestText = currentDraftId === draftId ? composer : taskDrafts[draftId]?.text ?? captured.text;
       if (latestText !== captured.text) drafts[`task:${taskId}`] = latestText;
       const wasOpen = openDraftIds.includes(draftId);
@@ -1782,7 +2027,11 @@
         const created = snapshot?.tasks.find(task => task.id === taskId);
         if (created) openTask(created);
       }
-    } catch (reason) { error = text(reason); }
+    } catch (reason) {
+      error = text(reason);
+      updateOptimisticMessage(optimistic.id, { status: 'not-confirmed', error: text(reason) });
+      if (currentDraftId === draftId && !composer) composer = captured.text;
+    }
     finally { busy = false; setComposerPending(`draft:${draftId}`, false); }
   }
 
@@ -1797,6 +2046,7 @@
     openSettings();settingsCategory='agents';
   }
   function routeAgentSettings(draft:Agent) {
+    mobileMain = true;
     modal=null;
     if(embedded){onAgentSettingsSelect?.(draft);return;}
     const owner=paneIds(layout).find(id=>(id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).some(tab=>tab.kind==='settings'))??activePaneId;
@@ -1809,7 +2059,7 @@
   async function saveAgent() {
     if(!agentDraft)return;
     const oldId=agentDraft.id;
-    const submitted={...agentDraft,id:oldId||crypto.randomUUID(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean)};
+    const submitted={...agentDraft,id:oldId||localUuid(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean)};
     if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(snapshot?.agents.find(agent=>agent.id===submitted.id)??submitted));}
   }
   async function saveHost() {
@@ -1845,6 +2095,7 @@
     }
   }
   function openProject(project: Project) {
+    mobileMain = true;
     saveCurrentDraft();
     currentDraftId = null;
     selectedTaskId = null;
@@ -1864,9 +2115,13 @@
     }
   }
   async function setSidebarView(view: SidebarView) {
-    if (!snapshot || busy) return;
-    if (view === 'activity' && !await switchWorkspace('all')) return;
-    await run(()=>saveSettingsPatch({sidebarView:view}));
+    if (!snapshot || busy || sidebarView === view) return;
+    // The view switcher must first commit its own direct preference action.
+    // Waiting for a workspace restore before doing so leaves the first
+    // activation pending. Activity still restores the all-workspaces context,
+    // but only after the selected view is durable and visible.
+    const saved = await run(()=>saveSettingsPatch({sidebarView:view}));
+    if (saved && view === 'activity') void switchWorkspace('all');
   }
   async function moveTaskProject(taskId: string, projectId: string) {
     await run(()=>bridge.setTaskProject(taskId, projectId || null), 'Chat project updated.');
@@ -1929,6 +2184,7 @@
     }
   }
   function openAgent(agent: Agent) {
+    mobileMain = true;
     saveCurrentDraft();
     currentDraftId = null;
     selectedTaskId = null;
@@ -2035,7 +2291,22 @@
   function dismissMonitterMenu(event: PointerEvent) {
     if (!(event.target instanceof Element) || !event.target.closest('.task-overflow')) taskMenu = false;
     if (!(event.target instanceof Element) || !event.target.closest('.agent-rail, .rail-chats')) railAgentId = null;
+    if (!(event.target instanceof Element) || !event.target.closest('.tab-picker')) tabPickerOpen = false;
   }
+  function selectTabPicker(select: () => void) {
+    select();
+    tabPickerOpen = false;
+  }
+  const currentTabLabel = $derived.by(() => {
+    if (pane === 'task') return currentDraftId ? taskDrafts[currentDraftId]?.title || 'New chat' : selectedTask?.title || 'Chat';
+    if (pane === 'channel') return activeChannel?.name || 'Channel';
+    if (pane === 'terminal') return selectedTerminal?.title || 'Terminal';
+    if (pane === 'empty') return 'New tab';
+    if (pane === 'settings') return 'Settings';
+    if (pane === 'agent') return focusedAgent?.name || 'Agent';
+    if (pane === 'project') return focusedProject?.name || 'Project';
+    return 'Workspace';
+  });
   function focusAdjacentPane(direction: 'left' | 'right' | 'up' | 'down') {
     if (embedded) return false;
     const current = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"]`);
@@ -2103,9 +2374,10 @@
   }
   function handleShortcuts(event: KeyboardEvent) {
     tabIndexModifier = macPlatform ? event.metaKey : event.ctrlKey;
+    if (event.key === 'Escape' && tabPickerOpen) { event.preventDefault(); tabPickerOpen = false; return; }
     if (!embedded && tabIndexModifier && !event.altKey && !event.shiftKey && !event.isComposing && /^[1-9]$/.test(event.key) && !document.querySelector('[role="dialog"]')) {
       event.preventDefault();
-      const buttons=document.querySelectorAll<HTMLButtonElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"] .tabs > .tab-entry > button.tab`);
+      const buttons=document.querySelectorAll<HTMLButtonElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"] .tabs > .tab-picker-list > .tab-entry > button.tab`);
       buttons[Number(event.key)-1]?.click();
       return;
     }
@@ -2328,9 +2600,9 @@
     if (busy || handleSlashSubmit()) return;
     if (!activeChannel || !canSend || !effectiveRecipients.length) { error = "Choose at least one agent to receive this channel message."; return; }
     const channelId = activeChannel.id, sentDraft = composer, agentIds = [...effectiveRecipients], key = `channel:${channelId}`, attachmentIds=currentAttachments.map(item=>item.id);
-    setComposerPending(key, true);
-    try { if (await run(() => bridge.sendChannelMessage(channelId, promptText(sentDraft), agentIds,attachmentIds))) {clearSentDraft(key, sentDraft);clearAttachments(key,attachmentIds);}  }
-    finally { setComposerPending(key, false); }
+    const sentText = promptText(sentDraft);
+    startOptimisticSend({ kind: 'channel', targetId: channelId, text: sentText, displayText: sentDraft, attachments: [...currentAttachments], recipientIds: agentIds, baselineIds: new Set(activeChannel.messages.map(message => message.id)), baselineQueuedIds: new Set((snapshot?.queuedMessages ?? []).filter(message => message.channelId === channelId).map(message => message.id)) }, () => bridge.sendChannelMessage(channelId, sentText, agentIds, attachmentIds));
+    clearSentDraft(key, sentDraft); clearAttachments(key, attachmentIds);
   }
 </script>
 
@@ -2360,10 +2632,10 @@
   {/if}
 {/snippet}
 
-{#snippet sidebarChat(task: Task, detail = false)}
+{#snippet sidebarChat(task: Task, detail = false, recent = false)}
   {@const sortGroup=sidebarView==='activity'?'':sidebarView==='projects'?`project-chats:${task.projectId??'unassigned'}`:`agent-chats:${task.agentId}`}
   {@const agent = snapshot?.agents.find(item=>item.id===task.agentId)}
-  <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
+  <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:recent class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
     <button class="task-select" onclick={() => {
       const target: WorkspaceKey = sidebarView === 'standard' ? `agent:${task.agentId}` : sidebarView === 'projects' ? `project:${task.projectId ?? 'unassigned'}` : activeWorkspaceKey;
       if (target !== activeWorkspaceKey) void switchWorkspace(target).then(changed => { if (changed) routeTask(task); }); else routeTask(task);
@@ -2378,6 +2650,16 @@
       <button aria-label={`Archive chat ${task.title}`} title="Archive chat" disabled={busy || task.status === 'running'} onclick={()=>archiveTask(task)}><Archive size={12}/></button>
     </div>
   </div>
+{/snippet}
+
+{#snippet sidebarChats(tasks: Task[], detail = false, empty = 'No chats yet')}
+  {#each tasks.filter(task => sidebarOpenTaskIds.has(task.id)) as task (task.id)}{@render sidebarChat(task, detail)}{/each}
+  {@const recentTasks = tasks.filter(task => !sidebarOpenTaskIds.has(task.id))}
+  {#if recentTasks.length}
+    <div class="recents-divider"><Clock size={12} aria-hidden="true"/>Recents:</div>
+    {#each recentTasks as task (task.id)}{@render sidebarChat(task, detail, true)}{/each}
+  {/if}
+  {#if !tasks.length}<p class="empty-tree">{empty}</p>{/if}
 {/snippet}
 
 {#snippet attachmentTools()}
@@ -2398,6 +2680,16 @@
   {#if agent}<span class="avatar message-avatar" title={agent.name}>{@render avatarVisual(agent, 12)}</span>{/if}
 {/snippet}
 
+{#snippet deliveryStatus(message: OptimisticMessage)}
+  <span class="delivery-status" data-delivery-status={message.status} role="status">
+    {message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'}
+  </span>
+  {#if message.status === 'not-confirmed'}
+    <button class="delivery-retry" onclick={() => retryOptimisticMessage(message.id)}>Retry</button>
+    {#if message.error}<small class="delivery-error">{message.error}</small>{/if}
+  {/if}
+{/snippet}
+
 {#snippet agentWaiting(agent: Agent | null | undefined, starting = false)}
   <div class="agent-waiting" role="status" aria-live="polite" aria-label={`${agent?.name ?? 'Agent'} ${starting ? 'is getting ready…' : 'is pondering…'}`}>
     {@render messageAvatar(agent)}
@@ -2410,6 +2702,23 @@
   <button class="icon pane-expand-control" aria-label={label} aria-pressed={focusStep>0} title={focusStep?label:`Expand pane (${modifierLabel}click to fill workspace)`} oncontextmenu={event=>{if(event.ctrlKey){event.preventDefault();expandTab(true)}}} onclick={event=>expandTab(event.metaKey||event.ctrlKey)}>{#if focusStep}<Minimize2 size={15}/>{:else}<MoveDiagonal size={15}/>{/if}</button>
 {/snippet}
 
+{#snippet workspaceContext()}
+  <div class="workspace-context" data-workspace-context data-workspace-key={activeWorkspaceKey} aria-label={`Current workspace: ${workspaceLabel}`} title={`Workspace: ${workspaceLabel}`}>
+    {#if activeWorkspaceKey.startsWith('agent:')}
+      {@const agent=snapshot?.agents.find(item=>item.id===activeWorkspaceKey.slice(6))}
+      <span class="avatar">{@render avatarVisual(agent, 16)}</span>
+    {:else if activeWorkspaceKey.startsWith('project:') && activeWorkspaceKey.slice(8) !== 'unassigned'}
+      {@const project=projects.find(item=>item.id===activeWorkspaceKey.slice(8))}
+      {@const ProjectIcon=project ? projectIconComponent(project.icon) : Folder}
+      <ProjectIcon size={16} style={project ? `color:${project.color}` : undefined}/>
+    {:else if activeWorkspaceKey === 'project:unassigned'}
+      <Folder size={16}/>
+    {:else}
+      <Activity size={16}/>
+    {/if}
+  </div>
+{/snippet}
+
 {#snippet rightSidebarControl()}
   <button class="icon right-sidebar-control" aria-label={showDetail ? 'Hide right sidebar' : 'Show right sidebar'} title={showDetail ? 'Hide right sidebar' : 'Show right sidebar'} aria-pressed={showDetail} onclick={()=>showDetail=!showDetail}><PanelRight size={16}/></button>
 {/snippet}
@@ -2417,37 +2726,36 @@
 {#snippet workspaceView()}
   <section class="workspace" class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
     <header class="topbar" data-tauri-drag-region>
-      <nav class="tabs" class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
-        {#if overviewOpen}<div class="tab-entry dashboard-tab" class:active={pane==='overview'}>
-          <button class="tab" aria-pressed={pane==='overview'} aria-label="Overview" title="Dashboard" onclick={openOverview}><LayoutDashboard size={16}/></button>
-
-          <button class="close-tab" aria-label="Close dashboard tab" title="Close dashboard tab" onclick={closeOverview}><X size={12}/></button>
-        </div>{/if}
+      {@render workspaceContext()}
+      <nav class="tabs tab-picker" class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
+        <button class="tab-picker-trigger" type="button" aria-expanded={tabPickerOpen} aria-controls={`open-tabs-${paneId}`} onclick={()=>tabPickerOpen=!tabPickerOpen}><span>{currentTabLabel}</span><ChevronDown size={15}/></button>
+        <div class="tab-picker-list" id={`open-tabs-${paneId}`} aria-label="Open tabs">
         {#each orderedTabs() as tab (`${tab.kind}:${tab.id}`)}
           {#if tab.kind === 'draft'}{@const draft=taskDrafts[tab.id]}{#if draft}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={currentDraftId === tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'draft',tab.id)} onpointerdown={event=>startTabPointer(event,'draft',tab.id)} onclick={() => openTaskDraft(draft)}><span class="dot idle"></span><span>{draft.title || 'New chat'}</span></button><button class="close-tab" aria-label="Close draft" onclick={() => closeTaskDraft(tab.id)}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={currentDraftId === tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'draft',tab.id)} onpointerdown={event=>startTabPointer(event,'draft',tab.id)} onclick={() => selectTabPicker(() => openTaskDraft(draft))}><span class="dot idle"></span><span>{draft.title || 'New chat'}</span></button><button class="close-tab" aria-label="Close draft" onclick={() => {closeTaskDraft(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'task'}{@const task=snapshot?.tasks.find(item=>item.id===tab.id)}{#if task}
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
-              <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => openTask(task)} title={task.title}><span class={`dot ${task.status}`}></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
+              <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => selectTabPicker(() => openTask(task))} title={task.title}><span class={`dot ${task.status}`}></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
 
-              <button class="close-tab" aria-label={`Close tab ${task.title}`} onclick={() => closeTaskTab(tab.id)}><X size={12} /></button>
+              <button class="close-tab" aria-label={`Close tab ${task.title}`} onclick={() => {closeTaskTab(tab.id);tabPickerOpen=false;}}><X size={12} /></button>
             </div>
           {/if}
           {:else if tab.kind === 'channel'}{@const channel=snapshot?.channels.find(item=>item.id===tab.id)}{#if channel}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>openChannel(channel)}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview()}}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'terminal'}{@const session=$terminalSessions[tab.id]}{#if session}
-            <div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>openTerminalTab(tab.id)} title={session.cwd}><Terminal size={13}/><span><AnimatedTitle text={session.title} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>closeTerminalTab(tab.id)}><X size={12}/></button></div>
+            <div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><Terminal size={13}/><span><AnimatedTitle text={session.title} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'empty'}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'}}><Plus size={13}/><span>New tab</span></button><button class="close-tab" aria-label="Close empty tab" onclick={()=>closeEmptyTab(tab.id)}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}><Plus size={13}/><span>New tab</span></button><button class="close-tab" aria-label="Close empty tab" onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {:else if tab.kind === 'settings'}
-            <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} onclick={()=>openSettings()}><Settings2 size={13}/><span>Settings</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={closeSettings}><X size={12}/></button></div>
+            <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} onclick={()=>selectTabPicker(()=>openSettings())}><Settings2 size={13}/><span>Settings</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={()=>{closeSettings();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
         {/each}
         {#if pane === "agent" && focusedAgent}<div class="tab-entry active"><button class="tab active" aria-pressed="true"><Bot size={13}/>{focusedAgent.name}</button></div>{/if}
         {#if pane === 'project' && focusedProject}{@const ProjectIcon = projectIconComponent(focusedProject.icon)}<div class="tab-entry active"><button class="tab active" aria-pressed="true"><ProjectIcon size={13} style={`color:${focusedProject.color}`}/>{focusedProject.name}</button></div>{/if}
+        </div>
       </nav>
       <div class="top-actions" data-tauri-drag-region>
         {#if pane==='empty' && (embedded || paneIds(layout).length>1)}<button class="icon" aria-label="Close empty pane" title="Close pane" onclick={closeOverview}><X size={16}/></button>{/if}
@@ -2584,7 +2892,7 @@
           </div>
           </div>
         {/snippet}
-          {#if activeChannel.messages.length}{#each activeChannel.messages as message}<article
+          {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}{#each activeChannel.messages as message}<article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                 class="message"
@@ -2596,10 +2904,16 @@
                       ? "You"
                       : (snapshot.agents.find((a) => a.id === message.agentId)
                           ?.name ?? "Agent")}</span
-                  ><time>{date(message.createdAt)}</time>
+                  ><time>{date(message.createdAt)}</time>{#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
                 </div>
                 <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
-              </article>{/each}{:else}<div class="blank-conversation">
+              </article>{/each}
+              {#each optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel.id) as message (message.id)}
+                <article class="message user optimistic-message" data-delivery-status={message.status}>
+                  <div class="message-meta"><span>You</span><time>{date(message.createdAt)}</time>{@render deliveryStatus(message)}</div>
+                  <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
+                </article>
+              {/each}{:else}<div class="blank-conversation">
               <MessageSquare size={24} />
               <h2>Start this channel</h2>
               <p>
@@ -2654,6 +2968,12 @@
             <label>Project<select class="draft-select" id="task-project" aria-label="Project" bind:value={taskProjectId} onchange={routeChangedDraft} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId}><option value="">No project</option>{#each projects as project}<option value={project.id}>{project.name}</option>{/each}</select></label>
           </div>
           {#if taskFormAgent && !taskProjectId}<label class="task-workspace-editor"><span><Folder size={13}/>Working folder</span><div><input aria-label="Working folder" bind:value={taskCwd} placeholder={inheritedTaskCwd || '/path/to/project'} disabled={busy || !!currentTaskDraft.createdTaskId}/>{#if snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.kind === 'local'}<button class="icon" aria-label="Browse working folder" title="Choose folder" disabled={busy || !!currentTaskDraft.createdTaskId} onclick={browseTaskFolder}><Folder size={15}/></button>{/if}</div></label>{:else if taskFormAgent}<p class="task-workspace-preview"><Folder size={13}/><span><b>{snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.name ?? 'Host'}</b><code>{taskFormCwd}</code></span></p>{/if}
+          {#each optimisticMessages.filter(message => message.kind === 'draft' && message.targetId === currentDraftId) as message (message.id)}
+            <article class="message user optimistic-message" data-delivery-status={message.status}>
+              <div class="message-meta"><span>You</span><time>{date(message.createdAt)}</time>{@render deliveryStatus(message)}</div>
+              <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
+            </article>
+          {/each}
           <div class="composer draft-composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render slashMenu()}
@@ -2701,17 +3021,19 @@
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' ? `tool:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}<RunActivity event={item.value} />
               {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
-              {:else}{@const message = item.value}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
+              {:else}{@const message = item.value}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                   class:system={message.role === "system"}
+                  class:optimistic-message={!!optimistic}
                   class="message"
+                  data-delivery-status={optimistic?.status}
                 >
                   <div class="message-meta">
                     {#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}
                     <span
                       >{senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")}</span
-                    ><time>{date(message.createdAt)}</time>
+                    ><time>{date(message.createdAt)}</time>{#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
                   </div>
                   <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
                 </article>{/if}{/each}{:else if !pendingApprovalRequests.length && !resolvedApprovalRequests.length}<div class="blank-conversation">
@@ -2758,7 +3080,7 @@
             <div class="git-slot" class:hidden={detailTab!=='git' || gitState.repository!==true}>
               <GitPane bind:this={gitPane} taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} onStatus={value=>{gitState=value}}/>
             </div>
-            <div class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError}/></div>
+            <div class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
             <div class="detail-scroll" class:hidden={detailTab==='timeline' || (detailTab==='git' && gitState.repository===true)}>
               <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
               <dl>
@@ -2815,28 +3137,20 @@
   </section>
 {/snippet}
 
-<main class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCollapsed} class:embedded class="app-shell">
-  {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks">
-    <SidebarResize side="left" collapsed={sidebarCollapsed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>
-    <div class="brand" class:scrolled={sidebarScrolled} data-tauri-drag-region>
-      {#if !sidebarCollapsed}<strong>monitter</strong>{/if}
-      {#if !sidebarCollapsed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
+<main use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
+  {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
+    {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
+    <div class="brand" class:scrolled={sidebarScrolled}>
+      {#if !sidebarCompressed}<strong data-tauri-drag-region>monitter</strong>{/if}
+      {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
         {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} disabled={busy || !bridge.available || !snapshot} onclick={()=>{void setSidebarView(view.id)}}><view.icon size={15}/></button>{/each}
       </div>{/if}
     </div>
-    {#if !sidebarCollapsed}
+    {#if !sidebarCompressed}
     <nav class="side-scroll" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
-      <section class="workspace-scopes" aria-label="Desktop workspace" data-workspace-picker>
-        <p class="section-label"><span>WORKSPACE</span></p>
-        <select aria-label="Switch desktop workspace" value={activeWorkspaceKey} onchange={chooseWorkspace} disabled={workspaceTransition}>
-          <option value="all">All activity</option>
-          <optgroup label="Agents">{#each snapshot?.agents ?? [] as agent}<option value={`agent:${agent.id}`}>{agent.name}</option>{/each}</optgroup>
-          <optgroup label="Projects">{#each projects as project}<option value={`project:${project.id}`}>{project.name}</option>{/each}<option value="project:unassigned">No project</option></optgroup>
-        </select>
-        {#if globalPendingApprovals.length}<div class="workspace-approval-list" aria-label="Pending approvals across workspaces">
-          {#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span><span>Approval · {item.task.title}</span></button>{/each}
-        </div>{/if}
-      </section>
+      {#if globalPendingApprovals.length}<div class="workspace-approval-list" aria-label="Pending approvals across workspaces">
+        {#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span><span>Approval · {item.task.title}</span></button>{/each}
+      </div>{/if}
       {#if sidebarView === 'standard'}
       <div class="section-label">
         <span>AGENTS</span><button
@@ -2875,7 +3189,7 @@
               >
             </div>
             <div class="task-tree" id={`agent-chats-${agent.id}`} hidden={collapsedAgents[agent.id]}>
-              {#each agentTasks as task}{@render sidebarChat(task)}{/each}{#if !agentTasks.length}<p class="empty-tree">No chats yet</p>{/if}
+              {@render sidebarChats(agentTasks)}
             </div>
           </section>{/each}{:else}<div class="side-empty">
           <Bot size={18} />
@@ -2906,7 +3220,7 @@
               <button class="quiet" aria-label={`Edit project ${project.name}`} title="Edit project" onclick={()=>editProject(project)}><MoreHorizontal size={14}/></button>
             </div>
             {#if !collapsedProjects[project.id]}<div class="task-tree">
-              {#each projectTasks as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}
+              {@render sidebarChats(projectTasks, true)}
             </div>{/if}
           </section>
         {:else}<p class="view-hint">Group chats from any agent in a project.</p>{/each}
@@ -2915,7 +3229,7 @@
             {#if collapsedProjects.unassigned}<ChevronRight size={13}/>{:else}<ChevronDown size={13}/>{/if}<Folder size={14}/><span>No project</span><small>{activityTasks.filter(task=>!task.projectId).length}</small>
           </button>
           {#if !collapsedProjects.unassigned}<div class="task-tree">
-            {#each sidebarSorted(activityTasks.filter(task=>!task.projectId),'project-chats:unassigned') as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">All chats are organised.</p>{/each}
+            {@render sidebarChats(sidebarSorted(activityTasks.filter(task=>!task.projectId),'project-chats:unassigned'), true, 'All chats are organised.')}
           </div>{/if}
         </section>
       {/if}
@@ -2938,9 +3252,6 @@
         >{/each}
     </nav>
     {:else}<nav class="agent-rail" aria-label="Agents" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
-      <select class="rail-workspace-picker" aria-label="Switch desktop workspace" value={activeWorkspaceKey} onchange={chooseWorkspace} disabled={workspaceTransition} title={`Workspace: ${workspaceLabel}`}>
-        <option value="all">All activity</option>{#each snapshot?.agents ?? [] as agent}<option value={`agent:${agent.id}`}>{agent.name}</option>{/each}{#each projects as project}<option value={`project:${project.id}`}>{project.name}</option>{/each}<option value="project:unassigned">No project</option>
-      </select>
       {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
       {#each sidebarSorted(snapshot?.agents ?? [],'agents') as agent}<button use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}} class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
         <span class="avatar">{@render avatarVisual(agent, 15)}</span>
@@ -2951,7 +3262,7 @@
     </nav>{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
-      <div class="rail-chat-list">{#each sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`) as task (task.id)}{@render sidebarChat(task)}{:else}<p class="detail-empty">No chats yet.</p>{/each}</div>
+      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
     <footer class="sidebar-footer" aria-label="Workspace controls">
@@ -2961,7 +3272,8 @@
       <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
     </footer>
   </aside>{/if}
-  {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid">
+  {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
+    {#if mobileSidebar}<button class="mobile-back" onclick={()=>{mobileMain=false;railAgentId=null;}}>← Back to chats</button>{/if}
     <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
         <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} workspaceKey={activeWorkspaceKey}
@@ -3456,17 +3768,13 @@
   }
   .sidebar-views { display: flex; flex: none; gap: 2px; margin-left: auto; }
   .view-toggle { display: grid; place-items: center; width: 24px; height: 26px; padding: 0; border-radius: 5px; color: var(--muted); }
-  .view-toggle:hover { background: var(--soft); color: var(--ink); }
+  @media (hover:hover) and (pointer:fine) { .view-toggle:hover { background: var(--soft); color: var(--ink); } }
   .view-toggle[aria-pressed="true"] { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
   .project-group { margin: 5px 0 12px; }
-  .workspace-scopes { display:grid; gap:7px; margin:4px 0 14px; padding:0 2px 11px; border-bottom:1px solid var(--line); }
-  .workspace-scopes .section-label { margin:0; }
-  .workspace-scopes select { width:100%; min-width:0; padding:7px 8px; border:1px solid var(--line); border-radius:6px; color:var(--ink); background:var(--panel); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); }
-  .workspace-approval-list { display:grid; gap:4px; }
+  .workspace-approval-list { display:grid; gap:4px; margin:2px 2px 13px; padding-bottom:11px; border-bottom:1px solid var(--line); }
   .workspace-approval { display:flex; align-items:center; gap:6px; min-width:0; padding:5px 4px; border:0; border-radius:5px; color:var(--ink); background:color-mix(in srgb,var(--accent) 8%,transparent); text-align:left; font-size:calc(10px * var(--interface-font-ratio, 1)); }
   .workspace-approval > span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .rail-workspace-picker { width:44px; height:28px; padding:0; border:1px solid var(--line); border-radius:5px; color:var(--ink); background:var(--panel); font-size:10px; }
   .approval-badge { display:inline-flex; align-items:center; justify-content:center; margin-left:5px; min-width:16px; padding:1px 4px; border-radius:8px; color:var(--accent-ink); background:color-mix(in srgb,var(--accent) 18%,transparent); font-size:10px; }
   .agent-name[aria-pressed="true"] { color:var(--accent-ink); }
   .rail-approvals { display:grid; gap:4px; }
@@ -3534,8 +3842,24 @@
   }
   .agent-avatar-toggle { position:relative; padding:0; border:0; overflow:hidden; cursor:pointer; }
   .avatar-toggle-overlay { position:absolute; inset:0; display:grid; place-items:center; background:rgba(0,0,0,.75); color:#fff; opacity:0; pointer-events:none; border-radius:inherit; }
-  .agent-avatar-toggle:hover .avatar-toggle-overlay, .agent-avatar-toggle:focus-visible .avatar-toggle-overlay { opacity:1; }
+  .agent-avatar-toggle:focus-visible .avatar-toggle-overlay { opacity:1; }
+  @media (hover:hover) and (pointer:fine) { .agent-avatar-toggle:hover .avatar-toggle-overlay { opacity:1; } }
   .task-tree[hidden] { display:none; }
+  .task-row.recent { opacity:.65; }
+  .task-row.recent:focus-within { opacity:1; }
+  @media (hover:hover) and (pointer:fine) { .task-row.recent:hover { opacity:1; } }
+  .recents-divider { display:flex; align-items:center; gap:8px; margin:9px 8px 5px; color:var(--muted); font-size:11px; }
+  .recents-divider::after { content:''; flex:1; height:1px; background:var(--line); }
+  .agent-group > .task-tree > .recents-divider { position:relative; margin-left:calc(var(--thread-axis) + 8px); }
+  .agent-group > .task-tree > .recents-divider::before {
+    content:''; position:absolute; pointer-events:none;
+    left:-8.5px; width:1px; top:-9px; bottom:-5px; background:var(--line);
+  }
+  .recents-divider :global(svg) { flex:none; }
+  .agent-group > .task-tree > .recents-divider :global(svg) {
+    position:absolute; left:-8px; top:50%; transform:translate(-50%,-50%);
+    z-index:1; background:var(--sidebar); border-radius:50%;
+  }
   .avatar.small {
     width: 20px;
     height: 20px;
@@ -3609,7 +3933,8 @@
   .chat-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-meta { font-size: calc(9.5px * var(--interface-font-ratio, 1)); color: var(--muted); }
   .chat-actions { display:flex; align-items:center; flex:none; gap:1px; opacity:0; pointer-events:none; }
-  .task-row:hover .chat-actions, .task-row:focus-within .chat-actions { opacity:1; pointer-events:auto; }
+  .task-row:focus-within .chat-actions { opacity:1; pointer-events:auto; }
+  @media (hover:hover) and (pointer:fine) { .task-row:hover .chat-actions { opacity:1; pointer-events:auto; } }
   .chat-actions button { display:grid; place-items:center; width:20px; height:22px; padding:0; color:var(--muted); border-radius:4px; }
   .chat-actions button:hover { background:var(--soft); color:var(--ink); }
   .task-row small { display:none; }
@@ -3668,6 +3993,39 @@
     font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .pane-grid { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+  .app-shell.mobile-navigation:not(.embedded) {
+    display:flex; flex-direction:column; position:fixed; left:0;
+    top:var(--mobile-viewport-top,0px); width:100%;
+    height:100dvh; height:var(--mobile-viewport-height,100dvh);
+  }
+  .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid {
+    position:absolute; inset:0; width:100%; box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+    transition:transform .24s cubic-bezier(.22,.61,.36,1), visibility 0s .24s;
+    background:var(--paper);
+  }
+  .mobile-navigation > .sidebar { border-right:0; transform:translateX(0); background:var(--sidebar); }
+  .mobile-navigation > .pane-grid { flex-direction:column; transform:translateX(100%); visibility:hidden; }
+  .mobile-navigation.mobile-main > .sidebar { transform:translateX(-100%); visibility:hidden; }
+  .mobile-navigation.mobile-main > .pane-grid { transform:translateX(0); visibility:visible; transition-delay:0s; }
+  .mobile-navigation:not(.mobile-main) > .sidebar { visibility:visible; transition-delay:0s; }
+  .mobile-navigation :global(textarea), .mobile-navigation :global(input:not([type=checkbox]):not([type=radio]):not([type=range])) {
+    font-size:max(16px,var(--chat-font-size,13px));
+  }
+  .mobile-navigation :global(.composer) { max-height:none; }
+  .mobile-navigation :global(.composer textarea) { min-height:36px; max-height:min(120px,20dvh); resize:none; }
+  .mobile-navigation:global([data-keyboard-composer=true]) { --pane-tabbar-height:36px; }
+  .mobile-navigation:global([data-keyboard-composer=true]) .mobile-back { padding-top:6px; padding-bottom:6px; }
+  .mobile-navigation:global([data-keyboard-composer=true]) :global(.pane-task-header) { display:none; }
+  .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-layout) { padding:8px 12px; align-content:start; mask-image:none; -webkit-mask-image:none; }
+  .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-content > :not(.composer)) { display:none; }
+  .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-composer.composer) { width:100%; margin:0; }
+  .mobile-navigation:global([data-keyboard-composer=true]) :global(.composer textarea) { height:52px; min-height:36px; max-height:72px; }
+  .mobile-navigation .sidebar-footer { bottom:env(safe-area-inset-bottom,0px); }
+  @media (prefers-reduced-motion:reduce) {
+    .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid { transition:none; }
+  }
+  .mobile-back { flex:none; text-align:left; padding:12px 16px; border:0; border-bottom:1px solid var(--line); background:var(--sidebar); color:var(--accent-ink); font:inherit; cursor:pointer; }
   .settings-surface { container-type:inline-size; flex:1; min-width:0; min-height:0; overflow:hidden; display:flex; }
   .settings-surface.settings-hidden { display:none; }
   .pane-expand-control { flex:none; }
@@ -3697,6 +4055,8 @@
     border-bottom: 0;
     background: linear-gradient(var(--line), var(--line)) left bottom / 100% 1px no-repeat, var(--sidebar);
   }
+  .workspace-context { display:grid; place-items:center; flex:none; width:30px; padding-bottom:.5em; color:var(--muted); }
+  .workspace-context .avatar { width:24px; height:24px; }
   .top-actions {
     display: flex;
     align-items: center;
@@ -3959,6 +4319,8 @@
     overscroll-behavior: contain;
     scrollbar-width: none;
   }
+  .tab-picker-trigger { display:none; }
+  .tab-picker-list { display:contents; }
   .tab {
     display: flex;
     align-items: center;
@@ -3984,12 +4346,30 @@
   .tab span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tab-entry .tab { max-width: 210px; padding-right:31px; }
   .close-tab { position:absolute; z-index:2; right:3px; top:50%; display:grid; place-items:center; width:22px; height:24px; transform:translateY(-50%); color:var(--muted); border-radius:4px; opacity:0; pointer-events:none; transition:opacity .12s ease; }
-  .tab-entry:hover .close-tab, .tab-entry:focus-within .close-tab { opacity:1; pointer-events:auto; }
+  .tab-entry:focus-within .close-tab { opacity:1; pointer-events:auto; }
+  @media (hover:hover) and (pointer:fine) { .tab-entry:hover .close-tab { opacity:1; pointer-events:auto; } }
   .close-tab:hover, .tab:hover { background: var(--soft); }
   .tab.active:hover, .tab-entry.active .tab:hover { background: var(--paper); }
   .terminal-tab.active, .terminal-tab.active .tab:hover { background: var(--terminal-background); }
   .terminal-tab.active .tab, .terminal-tab.active .close-tab { color: var(--terminal-foreground); }
   .terminal-tab.active .close-tab:hover { background: #252a31; }
+  @container workspace-pane (max-width: 620px) {
+    .tabs.tab-picker { position:relative; overflow:visible; min-width:0; }
+    .tab-picker-trigger { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; min-width:0; padding:0 8px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--panel); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-align:left; }
+    .tab-picker-trigger > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tab-picker-trigger :global(svg) { flex:none; transition:transform .16s ease; }
+    .tab-picker-open .tab-picker-trigger :global(svg) { transform:rotate(180deg); }
+    .tab-picker-list { position:absolute; z-index:40; top:calc(100% + 6px); left:0; right:0; display:grid; gap:3px; max-height:min(60vh,420px); padding:5px; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--panel); box-shadow:0 10px 26px #0003; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(-6px); transition:opacity .16s ease,transform .16s ease,visibility .16s step-end; }
+    .tab-picker-open .tab-picker-list { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition:opacity .16s ease,transform .16s ease; }
+    .tab-picker-list .tab-entry { width:100%; min-height:36px; border:1px solid transparent; border-radius:5px; background:transparent; }
+    .tab-picker-list .tab-entry.active { border-color:var(--line); background:var(--soft); }
+    .tab-picker-list .tab { flex:1; width:100%; max-width:none; min-height:34px; padding-right:31px; border:0; border-radius:5px; }
+    .tab-picker-list .close-tab { opacity:1; pointer-events:auto; }
+    .tab-picker-list .tab-entry:hover .tab { background:var(--soft); }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    .tab-picker-trigger :global(svg),.tab-picker-list { transition:none; }
+  }
   .conversation-head {
     background: color-mix(in srgb, var(--paper) 50%, transparent);
     -webkit-backdrop-filter: blur(14px);
@@ -4054,6 +4434,12 @@
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
     font-weight: 400;
   }
+  .optimistic-message { border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+  .delivery-status { color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+  .delivery-status[data-delivery-status="sending"] { color: var(--accent); }
+  .delivery-status[data-delivery-status="not-confirmed"], .delivery-error { color: #bd655b; }
+  .delivery-retry { width: auto; min-height: 20px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--panel); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
+  .delivery-error { display: block; width: 100%; margin-top: 4px; font-size: calc(10px * var(--interface-font-ratio, 1)); font-weight: 400; }
   .message :global(.markdown) {
     font-size: var(--chat-font-size, 13px);
     line-height: var(--chat-line-height, 1.65);
@@ -4648,11 +5034,12 @@
   .task-heading > h1 { margin: 0; }
   .tabs.hide-tab-close .close-tab { display:none; }
   .tabs { counter-reset: tab-index; }
-  .tabs > .tab-entry { counter-increment: tab-index; }
-  .tabs.show-tab-index > .tab-entry::after { content: counter(tab-index); position:absolute; right:5px; top:50%; transform:translateY(-50%); z-index:3; min-width:18px; height:18px; display:grid; place-items:center; border-radius:4px; background:var(--panel); color:var(--accent-ink); border:1px solid var(--line); font:11px var(--mono); pointer-events:none; }
+  .tabs > .tab-picker-list > .tab-entry { counter-increment: tab-index; }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry::after { content: counter(tab-index); position:absolute; right:5px; top:50%; transform:translateY(-50%); z-index:3; min-width:18px; height:18px; display:grid; place-items:center; border-radius:4px; background:var(--panel); color:var(--accent-ink); border:1px solid var(--line); font:11px var(--mono); pointer-events:none; }
   .task-title { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
   .task-title-edit { flex: none; opacity: 0; color: var(--muted); transition: opacity .12s ease, color .12s ease; }
-  .task-heading:hover .task-title-edit, .task-title:focus-within .task-title-edit { opacity: 1; }
+  .task-title:focus-within .task-title-edit { opacity: 1; }
+  @media (hover:hover) and (pointer:fine) { .task-heading:hover .task-title-edit { opacity:1; } }
   .task-title-edit:hover { color: var(--ink); }
   .task-overflow { position: relative; }
   .task-menu { display: grid; min-width: 155px; }
@@ -4660,7 +5047,13 @@
   .agent-identity { margin: 0 0 14px; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
   .agent-identity summary { display: flex; gap: 9px; align-items: center; cursor: pointer; list-style: none; }
   .agent-identity summary::-webkit-details-marker { display: none; }
-  .identity-avatar { width: 32px; height: 32px; }.identity-avatar-button { position:relative; padding:0; border:0; cursor:pointer; overflow:hidden; }.avatar-edit-overlay { position:absolute; inset:0; display:grid; place-items:center; border-radius:inherit; color:#fff; background:rgba(0,0,0,.75); opacity:0; transition:opacity .15s ease; }.identity-avatar-button:hover .avatar-edit-overlay { opacity:1; }
+  .identity-avatar { width: 32px; height: 32px; }.identity-avatar-button { position:relative; padding:0; border:0; cursor:pointer; overflow:hidden; }.avatar-edit-overlay { position:absolute; inset:0; display:grid; place-items:center; border-radius:inherit; color:#fff; background:rgba(0,0,0,.75); opacity:0; transition:opacity .15s ease; pointer-events:none; }
+  @media (hover:hover) and (pointer:fine) { .identity-avatar-button:hover .avatar-edit-overlay { opacity:1; } }
+  @media (hover:none), (pointer:coarse) {
+    .chat-actions, .close-tab, .task-title-edit { opacity:1; pointer-events:auto; }
+    .avatar-toggle-overlay, .avatar-edit-overlay { display:none; }
+    button, .app-shell :global(a), summary { touch-action:manipulation; }
+  }
   .agent-identity b, .agent-identity small { display: block; }
   .agent-identity small { color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); margin-top: 2px; }
   .identity-actions { padding: 9px 0 0 41px; }

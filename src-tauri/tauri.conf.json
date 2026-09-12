@@ -41,6 +41,9 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Your agents, together.",
+    "resources": {
+      "../build/": "lan-web/"
+    },
     "macOS": {
       "minimumSystemVersion": "13.0",
       "signingIdentity": "-"

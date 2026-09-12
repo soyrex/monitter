@@ -83,6 +83,7 @@ while line := sys.stdin.readline():
         })
         send({"jsonrpc": "2.0", "id": request["id"], "result": {"task_id": "task"}})
     elif method == "prompt.submit":
+        (Path(__file__).parent / "prompt.json").write_text(json.dumps(request["params"]))
         send({"jsonrpc": "2.0", "id": request["id"], "result": {"task_id": "task"}})
         event("tool.complete", {
             "tool_id": "tool-1", "name": "computer_use", "summary": "clicked",
@@ -183,7 +184,7 @@ def records(stdout: str) -> list[dict]:
     return [json.loads(line) for line in stdout.splitlines() if line.strip()]
 
 
-def invoke(wrapper: Path, cwd: Path, *extra: str) -> list[dict]:
+def invoke(wrapper: Path, cwd: Path, *extra: str, prompt: str = "Prompt\n") -> list[dict]:
     process = subprocess.run(
         [
             sys.executable,
@@ -196,7 +197,7 @@ def invoke(wrapper: Path, cwd: Path, *extra: str) -> list[dict]:
             str(cwd),
             *extra,
         ],
-        input="Prompt\n",
+        input=prompt,
         text=True,
         capture_output=True,
         timeout=20,
@@ -269,6 +270,28 @@ def test_legacy_minimax_override_selects_its_oauth_provider() -> None:
         assert create["provider"] == "minimax-oauth"
 
 
+def test_multiline_framed_prompt_preserves_peer_context() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "hermes-agent"
+        wrapper = install_fake(root, PROTOCOL_GATEWAY)
+        prompt = "Monitter agent: Hermes\n\nPeer context from Rafa:\nYou are a bungleflop!"
+        frame = f"MONITTER/HERMES/1 {len(prompt.encode('utf-8'))}\n{prompt}"
+        invoke(wrapper, Path(temporary), prompt=frame)
+        submitted = json.loads((root / "tui_gateway" / "prompt.json").read_text(encoding="utf-8"))
+        assert submitted["text"] == prompt
+
+
+def test_gateway_diagnostics_hide_warnings_but_keep_errors() -> None:
+    bridge = bridge_module()
+    assert bridge.useful_gateway_diagnostic(
+        "2026-09-11T14:56:46.955384Z WARN MCP client shutdown failed"
+    ) is None
+    assert bridge.useful_gateway_diagnostic("DEBUG reconnecting") is None
+    assert bridge.useful_gateway_diagnostic("ERROR authentication failed") == (
+        "ERROR authentication failed"
+    )
+
+
 def test_process_group_cancellation_reaches_gateway() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "hermes-agent"
@@ -327,6 +350,8 @@ def main() -> None:
     test_locator_keeps_venv_interpreter()
     test_protocol_create_resume_and_race()
     test_legacy_minimax_override_selects_its_oauth_provider()
+    test_multiline_framed_prompt_preserves_peer_context()
+    test_gateway_diagnostics_hide_warnings_but_keep_errors()
     test_process_group_cancellation_reaches_gateway()
     test_unresponsive_close_is_bounded()
     print("Hermes bridge offline tests passed")

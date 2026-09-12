@@ -1,8 +1,9 @@
 <script lang="ts">
   import { Bot, Users, Check, LoaderCircle, MessageSquare, Palette, ShieldCheck, Type } from "@lucide/svelte";
   import type { Settings } from "$lib/types";
+  import LanSettings from './LanSettings.svelte';
 
-  type Category = "appearance" | "typography" | "behaviour" | "conversation" | "agents" | "directory";
+  type Category = "appearance" | "typography" | "behaviour" | "conversation" | "agents" | "directory" | "lan";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
   type LineHeightKey = "chatLineHeight" | "terminalLineHeight";
@@ -25,6 +26,7 @@
 
   const accents = ["#3f9d6a", "#3978d4", "#8755c7", "#c44c79", "#c27524"];
   const categories: { id: Category; label: string; detail: string; icon: typeof Palette }[] = [
+    { id: "lan", label: "LAN access", detail: "Open Monitter in a browser", icon: ShieldCheck },
     { id: "directory", label: "Agent directory", detail: "Discover skills and responsibilities", icon: Users },
     { id: "agents", label: "Agents", detail: "Identity, harness and skills", icon: Bot },
     { id: "appearance", label: "Appearance", detail: "Theme, accent and panes", icon: Palette },
@@ -92,7 +94,8 @@
         <h1>{categories.find((item) => item.id === activeCategory)?.label}</h1>
       </div>
       <div class="save-state" aria-live="polite">
-        {#if activeCategory === "directory"}<span>Browse available agents</span>
+        {#if activeCategory === "lan"}<span>Local network</span>
+        {:else if activeCategory === "directory"}<span>Browse available agents</span>
       {:else if activeCategory === "agents"}Save changes with Save agent
         {:else if pending > 0}<LoaderCircle class="spin" size={14} /> Saving…
         {:else if saveError}<span class="save-error">Could not save</span>
@@ -105,7 +108,8 @@
       <p class="error" role="alert">{saveError}</p>
     {/if}
 
-    {#if activeCategory === "directory"}
+    {#if activeCategory === "lan"}<LanSettings />
+    {:else if activeCategory === "directory"}
       <div class="section-stack">{#if agentDirectory}{@render agentDirectory()}{/if}</div>
     {:else if activeCategory === "agents"}
       <div class="section-stack">{#if agentEditor}{@render agentEditor()}{/if}</div>

@@ -377,7 +377,10 @@ process = subprocess.Popen(
 )
 assert process.stdin is not None
 process.stdin.write(prompt)
-process.stdin.write(b"\n")
+# Hermes receives a nested length frame because its bridge stays resident for
+# approval replies. Adding a newline would become a stray approval input.
+if not prompt.startswith(b"MONITTER/HERMES/1 "):
+    process.stdin.write(b"\n")
 process.stdin.close()
 
 while process.poll() is None:
@@ -409,6 +412,12 @@ while process.poll() is None:
 raise SystemExit(process.returncode)
 "#;
 
+const HERMES_PROMPT_PREFIX: &str = "MONITTER/HERMES/1 ";
+
+fn hermes_prompt_frame(prompt: &str) -> String {
+    format!("{HERMES_PROMPT_PREFIX}{}\n{prompt}", prompt.len())
+}
+
 fn remote_runner(cli: &str, cwd: &str, args: &[String]) -> String {
     std::iter::once(posix_quote("python3"))
         .chain(std::iter::once(posix_quote("-c")))
@@ -430,6 +439,57 @@ fn isolate_child(command: &mut Command) {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+}
+
+/// Provider stderr is a transport diagnostic channel, not a user activity feed.
+/// CLI harnesses routinely write startup, shutdown, and MCP warnings there even
+/// when a turn succeeds. Keep those out of the conversation, while retaining a
+/// single concise error that can help an operator diagnose a failed run.
+fn provider_stderr_diagnostic(line: &str) -> Option<String> {
+    let text = line.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let upper = text.to_ascii_uppercase();
+    if ["TRACE", "DEBUG", "INFO", "WARN", "WARNING"]
+        .iter()
+        .any(|level| {
+            upper == *level
+                || upper.starts_with(&format!("{level} "))
+                || upper.contains(&format!(" {level} "))
+        })
+    {
+        return None;
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let actionable = [
+        "error",
+        "fatal",
+        "panic",
+        "permission denied",
+        "unauthorized",
+        "authentication",
+        "not found",
+        "could not",
+        "failed",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if !actionable {
+        return None;
+    }
+
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const LIMIT: usize = 600;
+    if compact.chars().count() > LIMIT {
+        Some(format!(
+            "{}…",
+            compact.chars().take(LIMIT).collect::<String>()
+        ))
+    } else {
+        Some(compact)
     }
 }
 
@@ -1066,6 +1126,41 @@ pub fn parse_codex_event(value: &Value) -> Parsed {
         .or_else(|| value.get("text").and_then(Value::as_str))
         .map(str::to_owned);
 
+    // Computer Use returns screenshots as a real MCP result image. This is
+    // distinct from a UserMessage local_image and is safe to associate with
+    // the following assistant response from this same native run.
+    if matches!(item_type, "McpToolCall" | "mcp_tool_call")
+        && matches!(ty, "item.completed" | "item_completed")
+        && matches!(
+            item.get("server").and_then(Value::as_str),
+            Some("cua_repl" | "mcp__cua_repl")
+        )
+        && item.get("tool").and_then(Value::as_str) == Some("js")
+    {
+        if let Some(data) = item
+            .pointer("/result/content")
+            .and_then(Value::as_array)
+            .and_then(|content| {
+                content.iter().find_map(|entry| {
+                    (entry.get("type").and_then(Value::as_str) == Some("image"))
+                        .then(|| entry.get("data").and_then(Value::as_str))
+                        .flatten()
+                })
+            })
+        {
+            return Parsed {
+                native_session_id,
+                assistant: None,
+                event: Some((
+                    "computer_image".into(),
+                    "Computer screenshot".into(),
+                    data.into(),
+                )),
+                failed: false,
+            };
+        }
+    }
+
     if matches!(item_type, "agent_message" | "assistant_message") && ty == "item.completed" {
         return Parsed {
             native_session_id,
@@ -1245,6 +1340,10 @@ impl RunControl {
                 signal_child(child, libc::SIGINT);
             }
         }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 
     /// Sends a provider control frame only while this run still owns an
@@ -1777,6 +1876,11 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             .map(|remote| remote.endpoint.clone());
         let control_stdin = if let Some(mut stdin) = child.stdin.take() {
             let write_result = if remote_supervised {
+                let prompt_frame = if task.provider == "hermes" {
+                    hermes_prompt_frame(&prompt)
+                } else {
+                    prompt.clone()
+                };
                 let collaboration_frame = grant.as_ref().map(|grant| {
                     let mut frame = serde_json::json!({
                         "endpoint": remote_endpoint.as_deref().unwrap_or(&grant.endpoint),
@@ -1794,14 +1898,16 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                         .write_all(format!("MONITTER/COLLAB/1 {}\n", frame.len()).as_bytes())
                         .and_then(|_| stdin.write_all(frame.as_bytes()))
                         .and_then(|_| {
-                            stdin.write_all(format!("MONITTER/1 {}\n", prompt.len()).as_bytes())
+                            stdin.write_all(
+                                format!("MONITTER/1 {}\n", prompt_frame.len()).as_bytes(),
+                            )
                         })
-                        .and_then(|_| stdin.write_all(prompt.as_bytes()))
+                        .and_then(|_| stdin.write_all(prompt_frame.as_bytes()))
                         .and_then(|_| stdin.flush())
                 } else {
                     stdin
-                        .write_all(format!("MONITTER/1 {}\n", prompt.len()).as_bytes())
-                        .and_then(|_| stdin.write_all(prompt.as_bytes()))
+                        .write_all(format!("MONITTER/1 {}\n", prompt_frame.len()).as_bytes())
+                        .and_then(|_| stdin.write_all(prompt_frame.as_bytes()))
                         .and_then(|_| stdin.flush())
                 }
             } else if task.provider == "claude" {
@@ -1809,6 +1915,10 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 stdin
                     .write_all(frame.as_bytes())
                     .and_then(|_| stdin.write_all(b"\n"))
+                    .and_then(|_| stdin.flush())
+            } else if task.provider == "hermes" {
+                stdin
+                    .write_all(hermes_prompt_frame(&prompt).as_bytes())
                     .and_then(|_| stdin.flush())
             } else {
                 stdin
@@ -2044,12 +2154,17 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             let service = service.clone();
             let task = task_id.clone();
             thread::spawn(move || {
+                let mut diagnostic_recorded = false;
                 for line in BufReader::new(stderr).lines() {
                     match line {
-                        Ok(line) if !line.trim().is_empty() => {
-                            service.record(&task, "error", "Provider stderr", line)
+                        Ok(line) => {
+                            if !diagnostic_recorded {
+                                if let Some(detail) = provider_stderr_diagnostic(&line) {
+                                    diagnostic_recorded = true;
+                                    service.record(&task, "error", "Provider diagnostic", detail);
+                                }
+                            }
                         }
-                        Ok(_) => {}
                         Err(error) => service.record(
                             &task,
                             "error",
@@ -2441,6 +2556,27 @@ mod tests {
     }
 
     #[test]
+    fn provider_stderr_ignores_routine_log_levels() {
+        assert_eq!(
+            provider_stderr_diagnostic(
+                "2026-09-11T14:56:46.955384Z WARN codex_rmcp::rmcp_client: shutdown failed"
+            ),
+            None
+        );
+        assert_eq!(provider_stderr_diagnostic("DEBUG connection retry"), None);
+        assert_eq!(provider_stderr_diagnostic("INFO ready"), None);
+    }
+
+    #[test]
+    fn provider_stderr_keeps_a_concise_actionable_error() {
+        assert_eq!(
+            provider_stderr_diagnostic("ERROR authentication failed for configured provider"),
+            Some("ERROR authentication failed for configured provider".into())
+        );
+        assert_eq!(provider_stderr_diagnostic("ordinary progress line"), None);
+    }
+
+    #[test]
     fn remote_supervisor_accepts_secret_collaboration_frame_before_prompt() {
         let mut command = Command::new("python3");
         command
@@ -2475,6 +2611,52 @@ mod tests {
         drop(stdin);
         assert!(child.wait().unwrap().success());
         assert_eq!(output, "http://127.0.0.1:4444/rpc:not-in-argv");
+    }
+
+    #[test]
+    fn hermes_prompt_frame_keeps_multiline_peer_context_intact() {
+        let prompt = "Monitter agent: Hermes\n\nPeer context from Rafa:\nYou are a bungleflop!";
+        assert_eq!(
+            hermes_prompt_frame(prompt),
+            format!("MONITTER/HERMES/1 {}\n{prompt}", prompt.len())
+        );
+    }
+
+    #[test]
+    fn remote_supervisor_forwards_hermes_frame_without_an_extra_newline() {
+        let prompt = "First line\nPeer context from Rafa:\nYou are a bungleflop!";
+        let frame = hermes_prompt_frame(prompt);
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                REMOTE_SUPERVISOR,
+                "/tmp",
+                "python3",
+                "-c",
+                "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(format!("MONITTER/1 {}\n", frame.len()).as_bytes())
+            .unwrap();
+        stdin.write_all(frame.as_bytes()).unwrap();
+        // Keep the control pipe open: an EOF is intentionally interpreted as
+        // cancellation by the remote supervisor. The real runner likewise
+        // retains it for cancellation/approval control.
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(output, frame);
     }
 
     #[test]
@@ -2584,6 +2766,18 @@ mod tests {
         }))
         .assistant
         .is_none());
+    }
+
+    #[test]
+    fn cua_result_image_is_a_generated_computer_image_event() {
+        let parsed = parse_codex_event(&serde_json::json!({
+            "type":"item.completed", "thread_id":"session-1", "item":{
+                "type":"McpToolCall", "server":"cua_repl", "tool":"js",
+                "result":{"content":[{"type":"image","data":"/9j/2Q=="}]}
+            }
+        }));
+        assert_eq!(parsed.native_session_id.as_deref(), Some("session-1"));
+        assert_eq!(parsed.event.unwrap().0, "computer_image");
     }
 
     #[test]

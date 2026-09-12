@@ -21,7 +21,9 @@
   .icon-slot,.close-slot { width:28px;height:28px;display:grid;place-items:center;padding:0;box-sizing:border-box; }
   .notice-text { min-width:0;overflow-wrap:anywhere; }
   .close-slot { border:0;background:transparent;color:var(--muted);border-radius:5px;opacity:0;transition:opacity 120ms;cursor:pointer; }
-  .alert:hover .close-slot,.alert:focus-within .close-slot { opacity:1; }
+  .alert:focus-within .close-slot { opacity:1; }
+  @media (hover:hover) and (pointer:fine) { .alert:hover .close-slot { opacity:1; } }
+  @media (hover:none), (pointer:coarse) { .close-slot { opacity:1; } }
   .close-slot:hover { background:var(--soft); }
   .error { border-color:color-mix(in srgb,#bd4c43 45%,var(--line));color:#b84c44; }
   .fading { opacity:0;translate:0 -4px;pointer-events:none; }

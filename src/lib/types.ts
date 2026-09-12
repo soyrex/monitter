@@ -43,6 +43,12 @@ export interface RunEvent {
   id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration';
   title: string; detail: string; createdAt: number;
 }
+/** A revision-aware, compact UI projection. A null snapshot means unchanged. */
+export interface UiSnapshotResponse { revision: string; snapshot: Snapshot | null; }
+/** Fast-send acknowledgement: acceptance is durable, but no snapshot is implied. */
+export interface SendAccepted { accepted: true; }
+/** Full diagnostic activity is deliberately loaded only when its pane is opened. */
+export interface TaskEventsPage { events: RunEvent[]; nextBefore: number | null; }
 export interface ChannelMessage {
   id: string; role: 'user' | 'assistant'; agentId: string | null;
   text: string; createdAt: number; taskId: string | null;

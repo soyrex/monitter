@@ -16,7 +16,7 @@ async function newFixturePage(context, init) {
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.addInitScript(init);
   await page.goto(url);
-  await expect(page.getByLabel('Switch desktop workspace', { exact: true })).toBeVisible({ timeout: 30000 });
+  await expect(page.locator('[data-workspace-context]')).toBeVisible({ timeout: 30000 });
   return page;
 }
 
@@ -93,10 +93,32 @@ try {
       sessionStorage.setItem('scoped-workspaces-seeded', 'true');
     }
   });
-  const workspace = page.getByLabel('Switch desktop workspace', { exact: true });
-  const rows = () => page.locator('.activity-list .task-row');
+  const workspaceContext = page.locator('[data-workspace-context]').first();
+  const expectWorkspace = key => expect(workspaceContext).toHaveAttribute('data-workspace-key', key);
+  const ensureSidebarOpen = async () => {
+    const standard = page.getByRole('button', { name: 'Standard view', exact: true });
+    if (!await standard.isVisible()) {
+      await page.getByRole('separator', { name: 'Resize main sidebar', exact: true }).press('Enter');
+      await expect(standard).toBeVisible();
+    }
+  };
+  const chooseSidebarView = async label => {
+    await ensureSidebarOpen();
+    const button = page.getByRole('button', { name: `${label} view`, exact: true });
+    if (await button.getAttribute('aria-pressed') !== 'true') await button.click();
+    await expect(button).toHaveAttribute('aria-pressed', 'true');
+  };
+  const chooseAgent = async (id, name) => {
+    await chooseSidebarView('Standard');
+    await page.getByRole('button', { name: `Open agent ${name}`, exact: true }).click();
+    await expectWorkspace(`agent:${id}`);
+  };
+  const chooseProject = async (id, name) => {
+    await chooseSidebarView('Projects');
+    await page.getByRole('button', { name: `Open project ${name}`, exact: true }).click();
+    await expectWorkspace(`project:${id}`);
+  };
   const overlapTab = () => page.locator('[data-tab-kind="task"][data-tab-id="overlap"] > button.tab');
-  const titles = async () => rows().locator('.chat-copy > span:first-child').allTextContents();
   const forbidden = () => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => ['createTask', 'sendMessage', 'resumeTask', 'cancelTask', 'closeTerminal'].includes(call.method)));
   const controls = async label => {
     await page.keyboard.press('Meta+p');
@@ -111,35 +133,35 @@ try {
     await expect(close).toHaveCount(0);
   };
 
-  await workspace.selectOption('agent:north');
-  await expect.poll(titles).toEqual(['Overlap chat', 'North harbor chat', 'South beacon chat', 'Approval needed']);
-  await workspace.selectOption('project:beacon');
-  await expect.poll(titles).toEqual(['Overlap chat', 'North harbor chat', 'South beacon chat', 'Approval needed']);
-  await expect(rows().filter({ hasText: 'Overlap chat' })).toHaveCount(1);
-  passed.push('the sidebar remains global across agent and project workspaces');
+  await chooseAgent('north', 'North');
+  await expect(page.getByRole('button', { name: 'Overview', exact: true })).toHaveCount(0);
+  await expect(page.locator('.agent-group .task-row')).toHaveCount(4);
+  await chooseProject('beacon', 'Beacon');
+  await expect(page.locator('.project-group .task-row')).toHaveCount(4);
+  passed.push('the picker is absent and the sidebar remains global across agent and project workspaces');
 
   // A globally visible chat can jump directly from another agent's workspace
   // to its owner, while each workspace keeps its separate tab layout.
-  await workspace.selectOption('agent:north');
-  await page.locator('.activity-list .task-select').filter({ hasText: 'South beacon chat' }).click();
-  await expect(workspace).toHaveValue('agent:south');
+  await chooseAgent('north', 'North');
+  await page.locator('.agent-group .task-select').filter({ hasText: 'South beacon chat' }).click();
+  await expectWorkspace('agent:south');
   await expect(page.getByRole('heading', { name: /South beacon chat/ })).toBeVisible();
   passed.push('a global sidebar chat switches directly to its owning agent workspace');
 
   // Create UI-only state in North, then make sure the other scope cannot overwrite it.
-  await workspace.selectOption('agent:north');
-  await page.locator('.activity-list .task-select').filter({ hasText: 'Overlap chat' }).click();
+  await chooseAgent('north', 'North');
+  await page.locator('.agent-group .task-select').filter({ hasText: 'Overlap chat' }).click();
   const composer = page.getByLabel('Task message', { exact: true });
   await composer.fill('North-only unsent draft');
   await controls('Two columns');
   await expect(page.locator('.pane-leaf')).toHaveCount(2);
   await controls('New terminal');
   await expect(page.locator('.terminal-tab')).toHaveCount(1);
-  await workspace.selectOption('project:beacon');
-  await page.locator('.activity-list .task-select').filter({ hasText: 'Overlap chat' }).click();
+  await chooseProject('beacon', 'Beacon');
+  await page.locator('.project-group .task-select').filter({ hasText: 'Overlap chat' }).click();
   await expect(page.locator('[data-tab-kind="task"][data-tab-id="overlap"]')).toBeVisible();
   await expect(composer).toHaveValue('North-only unsent draft');
-  await workspace.selectOption('agent:north');
+  await chooseAgent('north', 'North');
   await expect(page.locator('.pane-leaf')).toHaveCount(2);
   await expect(page.locator('.terminal-tab')).toHaveCount(1);
   await overlapTab().click();
@@ -149,16 +171,16 @@ try {
 
   // In Standard view an agent header is itself workspace navigation, not merely
   // a collapsible label, and restores that agent's saved tab state.
-  await page.getByRole('button', { name: 'Standard view', exact: true }).click();
-  await workspace.selectOption('project:beacon');
+  await chooseProject('beacon', 'Beacon');
+  await chooseSidebarView('Standard');
   await page.getByRole('button', { name: 'Open agent North', exact: true }).click();
-  await expect(workspace).toHaveValue('agent:north');
+  await expectWorkspace('agent:north');
   await overlapTab().click();
   await expect(composer).toHaveValue('North-only unsent draft');
   passed.push('agent header switches to and restores its independent workspace');
 
   // A fresh local draft is scoped before it ever creates a task or sends text.
-  await workspace.selectOption('project:beacon');
+  await chooseProject('beacon', 'Beacon');
   await controls('New chat');
   await expect(page.getByLabel('Agent', { exact: true })).toHaveValue('north');
   await expect(page.getByLabel('Project', { exact: true })).toHaveValue('beacon');
@@ -167,46 +189,45 @@ try {
 
   // A project-scoped draft remains in its project when only its agent changes.
   await page.getByLabel('Agent', { exact: true }).selectOption('south');
-  await expect(workspace).toHaveValue('project:beacon');
+  await expectWorkspace('project:beacon');
   await expect(page.getByLabel('Agent', { exact: true })).toHaveValue('south');
   await closeDraft();
 
   // Changing a draft owner from an agent workspace moves the local-only tab
   // into the new owner's workspace.
-  await workspace.selectOption('agent:north');
-  await expect(workspace).toHaveValue('agent:north');
+  await chooseAgent('north', 'North');
   await controls('New chat');
   await page.getByLabel('Agent', { exact: true }).selectOption('south');
-  await expect(workspace).toHaveValue('agent:south');
+  await expectWorkspace('agent:south');
   await expect(page.getByLabel('Agent', { exact: true })).toHaveValue('south');
   await closeDraft();
-  await workspace.selectOption('agent:north');
+  await chooseAgent('north', 'North');
   await overlapTab().click();
   passed.push('changing a draft agent routes its tab into that agent workspace');
 
   // The approval entry remains discoverable when its owning task is outside the active scope.
-  await workspace.selectOption('project:beacon');
+  await chooseProject('beacon', 'Beacon');
   const approvalJump = page.getByRole('button', { name: /Approval .*Approval needed/ });
   await expect(approvalJump).toBeVisible();
   await approvalJump.click();
-  await expect(workspace).toHaveValue('project:harbor');
+  await expectWorkspace('project:harbor');
   await expect(page.getByRole('heading', { name: /Approval needed/ })).toBeVisible();
   await expect(page.getByLabel('Pending approval requests', { exact: true })).toBeVisible();
   passed.push('a pending approval outside the current scope jumps to its owning workspace and chat');
 
   // Channels are global rather than pinned to the project/agent filter. The
   // approval shortcut remains available after collapsing the full sidebar.
-  await workspace.selectOption('agent:north');
+  await chooseAgent('north', 'North');
   await page.locator('.channel-row').filter({ hasText: 'Global updates' }).click();
-  await expect(workspace).toHaveValue('all');
+  await expectWorkspace('all');
   await expect(page.getByRole('heading', { name: /Global updates/ })).toBeVisible();
-  await workspace.selectOption('project:beacon');
+  await chooseProject('beacon', 'Beacon');
   const sidebarResize = page.getByRole('separator', { name: 'Resize main sidebar', exact: true });
   await sidebarResize.press('Enter');
   const railApproval = page.locator('[aria-label="Pending approvals across workspaces"] .workspace-approval[data-approval-task="approval-chat"]');
   await expect(railApproval).toBeVisible();
   await railApproval.click();
-  await expect(workspace).toHaveValue('project:harbor');
+  await expectWorkspace('project:harbor');
   const resizeBox = await sidebarResize.boundingBox();
   if (!resizeBox) throw new Error('Sidebar resize handle is unavailable.');
   await page.mouse.move(resizeBox.x + resizeBox.width / 2, resizeBox.y + 80);
@@ -214,24 +235,25 @@ try {
   await page.mouse.move(resizeBox.x + 180, resizeBox.y + 80);
   await page.mouse.up();
   await expect(sidebarResize).toHaveAttribute('aria-valuetext', /pixels/);
-  await page.getByRole('button', { name: 'Activity view', exact: true }).click();
+  await chooseSidebarView('Activity');
+  await expectWorkspace('all');
   passed.push('global channel opens All activity and approval routing remains visible while sidebar is collapsed');
 
   // Backend-style reassignment removes the task tab only from its old
   // right-hand workspace, without changing unrelated task metadata.
   const original = await page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks.find(item => item.id === 'overlap'));
   await page.evaluate(() => { const qa = window.__MONITTER_QA__, state = qa.snapshot(); state.tasks.find(item => item.id === 'overlap').projectId = 'harbor'; qa.setSnapshot(state); });
-  await workspace.selectOption('project:beacon');
+  await chooseProject('beacon', 'Beacon');
   await expect(page.locator('[data-tab-kind="task"][data-tab-id="overlap"]')).toHaveCount(0);
-  await workspace.selectOption('project:harbor');
+  await chooseProject('harbor', 'Harbor');
   const reassigned = await page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks.find(item => item.id === 'overlap'));
   expect({ ...reassigned, projectId: original.projectId }).toEqual(original);
   passed.push('project reassignment removes only an old scoped tab and preserves task metadata');
 
   // Inactive scope state is durable across a browser reload, including the old North layout and draft.
-  await workspace.selectOption('agent:north');
+  await chooseAgent('north', 'North');
   await page.reload();
-  await expect(workspace).toHaveValue('agent:north');
+  await expectWorkspace('agent:north');
   await expect(page.locator('.pane-leaf')).toHaveCount(2);
   await expect(page.locator('.terminal-tab')).toHaveCount(1);
   await overlapTab().click();
@@ -251,10 +273,11 @@ try {
       return original(...args);
     };
   });
+  await chooseSidebarView('Projects');
   await page.getByLabel('Task message', { exact: true }).fill('Keep this while send is pending');
   await page.getByRole('button', { name: 'Send task message', exact: true }).click();
-  await workspace.selectOption('project:beacon');
-  await expect(workspace).toHaveValue('agent:north');
+  await page.getByRole('button', { name: 'Open project Beacon', exact: true }).click();
+  await expectWorkspace('agent:north');
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('monitter.workspaces.v2')).activeWorkspaceKey)).toBe('agent:north');
   await expect(page.getByLabel('Task message', { exact: true })).toHaveValue('Keep this while send is pending');
   await page.evaluate(() => window.__MONITTER_QA__.releaseScopedSend());

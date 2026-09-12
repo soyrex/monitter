@@ -21,6 +21,32 @@ class BridgeError(RuntimeError):
 
 
 _OUTPUT_LOCK = threading.Lock()
+_PROMPT_PREFIX = b"MONITTER/HERMES/1 "
+
+
+def useful_gateway_diagnostic(text: str) -> str | None:
+    """Keep routine gateway stderr out of the operator's activity feed."""
+    text = text.strip()
+    if not text:
+        return None
+    upper = text.upper()
+    if any(
+        upper == level
+        or upper.startswith(f"{level} ")
+        or f" {level} " in upper
+        for level in ("TRACE", "DEBUG", "INFO", "WARN", "WARNING")
+    ):
+        return None
+    lower = text.lower()
+    if not any(
+        needle in lower
+        for needle in (
+            "error", "fatal", "panic", "permission denied", "unauthorized",
+            "authentication", "not found", "could not", "failed",
+        )
+    ):
+        return None
+    return " ".join(text.split())[:600]
 
 # Monitter stores a harness model as one field. Hermes, however, keeps model
 # and provider as separate session-scoped values. Older Monitter state can also
@@ -34,6 +60,29 @@ _LEGACY_PROVIDER_ALIASES = {"minimax-oath": "minimax-oauth"}
 def emit(kind: str, **fields: Any) -> None:
     with _OUTPUT_LOCK:
         print(json.dumps({"type": kind, **fields}, ensure_ascii=False), flush=True)
+
+
+def read_prompt() -> str:
+    """Read one exact prompt without treating its newlines as message boundaries.
+
+    The old adapter read one line from stdin. That discarded every line after
+    an initial system context, including delegated peer text. The length frame
+    also leaves stdin available for explicit desktop approval replies.
+    """
+    source = sys.stdin.buffer
+    header = source.readline()
+    if header.startswith(_PROMPT_PREFIX):
+        try:
+            size = int(header[len(_PROMPT_PREFIX) :].strip())
+        except ValueError as exc:
+            raise BridgeError("Hermes prompt frame has an invalid length") from exc
+        if size < 1 or size > 16 * 1024 * 1024:
+            raise BridgeError("Hermes prompt frame has an invalid size")
+        payload = source.read(size)
+        if len(payload) != size:
+            raise BridgeError("Hermes prompt frame ended before the full prompt")
+        return payload.decode("utf-8", errors="replace")
+    return header.decode("utf-8", errors="replace").rstrip("\r\n")
 
 
 def split_model_override(raw: str) -> tuple[str, str | None]:
@@ -221,10 +270,13 @@ class Gateway:
 
     def _drain_stderr(self) -> None:
         assert self.process.stderr is not None
+        diagnostic_sent = False
         for line in self.process.stderr:
             text = line.rstrip("\r\n")
-            if text:
-                emit("log", session_id=self.durable_session_id, text=text)
+            diagnostic = useful_gateway_diagnostic(text)
+            if diagnostic and not diagnostic_sent:
+                diagnostic_sent = True
+                emit("log", session_id=self.durable_session_id, text=diagnostic)
 
     def send(self, method: str, params: dict[str, Any]) -> int:
         self._ids += 1
@@ -281,11 +333,12 @@ class Gateway:
             return "deny"
         expected = str(request_id or "")
         deadline = time.monotonic() + 300
+        source = sys.stdin.buffer
         while time.monotonic() < deadline:
-            readable, _, _ = select.select([sys.stdin], [], [], 0.25)
+            readable, _, _ = select.select([source], [], [], 0.25)
             if not readable:
                 continue
-            line = sys.stdin.readline()
+            line = source.readline()
             if not line:
                 return "deny"
             try:
@@ -526,11 +579,10 @@ def main() -> int:
     parser.add_argument("--model", default="")
     parser.add_argument("--approval-stdio", action="store_true")
     options = parser.parse_args()
-    # Keep stdin open for explicit desktop approval replies. The ordinary
-    # one-shot adapter writes a single newline-terminated prompt.
-    prompt = sys.stdin.readline()
-    if prompt.endswith("\n"):
-        prompt = prompt[:-1]
+    # Keep stdin open for explicit desktop approval replies. The runner sends
+    # a length-framed prompt so collaboration/system context newlines remain
+    # content rather than accidental message boundaries.
+    prompt = read_prompt()
     if not prompt.strip():
         raise BridgeError("Hermes prompt is empty")
     return run(options, prompt)
