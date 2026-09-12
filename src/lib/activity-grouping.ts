@@ -1,8 +1,31 @@
 import type { Message, RunEvent } from '$lib/types';
 
+/** Extract displayable summary text, never provider IDs or encrypted metadata. */
+export function reasoningSummary(detail: string): string {
+  const trimmed = detail.trim();
+  if (!trimmed) return '';
+  const text = (value: unknown, depth = 0): string => {
+    if (depth > 8) return '';
+    if (typeof value === 'string') return value.trim();
+    if (Array.isArray(value)) return value.map(item => text(item, depth + 1)).filter(Boolean).join('\n\n');
+    if (!value || typeof value !== 'object') return '';
+    const record = value as Record<string, unknown>;
+    // Codex sends summary text blocks or strings; other harnesses can supply
+    // plain text/content. Prefer the summary when both representations exist.
+    return text(record.summary, depth + 1) || text(record.text, depth + 1) || text(record.content, depth + 1);
+  };
+  try { return text(JSON.parse(trimmed)); }
+  catch { return trimmed; }
+}
+
+export function isBlankReasoning(event: RunEvent): boolean {
+  return event.kind === 'reasoning' && !reasoningSummary(event.detail);
+}
+
 export type ConversationActivityItem =
   | { type: 'message'; value: Message }
   | { type: 'activity'; value: RunEvent }
+  | { type: 'reasoning-group'; values: RunEvent[] }
   | { type: 'tool-group'; values: RunEvent[] };
 
 function toolIdentity(event: RunEvent) {
@@ -61,6 +84,15 @@ export function groupConversationActivity(
 
   const grouped: ConversationActivityItem[] = [];
   for (const item of ordered) {
+    if (item.type === 'activity' && isBlankReasoning(item.value)) {
+      const previous = grouped.at(-1);
+      if (previous?.type === 'reasoning-group' && previous.values[0].taskId === item.value.taskId) {
+        previous.values.push(item.value);
+      } else {
+        grouped.push({ type: 'reasoning-group', values: [item.value] });
+      }
+      continue;
+    }
     if (item.type !== 'activity' || item.value.kind !== 'tool') {
       grouped.push(item);
       continue;

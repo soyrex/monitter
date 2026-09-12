@@ -1,4 +1,4 @@
-import { chromium, expect } from '@playwright/test';
+import { webkit, expect } from '@playwright/test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 // Start the development server first. The injected bridge is browser-QA-only.
@@ -6,7 +6,9 @@ const url = process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18420';
 const output = 'verification/ui-scroll-results.json';
 mkdirSync('verification', { recursive: true });
 
-const browser = await chromium.launch({ headless: true });
+// WebKit is deliberately used here: its scroll/ResizeObserver scheduling has
+// exposed the desktop and narrow-webview regression this test protects.
+const browser = await webkit.launch({ headless: true });
 const passed = [];
 const pageErrors = [];
 let page;
@@ -94,6 +96,24 @@ try {
   const waitForHeightGrowth = async beforeHeight => {
     await expect.poll(async () => (await metrics()).total).toBeGreaterThan(beforeHeight + 8);
   };
+  const growThenDispatchScrollBeforeResizeObserver = async () => {
+    // Reproduce the ordering that regressed send/reply following: content has
+    // already become taller, and a scroll event arrives before ResizeObserver.
+    // This operates on the real compiled MessagePane rather than a mock
+    // controller. The old implementation treated that as reader intent.
+    await page.evaluate(() => {
+      const viewport = document.querySelector('.messages');
+      const content = document.querySelector('.message-content');
+      if (!(viewport instanceof HTMLElement) || !(content instanceof HTMLElement)) throw new Error('MessagePane fixture unavailable');
+      const lateImage = document.createElement('div');
+      lateImage.dataset.scrollRegressionLateLayout = 'true';
+      lateImage.style.height = '360px';
+      lateImage.style.marginTop = '12px';
+      lateImage.textContent = 'Late image/font layout growth.';
+      content.append(lateImage);
+      viewport.dispatchEvent(new Event('scroll'));
+    });
+  };
 
   const checkViewportBehaviour = async ({ open, incoming, label }) => {
     await open();
@@ -151,6 +171,16 @@ try {
   await expect(jump).toBeVisible();
   passed.push('chat: late growth follows only when already near latest');
 
+  // Deterministic regression for WebKit's scroll-before-ResizeObserver path.
+  // Send/reply and late image growth take this same layout route in the app.
+  await openChatA();
+  await atBottom();
+  lateBefore = await metrics();
+  await growThenDispatchScrollBeforeResizeObserver();
+  await waitForHeightGrowth(lateBefore.total);
+  await atBottom();
+  passed.push('chat: scroll-before-ResizeObserver content growth retains latest follow');
+
   await openChatA();
   await atBottom();
   await page.setViewportSize({ width: 1120, height: 560 });
@@ -159,6 +189,19 @@ try {
   await page.setViewportSize({ width: 1120, height: 680 });
   await atBottom();
   passed.push('chat: viewport resize retains latest position');
+
+  // Narrow WebKit layout must leave a real clearance below the final entry:
+  // 20px fade plus 8px, rather than the old 14px mobile padding.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await atBottom();
+  const mobileClearance = await page.locator('.message-content').evaluate(node => ({
+    bottomPadding: Number.parseFloat(getComputedStyle(node).paddingBottom),
+    fade: Number.parseFloat(getComputedStyle(node.closest('.messages')).getPropertyValue('--scroll-fade')),
+  }));
+  expect(mobileClearance.bottomPadding).toBeGreaterThanOrEqual(mobileClearance.fade + 8);
+  await assertDocumentDoesNotScroll();
+  passed.push('narrow WebKit: final entry clears fade by at least 8px');
+  await page.setViewportSize({ width: 1120, height: 680 });
 
   // A successful send is a user action and always brings the still-active conversation to its latest entry.
   await openChatA();

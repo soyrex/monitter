@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { Bot, Users, Check, LoaderCircle, MessageSquare, Palette, ShieldCheck, Type } from "@lucide/svelte";
+  import { Bot, Users, Check, LoaderCircle, MessageSquare, Palette, ShieldCheck, Smartphone, Type } from "@lucide/svelte";
   import type { Settings } from "$lib/types";
+  import { getBridge } from '$lib/bridge';
+  import { isLanBrowser } from '$lib/lan';
+  import { remoteControlOpen } from '$lib/workspace-panels';
   import LanSettings from './LanSettings.svelte';
 
-  type Category = "appearance" | "typography" | "behaviour" | "conversation" | "agents" | "directory" | "lan";
+  type Category = "appearance" | "typography" | "behaviour" | "conversation" | "agents" | "directory" | "lan" | "remote";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
   type LineHeightKey = "chatLineHeight" | "terminalLineHeight";
@@ -25,8 +28,10 @@
   } = $props();
 
   const accents = ["#3f9d6a", "#3978d4", "#8755c7", "#c44c79", "#c27524"];
+  const remoteControlAvailable = !isLanBrowser() && getBridge().available;
   const categories: { id: Category; label: string; detail: string; icon: typeof Palette }[] = [
     { id: "lan", label: "LAN access", detail: "Open Monitter in a browser", icon: ShieldCheck },
+    ...(remoteControlAvailable ? [{ id: "remote" as const, label: "Remote control", detail: "Pair this desktop with your phone", icon: Smartphone }] : []),
     { id: "directory", label: "Agent directory", detail: "Discover skills and responsibilities", icon: Users },
     { id: "agents", label: "Agents", detail: "Identity, harness and skills", icon: Bot },
     { id: "appearance", label: "Appearance", detail: "Theme, accent and panes", icon: Palette },
@@ -95,6 +100,7 @@
       </div>
       <div class="save-state" aria-live="polite">
         {#if activeCategory === "lan"}<span>Local network</span>
+        {:else if activeCategory === "remote"}<span>Desktop pairing</span>
         {:else if activeCategory === "directory"}<span>Browse available agents</span>
       {:else if activeCategory === "agents"}Save changes with Save agent
         {:else if pending > 0}<LoaderCircle class="spin" size={14} /> Saving…
@@ -109,6 +115,13 @@
     {/if}
 
     {#if activeCategory === "lan"}<LanSettings />
+    {:else if activeCategory === "remote"}
+      <div class="section-stack">
+        <section class="setting-card" aria-labelledby="remote-control-heading">
+          <div class="card-heading"><h2 id="remote-control-heading">Pair a phone</h2><p>Create a one-time pairing code from this desktop. Pairing remains active if you return to Settings or close this page.</p></div>
+          <button class="remote-action" type="button" onclick={() => remoteControlOpen.set(true)}>Open Remote control</button>
+        </section>
+      </div>
     {:else if activeCategory === "directory"}
       <div class="section-stack">{#if agentDirectory}{@render agentDirectory()}{/if}</div>
     {:else if activeCategory === "agents"}
@@ -227,6 +240,7 @@
   .segmented { display:flex; padding:3px; border:1px solid var(--line); border-radius:7px; background:var(--soft); }.segmented button { flex:1; padding:7px 8px; border:0; border-radius:4px; color:var(--muted); background:transparent; font:calc(11.5px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-transform:capitalize; cursor:pointer; }.segmented button.chosen { color:var(--ink); background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.08); }
   .swatches { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }.swatches > button { width:26px; height:26px; padding:0; border:2px solid transparent; border-radius:50%; background:var(--swatch); cursor:pointer; }.swatches > button.chosen { border-color:var(--ink); outline:2px solid var(--paper); outline-offset:-4px; }.colour-picker { display:flex; align-items:center; gap:7px; margin-left:3px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.colour-picker input { width:28px; height:25px; padding:1px; border:1px solid var(--line); border-radius:5px; background:var(--paper); cursor:pointer; }.colour-picker span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
   .range { width:100%; padding:0; accent-color:var(--accent); cursor:pointer; }.range:disabled { cursor:not-allowed; }.range-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font:calc(10px * var(--interface-font-ratio, 1)) var(--mono, monospace); }.range-footer button { padding:0; border:0; color:var(--accent-ink, var(--accent)); background:none; font:calc(11px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); cursor:pointer; }
+  .remote-action { justify-self:start; padding:9px 11px; border:0; border-radius:7px; color:var(--on-accent, #fff); background:var(--accent); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); cursor:pointer; }
   .switch-row { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:5px 0; }.switch-row span { display:grid; gap:3px; }.switch-row strong,.range-setting { font-size:calc(12px * var(--interface-font-ratio, 1)); }.switch-row small { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); line-height:1.45; }.switch-row input { appearance:none; -webkit-appearance:none; position:relative; flex:none; width:32px; height:18px; margin:0; border:1px solid var(--line); border-radius:999px; background:var(--soft); cursor:pointer; transition:.15s ease; }.switch-row input::after { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--muted); content:""; transition:.15s ease; }.switch-row input:checked { border-color:var(--accent); background:var(--accent); }.switch-row input:checked::after { left:16px; background:var(--on-accent, #fff); }.switch-row input:focus-visible,.settings-nav button:focus-visible,.segmented button:focus-visible,.swatches button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .range-setting { display:grid; grid-template-columns:1fr auto; gap:9px; padding-top:8px; }.range-setting input { grid-column:1 / -1; }.range-setting.disabled { opacity:.52; }.font-grid { display:grid; gap:16px; }.font-setting { display:grid; grid-template-columns:minmax(0, 1fr) 180px; gap:12px; padding-bottom:16px; border-bottom:1px solid var(--line); }.font-setting:last-child { padding-bottom:0; border-bottom:0; }.font-setting label { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.font-setting input { width:100%; padding:8px 9px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--paper); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); }.font-setting input:focus { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }.error { max-width:760px; margin:0 auto 14px; padding:9px 11px; border:1px solid color-mix(in srgb, #b84c44 40%, var(--line)); border-radius:7px; color:#b84c44; background:color-mix(in srgb, #b84c44 7%, transparent); font-size:calc(11.5px * var(--interface-font-ratio, 1)); }
   @keyframes spin { to { transform:rotate(360deg); } }

@@ -9,38 +9,52 @@
   let showJump = $state(false);
   let followingLatest = true;
   let lastViewportHeight = 0;
-  let lastScrollTop = 0;
   let lastScrollHeight = 0;
+  let followFrame: number | undefined;
   const bottomThreshold = 48;
 
   function atLatest() {
     return !viewport || viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= bottomThreshold;
   }
 
-  function wasFollowingBeforeLayout() {
-    return followingLatest || lastScrollHeight - lastViewportHeight - lastScrollTop <= bottomThreshold;
-  }
-
   function rememberMetrics() {
     if (!viewport) return;
     lastViewportHeight = viewport.clientHeight;
     lastScrollHeight = viewport.scrollHeight;
-    lastScrollTop = viewport.scrollTop;
+  }
+
+  function pinToLatest() {
+    if (!viewport) return;
+    viewport.scrollTop = viewport.scrollHeight;
+    showJump = false;
+    // Keep programmatic scroll events from being mistaken for reader intent.
+    rememberMetrics();
+  }
+
+  function followLayout() {
+    pinToLatest();
+    // Svelte children, font/image layout and composer resizing can settle after
+    // the first measurement. Coalesce a final correction without smooth-scroll
+    // animations that would constantly lag behind streamed replies.
+    if (followFrame !== undefined) return;
+    followFrame = requestAnimationFrame(() => {
+      followFrame = undefined;
+      if (followingLatest) pinToLatest();
+    });
   }
 
   function jumpToLatest() {
-    if (!viewport) return;
     followingLatest = true;
-    viewport.scrollTop = viewport.scrollHeight;
-    showJump = false;
+    followLayout();
   }
 
   function handleScroll() {
-    // A browser may emit scroll before or after ResizeObserver when a pane's
-    // height changes. That movement is layout, not an explicit reader choice.
-    if (viewport && viewport.clientHeight !== lastViewportHeight) {
-      followingLatest = wasFollowingBeforeLayout();
-      showJump = !followingLatest;
+    // Scroll anchoring/clamping can emit before ResizeObserver for CONTENT
+    // growth as well as viewport resizing. Preserve the pre-layout follow state
+    // instead of measuring the new, larger bottom gap as a reader scrolling up.
+    if (viewport && (viewport.clientHeight !== lastViewportHeight || viewport.scrollHeight !== lastScrollHeight)) {
+      if (followingLatest) followLayout();
+      else showJump = !atLatest();
       rememberMetrics();
       return;
     }
@@ -49,7 +63,7 @@
     rememberMetrics();
   }
 
-  // A conversation activation or successful send requests a jump after Svelte
+  // A conversation activation or explicit send requests a jump after Svelte
   // has rendered that conversation. Background updates do not change this key.
   $effect(() => {
     resetKey;
@@ -61,15 +75,17 @@
     const observer = new ResizeObserver(() => {
       // Covers streamed content, expanded tools, images/fonts and pane resizing.
       // Readers who scrolled up keep their place as new content arrives.
-      followingLatest = wasFollowingBeforeLayout();
-      if (followingLatest) jumpToLatest();
-      else showJump = true;
+      if (followingLatest) followLayout();
+      else showJump = !atLatest();
       rememberMetrics();
     });
     if (viewport) observer.observe(viewport);
     if (content) observer.observe(content);
     if (heading) observer.observe(heading);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (followFrame !== undefined) cancelAnimationFrame(followFrame);
+    };
   });
 </script>
 
@@ -98,6 +114,6 @@
   .jump-latest { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; z-index: 2; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); background: var(--panel); box-shadow: 0 3px 12px #0002; cursor: pointer; }
   .jump-latest:hover { color: var(--accent-ink); border-color: var(--accent); background: var(--soft); }
   .jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  @media (max-width: 640px) { .message-content { padding-block: 14px; } .jump-latest { bottom: 10px; } }
+  @media (max-width: 640px) { .message-content { padding-top: 14px; padding-bottom: calc(var(--scroll-fade) + 8px); } .jump-latest { bottom: 10px; } }
 
 </style>
