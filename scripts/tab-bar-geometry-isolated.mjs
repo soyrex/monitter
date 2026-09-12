@@ -9,7 +9,7 @@ const source = await readFile(new URL('../src/lib/components/AppSurface.svelte',
 for (const rule of [
   '.tab-picker-list .tab-status { position:absolute;',
   '.tab-picker-list .tab-entry:hover .tab-status, .tab-picker-list .tab-entry:focus-within .tab-status { opacity:0; }',
-  '.tab-status, .tab-picker-list .tab-status { opacity:0; }',
+  '.tab-status, .compact-tabs .tab-picker-list .tab-status { opacity:0; }',
   'border:1px solid var(--line); border-radius:4px; background:var(--panel);',
 ]) assert.ok(source.includes(rule), `Missing tab geometry rule: ${rule}`);
 

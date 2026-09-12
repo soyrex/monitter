@@ -1,4 +1,4 @@
-import type { Message, RunEvent } from '$lib/types';
+import type { ApprovalRequest, Message, RunEvent } from '$lib/types';
 
 /** Extract displayable summary text, never provider IDs or encrypted metadata. */
 export function reasoningSummary(detail: string): string {
@@ -25,6 +25,7 @@ export function isBlankReasoning(event: RunEvent): boolean {
 export type ConversationActivityItem =
   | { type: 'message'; value: Message }
   | { type: 'activity'; value: RunEvent }
+  | { type: 'approval'; value: ApprovalRequest }
   | { type: 'reasoning-group'; values: RunEvent[] }
   | { type: 'tool-group'; values: RunEvent[] };
 
@@ -72,15 +73,47 @@ export function isShellActivity(event: RunEvent): boolean {
   return /^(?:\/[^\s]+\/)?(?:ba|z|fi|k|da)?sh(?:\s|$)/i.test(event.title.trim());
 }
 
+/** Context compaction lifecycle updates share an app-server item id. */
+export function contextCompactionId(event: RunEvent): string | null {
+  const normalize = (value: string) => value.replaceAll(/[\s_-]/g, '').toLowerCase();
+  let detail: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(event.detail);
+    detail = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch { /* A title-only event has no durable lifecycle identity. */ }
+  const type = normalize(String(detail?.type ?? event.title));
+  const id = detail?.id;
+  return type === 'contextcompaction' && typeof id === 'string' && id.trim() ? id : null;
+}
+
+export function isContextCompaction(event: RunEvent): boolean {
+  const normalize = (value: string) => value.replaceAll(/[\s_-]/g, '').toLowerCase();
+  if (normalize(event.title) === 'contextcompaction') return true;
+  try { return normalize(String(JSON.parse(event.detail)?.type ?? '')) === 'contextcompaction'; }
+  catch { return false; }
+}
+
+/** New app-server records explicitly retain the compaction lifecycle phase. */
+export function contextCompactionPhase(event: RunEvent): 'started' | 'completed' | null {
+  if (!isContextCompaction(event)) return null;
+  try {
+    const phase = JSON.parse(event.detail)?.monitterPhase;
+    return phase === 'started' || phase === 'completed' ? phase : null;
+  } catch { return null; }
+}
+
 export function groupConversationActivity(
   messages: Message[],
   events: RunEvent[],
   compressToolCalls = false,
+  approvals: ApprovalRequest[] = [],
 ): ConversationActivityItem[] {
   const ordered = [
-    ...messages.map(value => ({ type: 'message' as const, value })),
-    ...events.map(value => ({ type: 'activity' as const, value })),
-  ].sort((left, right) => left.value.createdAt - right.value.createdAt);
+    ...messages.map(value => ({ type: 'message' as const, value, at: value.createdAt })),
+    ...events.map(value => ({ type: 'activity' as const, value, at: value.createdAt })),
+    // Resolution is the user-visible event; do not move it back to request creation.
+    ...approvals.filter(value => value.status !== 'pending').map(value => ({ type: 'approval' as const, value, at: value.resolvedAt ?? value.createdAt })),
+  ].sort((left, right) => left.at - right.at);
 
   const grouped: ConversationActivityItem[] = [];
   for (const item of ordered) {
@@ -94,11 +127,22 @@ export function groupConversationActivity(
       continue;
     }
     if (item.type !== 'activity' || item.value.kind !== 'tool') {
+      // `at` is only a sorting aid; the richer item remains structurally
+      // compatible with the public discriminated union returned from here.
       grouped.push(item);
       continue;
     }
     const previous = grouped.at(-1);
-    if (previous?.type === 'tool-group' && (compressToolCalls || toolFamily(previous.values[0]) === toolFamily(item.value))) {
+    const previousCompaction = previous?.type === 'tool-group' && isContextCompaction(previous.values.at(-1)!);
+    const currentCompaction = isContextCompaction(item.value);
+    const previousCompactionId = previousCompaction ? contextCompactionId(previous!.values.at(-1)!) : null;
+    const currentCompactionId = contextCompactionId(item.value);
+    const compactionLifecycle = previousCompaction || currentCompaction;
+    if (previous?.type === 'tool-group' && (
+      compactionLifecycle
+        ? previousCompactionId !== null && previousCompactionId === currentCompactionId
+        : compressToolCalls || toolFamily(previous.values[0]) === toolFamily(item.value)
+    )) {
       previous.values.push(item.value);
     } else {
       grouped.push({ type: 'tool-group', values: [item.value] });

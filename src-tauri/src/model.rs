@@ -299,6 +299,8 @@ pub struct Settings {
     pub shortcut_mode: String,
     #[serde(default = "default_show_tab_close_buttons")]
     pub show_tab_close_buttons: bool,
+    #[serde(default = "default_tab_style")]
+    pub tab_style: String,
 }
 impl Eq for Settings {}
 fn default_terminal_font_size() -> u8 {
@@ -309,6 +311,9 @@ pub fn default_shortcut_mode() -> String {
 }
 fn default_show_tab_close_buttons() -> bool {
     true
+}
+fn default_tab_style() -> String {
+    "classic".into()
 }
 fn default_chat_font_size() -> u8 {
     13
@@ -572,6 +577,7 @@ pub fn default_snapshot() -> Snapshot {
             busy_message_mode: default_busy_message_mode(),
             shortcut_mode: default_shortcut_mode(),
             show_tab_close_buttons: default_show_tab_close_buttons(),
+            tab_style: default_tab_style(),
         },
     }
 }
@@ -596,6 +602,7 @@ mod tests {
         assert_eq!(settings.sidebar_view, "standard");
         assert_eq!(settings.shortcut_mode, "standard");
         assert!(settings.show_tab_close_buttons);
+        assert_eq!(settings.tab_style, "classic");
     }
 
     #[test]
@@ -613,6 +620,19 @@ mod tests {
         assert_eq!(value["sidebarView"], "standard");
         assert_eq!(value["shortcutMode"], "standard");
         assert_eq!(value["showTabCloseButtons"], true);
+        assert_eq!(value["tabStyle"], "classic");
+    }
+
+    #[test]
+    fn tab_style_round_trips_through_settings_json() {
+        let mut settings = default_snapshot().settings;
+        settings.tab_style = "modern".into();
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(serialized.contains("\"tabStyle\":\"modern\""));
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serialized).unwrap(),
+            settings
+        );
     }
 
     #[test]

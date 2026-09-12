@@ -9,20 +9,53 @@ type Runtime = { session: TerminalSession; terminal?: Xterm; fit?: FitAddon; hos
 const runtimes = new Map<string, Runtime>();
 export const terminalSessions = writable<Record<string, TerminalSession>>({});
 export const terminalErrors = writable<Record<string, string>>({});
+let titleRefresh: ReturnType<typeof setInterval> | undefined;
+let titleRefreshing = false;
 
 function publish() {
   const sessions: Record<string, TerminalSession> = {}, errors: Record<string, string> = {};
   for (const [id, runtime] of runtimes) { sessions[id] = runtime.session; if (runtime.error) errors[id] = runtime.error; }
   terminalSessions.set(sessions); terminalErrors.set(errors);
 }
+async function refreshTerminalSessions() {
+  if (titleRefreshing || !runtimes.size) return;
+  titleRefreshing = true;
+  try {
+    // The native monitor owns process observation. This is only a compact
+    // session projection refresh, so hidden terminal tabs and sidebar rows
+    // receive the same title state as the visible pane.
+    const targets = new Map([...runtimes].filter(([, runtime]) => !runtime.closing));
+    let changed = false;
+    for (const session of await getBridge().listTerminals()) {
+      const runtime = targets.get(session.id);
+      // Do not import terminals from another window, revive a closed runtime,
+      // or replace the read-driven exit/drain state with a list snapshot.
+      if (!runtime || runtimes.get(session.id) !== runtime || runtime.closing) continue;
+      if (runtime.session.title !== session.title || runtime.session.autoTitle !== session.autoTitle || runtime.session.customTitle !== session.customTitle) {
+        runtime.session = { ...runtime.session, title: session.title, autoTitle: session.autoTitle, customTitle: session.customTitle };
+        changed = true;
+      }
+    }
+    if (changed) publish();
+  } catch { /* Visible read/input errors remain the actionable terminal errors. */ }
+  finally { titleRefreshing = false; }
+}
+function updateTitleRefresh() {
+  if (runtimes.size && !titleRefresh) titleRefresh = setInterval(() => void refreshTerminalSessions(), 1000);
+  if (!runtimes.size && titleRefresh) { clearInterval(titleRefresh); titleRefresh = undefined; }
+}
 function applyRead(runtime: Runtime, read: TerminalRead) {
-  const changed = runtime.session.status !== read.status || runtime.session.exitCode !== read.exitCode || runtime.errorSource==='read';
+  const session = read.session ? { ...read.session, status: read.status, exitCode: read.exitCode } : { ...runtime.session, status: read.status, exitCode: read.exitCode };
+  const changed = runtime.session.title !== session.title || runtime.session.autoTitle !== session.autoTitle || runtime.session.customTitle !== session.customTitle || runtime.session.status !== session.status || runtime.session.exitCode !== session.exitCode || runtime.errorSource==='read';
   if (read.truncated) {
     runtime.decoder = new TextDecoder();
     runtime.terminal?.write('\r\n\x1b[33m[Earlier terminal output was truncated.]\x1b[0m\r\n');
   }
   for (const chunk of read.chunks) { const text = runtime.decoder.decode(new Uint8Array(chunk.data), { stream: true }); runtime.terminal?.write(text); runtime.recentOutput = (runtime.recentOutput + text).slice(-12_000); }
-  runtime.afterSeq = read.nextSeq; runtime.session = { ...runtime.session, status: read.status, exitCode: read.exitCode };
+  runtime.afterSeq = read.nextSeq;
+  // Backend title state is authoritative. This also means a remounted pane
+  // cannot reset a title which changed while its xterm was hidden.
+  runtime.session = session;
   if (read.status === 'exited') {
     // A bounded backend read can report exit with more queued chunks after this batch.
     runtime.draining = read.chunks.length > 0;
@@ -43,7 +76,7 @@ async function poll(runtime: Runtime) {
 }
 function startPolling(runtime: Runtime) { if (runtime.poll || (runtime.session.status === 'exited' && !runtime.draining) || !runtime.terminal) return; void poll(runtime); runtime.poll = setInterval(() => void poll(runtime), 200); }
 function stopPolling(runtime: Runtime) { if (runtime.poll) clearInterval(runtime.poll); runtime.poll = undefined; }
-export function registerTerminal(session: TerminalSession) { const current = runtimes.get(session.id); if (current) { current.session = session; publish(); return; } const runtime: Runtime = { session, draining:session.status==='exited', mountGeneration: 0, afterSeq: 0, decoder: new TextDecoder(), recentOutput: '', writeChain: Promise.resolve() }; runtimes.set(session.id, runtime); publish(); }
+export function registerTerminal(session: TerminalSession) { const current = runtimes.get(session.id); if (current) { current.session = session; publish(); return; } const runtime: Runtime = { session, draining:session.status==='exited', mountGeneration: 0, afterSeq: 0, decoder: new TextDecoder(), recentOutput: '', writeChain: Promise.resolve() }; runtimes.set(session.id, runtime); updateTitleRefresh(); publish(); }
 export function recentTerminalOutput(id: string) {
   // Preserve only printable visible text for the naming prompt; terminal escape
   // sequences are control protocol, not pane content.
@@ -106,5 +139,12 @@ function refit(runtime: Runtime) {
 export async function mountTerminal(sessionId: string, host: HTMLElement) { const runtime = runtimes.get(sessionId); if (!runtime) return; runtime.desiredHost=host; const generation=++runtime.mountGeneration; await ensureTerminal(runtime, host, generation); if (runtime.mountGeneration!==generation || runtime.desiredHost!==host || runtime.host!==host) return; runtime.observer?.disconnect(); runtime.observer = new ResizeObserver(() => { if (runtime.resizeTimer) clearTimeout(runtime.resizeTimer); runtime.resizeTimer = setTimeout(() => refit(runtime), 80); }); runtime.observer.observe(host); }
 export function setTerminalActive(sessionId: string, active: boolean) { const runtime = runtimes.get(sessionId); if(!runtime)return;runtime.active=active;if(active && runtime.host){refit(runtime);runtime.terminal?.focus();} }
 export function unmountTerminal(sessionId: string, host: HTMLElement) { const runtime = runtimes.get(sessionId); if (!runtime || runtime.desiredHost !== host) return; runtime.mountGeneration++; runtime.desiredHost=undefined; if (runtime.host===host) { runtime.observer?.disconnect(); runtime.observer = undefined; if (runtime.terminal?.element?.parentElement === host) host.removeChild(runtime.terminal.element); runtime.host = undefined; } }
-export async function closeTerminalSession(id: string): Promise<void> { const runtime = runtimes.get(id); if (!runtime) return; if (!runtime.closing) runtime.closing = getBridge().closeTerminal(id).then(() => { stopPolling(runtime); runtime.observer?.disconnect(); runtime.themeObserver?.disconnect(); if (runtime.resizeTimer) clearTimeout(runtime.resizeTimer); runtime.terminal?.dispose(); runtimes.delete(id); publish(); }).catch(reason => { runtime.closing = undefined; runtime.errorSource='close'; runtime.error = reason instanceof Error ? reason.message : String(reason); publish(); throw reason; }); return runtime.closing; }
+export async function closeTerminalSession(id: string): Promise<void> { const runtime = runtimes.get(id); if (!runtime) return; if (!runtime.closing) runtime.closing = getBridge().closeTerminal(id).then(() => { stopPolling(runtime); runtime.observer?.disconnect(); runtime.themeObserver?.disconnect(); if (runtime.resizeTimer) clearTimeout(runtime.resizeTimer); runtime.terminal?.dispose(); runtimes.delete(id); updateTitleRefresh(); publish(); }).catch(reason => { runtime.closing = undefined; runtime.errorSource='close'; runtime.error = reason instanceof Error ? reason.message : String(reason); publish(); throw reason; }); return runtime.closing; }
 export function terminalStatus(id: string) { return runtimes.get(id)?.session; }
+
+/** Narrow hooks for the isolated runtime regression harness; not used by the UI. */
+export const terminalRuntimeTesting = {
+  applyRead(id: string, read: TerminalRead) { const runtime = runtimes.get(id); if (!runtime) throw new Error(`Unknown terminal ${id}`); applyRead(runtime, read); },
+  refresh: refreshTerminalSessions,
+  discard(id: string) { runtimes.delete(id); updateTitleRefresh(); publish(); },
+};

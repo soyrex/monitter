@@ -4123,6 +4123,9 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     ) {
         return Err("Shortcut mode must be standard or vim.".into());
     }
+    if !matches!(settings.tab_style.as_str(), "classic" | "modern") {
+        return Err("Tab style must be classic or modern.".into());
+    }
     Ok(())
 }
 
@@ -5412,6 +5415,19 @@ name@rafa.test",
         assert_eq!(
             validate_settings(&settings),
             Err("Shortcut mode must be standard or vim.".into())
+        );
+    }
+
+    #[test]
+    fn settings_validation_limits_tab_style_to_classic_or_modern() {
+        let mut settings = default_snapshot().settings;
+        assert!(validate_settings(&settings).is_ok());
+        settings.tab_style = "modern".into();
+        assert!(validate_settings(&settings).is_ok());
+        settings.tab_style = "rounded".into();
+        assert_eq!(
+            validate_settings(&settings),
+            Err("Tab style must be classic or modern.".into())
         );
     }
 

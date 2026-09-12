@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { groupConversationActivity, isShellActivity, reasoningSummary } from '../src/lib/activity-grouping.ts';
+import { contextCompactionPhase, groupConversationActivity, isShellActivity, reasoningSummary } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
+const approval = (id, createdAt, resolvedAt = null) => ({ id, taskId: 'task', provider: 'codex', runId: `run:${id}`, tool: 'computer', summary: 'Allow computer use', detail: '', risk: 'medium', status: 'approved', createdAt, resolvedAt, decision: 'approve_once' });
 const groups = (messages, events) => groupConversationActivity(messages, events).filter(item => item.type === 'tool-group');
 
 // Screenshot-style empty and real web searches remain two raw entries together.
@@ -35,6 +36,12 @@ assert.equal(groups([], [event('a',1,'gmail.search_emails','query'),event('b',2,
 assert.equal(groups([], [event('a',1,'mcp__gmail__search_emails','query'),event('b',2,'mcp__gmail__read_email','email')]).length,1);
 console.log('activity grouping assertions passed');
 
+const approvalTimeline = groupConversationActivity([message('before', 1), message('after', 5)], [event('tool', 3, 'Run command', '')], false, [approval('resolved', 2, 4)]);
+assert.deepEqual(approvalTimeline.map(item => item.type), ['message', 'tool-group', 'approval', 'message']);
+assert.equal(approvalTimeline[2].value.id, 'resolved');
+assert.equal(groupConversationActivity([], [], false, [{ ...approval('pending', 1), status: 'pending', resolvedAt: null }]).length, 0, 'Pending approvals belong in the dock, never the historical timeline');
+console.log('approval resolution appears inline at its resolution timestamp');
+
 const mixed = [event('cmd1',1,'/bin/zsh -lc ls',''),event('web',2,'web_search',''),event('cmd2',3,'/bin/zsh -lc pwd','')];
 assert.equal(groupConversationActivity([],mixed,true).length,1);
 assert.equal(groupConversationActivity([],mixed,true)[0].values.length,3);
@@ -45,6 +52,18 @@ assert.equal(isShellActivity(event('shell',1,'/bin/zsh -lc git status','')),true
 assert.equal(isShellActivity(event('shell',1,'Run command','')),true);
 assert.equal(isShellActivity(event('shell',1,'git status','{"type":"command_execution"}')),true);
 assert.equal(isShellActivity(event('search',1,'web_search','')),false);
+
+const compaction = (id, at, phase) => event(`compaction-${id}-${phase}`, at, 'ContextCompaction', JSON.stringify({ type: 'ContextCompaction', id, monitterPhase: phase }));
+let compactions = groupConversationActivity([], [compaction('one', 1, 'started'), compaction('one', 15_300, 'completed')], true);
+assert.equal(compactions.length, 1, 'A matching compaction lifecycle stays together when compression is enabled');
+assert.equal(compactions[0].values.length, 2);
+assert.equal(contextCompactionPhase(compactions[0].values[0]), 'started');
+assert.equal(contextCompactionPhase(compactions[0].values[1]), 'completed');
+compactions = groupConversationActivity([], [compaction('one', 1, 'started'), event('tool', 2, 'Run command', '{"type":"command_execution"}'), compaction('one', 15_300, 'completed')], true);
+assert.equal(compactions.length, 3, 'Compression must not merge a compaction lifecycle with unrelated tools');
+compactions = groupConversationActivity([], [compaction('one', 1, 'started'), compaction('one', 2, 'completed'), compaction('two', 3, 'started'), compaction('two', 4, 'completed')], true);
+assert.equal(compactions.length, 2, 'Separate native compactions stay separate even when adjacent');
+console.log('context compaction lifecycle grouping assertions passed');
 
 const reasoning = (id, at, detail = '') => ({ ...event(id, at, 'Reasoning', detail), kind: 'reasoning' });
 const emptyPayload = '{"content":[],"id":"rs_123","summary":[],"type":"reasoning"}';

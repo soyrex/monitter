@@ -25,7 +25,7 @@ export function responsiveBrand(node: HTMLElement, _sidebarCompressed = false) {
     observer?.disconnect();
     const full = node.querySelector<HTMLElement>('.brand-full');
     const views = node.querySelector<HTMLElement>('.sidebar-views');
-    observed = [node, full, views].filter((item): item is Element => !!item);
+    observed = [node, full, views].filter((item): item is HTMLElement => !!item);
     observer = new ResizeObserver(measure);
     observed.forEach(item => observer?.observe(item));
     measure();

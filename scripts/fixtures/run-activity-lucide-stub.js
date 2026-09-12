@@ -1,4 +1,5 @@
 export { default as Brain } from './lucide-stub.svelte';
+export { default as Archive } from './lucide-stub.svelte';
 export { default as ChevronRight } from './lucide-stub.svelte';
 export { default as Terminal } from './lucide-stub.svelte';
 export { default as SquareTerminal } from './lucide-stub.svelte';

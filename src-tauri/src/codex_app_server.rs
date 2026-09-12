@@ -1339,6 +1339,20 @@ fn parse_item(item: &Value, started: bool) -> Parsed {
         .and_then(Value::as_str)
         .unwrap_or(ty)
         .to_owned();
+    // Context compaction arrives as separate lifecycle items. Preserve that
+    // phase so the UI never has to infer success from a task becoming idle.
+    let detail = if ty.eq_ignore_ascii_case("ContextCompaction") {
+        let mut detail = item.clone();
+        if let Some(object) = detail.as_object_mut() {
+            object.insert(
+                "monitterPhase".into(),
+                Value::String(if started { "started" } else { "completed" }.into()),
+            );
+        }
+        detail.to_string()
+    } else {
+        item.to_string()
+    };
     Parsed {
         native_session_id: None,
         assistant: None,
@@ -1350,7 +1364,7 @@ fn parse_item(item: &Value, started: bool) -> Parsed {
             }
             .into(),
             title,
-            item.to_string(),
+            detail,
         )),
         failed: false,
     }
@@ -1601,5 +1615,19 @@ mod tests {
             Some(RequestStage::SubsequentTurn)
         );
         assert!(control.take_app_server_turn_request(11));
+    }
+
+    #[test]
+    fn context_compaction_keeps_its_native_id_and_lifecycle_phase() {
+        let item = json!({"type":"ContextCompaction","id":"compact-1"});
+        for (started, phase) in [(true, "started"), (false, "completed")] {
+            let parsed = parse_item(&item, started);
+            let event = parsed.event.expect("compaction is activity");
+            assert_eq!(event.0, "tool");
+            assert_eq!(event.1, "ContextCompaction");
+            let detail: Value = serde_json::from_str(&event.2).expect("JSON detail");
+            assert_eq!(detail["id"], "compact-1");
+            assert_eq!(detail["monitterPhase"], phase);
+        }
     }
 }

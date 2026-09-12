@@ -3,6 +3,7 @@ import type { TerminalSession } from '$lib/types';
 type WorkspacePaneTabs = {
   openTerminalIds?: unknown;
   settingsOpen?: unknown;
+  settingsCategory?: unknown;
   openEmptyIds?: unknown;
   openDraftIds?: unknown;
   taskDrafts?: unknown;
@@ -17,6 +18,17 @@ export type SidebarWorkspaceTab = {
 };
 
 type TabOrderItem = { kind?: unknown; id?: unknown };
+
+export function settingsTabTitle(category: unknown): string {
+  const labels: Record<string, string> = {
+    appearance: 'Appearance', typography: 'Typography',
+    behaviour: 'Permissions & behaviour', conversation: 'Conversation',
+    agents: 'Agents', directory: 'Agent directory', lan: 'LAN access', remote: 'Remote control',
+  };
+  const label = typeof category === 'string' && Object.hasOwn(labels, category)
+    ? labels[category] : labels.appearance;
+  return `Setting: ${label}`;
+}
 
 /**
  * Lists the non-chat tabs belonging to one already-scoped workspace. Terminal
@@ -41,10 +53,10 @@ export function collectWorkspaceSidebarTabs(
       ? { kind: 'terminal', id, title: terminal.title }
       : { kind: 'terminal', id, title: 'Terminal unavailable', disabled: true });
   };
-  const addSettings = () => {
+  const addSettings = (category: unknown) => {
     if (hasSettings) return;
     hasSettings = true;
-    tabs.push({ kind: 'settings', id: 'settings', title: 'Settings' });
+    tabs.push({ kind: 'settings', id: 'settings', title: settingsTabTitle(category) });
   };
 
   for (const pane of panes) {
@@ -85,14 +97,14 @@ export function collectWorkspaceSidebarTabs(
       if (!item || typeof item !== 'object') continue;
       const tab = item as TabOrderItem;
       if (tab.kind === 'terminal' && typeof tab.id === 'string' && terminalIds.has(tab.id)) addTerminal(tab.id);
-      else if (tab.kind === 'settings' && pane.settingsOpen === true) addSettings();
+      else if (tab.kind === 'settings' && pane.settingsOpen === true) addSettings(pane.settingsCategory);
       else if (tab.kind === 'draft' && typeof tab.id === 'string' && draftIds.has(tab.id)) addDraft(tab.id);
       else if (tab.kind === 'empty' && typeof tab.id === 'string' && emptyIds.has(tab.id)) addEmpty(tab.id);
     }
     for (const id of terminalIds) addTerminal(id);
     for (const id of draftIds) addDraft(id);
     for (const id of emptyIds) addEmpty(id);
-    if (pane.settingsOpen === true) addSettings();
+    if (pane.settingsOpen === true) addSettings(pane.settingsCategory);
   }
   return tabs;
 }
