@@ -25,6 +25,7 @@
     Activity,
     Clock,
     ArrowUp,
+    ArrowLeft,
     Search,
     ChevronDown,
     ChevronRight,
@@ -154,6 +155,7 @@
     ?? { task: routeTaskWorkspace, channel: routeChannel, draft: moveDraftToWorkspace };
   setContext('monitter-workspace-navigation', workspaceNavigation);
   let compactDetail = $state(false);
+  let compactTabs = $state(false);
   let queuedAttachments=$state<Record<string,Attachment[]>>({}), attachmentContexts=$state<Record<string,string>>({}), pendingUploads=$state<Record<string,boolean>>({});
   let filePicker=$state<HTMLInputElement>();
   const currentAttachments=$derived(queuedAttachments[currentDraftKey() ?? ''] ?? []);
@@ -257,10 +259,12 @@
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
   let mobileSidebar = $state(false);
+  const backToChats = getContext<() => void>('monitter-back-to-chats')
+    ?? (() => { mobileMain = false; railAgentId = null; });
+  setContext('monitter-back-to-chats', backToChats);
   let mobileMain = $state(false);
   const sidebarCompressed = $derived(sidebarCollapsed && !mobileSidebar);
   onMount(() => {
-    if (embedded) return;
     const viewport = window.matchMedia('(max-width: 760px)');
     const update = () => { mobileSidebar = viewport.matches; railAgentId = null; };
     update();
@@ -513,6 +517,7 @@
   function setComposerPending(key: string, pending: boolean) { if (pending) composerPending[key] = true; else delete composerPending[key]; }
   function watchPane(node: HTMLElement) {
     const resize = new ResizeObserver(() => {
+      compactTabs = node.clientWidth <= 620;
       const narrow = node.clientWidth < 700;
       if (narrow && !compactDetail) showDetail = false;
       compactDetail = narrow;
@@ -2724,9 +2729,13 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <section class="workspace" class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
+  <section class="workspace" class:compact-tabs={mobileSidebar || compactTabs} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
     <header class="topbar" data-tauri-drag-region>
-      {@render workspaceContext()}
+      {#if mobileSidebar}
+        <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
+      {:else}
+        {@render workspaceContext()}
+      {/if}
       <nav class="tabs tab-picker" class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
         <button class="tab-picker-trigger" type="button" aria-expanded={tabPickerOpen} aria-controls={`open-tabs-${paneId}`} onclick={()=>tabPickerOpen=!tabPickerOpen}><span>{currentTabLabel}</span><ChevronDown size={15}/></button>
         <div class="tab-picker-list" id={`open-tabs-${paneId}`} aria-label="Open tabs">
@@ -3273,7 +3282,6 @@
     </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
-    {#if mobileSidebar}<button class="mobile-back" onclick={()=>{mobileMain=false;railAgentId=null;}}>← Back to chats</button>{/if}
     <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
         <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} workspaceKey={activeWorkspaceKey}
@@ -4014,8 +4022,7 @@
   }
   .mobile-navigation :global(.composer) { max-height:none; }
   .mobile-navigation :global(.composer textarea) { min-height:36px; max-height:min(120px,20dvh); resize:none; }
-  .mobile-navigation:global([data-keyboard-composer=true]) { --pane-tabbar-height:36px; }
-  .mobile-navigation:global([data-keyboard-composer=true]) .mobile-back { padding-top:6px; padding-bottom:6px; }
+  .mobile-navigation:global([data-keyboard-composer=true]) { --pane-tabbar-height:52px; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.pane-task-header) { display:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-layout) { padding:8px 12px; align-content:start; mask-image:none; -webkit-mask-image:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-content > :not(.composer)) { display:none; }
@@ -4025,7 +4032,11 @@
   @media (prefers-reduced-motion:reduce) {
     .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid { transition:none; }
   }
-  .mobile-back { flex:none; text-align:left; padding:12px 16px; border:0; border-bottom:1px solid var(--line); background:var(--sidebar); color:var(--accent-ink); font:inherit; cursor:pointer; }
+  .mobile-navigation .workspace > .topbar { display:flex; height:52px; box-sizing:border-box; align-items:center; padding:4px; gap:4px; }
+  .mobile-navigation .mobile-back { flex:none; width:44px; height:44px; padding:0; color:var(--accent-ink); }
+  .mobile-navigation .topbar > .tabs { align-self:stretch; }
+  .mobile-navigation .topbar > .top-actions { padding:0; gap:0; }
+  .mobile-navigation .top-actions > .icon { width:44px; height:44px; }
   .settings-surface { container-type:inline-size; flex:1; min-width:0; min-height:0; overflow:hidden; display:flex; }
   .settings-surface.settings-hidden { display:none; }
   .pane-expand-control { flex:none; }
@@ -4353,7 +4364,7 @@
   .terminal-tab.active, .terminal-tab.active .tab:hover { background: var(--terminal-background); }
   .terminal-tab.active .tab, .terminal-tab.active .close-tab { color: var(--terminal-foreground); }
   .terminal-tab.active .close-tab:hover { background: #252a31; }
-  @container workspace-pane (max-width: 620px) {
+  .compact-tabs {
     .tabs.tab-picker { position:relative; overflow:visible; min-width:0; }
     .tab-picker-trigger { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; min-width:0; padding:0 8px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--panel); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-align:left; }
     .tab-picker-trigger > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
