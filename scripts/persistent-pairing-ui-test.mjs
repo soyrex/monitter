@@ -172,6 +172,7 @@ try {
 
   // Closing the Settings tab removes the target altogether. Reopening it must
   // reattach the existing controller rather than creating a new approval flow.
+  await desktop.locator('.settings-tab').hover();
   await desktop.getByRole('button', { name: 'Close Settings tab', exact: true }).click();
   await expect(desktop.getByRole('region', { name: 'Settings' })).toHaveCount(0);
   await expect(desktop.locator('.remote-panel')).toBeHidden();
