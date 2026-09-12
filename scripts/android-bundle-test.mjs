@@ -16,9 +16,10 @@ let browser, relay, desktop;
 try {
   execFileSync('unzip', ['-q', process.argv[2] ?? 'mobile-android/app/build/outputs/apk/debug/app-debug.apk', 'assets/*', '-d', directory]);
   const hostModule = resolve(directory, 'desktop-client.mjs');
-  execFileSync('node_modules/.bin/rolldown', [process.argv[3] ?? 'src/lib/controller/remote-client.ts', '--platform', 'node', '--format', 'esm', '--file', hostModule, '--logLevel', 'silent']);
+  execFileSync('node_modules/.bin/rolldown', [process.argv[3] ?? 'src/lib/controller/resumable-session.ts', '--platform', 'node', '--format', 'esm', '--file', hostModule, '--logLevel', 'silent']);
   globalThis.WebSocket = WebSocket;
-  const { createDesktopSession } = await import(pathToFileURL(hostModule).href);
+  const hostExports = await import(pathToFileURL(hostModule).href);
+  const createDesktopSession = hostExports.createDesktopSession ?? ((relayUrl, bridge, options) => hostExports.createResumableDesktopSession({relayUrl, bridge, ...options}));
   relay = spawn(process.execPath, ['scripts/relay-server.mjs'], {
     env: { ...process.env, MONITTER_RELAY_PORT: '0', MONITTER_RELAY_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
