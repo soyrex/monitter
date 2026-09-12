@@ -127,7 +127,7 @@ try {
   await page.reload();
   await expect(page.getByRole('button', { name: 'Connect to desktop', exact: true })).toBeVisible();
   assert.deepEqual(errors, []);
-  console.log('APK assets: secure pairing, sidebar modes, stalled refresh/send navigation, draft retention, bounded history, single send, cold route reload, foreground reconnect and explicit forgetting passed.');
+  console.log('APK assets: secure pairing, sidebar modes, stalled refresh/send navigation, draft retention, bounded history, single send and explicit forgetting passed.' + (persistentOptions ? ' Cold route reload and foreground reconnect also passed.' : ' Legacy host compatibility passed.'));
 } finally {
   await browser?.close(); desktop?.close(); relay?.kill('SIGTERM');
   await rm(directory, { recursive: true, force: true });
