@@ -9,6 +9,7 @@ import {
   parseControllerRequest,
   type AuthenticatedControllerContext,
   type ControllerClient,
+  type ControllerSendReceipt,
   type ControllerRequest,
   type ControllerResult,
   type ControllerResponse,
@@ -29,6 +30,10 @@ export function controllerSnapshot(snapshot: Snapshot): Snapshot {
 interface Receipt { fingerprint: string; response: Promise<ControllerResponse>; }
 
 export interface ControllerDispatcherOptions { maxMutationReceipts?: number; }
+export interface ControllerDispatchOptions {
+  /** Only a peer that explicitly offered this capability may receive receipts. */
+  readonly allowSendReceipt?: boolean;
+}
 
 /**
  * The dispatcher is deliberately transport-independent. A future encrypted,
@@ -51,26 +56,26 @@ export class ControllerDispatcher {
     this.maxMutationReceipts = capacity;
   }
 
-  async dispatch(input: unknown, context: unknown): Promise<ControllerResponse> {
+  async dispatch(input: unknown, context: unknown, options: ControllerDispatchOptions = {}): Promise<ControllerResponse> {
     const parsed = parseControllerRequest(input);
     if ('ok' in parsed) return parsed;
     if (!authenticatedControllerContext(context)) return this.error(parsed.id, 'unauthenticated', 'An authenticated paired transport is required.');
-    if (CONTROLLER_MUTATING_ACTIONS.has(parsed.request.action)) return this.dispatchMutation(parsed.id, parsed.request, context);
-    return this.execute(parsed.id, parsed.request);
+    if (CONTROLLER_MUTATING_ACTIONS.has(parsed.request.action)) return this.dispatchMutation(parsed.id, parsed.request, context, options);
+    return this.execute(parsed.id, parsed.request, options);
   }
 
-  async dispatchJson(json: string, context: unknown): Promise<string> {
+  async dispatchJson(json: string, context: unknown, options: ControllerDispatchOptions = {}): Promise<string> {
     if (new TextEncoder().encode(json).byteLength > CONTROLLER_MAX_REQUEST_BYTES) {
       return JSON.stringify(this.error(null, 'invalid_request', 'Request exceeds the controller size limit.'));
     }
     let input: unknown;
     try { input = JSON.parse(json); }
     catch { return JSON.stringify(this.error(null, 'invalid_request', 'Request must be valid JSON.')); }
-    const response = await this.dispatch(input, context);
+    const response = await this.dispatch(input, context, options);
     return JSON.stringify(response);
   }
 
-  private dispatchMutation(id: string, request: ControllerRequest, context: AuthenticatedControllerContext): Promise<ControllerResponse> {
+  private dispatchMutation(id: string, request: ControllerRequest, context: AuthenticatedControllerContext, options: ControllerDispatchOptions): Promise<ControllerResponse> {
     const fingerprint = JSON.stringify({ action: request.action, params: request.params });
     // Request IDs are scoped to the authenticated transport subject. A receipt
     // from one paired device must never be returned to another device.
@@ -81,17 +86,26 @@ export class ControllerDispatcher {
       return existing.response;
     }
     if (this.receipts.size >= this.maxMutationReceipts) return Promise.resolve(this.error(id, 'dedup_saturated', 'Mutation receipt cache is full; establish a new authenticated session.'));
-    const receipt: Receipt = { fingerprint, response: this.execute(id, request) };
+    const receipt: Receipt = { fingerprint, response: this.execute(id, request, options) };
     this.receipts.set(receiptKey, receipt);
     return receipt.response;
   }
 
-  private async execute(id: string, request: ControllerRequest): Promise<ControllerResponse> {
+  private async execute(id: string, request: ControllerRequest, options: ControllerDispatchOptions): Promise<ControllerResponse> {
     try {
       let result: ControllerResult;
       switch (request.action) {
         case 'getSnapshot': result = controllerSnapshot(await this.client.getSnapshot()); break;
-        case 'sendMessage': result = controllerSnapshot(await this.client.sendMessage(request.params.taskId, request.params.text)); break;
+        case 'sendMessage': {
+          const sendResult = await this.client.sendMessage(request.params.taskId, request.params.text);
+          // Older mobile builds expect every send response to be a Snapshot.
+          // Only a pairing peer that explicitly negotiated the capability sees
+          // the small durable receipt; no mutation is retried to learn this.
+          result = isSendReceipt(sendResult) && options.allowSendReceipt
+            ? sendResult
+            : controllerSnapshot(isSendReceipt(sendResult) ? await this.client.getSnapshot() : sendResult);
+          break;
+        }
         case 'cancelTask': result = controllerSnapshot(await this.client.cancelTask(request.params.taskId)); break;
         case 'resumeTask': result = controllerSnapshot(await this.client.resumeTask(request.params.taskId)); break;
         case 'listTerminals': result = await this.client.listTerminals(); break;
@@ -111,4 +125,8 @@ export class ControllerDispatcher {
   private error(id: string | null, code: Extract<ControllerResponse, { ok: false }>['error']['code'], message: string): ControllerResponse {
     return { version: CONTROLLER_PROTOCOL_VERSION, id, ok: false, error: { code, message } };
   }
+}
+
+function isSendReceipt(value: Snapshot | ControllerSendReceipt): value is ControllerSendReceipt {
+  return 'accepted' in value && value.accepted === true && !('tasks' in value);
 }

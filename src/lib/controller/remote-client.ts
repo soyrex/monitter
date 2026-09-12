@@ -1,5 +1,5 @@
 import { ControllerDispatcher } from './dispatcher';
-import { CONTROLLER_PROTOCOL_VERSION, type ControllerRequest, type ControllerResponse, type ControllerResult } from './protocol';
+import { CONTROLLER_PROTOCOL_VERSION, type ControllerRequest, type ControllerResponse, type ControllerResult, type ControllerSendReceipt } from './protocol';
 import { SecureChannel, base64urlToBytes, bytesToBase64url, deriveDirectionalKeys, deriveEcdhSecret, exportPairingPublicKey, generatePairingKeyPair, pairingCommitment, randomBytes, verificationCode, type SecureEnvelope } from './secure-session';
 import type { Snapshot, TerminalRead, TerminalSession } from '../types';
 import type { ControllerClient } from './protocol';
@@ -27,12 +27,16 @@ export interface MobileSession {
   getVerificationCode(): string | null;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   getSnapshot(): Promise<Snapshot>;
-  sendMessage(taskId: string, text: string): Promise<Snapshot>;
+  sendMessage(taskId: string, text: string): Promise<Snapshot | ControllerSendReceipt>;
   cancelTask(taskId: string): Promise<Snapshot>;
   resumeTask(taskId: string): Promise<Snapshot>;
   listTerminals(): Promise<TerminalSession[]>;
   readTerminal(id: string, afterSeq: number): Promise<TerminalRead>;
   close(): void;
+}
+/** Collaboration visitors never negotiate controller send receipts. */
+export interface CollaboratorMobileSession extends Omit<MobileSession, 'sendMessage'> {
+  sendMessage(taskId: string, text: string): Promise<Snapshot>;
 }
 
 type Role = 'desktop' | 'mobile';
@@ -43,6 +47,8 @@ interface PairingKeys { readonly privateKey?: CryptoKey; readonly publicKey?: Ui
 const MAX_RELAY_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_INVITATION_BYTES = 1024;
 const PAIRING_TIMEOUT_MS = 5 * 60_000;
+const MAX_CONCURRENT_DESKTOP_RPCS = 32;
+const SEND_RECEIPT_CAPABILITY = 'send-receipt-v1';
 
 function uuid(): string { return crypto.randomUUID(); }
 function validRelayUrl(value: string): boolean {
@@ -189,6 +195,8 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
   const invitationData: ControllerInvitationV2 = { version: 2, relayUrl, room: bytesToBase64url(randomBytes(18)), publicKey: bytesToBase64url(publicKey) };
   const session = new class extends PairingConnection {
     private approved = false;
+    private peerSupportsSendReceipt = false;
+    private pendingRpcs = 0;
     private peer: CollaboratorIdentity | null = null;
     private readonly pendingListeners = new Set<() => void>();
     private readonly dispatcher = new ControllerDispatcher(bridge);
@@ -197,7 +205,10 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
     onPendingPeer(listener: () => void) { this.pendingListeners.add(listener); return () => this.pendingListeners.delete(listener); }
     async approve() {
       if (!this.channel || this.status !== 'pending') throw new Error('No pending paired device to approve.');
-      try { await this.sendSecure({ type: 'approved' }); this.approved = true; this.completePairing(); this.setStatus('connected'); }
+      try {
+        await this.sendSecure({ type: 'approved', ...(this.peerSupportsSendReceipt ? { capabilities: [SEND_RECEIPT_CAPABILITY] } : {}) });
+        this.approved = true; this.completePairing(); this.setStatus('connected');
+      }
       catch (reason) { this.approved = false; this.close(); throw reason; }
     }
     async reject() { if (!this.channel) throw new Error('No pending paired device to reject.'); await this.sendSecure({ type: 'rejected' }); this.setStatus('rejected'); this.socket?.close(); }
@@ -209,17 +220,36 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
           this.peer = collaborator(value.operator);
           if (!this.peer) throw new Error('Invalid collaborator identity.');
         }
+        this.peerSupportsSendReceipt = hasSendReceiptCapability(value.capabilities);
         this.setStatus('pending'); for (const listener of this.pendingListeners) listener(); return;
       }
       if (value.type !== 'rpc' || !this.approved || this.status !== 'connected' || typeof value.json !== 'string') throw new Error('Unapproved controller request.');
-      const response = await this.dispatcher.dispatchJson(value.json, { authenticated: true, subject: `paired-room:${invitationData.room}` });
-      await this.sendSecure({ type: 'response', json: response });
+      // Keep authenticated opening and sealing ordered, but do not let a slow
+      // bridge read (notably a Snapshot) prevent a later cancel, send, or close
+      // frame from being decrypted and acted upon.
+      this.startRpc(value.json);
+    }
+    private startRpc(json: string) {
+      if (this.pendingRpcs >= MAX_CONCURRENT_DESKTOP_RPCS) {
+        void this.sendSecure({ type: 'response', json: JSON.stringify({ version: CONTROLLER_PROTOCOL_VERSION, id: requestIdFromJson(json), ok: false, error: { code: 'busy', message: 'Too many pending controller requests.' } }) })
+          .catch(() => { if (this.status === 'connected') this.close(); });
+        return;
+      }
+      this.pendingRpcs += 1;
+      void this.dispatcher.dispatchJson(json, { authenticated: true, subject: `paired-room:${invitationData.room}` }, { allowSendReceipt: this.peerSupportsSendReceipt })
+        .then(response => this.sendSecure({ type: 'response', json: response }))
+        // A close/revocation must never revive the socket. A failed response
+        // write while the session is still live is a transport failure.
+        .catch(() => { if (this.status === 'connected') this.close(); })
+        .finally(() => { this.pendingRpcs -= 1; });
     }
   }(invitationData, 'desktop', { privateKey: keyPair.privateKey, publicKey });
   return session;
 }
 
-export async function createMobileSession(invitation: string, operator?: CollaboratorIdentity): Promise<MobileSession> {
+export function createMobileSession(invitation: string): Promise<MobileSession>;
+export function createMobileSession(invitation: string, operator: CollaboratorIdentity): Promise<CollaboratorMobileSession>;
+export async function createMobileSession(invitation: string, operator?: CollaboratorIdentity): Promise<MobileSession | CollaboratorMobileSession> {
   if (operator && !collaborator(operator)) throw new Error('Enter a collaborator name of 2-48 characters.');
   const invitationData = parseInvitation(invitation);
   const keyPair = invitationData.version === 2 ? await generatePairingKeyPair() : null;
@@ -227,7 +257,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
   const expectedPeerPublicKey = invitationData.version === 2 ? base64urlToBytes(invitationData.publicKey) : undefined;
   const session = new class extends PairingConnection {
     private readonly pending = new Map<string, { resolve: (value: ControllerResult) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-    protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request' }); }
+    protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request', capabilities: [SEND_RECEIPT_CAPABILITY] }); }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
       if (value.type === 'pair-request') return;
@@ -252,7 +282,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       });
     }
     async getSnapshot() { return this.call('getSnapshot', {}) as Promise<Snapshot>; }
-    async sendMessage(taskId: string, text: string) { return this.call('sendMessage', { taskId, text }) as Promise<Snapshot>; }
+    async sendMessage(taskId: string, text: string) { return this.call('sendMessage', { taskId, text }) as Promise<Snapshot | ControllerSendReceipt>; }
     async cancelTask(taskId: string) { return this.call('cancelTask', { taskId }) as Promise<Snapshot>; }
     async resumeTask(taskId: string) { return this.call('resumeTask', { taskId }) as Promise<Snapshot>; }
     async listTerminals() { return this.call('listTerminals', {}) as Promise<TerminalSession[]>; }
@@ -260,7 +290,18 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     protected onDisconnected() { for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); } this.pending.clear(); }
     close() { this.onDisconnected(); super.close(); }
   }(invitationData, 'mobile', keyPair ? { privateKey: keyPair.privateKey, publicKey, expectedPeerPublicKey } : {});
-  return session;
+  return session as MobileSession | CollaboratorMobileSession;
+}
+
+function hasSendReceiptCapability(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= 8 && value.every(item => typeof item === 'string' && item.length <= 64) && value.includes(SEND_RECEIPT_CAPABILITY);
+}
+
+function requestIdFromJson(json: string): string | null {
+  try {
+    const request = JSON.parse(json);
+    return request && typeof request === 'object' && typeof request.id === 'string' ? request.id : null;
+  } catch { return null; }
 }
 
 /**

@@ -128,6 +128,15 @@ Mobile snapshots retain conversations but limit diagnostic events to the most
 recent 100, with 4,000 characters of detail each. Desktop history is unchanged.
 Larger conversation histories still need pagination before broader release.
 
+The encrypted transport opens and seals frames in sequence, but executes up to
+32 authenticated RPCs concurrently. A delayed snapshot therefore cannot block a
+later send, Stop, or `peer_left` close frame. Mobile clients that offer the
+`send-receipt-v1` pairing capability receive a durable `{ accepted: true }` send
+receipt from a current desktop host; they refresh the snapshot independently.
+Older mobile builds receive the legacy Snapshot response, and a new mobile paired
+with an older desktop does the same. No send is automatically retried during this
+compatibility negotiation.
+
 ## Android pairing update
 
 Android 0.2.0 adds the native Google Code Scanner through a main-frame,

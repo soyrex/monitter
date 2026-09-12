@@ -4,7 +4,6 @@
  import QRCode from 'qrcode';
  import { getBridge } from '$lib/bridge';
  import { createDesktopSession } from '$lib/controller/remote-client';
- import type { Snapshot } from '$lib/types';
  import { DEFAULT_RELAY, registerPairingCode, revokePairingCode, type PairingRegistration } from '$lib/controller/pairing-code';
  let { open = $bindable(false) }: { open?: boolean } = $props();
  let relay=$state(DEFAULT_RELAY), qr=$state(''), status=$state('off'), error=$state('');
@@ -21,13 +20,10 @@
    try {
      if(!getBridge().available)throw new Error('Open Remote control inside the Monitter desktop app.');
      const bridge = getBridge();
-     // Controller protocol predates tiny send receipts and always transports a
-     // snapshot. Adapt only this remote-control boundary; desktop chat remains
-     // receipt-first and never waits for a refresh.
-     const controllerBridge = { ...bridge, sendMessage: async (taskId: string, text: string): Promise<Snapshot> => {
-       const result = await bridge.sendMessage(taskId, text);
-       return 'tasks' in result ? result : bridge.getSnapshot();
-     } };
+     // The bridge returns either a legacy Snapshot or a durable fast-send
+     // receipt. The dispatcher only exposes the receipt after the paired phone
+     // offers that capability, so an installed older phone still sees a Snapshot.
+     const controllerBridge = { ...bridge, sendMessage: (taskId: string, text: string) => bridge.sendMessage(taskId, text) };
      const next=await createDesktopSession(relay,controllerBridge);
      if(current!==generation){next.close();return;} session=next;
      unsubscribe=next.subscribe(value=>{status=value.status;verificationCode=value.verificationCode??'';if(value.error)error=value.error;if(['pending','connected','closed','error','rejected'].includes(status))clearRegistration();});

@@ -80,6 +80,42 @@ try {
   const desktopClosed = once(callback => desktop.subscribe(state => { if (state.status === 'closed') callback(state); }));
   mobile.close(); await desktopClosed; desktop.close();
 
+  // Opening/decrypting is ordered, but a slow desktop Snapshot must not hold
+  // later authenticated work or peer_left in the receive queue. The modern
+  // mobile capability receives a tiny receipt while the legacy-shaped read is
+  // still stalled; no send is replayed to obtain that receipt.
+  let snapshotStarted;
+  let releaseSnapshot;
+  const snapshotStartedPromise = new Promise(resolve => { snapshotStarted = resolve; });
+  const delayedSnapshot = new Promise(resolve => { releaseSnapshot = resolve; });
+  let delayedCancels = 0, delayedSends = 0;
+  const delayedBridge = {
+    ...bridge,
+    getSnapshot: async () => { snapshotStarted(); await delayedSnapshot; return snapshot; },
+    sendMessage: async () => { delayedSends += 1; return { accepted: true }; },
+    cancelTask: async () => { delayedCancels += 1; return snapshot; },
+  };
+  const stalledDesktop = await createDesktopSession(relayUrl, delayedBridge);
+  const stalledPending = once(callback => stalledDesktop.subscribe(state => { if (state.status === 'pending') callback(state); }));
+  const stalledMobile = await createMobileSession(stalledDesktop.invitation);
+  await stalledPending; await stalledDesktop.approve();
+  await once(callback => stalledMobile.subscribe(state => { if (state.status === 'connected') callback(state); }));
+  const stalledRead = stalledMobile.getSnapshot();
+  // Attach the rejection observer before closing so Node does not treat the
+  // intentional security-close rejection as an unhandled promise.
+  const stalledReadOutcome = stalledRead.then(() => null, reason => reason);
+  await snapshotStartedPromise;
+  const cancellation = await stalledMobile.cancelTask('11111111-1111-4111-8111-111111111111');
+  assert.deepEqual(cancellation, snapshot);
+  const receipt = await stalledMobile.sendMessage('11111111-1111-4111-8111-111111111111', 'receipt first');
+  assert.deepEqual(receipt, { accepted: true });
+  assert.equal(delayedCancels, 1); assert.equal(delayedSends, 1);
+  const stalledClosed = once(callback => stalledDesktop.subscribe(state => { if (state.status === 'closed') callback(state); }));
+  stalledMobile.close(); await stalledClosed;
+  releaseSnapshot();
+  assert.match(String(await stalledReadOutcome), /Connection closed/);
+  stalledDesktop.close();
+
   // A collaboration visitor declares a bounded display identity inside the
   // encrypted pairing request; the host sees it only before explicit approval.
   const sharingDesktop = await createDesktopSession(relayUrl, bridge);
