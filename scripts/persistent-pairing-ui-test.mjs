@@ -129,6 +129,11 @@ try {
   await expect(policyInput).toHaveValue('14');
   await expect(panel.getByRole('status')).toContainText('pending');
   await expect(phone.getByText(/Compare this number with your desktop/)).toBeVisible();
+  await policyInput.fill('7');
+  await panel.getByRole('button', { name: 'Save policy', exact: true }).click();
+  await expect.poll(() => desktop.evaluate(async () => (await import('/test-pairing-modules.js')).loadDesktopPairing().then(record => record.inactivityDays))).toBe(7);
+  await expect(panel.getByRole('status')).toContainText('pending');
+  await expect(phone.locator('header small')).toContainText('awaiting approval');
   await panel.getByRole('button', { name: /approve phone/i }).click();
 
   await expect(phone.getByRole('heading', { name: 'Your workspace', exact: true })).toBeVisible();
