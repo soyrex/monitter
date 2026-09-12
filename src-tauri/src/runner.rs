@@ -6,6 +6,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
@@ -429,7 +430,7 @@ fn remote_runner(cli: &str, cwd: &str, args: &[String]) -> String {
         .join(" ")
 }
 
-fn isolate_child(command: &mut Command) {
+pub(crate) fn isolate_child(command: &mut Command) {
     command
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CODEX_SESSION_ID")
@@ -446,7 +447,7 @@ fn isolate_child(command: &mut Command) {
 /// CLI harnesses routinely write startup, shutdown, and MCP warnings there even
 /// when a turn succeeds. Keep those out of the conversation, while retaining a
 /// single concise error that can help an operator diagnose a failed run.
-fn provider_stderr_diagnostic(line: &str) -> Option<String> {
+pub(crate) fn provider_stderr_diagnostic(line: &str) -> Option<String> {
     let text = line.trim();
     if text.is_empty() {
         return None;
@@ -1310,6 +1311,14 @@ pub struct RunControl {
     resident: AtomicBool,
     child: Mutex<Option<Child>>,
     control_stdin: Mutex<Option<ChildStdin>>,
+    // Codex app-server is a resident JSON-RPC transport.  Keep its thread and
+    // current turn separate from the generic child handle so stale
+    // notifications cannot mutate a later task turn.
+    app_server_thread: Mutex<Option<String>>,
+    app_server_turn: Mutex<Option<String>>,
+    app_server_next_request: Mutex<i64>,
+    app_server_turn_requests: Mutex<HashSet<i64>>,
+    app_server_instance_id: String,
     auxiliary: Mutex<Vec<Child>>,
     remote_supervised: bool,
 }
@@ -1321,6 +1330,11 @@ impl RunControl {
             resident: AtomicBool::new(false),
             child: Mutex::new(None),
             control_stdin: Mutex::new(None),
+            app_server_thread: Mutex::new(None),
+            app_server_turn: Mutex::new(None),
+            app_server_next_request: Mutex::new(10),
+            app_server_turn_requests: Mutex::new(HashSet::new()),
+            app_server_instance_id: crate::model::id(),
             auxiliary: Mutex::new(Vec::new()),
             remote_supervised,
         })
@@ -1328,8 +1342,37 @@ impl RunControl {
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
-        if let Ok(mut stdin) = self.control_stdin.lock() {
-            stdin.take();
+        // Never hold a service/run lock behind a potentially blocked pipe
+        // write. Cancellation is invoked from UI-facing paths, so detach the
+        // owned stdin and let a short-lived writer attempt the advisory
+        // interrupt while process-group signalling proceeds immediately.
+        let thread_id = self
+            .app_server_thread
+            .try_lock()
+            .ok()
+            .and_then(|v| v.clone());
+        let turn_id = self.app_server_turn.try_lock().ok().and_then(|v| v.clone());
+        let stdin = self
+            .control_stdin
+            .try_lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(mut stdin) = stdin {
+            thread::spawn(move || {
+                if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
+                    let frame = serde_json::json!({
+                        "id": 0,
+                        "method": "turn/interrupt",
+                        "params": {"threadId": thread_id, "turnId": turn_id}
+                    });
+                    let _ = stdin
+                        .write_all(frame.to_string().as_bytes())
+                        .and_then(|_| stdin.write_all(b"\n"))
+                        .and_then(|_| stdin.flush());
+                }
+                // EOF is intentional: cancellation ends this resident
+                // transport and its reader performs bounded owned teardown.
+            });
         }
         if self.remote_supervised {
             self.cleanup_auxiliary();
@@ -1367,6 +1410,178 @@ impl RunControl {
             .map_err(|error| format!("Could not send approval response to provider: {error}"))
     }
 
+    /// Start another turn on an already initialized app-server transport.  The
+    /// caller only uses this after `is_resident`; it never falls back to an
+    /// uncertain one-shot `exec resume` invocation.
+    pub(crate) fn send_user_turn(&self, prompt: &str) -> Result<(), String> {
+        self.send_user_turn_with_task(prompt, None)
+    }
+
+    /// Starts a resident Codex turn with the task's latest saved settings.
+    /// Callers that have refreshed the task snapshot should use this variant;
+    /// Claude continues to use `send_user_turn` and its native stream frame.
+    pub(crate) fn send_user_turn_with_task(
+        &self,
+        prompt: &str,
+        task: Option<&Task>,
+    ) -> Result<(), String> {
+        let thread_id = self
+            .app_server_thread
+            .lock()
+            .map_err(|_| "Codex app-server state lock failed.".to_string())?
+            .clone();
+        // Claude's pre-existing stream-json resident transport shares this
+        // method. It has no app-server thread ID and must retain its native
+        // frame instead of receiving a JSON-RPC turn/start request.
+        let Some(thread_id) = thread_id else {
+            return self.send_control(&adapters::claude::user_frame(prompt).to_string());
+        };
+        let request_id = {
+            let mut next = self
+                .app_server_next_request
+                .lock()
+                .map_err(|_| "Codex app-server request lock failed.".to_string())?;
+            let id = *next;
+            *next = next.saturating_add(1);
+            id
+        };
+        let mut params = serde_json::json!({
+            "threadId": thread_id,
+            "input": [{"type":"text", "text":prompt, "text_elements": []}]
+        });
+        if let Some(task) = task {
+            params["cwd"] = Value::String(task.cwd.clone());
+            params["approvalPolicy"] = Value::String(
+                if task.sandbox == "yolo" {
+                    "never"
+                } else {
+                    "on-request"
+                }
+                .into(),
+            );
+            params["sandboxPolicy"] = match task.sandbox.as_str() {
+                "workspace-write" => {
+                    serde_json::json!({"type":"workspaceWrite","writableRoots":[task.cwd],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false})
+                }
+                "yolo" => serde_json::json!({"type":"dangerFullAccess"}),
+                _ => serde_json::json!({"type":"readOnly","networkAccess":false}),
+            };
+            params["model"] = if task.model.trim().is_empty() {
+                Value::Null
+            } else {
+                Value::String(task.model.clone())
+            };
+            if let Some(settings) = &task.model_settings {
+                if let Some(effort) = &settings.reasoning_effort {
+                    params["effort"] = Value::String(effort.clone());
+                }
+                if let Some(fast) = settings.fast_mode {
+                    params["serviceTierForTurn"] =
+                        Value::String(if fast { "priority" } else { "default" }.into());
+                }
+            }
+        }
+        let frame = serde_json::json!({
+            "id": request_id,
+            "method": "turn/start",
+            "params": params
+        });
+        self.app_server_turn_requests
+            .lock()
+            .map_err(|_| "Codex app-server request lock failed.".to_string())?
+            .insert(request_id);
+        if let Err(error) = self.send_control(&frame.to_string()) {
+            let _ = self.take_app_server_turn_request(request_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_app_server_thread(&self, thread_id: String) {
+        if let Ok(mut thread) = self.app_server_thread.lock() {
+            *thread = Some(thread_id);
+        }
+    }
+
+    pub(crate) fn set_app_server_turn(&self, turn_id: String) {
+        if let Ok(mut turn) = self.app_server_turn.lock() {
+            *turn = Some(turn_id);
+        }
+    }
+
+    pub(crate) fn clear_app_server_turn(&self) {
+        if let Ok(mut turn) = self.app_server_turn.lock() {
+            *turn = None;
+        }
+    }
+
+    pub(crate) fn app_server_turn_is_current(&self, thread_id: &str, turn_id: &str) -> bool {
+        self.app_server_thread
+            .lock()
+            .ok()
+            .and_then(|value| value.clone())
+            .as_deref()
+            == Some(thread_id)
+            && self
+                .app_server_turn
+                .lock()
+                .ok()
+                .and_then(|value| value.clone())
+                .as_deref()
+                == Some(turn_id)
+            && !self.is_cancelled()
+    }
+
+    pub(crate) fn matches_app_server_turn(&self, turn_id: &str) -> bool {
+        !turn_id.is_empty()
+            && self
+                .app_server_turn
+                .lock()
+                .ok()
+                .and_then(|value| value.clone())
+                .as_deref()
+                == Some(turn_id)
+            && !self.is_cancelled()
+    }
+
+    pub(crate) fn matches_app_server_thread(&self, thread_id: &str) -> bool {
+        !thread_id.is_empty()
+            && self
+                .app_server_thread
+                .lock()
+                .ok()
+                .and_then(|value| value.clone())
+                .as_deref()
+                == Some(thread_id)
+            && !self.is_cancelled()
+    }
+
+    pub(crate) fn mark_app_server_turn_request(&self, id: i64) -> Result<(), String> {
+        self.app_server_turn_requests
+            .lock()
+            .map_err(|_| "Codex app-server request lock failed.".to_string())?
+            .insert(id);
+        Ok(())
+    }
+
+    pub(crate) fn take_app_server_turn_request(&self, id: i64) -> bool {
+        self.app_server_turn_requests
+            .lock()
+            .map(|mut requests| requests.remove(&id))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn has_app_server_turn_request(&self) -> bool {
+        self.app_server_turn_requests
+            .lock()
+            .map(|requests| !requests.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn app_server_request_key(&self, turn_id: &str, rpc_id: &str) -> String {
+        format!("{}:{turn_id}:{rpc_id}", self.app_server_instance_id)
+    }
+
     pub(crate) fn mark_resident(&self) {
         self.resident.store(true, Ordering::SeqCst);
     }
@@ -1396,7 +1611,7 @@ impl RunControl {
         }
     }
 
-    fn install(
+    pub(crate) fn install(
         &self,
         child: Child,
         control_stdin: Option<ChildStdin>,
@@ -1464,6 +1679,11 @@ impl RunControl {
             thread::sleep(Duration::from_millis(40));
         }
     }
+
+    pub(crate) fn terminate_owned(&self) {
+        self.cancel();
+        let _ = self.wait();
+    }
 }
 
 fn signal_child(child: &mut Child, signal: i32) {
@@ -1476,7 +1696,7 @@ fn signal_child(child: &mut Child, signal: i32) {
     let _ = child.kill();
 }
 
-fn terminate_bounded(child: &mut Child) {
+pub(crate) fn terminate_bounded(child: &mut Child) {
     signal_child(child, libc::SIGTERM);
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -1753,6 +1973,12 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 return;
             }
         };
+        // Codex uses one owned, resident app-server connection per Monitter
+        // task.  Do not route it through exec's one-shot JSONL protocol.
+        if task.provider == "codex" && host.kind == "local" {
+            crate::codex_app_server::start(service, task_id, prompt, control);
+            return;
+        }
         if task.provider == "claude" && host.kind != "local" {
             service.finish(
                 &task_id,

@@ -1,5 +1,11 @@
 mod adapters;
+#[cfg(test)]
+mod app_server_live_tests;
+mod app_server_service;
+#[cfg(test)]
+mod app_server_tests;
 mod attachments;
+mod codex_app_server;
 mod collaboration;
 mod collaboration_runtime;
 mod collaboration_transport;
@@ -112,6 +118,7 @@ pub(crate) struct Service {
     // A real CUA image result is held only until the same run emits its next
     // assistant message. It is never a path reader or a persisted capability.
     pending_codex_images: Mutex<HashMap<String, Vec<attachments::Attachment>>>,
+    app_server_message_ids: Mutex<HashMap<(String, String, String), String>>,
     collaboration: Mutex<Option<collaboration_transport::Broker>>,
     collaboration_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     collaboration_started: std::sync::atomic::AtomicBool,
@@ -127,6 +134,8 @@ pub(crate) struct Service {
     // native runs, and a persisted request remains visible for audit/review
     // without claiming a tool can be resumed after that interruption.
     approval_waiters: Mutex<HashMap<String, Vec<mpsc::Sender<ApprovalSignal>>>>,
+    app_server_approvals: Mutex<HashMap<String, std::sync::Weak<runner::RunControl>>>,
+    input_waiters: Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, String>>>>,
 }
 
 const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -181,6 +190,7 @@ impl Service {
             }),
             runs: Mutex::new(RunRegistry::default()),
             pending_codex_images: Mutex::new(HashMap::new()),
+            app_server_message_ids: Mutex::new(HashMap::new()),
             collaboration: Mutex::new(None),
             collaboration_grants: Mutex::new(HashMap::new()),
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
@@ -193,6 +203,8 @@ impl Service {
             lan_error: Mutex::new(None),
             revision_epoch: uuid::Uuid::new_v4().to_string(),
             approval_waiters: Mutex::new(HashMap::new()),
+            app_server_approvals: Mutex::new(HashMap::new()),
+            input_waiters: Mutex::new(HashMap::new()),
         });
         Ok(service)
     }
@@ -505,6 +517,10 @@ impl Service {
                 &arg::<String>(&args, "approvalId")?,
                 ApprovalDecision::from_stored(&arg::<String>(&args, "decision")?)?,
             )?),
+            "resolve_input" => snapshot_value(self.resolve_input_request(
+                &arg::<String>(&args, "approvalId")?,
+                arg(&args, "response")?,
+            )?),
             "save_settings" => {
                 let settings: Settings = arg(&args, "settings")?;
                 let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
@@ -700,6 +716,8 @@ impl Service {
                 created_at: now(),
                 resolved_at: None,
                 decision: None,
+                input: None,
+                response: None,
             };
             snapshot.approval_requests.push(approval.clone());
             Ok(approval)
@@ -777,6 +795,15 @@ impl Service {
         decision: ApprovalDecision,
     ) -> Result<Snapshot, String> {
         let snapshot = self.mutate(None, |snapshot| {
+            let candidate = snapshot
+                .approval_requests
+                .iter()
+                .find(|request| request.id == approval_id)
+                .ok_or("Approval request was not found.")?;
+            self.validate_app_server_approval(candidate, snapshot)?;
+            if candidate.input.is_some() && decision == ApprovalDecision::ApproveOnce {
+                return Err("Provide the requested input before submitting.".into());
+            }
             let request = snapshot
                 .approval_requests
                 .iter_mut()
@@ -797,6 +824,9 @@ impl Service {
         // `mutate` has already persisted the decision before a runner can act
         // on it, so an approval never authorizes a tool only in memory.
         self.notify_approval_waiters(approval_id, Ok(decision));
+        if decision == ApprovalDecision::Deny {
+            self.notify_input_waiter(approval_id, Err("Request denied.".into()));
+        }
         Ok(snapshot)
     }
 
@@ -820,6 +850,7 @@ impl Service {
             approval_id,
             Err("Approval request expired before a decision.".into()),
         );
+        self.notify_input_waiter(approval_id, Err("Request expired.".into()));
         Ok(snapshot)
     }
 
@@ -1173,7 +1204,7 @@ impl Service {
         }
     }
 
-    /// Deliver a turn to a live Claude stream-json process. `false` means this
+    /// Deliver a turn to a live provider process. `false` means this
     /// task has no resident transport and should take the ordinary launch path;
     /// it never means "start a one-shot --resume process".
     fn send_to_resident(&self, task_id: &str, prompt: &str) -> Result<bool, String> {
@@ -1190,8 +1221,12 @@ impl Service {
         if !control.is_resident() {
             return Ok(false);
         }
-        let frame = adapters::claude::user_frame(prompt).to_string();
-        control.send_control(&frame)?;
+        let (task, _) = self.task_and_host(task_id)?;
+        if task.provider == "codex" {
+            control.send_user_turn_with_task(prompt, Some(&task))?;
+        } else {
+            control.send_user_turn(prompt)?;
+        }
         Ok(true)
     }
 
@@ -1216,11 +1251,23 @@ impl Service {
     }
 
     fn finish_if_current_run(
-        &self,
+        self: &Arc<Self>,
         task_id: &str,
         control: &Arc<runner::RunControl>,
         error: String,
     ) {
+        if self
+            .task_and_host(task_id)
+            .is_ok_and(|(task, _)| task.provider == "codex")
+        {
+            // Keep ownership reserved until the app-server reader has reaped
+            // this exact child. A failed write must not leave a live process
+            // behind or release its native thread for a competing writer.
+            if self.complete_app_server_turn(task_id, control, None, "error", Some(error)) {
+                control.cancel();
+            }
+            return;
+        }
         // Lock order matches reserve_run (data, then runs). Holding both makes
         // pointer ownership and the durable terminal transition one operation:
         // an old resident writer cannot fail over a newer run for this task.
@@ -1474,6 +1521,7 @@ impl Service {
             }
             if let Some(text) = assistant.filter(|text| !text.trim().is_empty()) {
                 state.messages.push(Message {
+                    stream_status: None,
                     sender_agent_id: None,
                     collaboration_id: None,
                     id: id(),
@@ -1812,7 +1860,7 @@ impl Service {
                 }
                 return Ok(None);
             }
-            state.messages.push(Message {
+            state.messages.push(Message { stream_status: None,
                 sender_agent_id: None,
                 collaboration_id: None,
                 id: id(),
@@ -1881,9 +1929,14 @@ impl Service {
         if let Some(control) = self.resident_control(&task_id)? {
             let service = Arc::clone(self);
             tauri::async_runtime::spawn_blocking(move || {
-                if let Err(error) =
-                    control.send_control(&adapters::claude::user_frame(&prompt).to_string())
-                {
+                let result = service.task_and_host(&task_id).and_then(|(task, _)| {
+                    if task.provider == "codex" {
+                        control.send_user_turn_with_task(&prompt, Some(&task))
+                    } else {
+                        control.send_user_turn(&prompt)
+                    }
+                });
+                if let Err(error) = result {
                     service.finish_if_current_run(&task_id, &control, error);
                 }
             });
@@ -2089,6 +2142,7 @@ impl Service {
                 .collect::<Vec<_>>()
                 .join("\n");
             snapshot.messages.push(Message {
+                stream_status: None,
                 sender_agent_id: queued.sender_agent_id.clone(),
                 collaboration_id: None,
                 id: id(),
@@ -2178,6 +2232,13 @@ impl Service {
             }
             state.tasks[ix].status = "interrupted".into();
             state.tasks[ix].updated_at = now();
+            for message in state
+                .messages
+                .iter_mut()
+                .filter(|m| m.task_id == task_id && m.stream_status.as_deref() == Some("streaming"))
+            {
+                message.stream_status = Some("interrupted".into());
+            }
             state.events.push(RunEvent {
                 id: id(),
                 task_id: task_id.into(),
@@ -2208,6 +2269,7 @@ impl Service {
             Ok(expired)
         })?;
         for approval_id in expired_approvals {
+            self.notify_input_waiter(&approval_id, Err("Request cancelled.".into()));
             self.notify_approval_waiters(
                 &approval_id,
                 Err("Approval request expired because its task was cancelled.".into()),
@@ -2956,6 +3018,7 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     }
     if !agent_instructions(&agent).trim().is_empty() {
         state.messages.push(Message {
+            stream_status: None,
             sender_agent_id: None,
             collaboration_id: None,
             id: id(),
@@ -3130,14 +3193,32 @@ fn get_lan_server_info(state: State<'_, AppState>) -> lan::Info {
 }
 
 #[tauri::command]
-fn resolve_approval(
+async fn resolve_approval(
     state: State<'_, AppState>,
-    id: String,
+    approval_id: String,
     decision: String,
 ) -> Result<Snapshot, String> {
-    state
-        .0
-        .resolve_approval_request(&id, ApprovalDecision::from_stored(&decision)?)
+    let service = state.0.clone();
+    let decision = ApprovalDecision::from_stored(&decision)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        service.resolve_approval_request(&approval_id, decision)
+    })
+    .await
+    .map_err(|error| format!("Approval worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn resolve_input(
+    state: State<'_, AppState>,
+    approval_id: String,
+    response: serde_json::Value,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.resolve_input_request(&approval_id, response)
+    })
+    .await
+    .map_err(|error| format!("Input worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -4236,7 +4317,7 @@ fn send_channel_message_accepted(
                 }
                 task.status = "running".into();
                 if !agent_instructions(&agent).trim().is_empty() {
-                    state.messages.push(Message {
+                    state.messages.push(Message { stream_status: None,
                         sender_agent_id: None,
                         collaboration_id: None,
                         id: id(),
@@ -4260,7 +4341,7 @@ fn send_channel_message_accepted(
             let (attachments, matched) =
                 matching_attachments(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             matched_attachment_ids.extend(matched);
-            state.messages.push(Message {
+            state.messages.push(Message { stream_status: None,
                 sender_agent_id: None,
                 collaboration_id: None,
                 id: id(),
@@ -4560,7 +4641,7 @@ fn wait_idle(service: &Service, task_id: &str, seconds: u64) -> Result<(), Strin
             .find(|task| task.id == task_id)
             .map(|task| task.status.as_str())
             != Some("running")
-            && !service.run_is_active(task_id)
+            && (!service.run_is_active(task_id) || service.has_resident_run(task_id))
         {
             return Ok(());
         }
@@ -4956,6 +5037,7 @@ pub fn run() {
             get_task_events,
             get_lan_server_info,
             resolve_approval,
+            resolve_input,
             finish_quit,
             read_attachment_file,
             store_attachment,
@@ -5080,6 +5162,7 @@ mod tests {
                     .unwrap();
                 a_task.status = "running".into();
                 snapshot.messages.push(Message {
+                    stream_status: None,
                     id: id(),
                     task_id: a.id.clone(),
                     role: "user".into(),
@@ -5090,6 +5173,7 @@ mod tests {
                     attachments: vec![],
                 });
                 snapshot.messages.push(Message {
+                    stream_status: None,
                     id: id(),
                     task_id: a.id.clone(),
                     role: "assistant".into(),
@@ -5121,6 +5205,7 @@ mod tests {
         service
             .mutate(None, |snapshot| {
                 snapshot.messages.push(Message {
+                    stream_status: None,
                     id: id(),
                     task_id: b.id.clone(),
                     role: "user".into(),
@@ -5131,6 +5216,7 @@ mod tests {
                     attachments: vec![],
                 });
                 snapshot.messages.push(Message {
+                    stream_status: None,
                     id: id(),
                     task_id: b.id.clone(),
                     role: "assistant".into(),
@@ -5514,11 +5600,28 @@ name@rafa.test",
         let prompt = dir.join("prompt");
         std::fs::write(
             &executable,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\nprintf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"resumed\"}}}}'\n",
-                arguments.display(),
-                prompt.display()
-            ),
+            r##"#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline');
+const directory = path.dirname(process.argv[1]);
+fs.writeFileSync(path.join(directory, 'arguments'), process.argv.slice(2).join('\n'));
+const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.method === 'initialize') send({ id: request.id, result: {} });
+  if (request.method === 'thread/resume') {
+    if (request.params.threadId !== 'native-session' || request.params.sandbox !== 'read-only') process.exit(2);
+    send({ id: request.id, result: { thread: { id: 'native-session' } } });
+  }
+  if (request.method === 'turn/start') {
+    fs.writeFileSync(path.join(directory, 'prompt'), request.params.input[0].text);
+    send({ id: request.id, result: { turn: { id: 'turn-resumed' } } });
+    send({ method: 'item/completed', params: { threadId: 'native-session', turnId: 'turn-resumed', item: { id: 'reply', type: 'agentMessage', text: 'resumed' } } });
+    send({ method: 'turn/completed', params: { threadId: 'native-session', turn: { id: 'turn-resumed', status: 'completed' } } });
+  }
+});
+"##,
         )
         .unwrap();
         #[cfg(unix)]
@@ -5581,15 +5684,15 @@ name@rafa.test",
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        assert_eq!(arguments[0], "exec");
-        assert!(arguments.windows(2).any(|pair| pair == ["-s", "read-only"]));
-        assert_eq!(
-            &arguments[arguments.len() - 4..],
-            ["resume", "--json", "native-session", "-"]
-        );
+        assert_eq!(arguments, ["app-server"]);
         assert!(std::fs::read_to_string(prompt)
             .unwrap()
-            .ends_with("User request:\nContinue from where we left off. If the last request is complete, let me know and wait for my next instruction.\n"));
+            .trim_end()
+            .ends_with("User request:\nContinue from where we left off. If the last request is complete, let me know and wait for my next instruction."));
+        if let Some(control) = service.resident_control(&task.id).unwrap() {
+            control.terminate_owned();
+            service.release_app_server_run(&task.id, &control);
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6095,16 +6198,35 @@ name@rafa.test",
         let task = service
             .create_task(task_input(agent_id, "Approval", None))
             .unwrap();
-        let approval = service
-            .create_approval_request(CreateApprovalRequest {
-                task_id: task.id.clone(),
-                provider: "codex".into(),
-                run_id: "run-1".into(),
-                tool: "shell".into(),
-                summary: "Write a file".into(),
-                detail: "The harness requested a workspace write.".into(),
-                risk: "medium".into(),
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
             })
+            .unwrap();
+        let control = service.reserve_run(&task.id).unwrap();
+        control.set_app_server_thread("approval-thread".into());
+        control.set_app_server_turn("approval-turn".into());
+        let approval = service
+            .create_app_server_approval(
+                &control,
+                "approval-turn",
+                CreateApprovalRequest {
+                    task_id: task.id.clone(),
+                    provider: "codex".into(),
+                    run_id: "run-1".into(),
+                    tool: "shell".into(),
+                    summary: "Write a file".into(),
+                    detail: "The harness requested a workspace write.".into(),
+                    risk: "medium".into(),
+                },
+                None,
+            )
             .unwrap();
         let waiter = Arc::clone(&service);
         let approval_id = approval.id.clone();
@@ -6119,6 +6241,8 @@ name@rafa.test",
         assert!(service
             .resolve_approval_request(&approval.id, ApprovalDecision::Deny)
             .is_err());
+        control.cancel();
+        service.release_app_server_run(&task.id, &control);
         drop(service);
 
         let reopened = Service::open(None, dir.clone()).unwrap();
@@ -6268,6 +6392,7 @@ name@rafa.test",
                 task.status = "running".into();
                 task.native_session_id = Some("native-session".into());
                 snapshot.messages.push(Message {
+                    stream_status: None,
                     sender_agent_id: None,
                     collaboration_id: None,
                     id: id(),

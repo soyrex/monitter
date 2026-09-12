@@ -1386,6 +1386,12 @@
       resolvingApprovalId = null;
     }
   }
+  async function resolveInput(request: ApprovalRequest, response: unknown) {
+    if (busy || request.status !== 'pending') return;
+    resolvingApprovalId = request.id;
+    try { await run(() => bridge.resolveInput(request.id, response)); }
+    finally { resolvingApprovalId = null; }
+  }
   function debouncedReload() {
     // A busy native event stream must not starve polling by resetting this
     // deadline for every event. bridge.getSnapshot coalesces the actual read.
@@ -3025,7 +3031,7 @@
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
           <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`}>
             {#if pendingApprovalRequests.length}<section class="pending-approvals" aria-label="Pending approval requests">
-              {#each pendingApprovalRequests as request (request.id)}<ApprovalRequestCard {request} disabled={busy} resolving={resolvingApprovalId === request.id} onresolve={resolveApproval}/>{/each}
+              {#each pendingApprovalRequests as request (request.id)}<ApprovalRequestCard {request} disabled={busy} resolving={resolvingApprovalId === request.id} onresolve={resolveApproval} oninput={resolveInput}/>{/each}
             </section>{/if}
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' ? `tool:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}<RunActivity event={item.value} />
@@ -3045,6 +3051,7 @@
                     ><time>{date(message.createdAt)}</time>{#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
                   </div>
                   <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
+                  {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
                 </article>{/if}{/each}{:else if !pendingApprovalRequests.length && !resolvedApprovalRequests.length}<div class="blank-conversation">
                 <Terminal size={24} />
                 <h2>No messages yet</h2>

@@ -14,7 +14,7 @@ interrupted completion. Agent text arrives through
 `item/agentMessage/delta`; completed items arrive through `item/completed`.
 
 The local fixture at `scripts/fixtures/codex-app-server/mock.mjs` exercises this
-lifecycle and the command-approval response route. Run it with:
+lifecycle and correlated command, permission and question responses. Run it with:
 
 ```sh
 node scripts/app-server-protocol-test.mjs
@@ -36,10 +36,56 @@ the same lifecycle. User-input requests carry questions and require an
 
 ## Scope boundaries
 
-MCP tool result `content` is an unconstrained JSON array in Codex 0.154.0; it
-does not provide a typed image-content contract. Experimental methods require
-both generated experimental support and client capability negotiation. The
-adapter must preserve unknown notifications as visible diagnostics and must
-not silently substitute `codex exec`, fabricated messages, or a different
-provider.
+Local desktop-hosted Codex chats use this adapter, including when operated
+through Monitter's LAN browser. SSH-hosted Codex remains on the existing
+`exec --json` adapter and does not advertise interactive approval support.
+Other harnesses retain their existing transports. No automatic retry or replay
+occurs after an uncertain delivery failure.
 
+MCP tool result `content` is an unconstrained JSON array in Codex 0.154.0.
+Monitter recognizes image blocks and validates their base64 image signatures
+and size before attaching them to the next completed reply. Computer-tool
+activity is displayed using the existing activity UI; this does not grant
+macOS permissions or install/configure a computer-use MCP server.
+
+Questions, flat primitive-field MCP forms and explicit URL elicitations are
+supported. Unsupported interactive methods are rejected, never auto-approved.
+Owner approvals/input are excluded from shared-visitor snapshots. Responses
+are bound to the owned process, native turn and RPC request; cancellation,
+upstream resolution and process loss expire pending requests.
+
+## Verification
+
+The service tests drive Monitter itself using the owned fixture child, not
+just a stand-alone protocol client:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+npm run check
+npx vite build
+```
+
+Use `npx vite build` for an isolated feature build. The repository's
+`npm run build` also publishes LAN assets and must not be used until deploying
+the feature is authorized.
+
+Serve the feature's `build/` directory on a separate loopback QA port and run
+`scripts/app-server-ui-test.mjs`, `scripts/instant-send-test.mjs`, and
+`scripts/generated-image-ui-test.mjs` with `MONITTER_TEST_URL` pointing to it.
+These WebKit tests cover desktop/mobile controls, optimistic sending, inline
+images and updates to one streamed message.
+
+Live tests are deliberately ignored by default. They use the existing local
+Codex account, temporary Monitter state and a scratch working directory:
+
+```sh
+MONITTER_LIVE_CODEX=1 cargo test --manifest-path src-tauri/Cargo.toml --lib live_codex_app_server -- --ignored --nocapture --test-threads=1
+```
+
+They verify context across resident turns and Stop/reconnect, plus a real
+command-approval denial that must not create its proposed scratch file. These
+tests consume ordinary existing-account model usage and create isolated native
+test threads; they do not modify CLI authentication/configuration, production
+Monitter state, or install the feature build.
+
+Protocol reference: [OpenAI Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).

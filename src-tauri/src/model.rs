@@ -80,6 +80,9 @@ pub struct Task {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    /// Only live app-server replies use this field; older/provider messages remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_status: Option<String>,
     pub id: String,
     pub task_id: String,
     pub role: String,
@@ -214,6 +217,40 @@ pub struct ApprovalRequest {
     pub resolved_at: Option<i64>,
     #[serde(default)]
     pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InteractionInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionInput {
+    pub kind: String,
+    #[serde(default)]
+    pub questions: Vec<InputQuestion>,
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    #[serde(default)]
+    pub is_secret: bool,
+    #[serde(default)]
+    pub options: Vec<InputOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputOption {
+    pub label: String,
+    pub description: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

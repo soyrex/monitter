@@ -14,6 +14,7 @@ const lines = []; child.stdout.setEncoding('utf8');
 child.stdout.on('data', (chunk) => lines.push(...chunk.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))));
 const waitFor = async (predicate) => { for (;;) { const found = lines.find(predicate); if (found) return found; await new Promise((resolve) => setTimeout(resolve, 5)); } };
 const call = (id, method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+const reply = (id, result) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
 
 call(1, 'initialize', { clientInfo: { name: 'test', title: null, version: '1' }, capabilities: { experimentalApi: false, requestAttestation: false } });
 assert.equal((await waitFor((m) => m.id === 1)).result.platformOs, 'macos');
@@ -22,13 +23,13 @@ call(3, 'turn/start', { threadId: started.result.thread.id, input: [{ type: 'tex
 assert.equal((await waitFor((m) => m.id === 3)).result.turn.status, 'inProgress');
 const approval = await waitFor((m) => m.method === 'item/commandExecution/requestApproval');
 assert.deepEqual(Object.keys(approval.params).sort(), ['approvalId','command','commandActions','cwd','environmentId','itemId','kind','proposedExecpolicyAmendment','proposedNetworkPolicyAmendments','reason','startedAtMs','threadId','turnId']);
-call(approval.id, 'response', { decision: 'accept' });
+reply(approval.id, { decision: 'accept' });
 const fileApproval = await waitFor((m) => m.method === 'item/fileChange/requestApproval');
 assert.equal(fileApproval.params.threadId, started.result.thread.id);
-call(fileApproval.id, 'response', { decision: 'accept' });
+reply(fileApproval.id, { decision: 'accept' });
 const userInput = await waitFor((m) => m.method === 'item/tool/requestUserInput');
 assert.equal(userInput.params.isBlocking, true);
-call(userInput.id, 'response', { answers: { confirm: { answers: ['yes'] } } });
+reply(userInput.id, { answers: { confirm: { answers: ['yes'] } } });
 assert.equal((await waitFor((m) => m.method === 'turn/completed')).params.turn.status, 'completed');
 call(4, 'turn/interrupt', { threadId: started.result.thread.id, turnId: 'no-active-turn' });
 assert.equal((await waitFor((m) => m.id === 4)).error.code, -32602);

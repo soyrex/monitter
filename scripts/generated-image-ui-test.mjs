@@ -16,6 +16,11 @@ try {
   await expect.poll(()=>image.evaluate(node=>node.complete && node.naturalWidth>0)).toBe(true);
   const bounds=await image.boundingBox();
   expect(bounds.width).toBeGreaterThan(100);
-  expect(bounds.x+bounds.width).toBeLessThanOrEqual(390);
+  // Opening a mobile chat uses a 280ms slide transition. Poll the geometry
+  // until the transition settles instead of sampling the transient right edge.
+  await expect.poll(async()=>{
+    const settled=await image.boundingBox();
+    return settled ? settled.x+settled.width : Infinity;
+  }, {timeout:5000}).toBeLessThanOrEqual(390);
   console.log('Generated screenshot displays inline within the mobile chat width.');
 } finally {await browser.close();}

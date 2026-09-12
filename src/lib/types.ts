@@ -27,6 +27,7 @@ export interface Task {
   modelSettings?: ModelSettings | null;
 }
 export interface Message {
+  streamStatus?: 'streaming' | 'complete' | 'interrupted';
   id: string; taskId: string; role: 'user' | 'assistant' | 'system';
   text: string; createdAt: number;
   senderAgentId?: string | null; collaborationId?: string | null;
@@ -72,6 +73,14 @@ export interface ApprovalRequest {
   status: 'pending' | 'approved' | 'denied' | 'expired' | 'unsupported';
   createdAt: number; resolvedAt: number | null;
   decision: 'approve_once' | 'deny' | null;
+  input?: InteractionInput | null;
+  response?: unknown;
+}
+export interface InteractionInput {
+  kind: 'questions' | 'form' | 'url';
+  questions: { id: string; header: string; question: string; isSecret: boolean; options: { label: string; description: string }[] }[];
+  schema: Record<string, unknown> | null;
+  url: string | null;
 }
 export interface Settings {
   shortcutMode?: 'standard' | 'vim';

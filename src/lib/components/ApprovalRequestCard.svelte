@@ -1,17 +1,26 @@
 <script lang="ts">
   import { AlertTriangle, Check, ShieldAlert, X } from '@lucide/svelte';
   import type { ApprovalRequest } from '$lib/types';
+  import HarnessInput from './HarnessInput.svelte';
 
-  let { request, disabled = false, resolving = false, onresolve }: {
+  let { request, disabled = false, resolving = false, onresolve, oninput }: {
     request: ApprovalRequest;
     disabled?: boolean;
     resolving?: boolean;
     onresolve?: (request: ApprovalRequest, decision: 'approve_once' | 'deny') => void;
+    oninput?: (request: ApprovalRequest, response: unknown) => void;
   } = $props();
 
   const isPending = $derived(request.status === 'pending');
+  const action = $derived.by(() => {
+    if (request.provider !== 'codex') return null;
+    try { const value = JSON.parse(request.detail); return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+    catch { return null; }
+  });
+  const command = $derived(typeof action?.command === 'string' ? action.command : Array.isArray(action?.command) ? action.command.join(' ') : '');
+  const reason = $derived(typeof action?.reason === 'string' ? action.reason : '');
   const outcome = $derived(
-    request.status === 'approved' ? 'Approved once'
+    request.status === 'approved' ? (request.input ? 'Response submitted' : 'Approved once')
       : request.status === 'denied' ? 'Denied'
       : request.status === 'expired' ? 'Expired before a decision'
       : request.status === 'unsupported' ? 'Unsupported by this backend'
@@ -27,7 +36,7 @@
     <span class="approval-icon" aria-hidden="true">
       {#if isPending || request.status === 'expired' || request.status === 'unsupported'}<ShieldAlert size={16}/>{:else if request.status === 'approved'}<Check size={16}/>{:else}<X size={16}/>{/if}
     </span>
-    <span class="approval-title">{isPending ? 'Approval needed' : outcome}</span>
+    <span class="approval-title">{isPending ? (request.input ? 'Your input is needed' : 'Approval needed') : outcome}</span>
     <time>{timestamp}</time>
   </header>
   <p class="approval-summary">{request.summary || request.tool}</p>
@@ -36,10 +45,17 @@
     <div><dt>Tool</dt><dd>{request.tool}</dd></div>
     <div><dt>Risk</dt><dd>{request.risk}</dd></div>
   </dl>
-  {#if request.detail}<p class="approval-detail">{request.detail}</p>{/if}
+  {#if action}
+    {#if command}<pre class="command-preview">{command}</pre>{/if}
+    {#if reason}<p class="approval-detail">{reason}</p>{/if}
+    {#if action.permissions}<pre class="command-preview">{JSON.stringify(action.permissions, null, 2)}</pre>{/if}
+    {#if action.changes}<pre class="command-preview">{JSON.stringify(action.changes, null, 2)}</pre>{/if}
+    <details class="technical"><summary>Request details</summary><pre>{JSON.stringify(action, null, 2)}</pre></details>
+  {:else if request.detail}<p class="approval-detail">{request.detail}</p>{/if}
   {#if isPending}
+    {#if request.input}<HarnessInput input={request.input} disabled={disabled || resolving || !oninput} onsubmit={response => oninput?.(request, response)}/>{/if}
     <div class="approval-actions">
-      <button class="approve" disabled={disabled || resolving} aria-label="Approve once approval request" onclick={() => onresolve?.(request, 'approve_once')}><Check size={15}/>Approve once</button>
+      {#if !request.input}<button class="approve" disabled={disabled || resolving || !onresolve} aria-label="Approve once approval request" onclick={() => onresolve?.(request, 'approve_once')}><Check size={15}/>Approve once</button>{/if}
       <button class="deny" disabled={disabled || resolving} aria-label="Deny approval request" onclick={() => onresolve?.(request, 'deny')}><X size={15}/>Deny</button>
       {#if resolving}<span class="resolving" role="status"><AlertTriangle size={13}/>Resolving…</span>{/if}
     </div>
@@ -60,6 +76,9 @@
   .approval-metadata div { display: flex; gap: 4px; }
   dt { color: var(--muted); } dd { margin: 0; color: var(--ink); }
   .approval-detail { margin: 10px 0 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+  .command-preview, .technical pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; font: 12px/1.5 var(--mono); }
+  .command-preview { padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  .technical { margin-top: 10px; color: var(--muted); font-size: 11px; }
   .approval-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
   .approval-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; font: 600 calc(11px * var(--interface-font-ratio, 1)) var(--interface-font, "IBM Plex Sans", sans-serif); }
   .approval-actions .approve { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }

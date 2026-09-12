@@ -5,8 +5,9 @@
 import readline from 'node:readline';
 
 const threadId = '00000000-0000-7000-8000-000000000001';
-const turnId = '00000000-0000-7000-8000-000000000002';
-const itemId = '00000000-0000-7000-8000-000000000003';
+let turnId = '00000000-0000-7000-8000-000000000002';
+let itemId = '00000000-0000-7000-8000-000000000003';
+let turnNumber = 0;
 let activeTurn = false;
 let requestNumber = 100;
 let pendingRequestKind = null;
@@ -31,10 +32,19 @@ const userInputText = (input) => Array.isArray(input) && input.some((entry) => e
 
 function beginTurn(id, params) {
   if (!userInputText(params?.input)) return rpcError(id, -32602, 'turn/start input must contain a text UserInput');
+  if (process.env.MONITTER_FIXTURE_ERROR === '1') { rpcError(id, -32001, 'fixture injected protocol failure'); process.exitCode = 2; return; }
+  turnNumber += 1;
+  turnId = `00000000-0000-7000-8000-00000000000${turnNumber + 1}`;
+  itemId = `00000000-0000-7000-8000-00000000000${turnNumber + 2}`;
   activeTurn = true;
   response(id, { turn: turn() });
   notification('turn/started', { threadId, turn: turn() });
   notification('item/agentMessage/delta', { threadId, turnId, itemId, delta: 'fixture response' });
+  notification('item/completed', { threadId, turnId, completedAtMs: 1726000000500, item: {
+    type: 'mcpToolCall', id: `${itemId}-mcp`, server: 'fixture', tool: 'image', status: 'completed',
+    arguments: {}, appContext: null, pluginId: null, readOnlyHint: true, durationMs: 1,
+    result: { content: [{ type: 'image', data: '/9j/2Q==', mimeType: 'image/jpeg' }], structuredContent: null, _meta: null }, error: null,
+  }});
   // Server requests exercise the adapter's exact request/response routing.
   const approvalId = ++requestNumber;
   pendingRequestKind = 'command';
@@ -63,7 +73,15 @@ rl.on('line', (line) => {
   }
   // Any response to our approval request completes the deterministic turn.
   if (request.id >= 100) {
-    response(request.id, {});
+    if (pendingRequestKind === 'command' || pendingRequestKind === 'file') {
+      if (!request.result?.decision || !['accept', 'decline', 'cancel'].includes(request.result.decision)) {
+        rpcError(request.id, -32602, 'fixture requires decision accept, decline, or cancel'); return;
+      }
+    } else if (pendingRequestKind === 'input') {
+      if (!request.result?.answers || typeof request.result.answers !== 'object') {
+        rpcError(request.id, -32602, 'fixture requires an answers object'); return;
+      }
+    } else { rpcError(request.id, -32602, 'fixture has no pending request'); return; }
     if (pendingRequestKind === 'command') {
       pendingRequestKind = 'file'; const nextId = ++requestNumber;
       send({ jsonrpc: '2.0', id: nextId, method: 'item/fileChange/requestApproval', params: { threadId, turnId, itemId, startedAtMs: 1726000000000, reason: 'fixture file approval', grantRoot: null } });

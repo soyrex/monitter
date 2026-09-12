@@ -148,10 +148,17 @@ Projects participate in the switcher; controls include new project and sidebar v
 
 ## Runtime and persistence
 
-Orbit-inspired native CLI processes: Codex `exec --json` and `exec resume --json <id>`, prompt via stdin.
+Local Codex chats use one owned `codex app-server` process per task over private stdin/stdout
+JSON-RPC. Initialize once, create/resume the saved native thread, and start each user turn on that
+connection. No HTTP/WebSocket listener is exposed. SSH Codex retains `exec --json` and
+`exec resume --json <id>` and does not advertise interactive approvals.
 Resume is explicit by native session ID. Users may attach an existing idle native session by ID; old
 transcript import and live takeover of another Desktop/TUI process are not implied.
-Codex event stream is JSONL item/turn events; do not promise token deltas unavailable in exec mode.
+Local Codex replies use item text deltas and authoritative completed items. The same durable
+message is updated rather than appending a message per token; `Message.streamStatus` is optionally
+`streaming`, `complete`, or `interrupted`. Legacy messages omit this field. Partial text survives
+restart as interrupted. Only completed replies mirror into channels or trigger peer routing.
+Every mutation is scoped to the owned process and native turn; stale events cannot update a new turn.
 Use real CLI account/config; do not copy auth or change global config. Resolve local CLI paths even
 when launched by Finder with limited PATH (user local bin, Homebrew, standard dirs).
 Claude uses one resident `--print --input-format stream-json --output-format stream-json --verbose`
@@ -201,13 +208,21 @@ provider transport resolves a pending request safely without authorizing work. N
 denial as a successful `Tool result`, and never render an enabled approval control unless that live
 provider run can receive the decision.
 
-Current interactive approval transports are Hermes' local full-duplex gateway and Claude's local
+Current interactive approval transports include local Codex app-server, Hermes' local full-duplex gateway and Claude's local
 stream-json host protocol. A Claude `can_use_tool` request creates one durable desktop approval and the
 chosen one-time allow or deny is returned to that exact control request ID with the provider's original
 tool input preserved. SSH Hermes and SSH Claude remain safe-deny/unsupported until their remote
-supervisor supports the same persistent full-duplex channel. Codex `exec` and OpenCode `run` still need
-their dedicated app-server/ACP adapters before an approval button is shown. No auto-resubmission after
+supervisor supports the same persistent full-duplex channel. SSH Codex `exec` and OpenCode `run` do not
+show enabled interactive approval buttons. No auto-resubmission after
 errors.
+
+Codex command/file/permission approval decisions remain one-time approve or deny and are returned
+to the exact JSON-RPC request. Structured questions and supported MCP forms attach optional `input`
+to the durable ApprovalRequest, with `response` retained after submission. `resolve_input
+{approvalId,response}` submits validated answers through the owner desktop/LAN bridge; visitors
+receive no approval/input records. URL elicitations require an explicit user action; links never
+open automatically. Unsupported requests are explicitly declined, never treated as approvals.
+Cancellation, process loss and restart expire pending requests; uncertain turns are not replayed.
 
 SSH host port 0 means use the existing SSH config/default (omit `-p`). An empty user/identity path
 also preserves the SSH config. Expand remote `~/` relative to the remote home, never the local home.

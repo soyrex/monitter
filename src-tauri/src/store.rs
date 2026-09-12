@@ -144,6 +144,12 @@ impl Store {
         }
 
         let mut recovered = false;
+        for message in &mut snapshot.messages {
+            if message.stream_status.as_deref() == Some("streaming") {
+                message.stream_status = Some("interrupted".into());
+                recovered = true;
+            }
+        }
         let mut interrupted_task_ids = std::collections::HashSet::new();
         for task in &mut snapshot.tasks {
             if task.status == "running" {

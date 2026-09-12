@@ -56,6 +56,7 @@ export interface MonitterBridge {
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
   resolveApproval(approvalId: string, decision: 'approve_once' | 'deny'): Promise<Snapshot>;
+  resolveInput(approvalId: string, response: unknown): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;
   saveChannel(channel: Channel): Promise<Snapshot>;
   setChannelAgentConversation(channelId: string, enabled: boolean, turnLimit: number): Promise<Snapshot>;
@@ -218,6 +219,7 @@ const nativeBridge: MonitterBridge = {
   editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
   cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
   resolveApproval: (approvalId, decision) => invoke<Snapshot>("resolve_approval", { approvalId, decision }),
+  resolveInput: (approvalId, response) => invoke<Snapshot>("resolve_input", { approvalId, response }),
   saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
   saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
   setChannelAgentConversation: (channelId, enabled, turnLimit) => invoke<Snapshot>("set_channel_agent_conversation", {channelId, enabled, turnLimit}),
@@ -299,6 +301,7 @@ const previewBridge: MonitterBridge = {
   editQueuedMessage: () => desktopOnly(),
   cancelTask: () => desktopOnly(),
   resolveApproval: () => desktopOnly(),
+  resolveInput: () => desktopOnly(),
   saveSettings: () => desktopOnly(),
   saveChannel: () => desktopOnly(),
   setChannelAgentConversation: () => desktopOnly(),
@@ -365,6 +368,7 @@ export function getBridge(): MonitterBridge {
         test.invoke("cancel_task", { taskId }) as Promise<Snapshot>,
       resolveApproval: (approvalId, decision) =>
         test.invoke("resolve_approval", { approvalId, decision }) as Promise<Snapshot>,
+      resolveInput: (approvalId, response) => test.invoke("resolve_input", { approvalId, response }) as Promise<Snapshot>,
       saveSettings: (settings) =>
         test.invoke("save_settings", { settings }) as Promise<Snapshot>,
       saveChannel: (channel) =>
