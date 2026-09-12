@@ -51,6 +51,13 @@ async function gotoReady(page, url) {
   throw lastError;
 }
 
+async function openRemoteControl(page) {
+  await page.getByRole('button', { name: 'Preferences', exact: true }).click();
+  const settings = page.getByRole('region', { name: 'Settings' });
+  await settings.getByRole('button', { name: 'Remote control', exact: true }).click();
+  await page.getByRole('button', { name: 'Open Remote control', exact: true }).click();
+}
+
 let browser, desktop, phone, moduleDirectory, staticServer;
 const diagnostics = { errors: [], console: [], requests: [] };
 try {
@@ -86,7 +93,7 @@ try {
   const pairingModule = await readFile(moduleBundle);
 
   browser = await chromium.launch();
-  const context = await browser.newContext();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.route('**/test-pairing-modules.js', route => route.fulfill({ status: 200, contentType: 'text/javascript', body: pairingModule }));
   await context.addInitScript({ content: readFileSync('scripts/ui-fixture.js', 'utf8') });
   desktop = await context.newPage();
@@ -101,7 +108,7 @@ try {
   // Establish this origin, then seed both nonextractable identities through the
   // shipped persistence module. The UI itself owns every session after reload.
   await gotoReady(desktop, baseUrl);
-  await desktop.getByRole('button', { name: 'Remote control', exact: true }).waitFor({ timeout: 90_000 });
+  await desktop.getByRole('button', { name: 'Preferences', exact: true }).waitFor({ timeout: 90_000 });
   const seeded = await desktop.evaluate(async relayUrl => {
     const store = await import('/test-pairing-modules.js');
     const secure = store;
@@ -121,8 +128,7 @@ try {
 
   await desktop.reload({ waitUntil: 'commit' });
   await gotoReady(phone, new URL('mobile', baseUrl).href);
-  await desktop.getByRole('button', { name: 'Remote control', exact: true }).waitFor({ timeout: 90_000 });
-  await desktop.getByRole('button', { name: 'Remote control', exact: true }).click();
+  await openRemoteControl(desktop);
   const panel = desktop.getByRole('dialog', { name: 'Remote control' });
   await expect(panel).toBeVisible();
   const policyInput = panel.getByLabel('Inactivity limit (days)');
@@ -166,7 +172,7 @@ try {
   // Recreating the desktop page restores its saved identity and room. The live
   // phone reconnects without returning to manual approval.
   await desktop.reload({ waitUntil: 'commit' });
-  await desktop.getByRole('button', { name: 'Remote control', exact: true }).click();
+  await openRemoteControl(desktop);
   const restoredPanel = desktop.getByRole('dialog', { name: 'Remote control' });
   await expect(phone.getByRole('heading', { name: 'Your workspace', exact: true })).toBeVisible();
   await expect(phone.locator('header small')).toContainText('connected');
@@ -188,6 +194,7 @@ try {
   await expect(phone.locator('header small')).toContainText('connected');
   await expect(restoredPanel.getByRole('status')).toContainText('connected');
   await expect(restoredPanel.getByRole('button', { name: /approve phone/i })).toHaveCount(0);
+  await desktop.screenshot({ path: 'verification/remembered-phones.png', fullPage: true });
 
   // Individual revocation updates the rendered list and durable record, closes
   // this phone, and removes its saved mobile pairing.
