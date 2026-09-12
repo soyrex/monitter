@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { groupConversationActivity, isShellActivity } from '../src/lib/activity-grouping.ts';
+import { groupConversationActivity, isShellActivity, reasoningSummary } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
@@ -45,3 +45,30 @@ assert.equal(isShellActivity(event('shell',1,'/bin/zsh -lc git status','')),true
 assert.equal(isShellActivity(event('shell',1,'Run command','')),true);
 assert.equal(isShellActivity(event('shell',1,'git status','{"type":"command_execution"}')),true);
 assert.equal(isShellActivity(event('search',1,'web_search','')),false);
+
+const reasoning = (id, at, detail = '') => ({ ...event(id, at, 'Reasoning', detail), kind: 'reasoning' });
+const emptyPayload = '{"content":[],"id":"rs_123","summary":[],"type":"reasoning"}';
+for (const empty of ['', '  ', 'null', '{}', '[]', emptyPayload, '{"summary":[{"type":"summary_text","text":"  "}],"encrypted_content":"opaque"}']) {
+  assert.equal(reasoningSummary(empty), '');
+}
+assert.equal(reasoningSummary(' A real plain-text summary. '), 'A real plain-text summary.');
+assert.equal(reasoningSummary('{"summary":[{"type":"summary_text","text":"First point"},{"type":"summary_text","text":"Second point"}],"id":"secret-id"}'), 'First point\n\nSecond point');
+assert.equal(reasoningSummary('{"summary":["Summary"],"content":["Duplicate content"]}'), 'Summary');
+assert.equal(reasoningSummary('{"text":"Readable text"}'), 'Readable text');
+assert.equal(reasoningSummary('{"content":[{"type":"text","text":"Readable content"}]}'), 'Readable content');
+assert.equal(reasoningSummary('An unfinished { paragraph'), 'An unfinished { paragraph');
+
+for (const compress of [false, true]) {
+  const blanks = [reasoning('r1', 1, emptyPayload), reasoning('r2', 2), reasoning('r3', 3, 'null')];
+  const combined = groupConversationActivity([], blanks, compress);
+  assert.equal(combined.length, 1);
+  assert.equal(combined[0].type, 'reasoning-group');
+  assert.deepEqual(combined[0].values, blanks);
+  assert.equal(blanks[0].detail, emptyPayload, 'Stored payloads must remain untouched');
+  for (const boundary of [event('tool', 2, 'Run command', '{}'), reasoning('summary', 2, 'Actual summary')]) {
+    assert.equal(groupConversationActivity([], [blanks[0], boundary, blanks[2]], compress).length, 3);
+  }
+  assert.equal(groupConversationActivity([message('reply', 2)], [blanks[0], blanks[2]], compress).length, 3);
+  assert.equal(groupConversationActivity([], [blanks[0], { ...blanks[1], taskId: 'other-task' }], compress).length, 2);
+}
+console.log('reasoning summary normalization and consecutive grouping assertions passed');

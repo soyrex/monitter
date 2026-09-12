@@ -64,7 +64,7 @@
 
 <style>
   .approval-request { margin: 12px 0 24px; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font-size: calc(12px * var(--interface-font-ratio, 1)); }
-  .approval-request.pending { border-color: color-mix(in srgb, var(--accent) 62%, var(--line)); box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 12%, transparent); }
+  .approval-request.pending { border-color: color-mix(in srgb, var(--accent) 78%, var(--line)); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 12%, transparent); }
   .approval-request.pending.high { border-color: color-mix(in srgb, #b84c44 70%, var(--line)); }
   header { display: flex; align-items: center; gap: 7px; }
   .approval-icon { display: grid; place-items: center; color: var(--accent-ink); }
@@ -80,12 +80,12 @@
   .command-preview { padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
   .technical { margin-top: 10px; color: var(--muted); font-size: 11px; }
   .approval-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
-  .approval-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; font: 600 calc(11px * var(--interface-font-ratio, 1)) var(--interface-font, "IBM Plex Sans", sans-serif); }
+  .approval-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 44px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 6px; font: 600 calc(11px * var(--interface-font-ratio, 1)) var(--interface-font, "IBM Plex Sans", sans-serif); }
   .approval-actions .approve { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
   .approval-actions .deny { color: #b84c44; }
   .approval-actions button:disabled { opacity: .55; cursor: wait; }
   .resolving { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
-  .resolved { padding-block: 10px; opacity: .92; }
+  .resolved { padding-block: 10px; opacity: .78; background: color-mix(in srgb, var(--panel) 92%, var(--bg)); }
   .resolved .approval-summary { margin-bottom: 5px; font-size: calc(12px * var(--interface-font-ratio, 1)); }
   @media (forced-colors: active) { .approval-request.pending { border-color: Highlight; } .approval-actions .approve { color: HighlightText; background: Highlight; } }
 </style>

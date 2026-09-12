@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { Check, Copy, Link2, LoaderCircle, Share2, UserRound, X } from '@lucide/svelte';
+  import { Check, Copy, Link2, LoaderCircle, UserRound, X } from '@lucide/svelte';
   import QRCode from 'qrcode';
   import { getBridge } from '$lib/bridge';
   import { createDesktopSession } from '$lib/controller/remote-client';
@@ -8,7 +8,8 @@
   import { activeOperatorShare, formatOperatorMessage, sharedSnapshot, sharedTaskIds, type ActiveOperatorShare } from '$lib/operator-sharing';
   import type { Snapshot, TerminalRead, TerminalSession } from '$lib/types';
 
-  let open = $state(false), relay = $state(DEFAULT_RELAY), primaryName = $state('Alex');
+  let { open = $bindable(false) }: { open?: boolean } = $props();
+  let relay = $state(DEFAULT_RELAY), primaryName = $state('Alex');
   let session = $state<Awaited<ReturnType<typeof createDesktopSession>> | null>(null);
   let registration = $state<PairingRegistration | null>(null), status = $state('off'), error = $state('');
   let qr = $state(''), link = $state(''), verificationCode = $state(''), now = $state(Date.now());
@@ -81,7 +82,6 @@
   onDestroy(() => { clearInterval(timer); stop(); });
 </script>
 
-<button class="share-launch" title="Share workspace" aria-label="Share workspace" onclick={() => open = !open}><Share2 size={18}/></button>
 {#if open}<dialog class="share-panel" open aria-label="Share workspace">
   <header><div><strong>Share with a collaborator</strong><small>One visitor, one-use encrypted link.</small></div><button aria-label="Close sharing" onclick={() => open = false}><X size={18}/></button></header>
   {#if !session}
@@ -109,5 +109,5 @@
 </dialog>{/if}
 
 <style>
-  .share-launch{position:fixed;right:56px;bottom:12px;z-index:90;width:36px;height:36px;display:grid;place-items:center;border:1px solid #454d40;border-radius:10px;color:#9fc6aa;background:#20251f;cursor:pointer}.share-panel{position:fixed;right:18px;bottom:58px;z-index:100;width:min(390px,calc(100vw - 36px));max-height:85vh;margin:0;overflow:auto;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);box-shadow:0 12px 40px #0006;font:13px var(--interface-font,"IBM Plex Sans",sans-serif)}header{display:flex;justify-content:space-between;gap:10px}header strong,header small{display:block}header small,.share-panel small{color:var(--muted)}button{border:0;border-radius:7px;padding:9px 10px;background:var(--soft);color:var(--ink);cursor:pointer}button.primary{background:var(--accent);color:var(--on-accent)}button.secondary{border:1px solid var(--line)}button.danger{color:#b84c44;margin-top:10px}.share-panel>label{display:grid;gap:5px;margin:13px 0;color:var(--muted)}input{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);font:inherit}.status{text-transform:capitalize;color:var(--accent-ink)}img{display:block;max-width:250px;margin:12px auto;border-radius:8px}.quote-code{display:grid;gap:5px;text-align:center;margin:12px 0}.quote-code strong,.verification{font:600 25px var(--mono);letter-spacing:3px;color:var(--accent-ink)}.verification{display:block;text-align:center;margin:16px}.share-list{margin:15px 0;padding-top:10px;border-top:1px solid var(--line)}.share-list h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.scope{display:flex;gap:9px;align-items:start;padding:7px 0}.scope input{width:auto;margin-top:3px;accent-color:var(--accent)}.scope b,.scope small{display:block}.error{color:#b84c44;line-height:1.4}
+  .share-panel{position:fixed;right:18px;bottom:18px;z-index:100;width:min(390px,calc(100vw - 36px));max-height:85vh;margin:0;overflow:auto;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);box-shadow:0 12px 40px #0006;font:13px var(--interface-font,"IBM Plex Sans",sans-serif)}header{display:flex;justify-content:space-between;gap:10px}header strong,header small{display:block}header small,.share-panel small{color:var(--muted)}button{border:0;border-radius:7px;padding:9px 10px;background:var(--soft);color:var(--ink);cursor:pointer}button.primary{background:var(--accent);color:var(--on-accent)}button.secondary{border:1px solid var(--line)}button.danger{color:#b84c44;margin-top:10px}.share-panel>label{display:grid;gap:5px;margin:13px 0;color:var(--muted)}input{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);font:inherit}.status{text-transform:capitalize;color:var(--accent-ink)}img{display:block;max-width:250px;margin:12px auto;border-radius:8px}.quote-code{display:grid;gap:5px;text-align:center;margin:12px 0}.quote-code strong,.verification{font:600 25px var(--mono);letter-spacing:3px;color:var(--accent-ink)}.verification{display:block;text-align:center;margin:16px}.share-list{margin:15px 0;padding-top:10px;border-top:1px solid var(--line)}.share-list h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.scope{display:flex;gap:9px;align-items:start;padding:7px 0}.scope input{width:auto;margin-top:3px;accent-color:var(--accent)}.scope b,.scope small{display:block}.error{color:#b84c44;line-height:1.4}
 </style>

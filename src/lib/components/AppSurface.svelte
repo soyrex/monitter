@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { localUuid } from '$lib/lan';
+  import { localUuid, isLanBrowser } from '$lib/lan';
+  import { workspaceShareOpen } from '$lib/workspace-panels';
+  import { responsiveBrand } from '$lib/responsive-brand';
+  import { collectWorkspaceSidebarTabs, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import "../../app.css";
   import AnimatedTitle from "./AnimatedTitle.svelte";
   import { autonaming } from "$lib/autoname-state";
@@ -56,6 +59,7 @@
     Radio,
     Save,
     Settings2,
+    Share2,
     Square,
     Terminal,
     Trash2,
@@ -93,6 +97,7 @@
   import { activeComputerTools } from "$lib/activity";
   import { groupConversationActivity } from '$lib/activity-grouping';
   import RunActivity from "$lib/components/RunActivity.svelte";
+  import ApprovalDock from "$lib/components/ApprovalDock.svelte";
   import MessagePane from "$lib/components/MessagePane.svelte";
   import GitPane from "$lib/components/GitPane.svelte";
   import RunSummary from "$lib/components/RunSummary.svelte";
@@ -139,7 +144,7 @@
   $effect(()=>{if(!embedded && expandedPaneId && (activePaneId!==expandedPaneId || !paneIds(layout).includes(expandedPaneId)))expandedPaneId=null;});
 
   let pointerTabDrag = $state<{tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null>(null);
-  let paneRefs = $state<Record<string, { openAgentSettings:(draft:Agent)=>void;openSettings:(category?:string)=>void;openTerminalTab:(id:string)=>void;newTerminal:()=>Promise<void>;openEmptyTab:()=>void;openTask: (task: Task) => void; openChannel: (channel: Channel) => void; openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void; takeTab: (tab: PaneTabTransfer) => TabPayload | null; receiveTab: (payload: TabPayload, before?: TabKey) => void; reorderTab:(tab:PaneTabTransfer,before?:TabKey)=>void; allTabs: () => PaneTabTransfer[]; captureState:()=>PaneState; restoreState:(value:PaneState)=>void; closeActiveTab:()=>void; swapActiveTab:(direction:1|-1)=>void; toggleDetail:()=>void; hasPending:()=>boolean;attachNativeFiles:(paths:string[])=>Promise<void> }>>({});
+  let paneRefs = $state<Record<string, { focusExistingTab:(tab:TabKey)=>boolean;openAgentSettings:(draft:Agent)=>void;openSettings:(category?:string)=>void;openTerminalTab:(id:string)=>void;newTerminal:()=>Promise<void>;openEmptyTab:()=>void;openTask: (task: Task) => void; openChannel: (channel: Channel) => void; openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void; takeTab: (tab: PaneTabTransfer) => TabPayload | null; receiveTab: (payload: TabPayload, before?: TabKey) => void; reorderTab:(tab:PaneTabTransfer,before?:TabKey)=>void; allTabs: () => PaneTabTransfer[]; captureState:()=>PaneState; restoreState:(value:PaneState)=>void; closeActiveTab:()=>void; swapActiveTab:(direction:1|-1)=>void; toggleDetail:()=>void; hasPending:()=>boolean;attachNativeFiles:(paths:string[])=>Promise<void> }>>({});
   let paneSelections = $state<Record<string,string|null>>({});
   let sidebarScrolled = $state(false);
   let workspaceReady = $state(false);
@@ -482,8 +487,7 @@
       id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
       createdAt: message.createdAt, attachments: message.attachments,
     }))],
-    visibleEvents.filter(event => event.kind === "tool" ||
-      (event.kind === "reasoning" && event.detail.trim())),
+    visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning"),
     snapshot?.settings.compressToolCalls === true,
   ));
   const selectedApprovalRequests = $derived(
@@ -500,6 +504,9 @@
     .map(request => ({ request, task: snapshot?.tasks.find(task => task.id === request.taskId) ?? null }))
     .filter((item): item is { request: ApprovalRequest; task: Task } => !!item.task)
     .sort((left, right) => left.request.createdAt - right.request.createdAt));
+  const channelPendingApprovals = $derived(globalPendingApprovals
+    .filter(item => !!activeChannel && item.task.channelId === activeChannel.id)
+    .map(item => item.request));
   function approvalCount(scope: WorkspaceKey) { return globalPendingApprovals.filter(item => taskBelongsToWorkspace(item.task, scope)).length; }
   const collaborations = $derived(((snapshot as (Snapshot & { collaborations?: CollaborationRecord[] }) | null)?.collaborations ?? []));
   const taskCollaborations = $derived(selectedTask ? collaborations.filter(item => item.fromTaskId === selectedTask.id || item.toTaskId === selectedTask.id) : []);
@@ -597,6 +604,47 @@
   function forgetTab(tab: TabKey) { tabOrder = tabOrder.filter(current=>current.kind!==tab.kind || current.id!==tab.id); }
   export function allTabs(): PaneTabTransfer[] {
     return orderedTabs().map(tab=>({sourcePaneId:paneId,...tab}));
+  }
+  export function focusExistingTab(tab: TabKey): boolean {
+    const index = orderedTabs().findIndex(item => item.kind === tab.kind && item.id === tab.id);
+    return index >= 0 && selectVimTab({ kind: 'index', index: index + 1 });
+  }
+  const sidebarWorkspaceTabs = $derived.by(() => {
+    const result: Record<string, SidebarWorkspaceTab[]> = {};
+    for (const agent of snapshot?.agents ?? []) {
+      const scope = `agent:${agent.id}`;
+      const saved = workspaceSet?.workspaces[scope];
+      const states = scope === activeWorkspaceKey
+        ? [{ openTerminalIds, settingsOpen, openEmptyIds, openDraftIds, taskDrafts, tabOrder: orderedTabs() },
+          ...paneIds(layout).filter(id => id !== 'main').flatMap(id => paneRefs[id] ? [paneRefs[id].captureState()] : [])]
+        : saved ? [saved.main, ...Object.values(saved.panes)] : [];
+      result[agent.id] = collectWorkspaceSidebarTabs(states, $terminalSessions);
+    }
+    return result;
+  });
+  const selectedSidebarTab = $derived.by(() => {
+    if (activePaneId === 'main') return currentVimTab();
+    const state = paneRefs[activePaneId]?.captureState();
+    if (!state) return null;
+    if (state.pane === 'terminal' && state.selectedTerminalId) return { kind: 'terminal', id: state.selectedTerminalId };
+    if (state.pane === 'settings') return { kind: 'settings', id: 'settings' };
+    if (state.pane === 'task' && state.currentDraftId) return { kind: 'draft', id: state.currentDraftId };
+    if (state.pane === 'empty' && state.selectedEmptyId) return { kind: 'empty', id: state.selectedEmptyId };
+    return null;
+  });
+  async function openAgentWorkspaceTab(agentId: string, tab: SidebarWorkspaceTab) {
+    if (tab.disabled) return;
+    const scope = `agent:${agentId}` as WorkspaceKey;
+    if (!await switchWorkspace(scope) || activeWorkspaceKey !== scope) return;
+    const owner = paneIds(layout).find(id => (id === 'main' ? allTabs() : paneRefs[id]?.allTabs() ?? [])
+      .some(item => item.kind === tab.kind && item.id === tab.id));
+    if (!owner) { notice = 'That tab is no longer open in this workspace.'; return; }
+    if (expandedPaneId && expandedPaneId !== owner) setPaneExpansion(null);
+    activePaneId = owner;
+    collapsedAgents[agentId] = false;
+    mobileMain = true;
+    if (owner === 'main') focusExistingTab(tab);
+    else paneRefs[owner]?.focusExistingTab(tab);
   }
   const sidebarOpenTaskIds = $derived.by(() => {
     const ids = new Set(openTaskIds);
@@ -2680,12 +2728,22 @@
 
 {#snippet deliveryStatus(message: OptimisticMessage)}
   <span class="delivery-status" data-delivery-status={message.status} role="status">
-    {message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'}
+    {#if message.status === 'sending'}<AnimatedTitle text="Sending" active={true} activeTooltip="Sending your message…"/>{:else}{message.status === 'sent' ? 'Sent' : 'Not confirmed'}{/if}
   </span>
   {#if message.status === 'not-confirmed'}
     <button class="delivery-retry" onclick={() => retryOptimisticMessage(message.id)}>Retry</button>
     {#if message.error}<small class="delivery-error">{message.error}</small>{/if}
   {/if}
+{/snippet}
+
+{#snippet sidebarWorkspacePanels(agentId: string)}
+  {#each sidebarWorkspaceTabs[agentId] ?? [] as tab (`${tab.kind}:${tab.id}`)}
+    <div class="task-row workspace-tab-row" class:current={activeWorkspaceKey === `agent:${agentId}` && selectedSidebarTab?.kind === tab.kind && selectedSidebarTab?.id === tab.id} data-workspace-tab-kind={tab.kind} data-workspace-tab-id={tab.id} data-workspace-agent={agentId}>
+      <button class="task-select" disabled={tab.disabled} aria-label={`Open ${tab.title}`} title={tab.title} onclick={() => void openAgentWorkspaceTab(agentId, tab)}>
+        <span class="workspace-tab-icon" aria-hidden="true">{#if tab.kind === 'terminal'}<Terminal size={14}/>{:else if tab.kind === 'settings'}<Settings2 size={14}/>{:else if tab.kind === 'draft'}<MessageSquare size={14}/>{:else}<Plus size={14}/>{/if}</span><span>{tab.title}</span>
+      </button>
+    </div>
+  {/each}
 {/snippet}
 
 {#snippet agentWaiting(agent: Agent | null | undefined, starting = false)}
@@ -2736,13 +2794,14 @@
         <div class="tab-picker-list" id={`open-tabs-${paneId}`} aria-label="Open tabs">
         {#each orderedTabs() as tab (`${tab.kind}:${tab.id}`)}
           {#if tab.kind === 'draft'}{@const draft=taskDrafts[tab.id]}{#if draft}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={currentDraftId === tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'draft',tab.id)} onpointerdown={event=>startTabPointer(event,'draft',tab.id)} onclick={() => selectTabPicker(() => openTaskDraft(draft))}><span class="dot idle"></span><span>{draft.title || 'New chat'}</span></button><button class="close-tab" aria-label="Close draft" onclick={() => {closeTaskDraft(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry task-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={currentDraftId === tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'draft',tab.id)} onpointerdown={event=>startTabPointer(event,'draft',tab.id)} onclick={() => selectTabPicker(() => openTaskDraft(draft))}><span class="tab-kind-icon" aria-hidden="true"><MessageSquare size={13}/><span class="tab-shortcut"></span></span><span>{draft.title || 'New chat'}</span></button><span class="tab-status" aria-label="Draft"><span class="dot idle"></span></span><button class="close-tab" aria-label="Close draft" onclick={() => {closeTaskDraft(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'task'}{@const task=snapshot?.tasks.find(item=>item.id===tab.id)}{#if task}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
-              <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => selectTabPicker(() => openTask(task))} title={task.title}><span class={`dot ${task.status}`}></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
+            <div class="tab-entry task-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
+              <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => selectTabPicker(() => openTask(task))} title={task.title}><span class="tab-kind-icon" aria-hidden="true"><MessageSquare size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
 
               <button class="edit-tab" aria-label={`Edit name for ${task.title}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openTask(task);renameTitle=task.title;taskProjectId=task.projectId??'';modal='taskSettings';}}><Pencil size={15}/></button>
+              <span class="tab-status" aria-label={`Status: ${task.status}`}><span class={`dot ${task.status}`}></span></span>
               <button class="close-tab" aria-label={`Close tab ${task.title}`} title="Close tab" onclick={() => {closeTaskTab(tab.id);tabPickerOpen=false;}}><X size={12} /></button>
             </div>
           {/if}
@@ -2790,7 +2849,7 @@
       <button class="pane-choice" disabled={busy} onclick={()=>snapshot?.agents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
       <button class="pane-choice" disabled={terminalBusy} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<Terminal size={22}/>{/if}<span>Terminal</span></button>
     </div></section>
-    {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface">{#if !mobileSidebar}<header class="terminal-pane-header">{@render paneExpandControl()}</header>{/if}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
+    {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface">{#if !mobileSidebar}<div class="terminal-pane-overlay">{@render paneExpandControl()}</div>{/if}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
     {:else if pane === 'project' && focusedProject}
       {@const ProjectIcon = projectIconComponent(focusedProject.icon)}
       <section class="overview project-overview">
@@ -2937,6 +2996,7 @@
           {/if}
         </MessagePane>
         <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
+        <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
         <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
           {@render slashMenu()}
@@ -3004,28 +3064,27 @@
         </div>
       </section>
     {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
-        {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Run detail views">
+        {#snippet detailTabs(showClose = true)}<div class="detail-tabs" role="tablist" aria-label="Run detail views">
           <div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Run detail</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
           {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
-          <button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>
+          {#if showClose}<button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>{/if}
         </div>{/snippet}
-        {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header">
+        {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header" class:has-detail-tabs={showDetail && !compactDetail}>
             <h1 class="task-title"><AnimatedTitle text={selectedTask.title} active={$autonaming[`task:${selectedTask.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={()=>{renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Pencil size={14}/></button></h1>
+            {#if showDetail && !compactDetail}{@render detailTabs(false)}{/if}
             <div class="task-actions">
               {@render paneExpandControl()}
               {@render rightSidebarControl()}
             </div>
           </div>{/if}
-        {#if showDetail && !compactDetail}{@render detailTabs()}{/if}
+        {#if mobileSidebar && showDetail && !compactDetail}{@render detailTabs()}{/if}
         <section class="conversation">
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
           <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`}>
-            {#if pendingApprovalRequests.length}<section class="pending-approvals" aria-label="Pending approval requests">
-              {#each pendingApprovalRequests as request (request.id)}<ApprovalRequestCard {request} disabled={busy} resolving={resolvingApprovalId === request.id} onresolve={resolveApproval} oninput={resolveInput}/>{/each}
-            </section>{/if}
-            {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' ? `tool:${item.values[0].id}` : item.value.id)}
+            {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}<RunActivity event={item.value} />
+              {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length} />
               {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
               {:else}{@const message = item.value}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
@@ -3060,6 +3119,7 @@
             {/if}
           </MessagePane>
           <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
+          <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
           <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render slashMenu()}
@@ -3147,10 +3207,10 @@
 <main use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
   {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
-    <div class="brand" class:scrolled={sidebarScrolled}>
-      {#if !sidebarCompressed}<strong data-tauri-drag-region>monitter</strong>{/if}
+    <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
+      {#if !sidebarCompressed}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true">monitter</span><span class="brand-short" aria-hidden="true">m</span></strong>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
-        {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} disabled={busy || !bridge.available || !snapshot} onclick={()=>{void setSidebarView(view.id)}}><view.icon size={15}/></button>{/each}
+        {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} disabled={busy || !bridge.available || !snapshot} onclick={()=>{void setSidebarView(view.id)}}><view.icon size={16}/></button>{/each}
       </div>{/if}
     </div>
     {#if !sidebarCompressed}
@@ -3166,7 +3226,7 @@
             sidebarSorted(activeTasks.filter(
               (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId,
             ),`agent-chats:${agent.id}`)}
-          <section class="agent-group" class:has-chats={agentTasks.length > 0 && !collapsedAgents[agent.id]}>
+          <section class="agent-group" class:has-chats={(agentTasks.length > 0 || (sidebarWorkspaceTabs[agent.id]?.length ?? 0) > 0) && !collapsedAgents[agent.id]}>
             <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
               <button class="avatar agent-avatar-toggle" aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={()=>collapsedAgents[agent.id]=!collapsedAgents[agent.id]}>
                 {@render avatarVisual(agent, 14)}
@@ -3190,7 +3250,8 @@
               >
             </div>
             <div class="task-tree" id={`agent-chats-${agent.id}`} hidden={collapsedAgents[agent.id]}>
-              {@render sidebarChats(agentTasks)}
+              {#if agentTasks.length || !sidebarWorkspaceTabs[agent.id]?.length}{@render sidebarChats(agentTasks)}{/if}
+              {@render sidebarWorkspacePanels(agent.id)}
             </div>
           </section>{/each}{:else}<div class="side-empty">
           <Bot size={18} />
@@ -3263,7 +3324,7 @@
     </nav>{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
-      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}</div>
+      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}{@render sidebarWorkspacePanels(railAgent.id)}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
     <footer class="sidebar-footer" aria-label="Workspace controls">
@@ -3271,6 +3332,7 @@
       <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
       <button class="icon" aria-label="Agent directory" title="Agent directory" onclick={()=>{directoryQuery='';routeSettings('directory')}}><Bot size={16}/></button>
       <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
+      {#if !isLanBrowser()}<button class="icon" aria-label="Share workspace" title="Share workspace" onclick={()=>workspaceShareOpen.set(true)}><Share2 size={16}/></button>{/if}
     </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
@@ -3724,15 +3786,25 @@
     padding: 0 13px;
   }
   .brand strong {
-    font-size: calc(14px * var(--interface-font-ratio, 1));
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    align-self: center;
+    font-size: calc(13px * var(--interface-font-ratio, 1));
+    line-height: 1;
+    opacity: .8;
     letter-spacing: -0.02em;
   }
   .brand { height: var(--pane-tabbar-height,52px); box-sizing: border-box; }
+  .brand-full { display:inline-block; }
+  .brand-short { display:none; }
+  .brand:global([data-compact-wordmark="true"]) .brand-full { position:absolute; visibility:hidden; pointer-events:none; }
+  .brand:global([data-compact-wordmark="true"]) .brand-short { display:inline; }
   .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: calc(12px / var(--interface-scale,1)); gap: 4px; }
   .native-mac.native-fullscreen .brand { padding-left: 13px; }
   .native-mac.native-fullscreen.sidebar-collapsed { grid-template-columns: 56px minmax(0,1fr); }
   .native-mac .sidebar-views { gap: 0; }
-  .native-mac .view-toggle { width: 22px; }
   .native-mac { --pane-tabbar-height: max(36px, calc(68px / var(--interface-scale, 1))); }
   .native-mac .topbar {
     height: var(--pane-tabbar-height);
@@ -3767,7 +3839,8 @@
     padding: 11px 8px;
   }
   .sidebar-views { display: flex; flex: none; gap: 2px; margin-left: auto; }
-  .view-toggle { display: grid; place-items: center; width: 24px; height: 26px; padding: 0; border-radius: 5px; color: var(--muted); }
+  .view-toggle { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border-radius: 6px; color: var(--muted); }
+  .mobile-navigation .view-toggle { width:44px; height:44px; }
   @media (hover:hover) and (pointer:fine) { .view-toggle:hover { background: var(--soft); color: var(--ink); } }
   .view-toggle[aria-pressed="true"] { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
@@ -3931,6 +4004,10 @@
   }
   .task-select { display:flex; align-items:center; gap:7px; min-width:0; flex:1; padding:0; text-align:left; }
   .task-select > span:last-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .workspace-tab-icon { display:grid; place-items:center; flex:none; position:relative; z-index:1; color:var(--muted); background:var(--sidebar); }
+  .workspace-tab-row .task-select { min-height:28px; }
+  .workspace-tab-row .task-select:disabled { opacity:.5; cursor:not-allowed; }
+  .mobile-navigation .workspace-tab-row .task-select { min-height:40px; }
   .chat-copy { display: grid; gap: 3px; }
   .chat-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-meta { font-size: calc(9.5px * var(--interface-font-ratio, 1)); color: var(--muted); }
@@ -4035,8 +4112,9 @@
   .pane-expand-control { flex:none; }
   .overview-expand { order:99; flex:none; }
   .draft-expand { float:right; }
-  .terminal-surface { display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; background:var(--terminal-background,#090b0d); }
-  .terminal-pane-header { display:flex; justify-content:flex-end; flex:none; padding:2px 10px; }
+  .terminal-surface { position:relative; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; background:var(--terminal-background,#090b0d); }
+  .terminal-pane-overlay { position:absolute; top:2px; right:10px; z-index:2; display:flex; pointer-events:none; }
+  .terminal-pane-overlay > .pane-expand-control { pointer-events:auto; background:color-mix(in srgb,var(--terminal-background,#090b0d) 80%,transparent); }
   .terminal-surface :global(.terminal-pane) { flex:1; height:auto; }
   .tab-expanded > .topbar { display:none; }
   .workspace {
@@ -4070,8 +4148,9 @@
   }
   .sidebar-footer { position:absolute; bottom:0; left:0; right:0; z-index:3; display:flex; justify-content:space-around; align-items:center; height:48px; padding:4px 10px; box-sizing:border-box; border-top:1px solid var(--line); background:var(--sidebar); }
   .sidebar .side-scroll { padding-bottom:60px; }
-  .sidebar .agent-rail { padding-bottom:156px; }
-  .sidebar-collapsed .sidebar-footer { flex-direction:column; height:144px; padding:4px; }
+  .sidebar .agent-rail { padding-bottom:192px; }
+  .mobile-navigation .sidebar-footer > .icon { width:44px; height:44px; }
+  .sidebar-collapsed .sidebar-footer { flex-direction:column; height:180px; padding:4px; }
   .brand.scrolled { box-shadow:inset 0 -1px var(--line); }
   .new-task,
   .primary {
@@ -4303,7 +4382,10 @@
   .task-layout > .conversation { grid-column: 1; grid-row: 2; }
   .task-layout > .run-detail { grid-column: 2; grid-row: 2; }
   .task-layout > .detail-tabs { grid-column: 2; grid-row: 1; }
-  .task-layout:not(.detail-hidden):not(.compact-detail) .pane-task-header { grid-column: 1; }
+  .pane-task-header > .task-actions { margin-left:auto; }
+  .pane-task-header.has-detail-tabs { padding-top:0; padding-bottom:0; min-height:56px; }
+  .pane-task-header > .detail-tabs { min-width:0; overflow-x:auto; border-bottom:0; background:transparent; }
+  .compact-detail > .pane-task-header { position:relative; z-index:13; }
   .conversation {
     --chat-content-max-width: 900px;
     display: flex;
@@ -4350,6 +4432,11 @@
   .tab-entry.active .tab { color: var(--ink); }
   .tab span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tab-entry .tab { max-width: 210px; padding-right:31px; }
+  .tab-kind-icon { position:relative; display:grid; flex:none; place-items:center; width:13px; height:13px; }
+  .tab-shortcut { display:none; }
+  .tab-status { position:absolute; z-index:2; right:3px; top:50%; display:grid; place-items:center; width:22px; height:24px; transform:translateY(-50%); transition:opacity .12s ease; }
+  .tab-entry:focus-within .tab-status { opacity:0; }
+  @media (hover:hover) and (pointer:fine) { .tab-entry:hover .tab-status { opacity:0; } }
   .close-tab { position:absolute; z-index:2; right:3px; top:50%; display:grid; place-items:center; width:22px; height:24px; transform:translateY(-50%); color:var(--muted); border-radius:4px; opacity:0; pointer-events:none; transition:opacity .12s ease; }
   .tab-entry:focus-within .close-tab { opacity:1; pointer-events:auto; }
   @media (hover:hover) and (pointer:fine) { .tab-entry:hover .close-tab { opacity:1; pointer-events:auto; } }
@@ -4368,12 +4455,22 @@
     .tab-picker-open .tab-picker-list { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition:opacity .16s ease,transform .16s ease; }
     .tab-picker-list .tab-entry { width:100%; min-height:44px; border:1px solid transparent; border-radius:5px; background:transparent; }
     .tab-picker-list .tab-entry.active { border-color:var(--line); background:var(--soft); }
-    .tab-picker-list .tab { flex:1; width:0; min-width:0; max-width:none; min-height:44px; padding-right:8px; border:0; border-radius:5px; }
-    .tab-picker-list .edit-tab, .tab-picker-list .close-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:1; pointer-events:auto; }
+    .tab-picker-list .tab-entry:hover, .tab-picker-list .tab-entry:focus-within { background:var(--soft); }
+    .tab-picker-list .tab-entry.active:hover, .tab-picker-list .tab-entry.active:focus-within { background:color-mix(in srgb,var(--soft) 78%,var(--accent) 8%); }
+    .tab-picker-list .tab { flex:1; width:0; min-width:0; max-width:none; min-height:44px; padding-right:8px; border:0; border-radius:5px; background:transparent; }
+    .tab-picker-list .edit-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:1; pointer-events:auto; }
+    .tab-picker-list .close-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:0; pointer-events:none; }
+    .tab-picker-list .tab-status { position:absolute; z-index:3; right:0; top:0; display:grid; place-items:center; width:44px; height:44px; padding:0; transform:none; color:var(--muted); opacity:1; pointer-events:none; }
+    .tab-picker-list .tab-entry:hover .tab-status, .tab-picker-list .tab-entry:focus-within .tab-status { opacity:0; }
+    .tab-picker-list .tab-entry:hover .close-tab, .tab-picker-list .tab-entry:focus-within .close-tab { opacity:1; pointer-events:auto; }
     .tab-picker-list .edit-tab:disabled { opacity:.5; }
     .tab-picker-list .edit-tab:focus-visible, .tab-picker-list .close-tab:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-    .tab-picker-list .tab-entry:hover .tab { background:var(--soft); }
+    .tab-picker-list .tab-entry:hover .tab, .tab-picker-list .tab-entry:focus-within .tab { background:transparent; }
   }
+  .workspace.compact-tabs > .topbar { padding-block:.5em; }
+  .workspace.compact-tabs > .topbar > .workspace-context,
+  .workspace.compact-tabs > .topbar > .top-actions { padding-bottom:0; }
+  .mobile-navigation .workspace.compact-tabs > .topbar { padding-block:4px; }
   .mobile-navigation .compact-tabs > .topbar { position:relative; }
   .mobile-navigation .compact-tabs .tabs.tab-picker { position:static; }
   .mobile-navigation .compact-tabs .tab-picker-list { top:100%; left:0; right:0; border-radius:0 0 8px 8px; }
@@ -4415,7 +4512,6 @@
     max-width: 100%;
     margin: 0 0 24px;
   }
-  .pending-approvals { margin-bottom: 3px; }
   .approval-history { margin: 14px 0 24px; padding-top: 13px; border-top: 1px solid var(--line); }
   .approval-history h2 { margin: 0 0 7px; color: var(--muted); font: 600 calc(10px * var(--interface-font-ratio, 1)) var(--mono); letter-spacing: .06em; text-transform: uppercase; }
   .approval-history :global(.approval-request) { margin-bottom: 10px; }
@@ -4445,7 +4541,7 @@
     font-weight: 400;
   }
   .optimistic-message { border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
-  .delivery-status { color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+  .delivery-status { margin-left:auto; color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
   .delivery-status[data-delivery-status="sending"] { color: var(--accent); }
   .delivery-status[data-delivery-status="not-confirmed"], .delivery-error { color: #bd655b; }
   .delivery-retry { width: auto; min-height: 20px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--panel); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
@@ -5045,7 +5141,10 @@
   .tabs.hide-tab-close .close-tab { display:none; }
   .tabs { counter-reset: tab-index; }
   .tabs > .tab-picker-list > .tab-entry { counter-increment: tab-index; }
-  .tabs.show-tab-index > .tab-picker-list > .tab-entry::after { content: counter(tab-index); position:absolute; right:5px; top:50%; transform:translateY(-50%); z-index:3; min-width:18px; height:18px; display:grid; place-items:center; border-radius:4px; background:var(--panel); color:var(--accent-ink); border:1px solid var(--line); font:11px var(--mono); pointer-events:none; }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry:not([data-tab-kind='task']):not([data-tab-kind='draft'])::after { content: counter(tab-index); position:absolute; right:5px; top:50%; transform:translateY(-50%); z-index:3; min-width:18px; height:18px; display:grid; place-items:center; border-radius:4px; background:var(--panel); color:var(--accent-ink); border:1px solid var(--line); font:11px var(--mono); pointer-events:none; }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry.task-tab .tab-kind-icon :global(svg) { opacity:0; }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry.task-tab .tab-shortcut { position:absolute; inset:-3px; display:grid; place-items:center; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--accent-ink); font:11px var(--mono); }
+  .tabs.show-tab-index > .tab-picker-list > .tab-entry.task-tab .tab-shortcut::after { content:counter(tab-index); }
   .task-title { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
   .task-title-edit { flex: none; opacity: 0; color: var(--muted); transition: opacity .12s ease, color .12s ease; }
   .task-title:focus-within .task-title-edit { opacity: 1; }
@@ -5061,6 +5160,8 @@
   @media (hover:hover) and (pointer:fine) { .identity-avatar-button:hover .avatar-edit-overlay { opacity:1; } }
   @media (hover:none), (pointer:coarse) {
     .chat-actions, .close-tab, .task-title-edit { opacity:1; pointer-events:auto; }
+    .tab-status, .tab-picker-list .tab-status { opacity:0; }
+    .tab-picker-list .close-tab { opacity:1; pointer-events:auto; }
     .avatar-toggle-overlay, .avatar-edit-overlay { display:none; }
     button, .app-shell :global(a), summary { touch-action:manipulation; }
   }

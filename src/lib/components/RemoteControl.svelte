@@ -1,12 +1,13 @@
 <script lang="ts">
  import { onDestroy } from 'svelte';
- import { Smartphone, X } from '@lucide/svelte';
+ import { X } from '@lucide/svelte';
  import QRCode from 'qrcode';
  import { getBridge } from '$lib/bridge';
  import { createDesktopSession } from '$lib/controller/remote-client';
  import type { Snapshot } from '$lib/types';
  import { DEFAULT_RELAY, registerPairingCode, revokePairingCode, type PairingRegistration } from '$lib/controller/pairing-code';
- let open=$state(false), relay=$state(DEFAULT_RELAY), qr=$state(''), status=$state('off'), error=$state('');
+ let { open = $bindable(false) }: { open?: boolean } = $props();
+ let relay=$state(DEFAULT_RELAY), qr=$state(''), status=$state('off'), error=$state('');
  let verificationCode=$state(''), creating=$state(false), now=$state(Date.now());
  let registration=$state<PairingRegistration|null>(null);
  let session=$state<Awaited<ReturnType<typeof createDesktopSession>>|null>(null);
@@ -42,7 +43,6 @@
  async function reject(){try{await session?.reject();}catch(e){error=String(e);}}
  onDestroy(()=>{clearInterval(timer);stop();});
 </script>
-<button class="remote-launch" title="Remote control" aria-label="Remote control" onclick={()=>open=!open}><Smartphone size={18}/></button>
 {#if open}<div class="remote-panel" role="dialog" aria-label="Remote control">
 <header><h2>Remote control</h2><button aria-label="Close remote settings" onclick={()=>open=false}><X size={20}/></button></header>
 <p>Scan this desktop from your phone, or enter its nine-digit device key.</p>
@@ -60,6 +60,6 @@
 <small>Keep this desktop open. The relay forwards encrypted messages; work runs on this desktop.</small>
 </div>{/if}
 <style>
-.device-key{display:block;font:600 28px monospace;letter-spacing:3px;margin:12px 0;color:#edf0e9}
-.remote-launch{position:fixed;right:12px;bottom:12px;z-index:90;width:36px;height:36px;display:grid;place-items:center;border:1px solid #454d40;border-radius:10px;color:#9fc6aa;background:#20251f;cursor:pointer}.remote-panel{position:fixed;right:18px;bottom:58px;z-index:100;width:min(360px,calc(100vw - 36px));max-height:85vh;overflow:auto;padding:22px;border:1px solid #454d40;border-radius:18px;background:#1d221c;color:#edf0e9;font:14px 'IBM Plex Sans',sans-serif;box-shadow:0 12px 40px #0008}.remote-panel header{display:flex;align-items:center;justify-content:space-between}.remote-panel h2{font-size:20px;margin:0}.remote-panel p{line-height:1.5}.remote-panel label{display:block;margin:14px 0}.remote-panel input{box-sizing:border-box;width:100%;margin-top:6px;border:1px solid #4b5547;background:#161b15;color:inherit;border-radius:8px;padding:10px;font:inherit}.remote-panel button{padding:10px;border:0;border-radius:8px;background:#343f30;color:inherit;cursor:pointer;margin:4px}.remote-panel button.primary{background:#71c598;color:#142419}.remote-panel img{display:block;max-width:100%;margin:12px auto;border-radius:10px}.remote-panel small{display:block;color:#a2ad9c;line-height:1.5;margin-top:14px}
+.device-key{display:block;font:600 28px var(--mono,monospace);letter-spacing:3px;margin:12px 0;color:var(--accent-ink,var(--accent))}
+.remote-panel{position:fixed;right:18px;bottom:18px;z-index:100;width:min(360px,calc(100vw - 36px));max-height:85vh;overflow:auto;padding:22px;border:1px solid var(--line);border-radius:18px;background:var(--panel);color:var(--ink);font:14px var(--interface-font,'IBM Plex Sans',sans-serif);box-shadow:0 12px 40px #0008}.remote-panel header{display:flex;align-items:center;justify-content:space-between}.remote-panel h2{font-size:20px;margin:0}.remote-panel p{line-height:1.5}.remote-panel label{display:block;margin:14px 0}.remote-panel input{box-sizing:border-box;width:100%;margin-top:6px;border:1px solid var(--line);background:var(--paper);color:inherit;border-radius:8px;padding:10px;font:inherit}.remote-panel button{padding:10px;border:0;border-radius:8px;background:var(--soft);color:inherit;cursor:pointer;margin:4px}.remote-panel button.primary{background:var(--accent);color:var(--on-accent)}.remote-panel img{display:block;max-width:100%;margin:12px auto;border-radius:10px}.remote-panel small{display:block;color:var(--muted);line-height:1.5;margin-top:14px}
 </style>

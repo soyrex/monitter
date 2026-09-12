@@ -1,7 +1,7 @@
 <script lang="ts">
-  let { text, active = false }: { text: string; active?: boolean } = $props();
+  let { text, active = false, activeTooltip = 'Generating a title…' }: { text: string; active?: boolean; activeTooltip?: string } = $props();
 </script>
-<span class="animated-title" class:naming={active} aria-busy={active} title={active ? 'Generating a title…' : text}>{text}</span>
+<span class="animated-title" class:naming={active} aria-busy={active} title={active ? activeTooltip : text}>{text}</span>
 <style>
   .animated-title { position:relative; }
   .naming { color:var(--accent-ink); animation:title-glow 1.6s ease-in-out infinite; }

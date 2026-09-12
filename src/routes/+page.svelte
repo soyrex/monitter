@@ -4,12 +4,13 @@
   import AppSurface from "$lib/components/AppSurface.svelte";
   import LanGate from '$lib/components/LanGate.svelte';
   import { isLanBrowser } from '$lib/lan';
+  import { remoteControlOpen, workspaceShareOpen } from '$lib/workspace-panels';
 </script>
 <LanGate>
 <AppSurface />
 
 {#if !isLanBrowser()}
-<RemoteControl />
-<ShareControl />
+<RemoteControl bind:open={$remoteControlOpen} />
+<ShareControl bind:open={$workspaceShareOpen} />
 {/if}
 </LanGate>
