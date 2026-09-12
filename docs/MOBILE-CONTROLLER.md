@@ -177,5 +177,8 @@ approval. Both the updated APK and matching desktop frontend are required.
 Validation: `node scripts/pairing-storage-test.mjs` exercises Chromium and WebKit
 cold browser restarts and non-extractable key persistence;
 `node scripts/resumable-transport-run.mjs` exercises live relay reconnection,
-revocation, and no mutation replay. Native Pixel lock/unlock and force-stop
+revocation, and no mutation replay. After building,
+`node scripts/persistent-pairing-ui-test.mjs` serves the production bundle on an
+isolated local port and checks the policy editor, persisted phone list, reload
+reconnection and revocation. Native Pixel lock/unlock and force-stop
 validation still requires the installed app on a physical device.
