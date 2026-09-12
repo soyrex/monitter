@@ -3,7 +3,8 @@
   "name": "monitter-opaque-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-11",
-  "workers_dev": false,
+  "workers_dev": true,
+  "preview_urls": false,
   "routes": [
     {
       "pattern": "api.monitter.com",
