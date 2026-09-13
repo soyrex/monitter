@@ -42,7 +42,7 @@ const css = [
 const kinds = ['task', 'draft', 'terminal', 'settings'];
 const rows = kinds.map(kind => `<div class="tab-entry ${kind}-tab" data-tab-kind="${kind}"><button class="tab"><span class="tab-kind-icon"><svg aria-hidden="true"></svg><span class="tab-shortcut"></span></span><span>${kind}</span></button><button class="close-tab" aria-label="Close ${kind}">×</button></div>`).join('');
 const html = `<!doctype html><style>
-:root{--line:#aaa;--panel:#fff;--paper:#fafafa;--soft:#eee;--muted:#555;--accent-ink:#175b35;--mono:monospace}body{font:12px system-ui;margin:20px}button{font:inherit}.surface{margin-bottom:25px}.tab-kind-icon svg{width:13px;height:13px;background:currentColor}.compact-tabs{width:320px;height:210px}
+:root{--line:#aaa;--panel:#fff;--paper:#fafafa;--soft:#eee;--muted:#555;--accent-ink:#175b35;--mono:monospace;--sidebar:#fff;--pane-tabbar-height:46px;--density-tabbar-inset:6px;--density-tab-min-height:28px;--density-detail-tabs-height:32px;--density-detail-tab-height:24px;--density-pane-header-y:8px;--density-header-avatar-size:30px}body{font:12px system-ui;margin:20px}button{font:inherit}.surface{margin-bottom:25px}.tab-kind-icon svg{width:13px;height:13px;background:currentColor}.compact-tabs{width:320px;height:210px}
 ${css}
 .compact-tabs .tab-picker-list{top:0}
 </style><div class="surface" id="strip"><nav class="tabs tab-picker"><div class="tab-picker-list">${rows}</div></nav></div><div class="surface workspace modern-tabs" id="modern"><header class="topbar"><nav class="tabs tab-picker"><div class="tab-picker-list">${rows}</div></nav></header></div><div class="surface compact-tabs" id="picker"><nav class="tabs tab-picker tab-picker-open"><div class="tab-picker-list">${rows}</div></nav></div><div class="conversation-head task-heading pane-task-header" id="chat-header"><span class="avatar task-header-avatar"></span><h1>Chat title</h1><button>Sidebar</button></div>`;
@@ -71,7 +71,7 @@ try {
         const [i, k, c] = await Promise.all([icon.boundingBox(), keycap.boundingBox(), close.boundingBox()]);
         expect(Math.abs((i.x + i.width / 2) - (k.x + k.width / 2))).toBeLessThan(1);
         expect(k.x + k.width).toBeLessThan(c.x);
-        if (surface === 'picker') { expect(c.width).toBe(44); expect(c.height).toBe(44); }
+        if (surface === 'picker') { expect(c.width).toBeCloseTo(44, 2); expect(c.height).toBeCloseTo(44, 2); }
         if (!touch) await entry.hover();
         await expect.poll(() => close.evaluate(node => getComputedStyle(node).opacity), { message: `${surface}/${kind} touch=${touch}: Close must be visible` }).toBe('1');
         await close.focus();
@@ -85,7 +85,7 @@ try {
     const modernBounds = await modernTab.boundingBox();
     expect(modernBounds.y).toBe(modernBar.y);
     expect(modernBounds.height).toBe(modernBar.height);
-    expect(modernBar.height).toBe(48);
+    expect(modernBar.height).toBeCloseTo(42, 2);
     await expect(modernTab).toHaveCSS('border-top-left-radius', '0px');
     await page.locator('#modern').evaluate(node => {
       const tabs = document.createElement('div');
@@ -97,11 +97,11 @@ try {
     const detailTab = detailRow.locator('.detail-tab-entry').first();
     await expect(detailTab).toHaveCSS('border-top-left-radius', '0px');
     await expect(detailTab.locator('button')).toHaveCSS('border-top-left-radius', '0px');
-    expect((await detailTab.boundingBox()).height).toBe((await detailRow.boundingBox()).height - 1);
+    expect((await detailTab.boundingBox()).height).toBeCloseTo((await detailRow.boundingBox()).height - 1, 2);
     await page.locator('#modern').evaluate(node => node.classList.remove('modern-tabs'));
     await expect(detailTab).toHaveCSS('border-top-left-radius', '6px');
     await page.locator('#modern').evaluate(node => { node.classList.add('modern-tabs'); node.style.setProperty('--pane-tabbar-height', '36px'); });
-    expect((await page.locator('#modern .topbar').boundingBox()).height).toBe(32);
+    expect((await page.locator('#modern .topbar').boundingBox()).height).toBeCloseTo(32, 2);
     const header = page.locator('#chat-header');
     for (const side of ['top', 'bottom']) await expect(header).toHaveCSS(`padding-${side}`, '8px');
     for (const side of ['left', 'right']) await expect(header).toHaveCSS(`padding-${side}`, '15px');

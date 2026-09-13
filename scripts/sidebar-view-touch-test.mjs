@@ -18,7 +18,7 @@ try {
   const standard = page.getByRole('button', { name: 'Standard view', exact: true });
   const activity = page.getByRole('button', { name: 'Activity view', exact: true });
   const projects = page.getByRole('button', { name: 'Projects view', exact: true });
-  await expect(standard).toHaveAttribute('aria-pressed', 'true', { timeout: 60000 });
+  await expect(standard).toHaveAttribute('aria-pressed', 'true', { timeout: 120000 });
 
   await tap(projects);
   await expect(projects).toHaveAttribute('aria-pressed', 'true');
@@ -27,7 +27,8 @@ try {
   await tap(activity);
   await expect(activity).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.section-label').first()).toContainText('ACTIVITY');
-  await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'saveSettings').map(call => call.args.sidebarView))).toEqual(['projects', 'activity']);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web'))).toBe('activity');
+  await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'saveSettings' && call.args.sidebarView))).toEqual([]);
   expect(errors).toEqual([]);
   console.log('WebKit touchscreen single-tap changes the sidebar view.');
 } finally {

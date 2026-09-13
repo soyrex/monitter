@@ -275,7 +275,7 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   collaborations: [],
   queuedMessages: [],
   approvalRequests: [],
-  settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125,
+  settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125, interfaceDensity: 'normal',
     showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard', busyMessageMode: 'queue' },
 });
 
