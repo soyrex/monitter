@@ -21,6 +21,7 @@ type TabOrderItem = { kind?: unknown; id?: unknown };
 
 export function settingsTabTitle(category: unknown): string {
   const labels: Record<string, string> = {
+    profile: 'Profile',
     appearance: 'Appearance', typography: 'Typography',
     behaviour: 'Permissions & behaviour', conversation: 'Conversation',
     agents: 'Agents', directory: 'Agent directory', lan: 'LAN access', remote: 'Remote control',

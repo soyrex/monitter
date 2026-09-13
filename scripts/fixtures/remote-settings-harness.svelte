@@ -6,13 +6,19 @@
 
   let mounted = $state(true);
   let category = $state('remote');
-  const settings = { accent:'#3978d4', theme:'light', interfaceScale:100, showToolActivity:true, showReasoningSummaries:true, sendWithEnter:false, sidebarView:'standard' };
-  onMount(() => { (window as any).__REMOTE_SETTINGS_QA__ = { unmount:()=>mounted=false, mount:()=>mounted=true, category:(value:string)=>category=value }; });
+  let settings = $state({ accent:'#3978d4', theme:'light', interfaceScale:100, showToolActivity:true, showReasoningSummaries:true, sendWithEnter:false, sidebarView:'standard', userName:'' });
+  const saves: Record<string, unknown>[] = [];
+  async function save(patch: Record<string, unknown>) {
+    if (patch.userName === 'Save failure') throw new Error('Profile save failed');
+    saves.push(patch);
+    settings = { ...settings, ...patch };
+  }
+  onMount(() => { (window as any).__REMOTE_SETTINGS_QA__ = { unmount:()=>mounted=false, mount:()=>mounted=true, category:(value:string)=>category=value, saves }; });
 </script>
 
 <main>
   <RemoteControl bind:open={$remoteControlOpen}/>
-  {#if mounted}<SettingsPane {settings} bind:category onsave={async()=>{}} />{/if}
+  {#if mounted}<SettingsPane {settings} bind:category onsave={save} />{/if}
 </main>
 
 <style>

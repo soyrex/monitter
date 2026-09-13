@@ -809,7 +809,7 @@
       ...fallback, ...saved,
       overviewOpen: saved.overviewOpen !== false,
       settingsOpen: saved.settingsOpen === true,
-      settingsCategory: ['appearance','typography','behaviour','conversation','agents','directory'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
+      settingsCategory: ['profile','appearance','typography','behaviour','conversation','agents','directory','lan','remote'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openEmptyIds: Array.isArray(saved.openEmptyIds) ? saved.openEmptyIds : fallback.openEmptyIds,
       openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,

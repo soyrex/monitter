@@ -83,6 +83,8 @@ export interface InteractionInput {
   url: string | null;
 }
 export interface Settings {
+  /** Optional user identity supplied to agents for chats started after saving. */
+  userName?: string;
   shortcutMode?: 'standard' | 'vim';
   showTabCloseButtons?: boolean;
   tabStyle?: 'classic' | 'modern';

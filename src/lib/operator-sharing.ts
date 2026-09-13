@@ -64,11 +64,16 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
   return {
     // Explicit projection: new owner-only Snapshot fields must never become
     // visitor-visible just because they were added to the desktop protocol.
-    settings: snapshot.settings,
+    settings: { ...snapshot.settings, userName: '' },
     hosts: [],
     agents: snapshot.agents.filter(agent => agentIds.has(agent.id)).map(safeAgent),
     tasks,
-    messages: snapshot.messages.filter(message => ids.has(message.taskId)).map(safeMessage),
+    messages: snapshot.messages
+      .filter(message => ids.has(message.taskId))
+      // Saved agent profile/instruction records are owner-only system context.
+      // Keep peer-attributed system records, which are part of a shared chat.
+      .filter(message => message.role !== 'system' || !!message.senderAgentId)
+      .map(safeMessage),
     events: [],
     channels: [],
     projects: snapshot.projects.filter(project => projectIds.has(project.id)).map(safeProject),

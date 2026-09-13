@@ -37,20 +37,29 @@ const sharedTask: Task = { id: task, agentId: 'agent', title: 'Shared chat', nat
 const approval = (taskId: string): ApprovalRequest => ({ id: `approval-${taskId}`, taskId, provider: 'claude', runId: 'private-run', tool: 'Write', summary: 'Owner decision', detail: 'owner-only-approval-payload', risk: 'high', status: 'pending', createdAt: 0, resolvedAt: null, decision: null });
 const sharingSource: Snapshot & { futureOwnerOnly: string } = {
   ...sourceSnapshot,
+  settings: { ...sourceSnapshot.settings, userName: 'Alex Private' },
   tasks: [sharedTask, { ...sharedTask, id: 'unshared-task', projectId: null }],
-  messages: [{ id: 'shared-message', taskId: task, role: 'user', text: 'Selected content', createdAt: 0 }, { id: 'hidden-message', taskId: 'unshared-task', role: 'user', text: 'Unshared content', createdAt: 0 }],
+  messages: [
+    { id: 'shared-message', taskId: task, role: 'user', text: 'Selected content', createdAt: 0 },
+    { id: 'owner-profile', taskId: task, role: 'system', text: 'Private saved profile', createdAt: 0 },
+    { id: 'peer-system', taskId: task, role: 'system', senderAgentId: 'agent', text: 'Shared peer context', createdAt: 0 },
+    { id: 'hidden-message', taskId: 'unshared-task', role: 'user', text: 'Unshared content', createdAt: 0 },
+  ],
   approvalRequests: [approval(task), approval('unshared-task')],
   futureOwnerOnly: 'future-private-field',
 };
 for (const selection of [{ taskIds: [task], projectIds: [] }, { taskIds: [], projectIds: ['shared-project'] }]) {
   const visitor = sharedSnapshot(sharingSource, selection);
   assert.deepEqual(visitor.tasks.map(item => item.id), [task]);
-  assert.deepEqual(visitor.messages.map(item => item.id), ['shared-message']);
+  assert.deepEqual(visitor.messages.map(item => item.id), ['shared-message', 'peer-system']);
+  assert.equal(visitor.settings.userName, '');
   assert.deepEqual(visitor.approvalRequests, []);
   assert.equal(visitor.tasks[0].cwd, '');
   assert.equal(visitor.tasks[0].nativeSessionId, null);
   assert.equal('futureOwnerOnly' in visitor, false);
   assert.ok(!JSON.stringify(visitor).includes('owner-only-approval-payload'));
+  assert.ok(!JSON.stringify(visitor).includes('Alex Private'));
+  assert.ok(!JSON.stringify(visitor).includes('Private saved profile'));
 }
 assert.equal(sharingSource.approvalRequests.length, 2);
 assert.equal(sharingSource.tasks[0].cwd, '/private/folder');

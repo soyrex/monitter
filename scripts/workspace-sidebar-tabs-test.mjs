@@ -44,7 +44,7 @@ assert.deepEqual(collectWorkspaceSidebarTabs(input, terminals), [
 assert.deepEqual(input, before, 'collector must not mutate persisted pane state');
 assert.deepEqual(collectWorkspaceSidebarTabs([], terminals), []);
 console.log('workspace sidebar tab collector assertions passed');
-for (const [category, label] of Object.entries({ appearance: 'Appearance', typography: 'Typography', behaviour: 'Permissions & behaviour', conversation: 'Conversation', agents: 'Agents', directory: 'Agent directory', lan: 'LAN access', remote: 'Remote control' })) {
+for (const [category, label] of Object.entries({ profile: 'Profile', appearance: 'Appearance', typography: 'Typography', behaviour: 'Permissions & behaviour', conversation: 'Conversation', agents: 'Agents', directory: 'Agent directory', lan: 'LAN access', remote: 'Remote control' })) {
   assert.equal(settingsTabTitle(category), `Setting: ${label}`);
   assert.equal(collectWorkspaceSidebarTabs([{ settingsOpen: true, settingsCategory: category }], {})[0].title, `Setting: ${label}`);
 }

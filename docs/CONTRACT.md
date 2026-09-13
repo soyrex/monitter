@@ -291,6 +291,12 @@ Agents publish `expertise`, `responsibilities`, and `skills` string arrays along
 `collaborationEnabled` defaults to true; disabling it removes the agent from harness discovery and
 prevents new routed deliveries. Agent profile and instructions are captured for a newly created chat;
 editing a profile changes directory discovery immediately and the instructions of future chats.
+New chat context begins with `You are acting as <agent name>. You are an agent running
+inside the Monitter harness.`, followed by `Your user is "<Profile name>".` when a
+name is configured, then the saved purpose, expertise, responsibilities, skills and
+freeform instructions. This saved system context is included in the first direct
+or channel delivery (including a queued first turn), not repeated in each follow-up.
+Changing Profile or agent settings does not rewrite existing chat context or history.
 Profiles contain up to 40 entries per field, each at most 512 bytes. Full instructions and host
 credentials are never included in the directory.
 
@@ -589,11 +595,18 @@ Preferences, Cmd/Ctrl-comma, Cmd-P Settings, and the Cmd-K Settings entry open o
 Settings tab in the workspace. It closes with its close icon or Cmd/Ctrl-W, moves between panes
 (including edge-created splits), and restores its location and selected category with the workspace.
 Its category navigation and content scroll inside the pane; it does not block other tabs.
-Categories are Agents, Agent directory, Appearance, Typography, Permissions & Behaviour, and Conversation. Existing controls
+Categories include Profile, Agents, Agent directory, Appearance, Typography, Permissions & Behaviour, Conversation, LAN access, and desktop Remote control. Existing controls
 save automatically. Permissions remain per-agent/task; the page does not introduce a global bypass.
 Settings edits and command-palette preference changes use a shared queue that merges each patch
 into the latest saved settings. Failed saves remain visible; switching tabs preserves the settings
 page's local state and the chat's unsent draft.
+
+Profile contains an autosaved Your name field (`Settings.userName`). It defaults to
+an empty string for new and older stores: Monitter never guesses a name. Names may
+contain at most 80 Unicode code points and no control characters; the UI trims
+surrounding whitespace and clearing the field omits the user-name sentence in new
+chat prompts. This owner preference is shared by desktop and LAN settings. It is
+display context only, not authentication, permission or shared-operator authority.
 
 Conversation display: `Settings.tintUserMessages` defaults to false for existing and new installs. When enabled, user bubbles in direct chats and channels use a subtle accent tint; message content and agent replies are unchanged.
 
@@ -713,6 +726,8 @@ attachments, agent instructions, activity, approval details, queues or other wor
 Visitor snapshots use an explicit field projection; new desktop snapshot fields
 must be reviewed before they are exposed to visitors. Harness approvals remain
 with the desktop owner, even for a shared chat.
+Visitor projections omit the owner's Profile name and saved system instructions;
+peer-attributed system messages remain visible as shared conversation content.
 Ending sharing revokes the in-memory session immediately. A reconnect needs a
 fresh link and approval.
 

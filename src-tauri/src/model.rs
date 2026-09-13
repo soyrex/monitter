@@ -118,8 +118,19 @@ pub fn default_collaboration_enabled() -> bool {
     true
 }
 
-pub fn agent_instructions(agent: &Agent) -> String {
-    let mut parts = vec![format!("Monitter agent: {}", agent.name)];
+pub fn agent_instructions(agent: &Agent, user_name: &str) -> String {
+    let mut identity = format!(
+        "You are acting as {}. You are an agent running inside the Monitter harness.",
+        agent.name.trim()
+    );
+    if !user_name.trim().is_empty() {
+        // Treat the display name as a quoted value, including embedded quotes.
+        identity.push_str(&format!(
+            " Your user is {}.",
+            serde_json::json!(user_name.trim())
+        ));
+    }
+    let mut parts = vec![];
     if !agent.description.trim().is_empty() {
         parts.push(format!("Purpose: {}", agent.description.trim()));
     }
@@ -135,7 +146,14 @@ pub fn agent_instructions(agent: &Agent) -> String {
     if !agent.instructions.trim().is_empty() {
         parts.push(agent.instructions.trim().into());
     }
-    parts.join("\n\n")
+    if parts.is_empty() {
+        identity
+    } else {
+        format!(
+            "{identity}\n\nAgent settings and instructions:\n\n{}",
+            parts.join("\n\n")
+        )
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -255,6 +273,8 @@ pub struct InputOption {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default)]
+    pub user_name: String,
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: u8,
     #[serde(default = "default_chat_font_size")]
@@ -554,6 +574,7 @@ pub fn default_snapshot() -> Snapshot {
         queued_messages: vec![],
         approval_requests: vec![],
         settings: Settings {
+            user_name: String::new(),
             terminal_font_size: default_terminal_font_size(),
             chat_font_size: default_chat_font_size(),
             interface_font_size: default_interface_font_size(),
@@ -591,6 +612,7 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r##"{"accent":"#3f9d6a","theme":"system"}"##).unwrap();
 
+        assert!(settings.user_name.is_empty());
         assert_eq!(settings.interface_scale, 125);
         assert_eq!(settings.chat_line_height, 1.65);
         assert_eq!(settings.terminal_line_height, 1.0);
@@ -609,6 +631,7 @@ mod tests {
     fn settings_serialize_new_appearance_fields_in_camel_case() {
         let value = serde_json::to_value(default_snapshot().settings).unwrap();
 
+        assert_eq!(value["userName"], "");
         assert_eq!(value["interfaceScale"], 125);
         assert_eq!(value["chatLineHeight"], 1.65);
         assert_eq!(value["terminalLineHeight"], 1.0);
@@ -621,6 +644,34 @@ mod tests {
         assert_eq!(value["shortcutMode"], "standard");
         assert_eq!(value["showTabCloseButtons"], true);
         assert_eq!(value["tabStyle"], "classic");
+    }
+
+    #[test]
+    fn profile_name_round_trips_and_is_quoted_without_guessing_a_default() {
+        let mut snapshot = default_snapshot();
+        snapshot.settings.user_name = "Álex \"Al\"".into();
+        let value = serde_json::to_value(&snapshot.settings).unwrap();
+        assert_eq!(value["userName"], "Álex \"Al\"");
+        assert_eq!(
+            serde_json::from_value::<Settings>(value).unwrap(),
+            snapshot.settings
+        );
+
+        let agent = &mut snapshot.agents[0];
+        agent.name = "Claudine".into();
+        agent.description.clear();
+        agent.expertise.clear();
+        agent.responsibilities.clear();
+        agent.skills.clear();
+        agent.instructions.clear();
+        let identity =
+            "You are acting as Claudine. You are an agent running inside the Monitter harness.";
+        assert_eq!(agent_instructions(agent, ""), identity);
+        assert_eq!(agent_instructions(agent, "  "), identity);
+        assert_eq!(
+            agent_instructions(agent, &snapshot.settings.user_name),
+            format!("{identity} Your user is \"Álex \\\"Al\\\"\".")
+        );
     }
 
     #[test]

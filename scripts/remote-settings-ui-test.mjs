@@ -43,5 +43,17 @@ try {
   await desktop.evaluate(()=>window.__REMOTE_SETTINGS_QA__.mount()); await expect(panel).toBeVisible();
   await expect(panel.getByRole('status')).toContainText('Phone connected');
   assert.equal(await desktop.evaluate(()=>window.__socketCount),sockets,'Settings navigation must not recreate the live socket.');
+  await desktop.evaluate(()=>window.__REMOTE_SETTINGS_QA__.category('profile'));
+  const name = desktop.getByRole('textbox',{name:'Your name'});
+  await expect(name).toBeVisible();
+  await name.fill('  Claudine  '); await name.blur();
+  await expect.poll(()=>desktop.evaluate(()=>window.__REMOTE_SETTINGS_QA__.saves.at(-1)?.userName)).toBe('Claudine');
+  await name.fill(''); await name.blur();
+  await expect.poll(()=>desktop.evaluate(()=>window.__REMOTE_SETTINGS_QA__.saves.at(-1)?.userName)).toBe('');
+  await name.fill('x'.repeat(81)); await name.blur();
+  await expect(desktop.getByRole('alert')).toContainText('at most 80 characters');
+  await expect.poll(()=>desktop.evaluate(()=>window.__REMOTE_SETTINGS_QA__.saves.length)).toBe(2);
+  await name.fill('Save failure'); await name.blur();
+  await expect(desktop.getByRole('alert')).toContainText('Profile save failed');
   await desktop.screenshot({path:'verification/remote-settings-embedded-407.png',fullPage:true}); assert.deepEqual(errors,[]); console.log('Focused embedded remote Settings: narrow QR, registry failure, explicit approval and live socket survival passed.');
 } finally {await browser?.close(); relay?.kill('SIGTERM'); await new Promise(ok=>server?server.close(ok):ok()); await rm(temp,{recursive:true,force:true});}

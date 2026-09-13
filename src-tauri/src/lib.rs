@@ -1,5 +1,7 @@
 mod adapters;
 #[cfg(test)]
+mod agent_identity_tests;
+#[cfg(test)]
 mod app_server_live_tests;
 mod app_server_service;
 #[cfg(test)]
@@ -1816,19 +1818,7 @@ impl Service {
             {
                 return Err("This task's provider or sandbox policy is invalid.".into());
             }
-            let first_turn = !state
-                .messages
-                .iter()
-                .any(|message| message.task_id == task_id && message.role == "user");
-            let instructions = if first_turn {
-                state
-                    .messages
-                    .iter()
-                    .find(|message| message.task_id == task_id && message.role == "system" && message.sender_agent_id.is_none())
-                    .map(|message| message.text.clone())
-            } else {
-                None
-            };
+            let instructions = initial_task_instructions(state, &task_id);
             let peer_updates = state.messages.iter().rev()
                 .filter(|message| message.task_id == task_id)
                 .take_while(|message| !(message.role == "user" && message.sender_agent_id.is_none()))
@@ -2141,6 +2131,7 @@ impl Service {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let instructions = initial_task_instructions(snapshot, &task.id);
             snapshot.messages.push(Message {
                 stream_status: None,
                 sender_agent_id: queued.sender_agent_id.clone(),
@@ -2158,13 +2149,15 @@ impl Service {
             });
             snapshot.tasks[task_ix].status = "running".into();
             snapshot.tasks[task_ix].updated_at = now();
-            Ok(append_attachment_paths(
-                format!(
-                    "Channel context:\n{context}\n\nNew message:\n{}",
-                    queued.text
-                ),
-                &attachments,
-            ))
+            let prompt = format!(
+                "Channel context:\n{context}\n\nNew message:\n{}",
+                queued.text
+            );
+            let prompt = match instructions {
+                Some(instructions) => format!("{instructions}\n\n{prompt}"),
+                None => prompt,
+            };
+            Ok(append_attachment_paths(prompt, &attachments))
         })?;
         let launched = match self.send_to_resident(&queued.task_id, &prompt) {
             Ok(true) => Ok(()),
@@ -2958,6 +2951,23 @@ fn prepare_channel_mention_routes(
     Ok(routes)
 }
 
+/// The saved profile is initialization context, not a new user message. Send
+/// it once, including when a channel/peer delivery is a chat's first turn.
+fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<String> {
+    let mut messages = snapshot
+        .messages
+        .iter()
+        .filter(|message| message.task_id == task_id);
+    if messages.clone().any(|message| {
+        message.role == "user" || message.role == "assistant" || message.sender_agent_id.is_some()
+    }) {
+        return None;
+    }
+    messages
+        .find(|message| message.role == "system")
+        .map(|message| message.text.clone())
+}
+
 fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result<Task, String> {
     let state = &mut data.snapshot;
     if input.title.trim().is_empty() {
@@ -3016,7 +3026,8 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     if task.cwd.trim().is_empty() {
         return Err("Agent or host must specify a task folder.".into());
     }
-    if !agent_instructions(&agent).trim().is_empty() {
+    let instructions = agent_instructions(&agent, &state.settings.user_name);
+    if !instructions.trim().is_empty() {
         state.messages.push(Message {
             stream_status: None,
             sender_agent_id: None,
@@ -3024,7 +3035,7 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
             id: id(),
             task_id: task.id.clone(),
             role: "system".into(),
-            text: agent_instructions(&agent),
+            text: instructions,
             created_at: now(),
             attachments: vec![],
         });
@@ -4077,6 +4088,9 @@ fn edit_queued_message(
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), String> {
+    if settings.user_name.chars().count() > 80 || settings.user_name.chars().any(char::is_control) {
+        return Err("Your name must be at most 80 characters without control characters.".into());
+    }
     if [
         settings.terminal_font_size,
         settings.chat_font_size,
@@ -4319,14 +4333,15 @@ fn send_channel_message_accepted(
                     return Err("Agent or host must specify a task folder.".into());
                 }
                 task.status = "running".into();
-                if !agent_instructions(&agent).trim().is_empty() {
+                let instructions = agent_instructions(&agent, &state.settings.user_name);
+                if !instructions.trim().is_empty() {
                     state.messages.push(Message { stream_status: None,
                         sender_agent_id: None,
                         collaboration_id: None,
                         id: id(),
                         task_id: task.id.clone(),
                         role: "system".into(),
-                        text: agent_instructions(&agent),
+                        text: instructions,
                         created_at: now(),
                         attachments: vec![],
                     });
@@ -4344,6 +4359,7 @@ fn send_channel_message_accepted(
             let (attachments, matched) =
                 matching_attachments(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             matched_attachment_ids.extend(matched);
+            let instructions = initial_task_instructions(state, &task_id);
             state.messages.push(Message { stream_status: None,
                 sender_agent_id: None,
                 collaboration_id: None,
@@ -4354,10 +4370,9 @@ fn send_channel_message_accepted(
                 created_at: now(),
                 attachments: attachments.clone(),
             });
-            let task_prompt = if existing_ix.is_none() && !agent.instructions.trim().is_empty() {
+            let task_prompt = if let Some(instructions) = instructions {
                 format!(
-                    "{}\n\nChannel context:\n{context}\n\nNew message:\n{user_text}",
-                    agent.instructions.trim()
+                    "{instructions}\n\nChannel context:\n{context}\n\nNew message:\n{user_text}"
                 )
             } else {
                 format!("Channel context:\n{context}\n\nNew message:\n{user_text}")
@@ -5464,6 +5479,27 @@ name@rafa.test",
     }
 
     #[test]
+    fn profile_name_validation_allows_blank_and_unicode_but_rejects_controls_and_long_names() {
+        let mut settings = default_snapshot().settings;
+        for name in [
+            String::new(),
+            "Alex".into(),
+            "名".repeat(80),
+            "🦘".repeat(80),
+        ] {
+            settings.user_name = name;
+            assert!(validate_settings(&settings).is_ok());
+        }
+        for name in ["名".repeat(81), "Alex\nLuke".into(), "Alex\u{009f}".into()] {
+            settings.user_name = name;
+            assert_eq!(
+                validate_settings(&settings),
+                Err("Your name must be at most 80 characters without control characters.".into())
+            );
+        }
+    }
+
+    #[test]
     fn task_snapshots_host_and_agent_instructions() {
         let dir = temp_dir("task-snapshot");
         let service = Service::open(None, dir.clone()).unwrap();
@@ -5472,6 +5508,7 @@ name@rafa.test",
         let host_id = snapshot.hosts[0].id.clone();
         service
             .mutate(None, |snapshot| {
+                snapshot.settings.user_name = "Alex".into();
                 snapshot.agents[0].instructions = "Keep this instruction".into();
                 snapshot.agents[0].cwd.clear();
                 snapshot.hosts[0].default_cwd = "/first".into();
@@ -5493,6 +5530,8 @@ name@rafa.test",
             .unwrap();
         service
             .mutate(None, |snapshot| {
+                snapshot.settings.user_name = "New name".into();
+                snapshot.agents[0].instructions = "New instruction".into();
                 snapshot.hosts[0].default_cwd = "/changed".into();
                 Ok(())
             })
@@ -5510,7 +5549,7 @@ name@rafa.test",
                 .find(|message| message.task_id == task.id && message.role == "system")
                 .unwrap()
                 .text,
-            "Monitter agent: Codex\n\nPurpose: Local Codex CLI\n\nKeep this instruction"
+            "You are acting as Codex. You are an agent running inside the Monitter harness. Your user is \"Alex\".\n\nAgent settings and instructions:\n\nPurpose: Local Codex CLI\n\nKeep this instruction"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
