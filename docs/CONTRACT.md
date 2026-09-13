@@ -104,8 +104,9 @@ Base sizes `interfaceFontSize`, `chatFontSize`, and `terminalFontSize` are integ
 Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions.
 
 Settings include `accent`, `theme`, `interfaceScale` (integer percent, 80–200, default 125),
-`showToolActivity` and `showReasoningSummaries` (default true), `sendWithEnter` (default false),
-and `sidebarView` (`standard`, `activity`, or `projects`; default `standard`).
+`showToolActivity` and `showReasoningSummaries` (default true), and `sendWithEnter` (default false).
+The legacy shared `sidebarView` field remains readable for one-time migration only; current sidebar
+selection is client presentation state and is never written back through shared settings.
 `interfaceDensity` is `tight`, `normal`, or `spacious`, defaulting to `normal`. It changes
 workspace chrome rather than conversation typography: tab bars, compact tab selectors, pane headers,
 sidebar rows and their associated controls share density variables. Normal is lower than the former
@@ -160,10 +161,15 @@ project link: cwd, host, native session, running turn, messages and activity tim
 Deleting a project unassigns its chats, including archived/running chats, without deleting them.
 A host referenced by a project workspace cannot be deleted until that mapping is removed.
 
-The saved sidebar view offers Standard (agent groups), Activity (running first, then most recent),
-and Projects (collapsible project folders plus unassigned chats). Channels remain available in each
-view. Archived chats stay out of these ordinary lists and remain discoverable through Cmd-K.
-Projects participate in the switcher; controls include new project and sidebar view selection.
+The sidebar offers Standard (agent groups), Activity (running first, then most recent), and Projects
+(collapsible project folders plus unassigned chats). The selection is stored locally and independently
+for native desktop, ordinary web and mobile clients; changing one must not update a shared snapshot or
+alter another client's view. Switching updates the visible list synchronously without waiting for a
+backend settings write. Each browser tab retains its own choice across reloads using session storage;
+local storage supplies the default for a new client window. Split panes share their window's selection.
+Channels remain available in each view. Archived chats stay out of these
+ordinary lists and remain discoverable through Cmd-K. Projects participate in the switcher; controls
+include new project and sidebar view selection.
 
 ## Runtime and persistence
 
@@ -460,7 +466,7 @@ workspace terminal references are preserved too; reload reuses live shells, whil
 open fresh shells at their saved host/folder, as described in Terminal tabs. Deleted/reassigned chats
 are reconciled against current agent/project membership without deleting their history or drafts.
 
-The main sidebar can collapse to agent avatars with chat popovers. Its single view menu selects
+The main sidebar can collapse to agent avatars with chat popovers. Its client-local view menu selects
 Standard, Activity or Projects; nonstandard chat rows include the owning agent's avatar. Chat archive
 buttons appear on hover or focus. The monitter menu contains Preferences, Hosts, Agent directory and
 Archived chats. Cmd+, opens Preferences on macOS; Ctrl+, is available on Windows/Linux, alongside the

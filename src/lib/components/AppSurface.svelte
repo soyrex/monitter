@@ -3,6 +3,7 @@
   import { workspaceShareOpen } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
   import { collectWorkspaceSidebarTabs, settingsTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
+  import { loadSidebarViewPreference, saveSidebarViewPreference, type SidebarViewClient } from '$lib/sidebar-view-preference';
   import "../../app.css";
   import AnimatedTitle from "./AnimatedTitle.svelte";
   import MessageMeta from "./MessageMeta.svelte";
@@ -346,9 +347,20 @@
   let focusedProjectId = $state<string | null>(null);
   let collapsedProjects = $state<Record<string, boolean>>({});
   let sidebarOrder = $state<Record<string,string[]>>({});
+  const ownSidebarViewState = $state<{ view: SidebarView }>({ view: 'standard' });
+  const sidebarViewState = getContext<{ view: SidebarView }>('monitter-sidebar-view') ?? ownSidebarViewState;
+  setContext('monitter-sidebar-view', sidebarViewState);
+  const selectRootSidebarView = getContext<(view: SidebarView) => void>('monitter-select-sidebar-view') ?? setSidebarView;
+  setContext('monitter-select-sidebar-view', selectRootSidebarView);
+  const sidebarView = $derived(sidebarViewState.view);
+  let sidebarViewClientReady = $state(false);
+  let sidebarViewInitialized = $state(false);
+  const sidebarViewClient: SidebarViewClient = untrack(() => isTauri() ? 'desktop' : 'web');
   function sidebarSorted<T extends {id:string}>(items:T[],group:string):T[] {
     const order=sidebarOrder[group]??[];
-    return [...items].sort((a,b)=>(order.indexOf(a.id)<0?Infinity:order.indexOf(a.id))-(order.indexOf(b.id)<0?Infinity:order.indexOf(b.id)));
+    if (!order.length) return items;
+    const ranks = new Map(order.map((id, index) => [id, index]));
+    return [...items].sort((a,b)=>(ranks.get(a.id)??Infinity)-(ranks.get(b.id)??Infinity));
   }
   function moveSidebar(group:string,id:string,target:string,after:boolean) {
     const visible=Array.from(document.querySelectorAll<HTMLElement>('[data-sidebar-sort-group]')).filter(node=>node.dataset.sidebarSortGroup===group).map(node=>node.dataset.sidebarSortId!).filter(Boolean);
@@ -360,7 +372,14 @@
 
   const projects = $derived(snapshot?.projects ?? []);
   const focusedProject = $derived(projects.find(project => project.id === focusedProjectId) ?? null);
-  const sidebarView = $derived(snapshot?.settings.sidebarView ?? 'standard');
+  $effect(() => {
+    if (embedded || !sidebarViewClientReady || sidebarViewInitialized || !snapshot) return;
+    // Import the former shared preference once for a smooth migration, then
+    // keep all subsequent choices local to this client surface.
+    sidebarViewState.view = snapshot.settings.sidebarView ?? 'standard';
+    saveSidebarViewPreference(sidebarViewClient, sidebarView);
+    sidebarViewInitialized = true;
+  });
   const activeTasks = $derived(snapshot?.tasks.filter(task => !task.archived) ?? []);
   const scopedTasks = $derived(activeTasks.filter(task => taskBelongsToWorkspace(task, activeWorkspaceKey)));
   const activityTasks = $derived(activeTasks.filter(task=>!task.channelId).sort((a,b) =>
@@ -1485,7 +1504,12 @@
     refreshTimer = setTimeout(() => { refreshTimer = undefined; void reload(); }, 125);
   }
   onMount(() => {
-    if(!embedded)try{const saved=JSON.parse(localStorage.getItem('monitter.sidebar-order.v1')??'{}');if(saved && typeof saved==='object' && !Array.isArray(saved))sidebarOrder=Object.fromEntries(Object.entries(saved).filter(([,ids])=>Array.isArray(ids)&&ids.every(id=>typeof id==='string')) as [string,string[]][]);}catch{/* Use original order if storage is unavailable. */}
+    if(!embedded) {
+      const storedView = loadSidebarViewPreference(sidebarViewClient);
+      if (storedView) { sidebarViewState.view = storedView; sidebarViewInitialized = true; saveSidebarViewPreference(sidebarViewClient, storedView); }
+      sidebarViewClientReady = true;
+      try{const saved=JSON.parse(localStorage.getItem('monitter.sidebar-order.v1')??'{}');if(saved && typeof saved==='object' && !Array.isArray(saved))sidebarOrder=Object.fromEntries(Object.entries(saved).filter(([,ids])=>Array.isArray(ids)&&ids.every(id=>typeof id==='string')) as [string,string[]][]);}catch{/* Use original order if storage is unavailable. */}
+    }
 
     if (embedded) return;
     let unlisten: (() => void) | undefined;
@@ -2255,14 +2279,21 @@
       if (focusedProjectId === projectId) openOverview();
     }
   }
-  async function setSidebarView(view: SidebarView) {
-    if (!snapshot || busy || sidebarView === view) return;
-    // The view switcher must first commit its own direct preference action.
-    // Waiting for a workspace restore before doing so leaves the first
-    // activation pending. Activity still restores the all-workspaces context,
-    // but only after the selected view is durable and visible.
-    const saved = await run(()=>saveSettingsPatch({sidebarView:view}));
-    if (saved && view === 'activity') void switchWorkspace('all');
+  function setSidebarView(view: SidebarView) {
+    if (embedded) { selectRootSidebarView(view); return; }
+    if (sidebarView === view) return;
+    // This is presentation state, so update before any workspace restoration
+    // and never enqueue a backend settings save or snapshot refresh.
+    sidebarViewState.view = view;
+    sidebarViewInitialized = true;
+    saveSidebarViewPreference(sidebarViewClient, view);
+    if (view === 'activity' && activeWorkspaceKey !== 'all') {
+      // Let the changed sidebar paint before serialising and restoring a
+      // different workspace layout. A rapid second choice cancels the restore.
+      requestAnimationFrame(() => setTimeout(() => {
+        if (sidebarView === 'activity') void switchWorkspace('all');
+      }, 0));
+    }
   }
   async function moveTaskProject(taskId: string, projectId: string) {
     await run(()=>bridge.setTaskProject(taskId, projectId || null), 'Chat project updated.');
@@ -2659,7 +2690,7 @@
     ...["light","dark","system"].map(theme=>({id:`theme:${theme}`,label:`${theme[0].toUpperCase()+theme.slice(1)} theme`,checked:snapshot?.settings.theme===theme,group:"Appearance"})),
     ...(selectedTask ? [{id:"archive",label:"Archive current chat",group:"Current chat",disabled:selectedTask.status==="running"},
       ...(selectedTask.status==="running" ? [{id:"stop",label:"Stop current chat",group:"Current chat"}] : [])] : []),
-  ].map(item=>({...item,disabled:busy || ("disabled" in item && item.disabled)})));
+  ].map(item=>({...item,disabled:(!item.id.startsWith('sidebar:') && busy) || ("disabled" in item && item.disabled)})));
   async function selectPalette(id: string) {
     if (palette === "switch") {
       palette = null;
@@ -2683,6 +2714,7 @@
       }
       return;
     }
+    if (id.startsWith('sidebar:')) { palette = null; setSidebarView(id.slice(8) as SidebarView); return; }
     const settings = snapshot?.settings;
     if (!settings || busy) return;
     if (id === "vim-command") { palette=null; openVimCommand(); }
@@ -2699,7 +2731,6 @@
     else if (id === "detail") showDetail = !showDetail;
     else if (id.startsWith("scale-")) { if (id === "scale-reset") { scaleQueued = 125; void flushScale(); } else queueScale(id === "scale-up" ? 5 : -5); }
     else if (id.startsWith("theme:")) await run(()=>saveSettingsPatch({theme:id.slice(6) as "light"|"dark"|"system"}));
-    else if (id.startsWith('sidebar:')) await setSidebarView(id.slice(8) as SidebarView);
     else {
       palette = null;
       if (id === "new-task") openTaskComposer();
@@ -3327,7 +3358,7 @@
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
       {#if !sidebarCompressed}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true">monitter</span><span class="brand-short" aria-hidden="true">m</span></strong>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
-        {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} disabled={busy || !bridge.available || !snapshot} onclick={()=>{void setSidebarView(view.id)}}><view.icon size={16}/></button>{/each}
+        {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
       </div>{/if}
     </div>
     {#if !sidebarCompressed}

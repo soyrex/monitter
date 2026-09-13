@@ -17,7 +17,7 @@ try {
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.goto(url);
   await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 30000 });
-  const setView=async name=>{await page.getByRole('button',{name:/^Sidebar view:/}).click();await page.getByRole('menuitemradio',{name,exact:true}).click()};
+  const setView=async name=>{const button=page.getByRole('button',{name:`${name} view`,exact:true});if(await button.getAttribute('aria-pressed')!=='true')await button.click();await expect(button).toHaveAttribute('aria-pressed','true')};
   const newChat=async()=>{await page.keyboard.press('Meta+p');await page.getByRole('dialog').getByText('New chat',{exact:true}).click()};
   const openDraftOptions = async () => {
     const options = page.locator('details.draft-advanced');
@@ -109,7 +109,7 @@ try {
   await page.getByLabel('Task message', { exact: true }).fill('Draft survives sidebar views');
   for (const view of ['Standard', 'Activity', 'Projects']) {
     await setView(view);
-    await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.sidebarView)).toBe(view.toLowerCase());
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web'))).toBe(view.toLowerCase());
     await expect(page.getByLabel('Task message', { exact: true })).toHaveValue('Draft survives sidebar views');
   }
   await setView('Activity');

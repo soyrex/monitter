@@ -81,16 +81,12 @@ try {
 
   // The full sidebar owns the view selector.
   await page.getByRole('button', { name: 'Expand main sidebar', exact: true }).click();
-  // The three old tab buttons become one labelled view control with radio menu choices.
-  const view = page.getByRole('button', { name: 'Sidebar view: Standard', exact: true });
-  await view.click();
-  const viewMenu = page.getByRole('menu', { name: 'Sidebar view', exact: true });
-  await expect(viewMenu).toBeVisible();
-  for (const name of ['Standard', 'Activity', 'Projects']) await expect(viewMenu.getByRole('menuitemradio', { name, exact: true })).toBeVisible();
-  await viewMenu.getByRole('menuitemradio', { name: 'Activity', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Sidebar view: Activity', exact: true })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.sidebarView)).toBe('activity');
-  passed.push('sidebar views are selected through one accessible radio menu');
+  const activityView = page.getByRole('button', { name: 'Activity view', exact: true });
+  await activityView.click();
+  await expect(activityView).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web'))).toBe('activity');
+  await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'saveSettings' && call.args.sidebarView))).toEqual([]);
+  passed.push('sidebar views switch locally without a backend settings write');
 
   // Cmd-K/P still open their palettes after the footer launchers were removed.
   await expect(page.locator('.palette-launchers')).toHaveCount(0);
@@ -103,8 +99,7 @@ try {
   passed.push('Cmd-K and Cmd-P remain available without footer launchers');
 
   // Both local and SSH task panes ask the bridge only for their own task and show all three scopes.
-  await page.getByRole('button', { name: 'Sidebar view: Activity', exact: true }).click();
-  await page.getByRole('menu', { name: 'Sidebar view', exact: true }).getByRole('menuitemradio', { name: 'Standard', exact: true }).click();
+  await page.getByRole('button', { name: 'Standard view', exact: true }).click();
   for (const [title, taskId, root, stagedText] of [
     ['Local Git chat', 'local-git-task', '/tmp/local-git', 'staged local change'],
     ['Remote Git chat', 'remote-git-task', '/srv/git', 'staged remote change'],

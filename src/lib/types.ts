@@ -97,6 +97,7 @@ export interface Settings {
   dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
+  /** Legacy migration seed; active sidebar selection is client-local UI state. */
   sidebarView: SidebarView; busyMessageMode?: 'queue' | 'steer';
 }
 export interface Snapshot {
