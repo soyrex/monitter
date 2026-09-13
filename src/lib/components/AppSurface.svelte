@@ -4751,7 +4751,7 @@
   .tab-entry .tab { max-width: 210px; padding-right:31px; }
   .tab-kind-icon { position:relative; display:grid; flex:none; place-items:center; width:13px; height:13px; }
   .tab-shortcut { display:none; }
-  .tab-status { position:absolute; z-index:2; right:3px; top:50%; display:grid; place-items:center; width:22px; height:24px; transform:translateY(-50%); transition:opacity .12s ease; }
+  .tab-status { position:absolute; z-index:2; right:3px; top:50%; display:grid; place-items:center; width:22px; height:24px; transform:translateY(-50%); pointer-events:none; transition:opacity .12s ease; }
   .tab-entry:focus-within .tab-status { opacity:0; }
   @media (hover:hover) and (pointer:fine) { .tab-entry:hover .tab-status { opacity:0; } }
   .close-tab { position:absolute; z-index:2; right:3px; top:50%; display:grid; place-items:center; width:22px; height:24px; transform:translateY(-50%); color:var(--muted); border-radius:4px; opacity:0; pointer-events:none; transition:opacity .12s ease; }
@@ -5553,8 +5553,10 @@
   .agent-directory article.disabled { opacity: .58; }
   .app-shell.embedded { height: 100%; width: 100%; grid-template-columns: minmax(0,1fr); }
   .embedded .topbar { height: var(--pane-tabbar-height,52px); min-height: 32px; padding: 0.5em 0.5em 0; }
-  .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 12; box-shadow: -10px 0 30px #0003; }
-  .detail-backdrop { position: absolute; inset: 0; z-index: 11; background: #0002; }
+  .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 22; box-shadow: -10px 0 30px #0003; }
+  .detail-backdrop { position: fixed; inset: 0; z-index: 21; background:rgb(255 255 255 / .5); backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px); }
+  :global(:root[data-theme="dark"]) .detail-backdrop { background:rgb(0 0 0 / .5); }
+  @media (prefers-color-scheme:dark) { :global(:root[data-theme="system"]) .detail-backdrop { background:rgb(0 0 0 / .5); } }
   .app-shell:not(.embedded):not(.sidebar-collapsed) { grid-template-columns: min(40vw, max(230px, var(--left-sidebar-width, 252px))) minmax(0, 1fr); }
   .task-layout:not(.detail-hidden) { grid-template-columns: minmax(0, 1fr) min(40vw, max(260px, var(--right-sidebar-width, 292px)), calc(100% - 300px)); }
   /* An overlay must use the whole task layout, not its absent second grid column. */

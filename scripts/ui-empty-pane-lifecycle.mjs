@@ -29,8 +29,9 @@ for (const engine of engines) {
         if (kind === 'terminal') await second.getByRole('button', { name: 'Open terminal', exact: true }).click();
         const pane = page.locator('.pane-leaf').filter({ has: kind === 'terminal' ? page.locator('.terminal-tab') : kind === 'settings' ? page.locator('[data-tab-kind="settings"]') : kind === 'draft' ? page.locator('[data-tab-kind="draft"]') : page.locator('[data-tab-id="target"]') });
         await expect(pane).toHaveCount(1);
-        const close = kind === 'terminal' ? pane.getByRole('button', { name: /Close terminal/i }) : pane.getByRole('button', { name: /Close .*tab/i });
+        const close = pane.locator(`.tab-entry[data-tab-kind="${kind}"] .close-tab`);
         await expect(close).toHaveCount(1);
+        await pane.locator(`.tab-entry[data-tab-kind="${kind}"]`).hover();
         await close.click();
         await expect(page.locator('.pane-leaf')).toHaveCount(1);
         await expect(page.locator('[data-tab-id="base"]')).toHaveCount(1);
@@ -64,11 +65,19 @@ for (const engine of engines) {
       await expect(panes).toHaveCount(2);
       for (const id of ['nested-a', 'nested-b']) await expect(page.locator(`[data-tab-id="${id}"]`)).toHaveCount(1);
       await expect(page.locator('.pane-split.column')).toHaveCount(1);
+      await expect.poll(() => panes.evaluateAll(nodes => nodes.every(node => node.getAnimations().length === 0))).toBe(true);
       const root = await page.locator('.pane-grid-root').boundingBox();
       for (const box of await panes.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect()))) {
         expect(box.width).toBeGreaterThan(20); expect(box.height).toBeGreaterThan(20);
         expect(box.left).toBeGreaterThanOrEqual(root.x - 1); expect(box.right).toBeLessThanOrEqual(root.x + root.width + 1);
       }
+      await drag(page.locator('[data-tab-id="nested-a"] .tab'), panes.first(), .5, .5);
+      await expect(panes).toHaveCount(1);
+      await expect.poll(() => panes.evaluateAll(nodes => nodes.every(node => node.getAnimations().length === 0))).toBe(true);
+      for (const id of ['nested-a', 'nested-b']) await expect(page.locator(`[data-tab-id="${id}"]`)).toHaveCount(1);
+      const filled = await panes.boundingBox();
+      expect(Math.abs(root.width - filled.width)).toBeLessThan(2);
+      expect(Math.abs(root.height - filled.height)).toBeLessThan(2);
       expect(errors).toEqual([]);
     } finally { await page.close(); }
     console.log(`${engine.name()}: final task/draft/settings/terminal close collapse and nested right/bottom move passed`);

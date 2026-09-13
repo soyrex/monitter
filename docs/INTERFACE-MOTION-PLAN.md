@@ -1,8 +1,8 @@
 # Interface motion proposal
 
 Review baseline: `18771e7`. Branch: `feature/interface-motion-review`.
-Status: implemented as an isolated web prototype; final browser validation below.
-No merge or native rebuild is part of this prototype.
+Status: implemented and merged into main on request; browser validation below.
+Web-only delivery: no native rebuild is part of this change.
 
 ## Prototype
 
@@ -13,6 +13,13 @@ No merge or native rebuild is part of this prototype.
   conversation and status fades, modal/palette entrances and guarded exits, menu
   entrances, brand/group reveals, deliberate tab scrolling and pane position motion.
 - Pane dimming now covers the background and content without double-dimming.
+- Empty split panes are pruned after their last tab closes or moves, including
+  nested splits and runtime terminal removal. Recursive branch identity is retained
+  during teardown, and temporary missing pane references no longer discard removal.
+- Native userMessage/agentMessage lifecycle echoes are omitted from tool groups;
+  their ordinary conversation bubbles remain the visible representation.
+- Compact sidebar blades use a full-window 50% black/white blurred backdrop and
+  stay above the pane header. Normal docked sidebars are unchanged.
 - Large outgoing trees (over 512 descendant elements) skip the optional visual
   copy; incoming motion still runs. This bounds snapshot work on long sidebars.
 - Sidebar width and pointer resizing remain immediate; terminal contents are not
@@ -26,6 +33,10 @@ No merge or native rebuild is part of this prototype.
   retained views, inert outgoing copies, message arrival eligibility and tab reveal.
 - Chromium and WebKit pane tests: split/close/balance preserve the terminal identity;
   pointer resize creates no pane animation; theme dimming and crowded tab reveal pass.
+- Both engines pass final chat/draft/settings/terminal tab closure, nested split
+  movement and move-into-existing-pane collapse, with surviving panes filling space.
+- Both engines pass blade backdrop coverage, theme/blur, header hit targeting and
+  dismissal, including the mobile transformed-container layout.
 - Chromium and WebKit UI matrix passes: sidebar reversal, composer draft/focus,
   active-tab hover, detail tabs, palette focus/close, local preference persistence,
   OS override, light/dark themes, three densities and narrow mobile layout.
