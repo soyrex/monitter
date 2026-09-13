@@ -321,6 +321,8 @@ pub struct Settings {
     pub show_tab_close_buttons: bool,
     #[serde(default = "default_tab_style")]
     pub tab_style: String,
+    #[serde(default = "default_interface_density")]
+    pub interface_density: String,
 }
 impl Eq for Settings {}
 fn default_terminal_font_size() -> u8 {
@@ -334,6 +336,9 @@ fn default_show_tab_close_buttons() -> bool {
 }
 fn default_tab_style() -> String {
     "classic".into()
+}
+fn default_interface_density() -> String {
+    "normal".into()
 }
 fn default_chat_font_size() -> u8 {
     13
@@ -599,6 +604,7 @@ pub fn default_snapshot() -> Snapshot {
             shortcut_mode: default_shortcut_mode(),
             show_tab_close_buttons: default_show_tab_close_buttons(),
             tab_style: default_tab_style(),
+            interface_density: default_interface_density(),
         },
     }
 }
@@ -625,6 +631,7 @@ mod tests {
         assert_eq!(settings.shortcut_mode, "standard");
         assert!(settings.show_tab_close_buttons);
         assert_eq!(settings.tab_style, "classic");
+        assert_eq!(settings.interface_density, "normal");
     }
 
     #[test]
@@ -644,6 +651,7 @@ mod tests {
         assert_eq!(value["shortcutMode"], "standard");
         assert_eq!(value["showTabCloseButtons"], true);
         assert_eq!(value["tabStyle"], "classic");
+        assert_eq!(value["interfaceDensity"], "normal");
     }
 
     #[test]
@@ -680,6 +688,18 @@ mod tests {
         settings.tab_style = "modern".into();
         let serialized = serde_json::to_string(&settings).unwrap();
         assert!(serialized.contains("\"tabStyle\":\"modern\""));
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serialized).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn interface_density_round_trips_through_settings_json() {
+        let mut settings = default_snapshot().settings;
+        settings.interface_density = "tight".into();
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(serialized.contains("\"interfaceDensity\":\"tight\""));
         assert_eq!(
             serde_json::from_str::<Settings>(&serialized).unwrap(),
             settings

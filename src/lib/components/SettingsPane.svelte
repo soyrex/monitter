@@ -50,6 +50,8 @@
     { key: "terminalFont", sizeKey: "terminalFontSize", size: 14, label: "Terminal font", fallback: "IBM Plex Mono" },
   ];
   const activeCategory = $derived(categories.some((item) => item.id === category) ? category as Category : "appearance");
+  const densities = ['tight', 'normal', 'spacious'] as const;
+  const density = $derived(settings.interfaceDensity ?? 'normal');
 
   let pending = $state(0);
   let saveError = $state("");
@@ -201,6 +203,14 @@
           <div class="range-footer"><span>80%</span><button type="button" onclick={() => void save({ interfaceScale: 125 })}>Reset to default · 125%</button><span>200%</span></div>
         </section>
 
+        <section class="setting-card" aria-labelledby="density-heading">
+          <div class="card-heading"><h2 id="density-heading">Interface density</h2><p>Adjust the height and spacing of tabs, sidebars and pane controls.</p></div>
+          <input class="range density-range" type="range" aria-label="Interface density" aria-valuetext={density} min="0" max="2" step="1" value={densities.indexOf(density)} onchange={(event) => void save({ interfaceDensity: densities[Number(event.currentTarget.value)] ?? 'normal' })} />
+          <div class="density-labels" aria-hidden="true">
+            {#each densities as option}<button type="button" class:chosen={density === option} onclick={() => void save({ interfaceDensity: option })}>{option}</button>{/each}
+          </div>
+        </section>
+
         <section class="setting-card" aria-labelledby="tabs-heading">
           <div class="card-heading"><h2 id="tabs-heading">Tabs</h2><p>Choose a classic rounded strip or a modern full-height straight-edge strip.</p></div>
           <div class="segmented" aria-label="Tab style">
@@ -291,6 +301,7 @@
   .segmented { display:flex; padding:3px; border:1px solid var(--line); border-radius:7px; background:var(--soft); }.segmented button { flex:1; padding:7px 8px; border:0; border-radius:4px; color:var(--muted); background:transparent; font:calc(11.5px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-transform:capitalize; cursor:pointer; }.segmented button.chosen { color:var(--ink); background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.08); }
   .swatches { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }.swatches > button { width:26px; height:26px; padding:0; border:2px solid transparent; border-radius:50%; background:var(--swatch); cursor:pointer; }.swatches > button.chosen { border-color:var(--ink); outline:2px solid var(--paper); outline-offset:-4px; }.colour-picker { display:flex; align-items:center; gap:7px; margin-left:3px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.colour-picker input { width:28px; height:25px; padding:1px; border:1px solid var(--line); border-radius:5px; background:var(--paper); cursor:pointer; }.colour-picker span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
   .range { width:100%; padding:0; accent-color:var(--accent); cursor:pointer; }.range:disabled { cursor:not-allowed; }.range-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font:calc(10px * var(--interface-font-ratio, 1)) var(--mono, monospace); }.range-footer button { padding:0; border:0; color:var(--accent-ink, var(--accent)); background:none; font:calc(11px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); cursor:pointer; }
+  .density-range { margin-top:2px; }.density-labels { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }.density-labels button { padding:0; color:var(--muted); text-transform:capitalize; font-size:calc(10.5px * var(--interface-font-ratio, 1)); }.density-labels button:first-child { text-align:left; }.density-labels button:last-child { text-align:right; }.density-labels button.chosen { color:var(--accent-ink); font-weight:600; }
   .remote-control-host { min-width:0; }
   .profile-name { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.profile-name input { width:100%; max-width:420px; padding:8px 9px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--paper); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); }.profile-name input:focus { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }
   .switch-row { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:5px 0; }.switch-row span { display:grid; gap:3px; }.switch-row strong,.range-setting { font-size:calc(12px * var(--interface-font-ratio, 1)); }.switch-row small { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); line-height:1.45; }.switch-row input { appearance:none; -webkit-appearance:none; position:relative; flex:none; width:32px; height:18px; margin:0; border:1px solid var(--line); border-radius:999px; background:var(--soft); cursor:pointer; transition:.15s ease; }.switch-row input::after { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--muted); content:""; transition:.15s ease; }.switch-row input:checked { border-color:var(--accent); background:var(--accent); }.switch-row input:checked::after { left:16px; background:var(--on-accent, #fff); }.switch-row input:focus-visible,.settings-nav button:focus-visible,.segmented button:focus-visible,.swatches button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }

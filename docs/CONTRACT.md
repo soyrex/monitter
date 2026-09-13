@@ -106,6 +106,10 @@ Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family
 Settings include `accent`, `theme`, `interfaceScale` (integer percent, 80–200, default 125),
 `showToolActivity` and `showReasoningSummaries` (default true), `sendWithEnter` (default false),
 and `sidebarView` (`standard`, `activity`, or `projects`; default `standard`).
+`interfaceDensity` is `tight`, `normal`, or `spacious`, defaulting to `normal`. It changes
+workspace chrome rather than conversation typography: tab bars, compact tab selectors, pane headers,
+sidebar rows and their associated controls share density variables. Normal is lower than the former
+fixed tab bar; mobile touch targets retain their accessible minimum sizes in every density.
 `tabStyle` is `classic` or `modern`, defaulting to `classic`; missing values from existing saved
 workspaces resolve to `classic`. It is a shared desktop/LAN appearance preference.
 Modern tabs use straight edges and fill a bar four pixels shorter than Classic's base bar height,

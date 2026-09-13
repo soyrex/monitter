@@ -4140,6 +4140,12 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     if !matches!(settings.tab_style.as_str(), "classic" | "modern") {
         return Err("Tab style must be classic or modern.".into());
     }
+    if !matches!(
+        settings.interface_density.as_str(),
+        "tight" | "normal" | "spacious"
+    ) {
+        return Err("Interface density must be tight, normal, or spacious.".into());
+    }
     Ok(())
 }
 
@@ -5443,6 +5449,20 @@ name@rafa.test",
         assert_eq!(
             validate_settings(&settings),
             Err("Tab style must be classic or modern.".into())
+        );
+    }
+
+    #[test]
+    fn settings_validation_limits_interface_density() {
+        let mut settings = default_snapshot().settings;
+        for density in ["tight", "normal", "spacious"] {
+            settings.interface_density = density.into();
+            assert!(validate_settings(&settings).is_ok());
+        }
+        settings.interface_density = "roomy".into();
+        assert_eq!(
+            validate_settings(&settings),
+            Err("Interface density must be tight, normal, or spacious.".into())
         );
     }
 

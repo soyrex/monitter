@@ -88,6 +88,7 @@ export interface Settings {
   shortcutMode?: 'standard' | 'vim';
   showTabCloseButtons?: boolean;
   tabStyle?: 'classic' | 'modern';
+  interfaceDensity?: 'tight' | 'normal' | 'spacious';
   tintUserMessages?: boolean;
   compressToolCalls?: boolean;
   terminalFontSize?: number; chatFontSize?: number; interfaceFontSize?: number;
