@@ -965,6 +965,17 @@
     } finally { workspaceTransition = false; persistWorkspace(); }
     return activeWorkspaceKey === next;
   }
+  async function openGlobalOverview() {
+    // `all` is deliberately its own persisted workspace. Returning to it must
+    // not reuse or overwrite the current agent/project pane tree.
+    mobileMain = true;
+    railAgentId = null;
+    const switched = await switchWorkspace('all');
+    if (!switched || activeWorkspaceKey !== 'all') return;
+    if (expandedPaneId) setPaneExpansion(null);
+    activePaneId = 'main';
+    openOverview();
+  }
   function routeTaskWorkspace(task: Task) {
     if (embedded) { workspaceNavigation.task(task); return; }
     const target = workspaceForTask(task, activeWorkspaceKey);
@@ -3444,7 +3455,7 @@
   {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
-      {#if sidebarCompressed}<img use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo" src="/monitter-mark.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo" data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong>{/if}
+      {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
         {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
       </div>{/if}
@@ -4099,12 +4110,15 @@
     opacity: 1;
     letter-spacing: -0.02em;
   }
+  .brand-logo-button { appearance:none; margin:0; padding:0; border:0; color:inherit; background:transparent; cursor:pointer; }
+  .brand-logo-button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:5px; }
   .brand { height: var(--pane-tabbar-height,52px); box-sizing: border-box; }
   .brand-full { display:inline-block; width:110px; height:34px; vertical-align:middle; }
   .brand-full img { display:block; width:100%; height:100%; object-fit:contain; }
   .brand-short { display:none; width:25px; height:28px; overflow:hidden; position:relative; vertical-align:middle; }
   .brand-short img { display:block; width:100%; height:100%; object-fit:contain; }
-  .brand-app-icon { width:32px; height:32px; object-fit:contain; flex:none; }
+  .brand-app-icon { width:32px; height:32px; flex:none; }
+  .brand-app-icon img { display:block; width:100%; height:100%; object-fit:contain; }
   .brand:global([data-compact-wordmark="true"]) .brand-full { position:absolute; visibility:hidden; pointer-events:none; }
   .brand:global([data-compact-wordmark="true"]) .brand-short { display:inline-block; }
   .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: 0; padding-bottom: 0; gap: 4px; }
@@ -4119,9 +4133,6 @@
     flex-shrink: 0;
     user-select: none;
     -webkit-user-select: none;
-  }
-  .native-mac .brand strong {
-    pointer-events: none;
   }
   .icon {
     display: grid;
