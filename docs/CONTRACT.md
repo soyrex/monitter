@@ -252,6 +252,27 @@ Hermes' configured provider. Never silently substitute a harness.
 Provider stderr is diagnostic-only: routine trace, debug, info and warning output is discarded.
 At most one concise actionable provider error may appear in a chat's activity, while process/event
 failures remain visible through their normal task status.
+
+An owned ACP stdio transport that closes after a native session has been saved is repaired once,
+without client intervention: Monitter replaces the dead process, repeats the bounded initialize and
+`session/load` or `session/resume` handshake advertised by that ACP agent, and leaves the replacement
+resident for the next desktop, web or Android send. A successful idle repair is silent. If a prompt
+was outstanding when the pipe closed, its delivery is ambiguous even when the provider's saved log
+does not contain it. Monitter marks that turn interrupted, expires its approvals, preserves its user
+message and partial output, reports the ambiguity once, and reloads the session without replaying the
+prompt. Enqueuing a frame to Monitter's stdin writer is not proof that the agent received it, so this
+path never guesses based on a transcript or blindly retries an accepted turn.
+
+Each transport-loss episode permits one replacement only. A replacement does not earn another
+reconnect attempt until it has completed a subsequent real prompt; this prevents a crashing agent
+from forming an idle reload loop. Failure of the replacement initialize or session recovery is
+terminal rather than recursive. Cancellation, shutdown, an invalid launcher or
+configuration, permanent provider/authentication rejection, and an ACP agent that does not advertise
+recovery also fail or interrupt normally and are not silently retried. Recovery retains the exact
+task, launcher, host, working folder, native session and single-writer claim; an old process finishing
+cannot evict its replacement. Recovery diagnostics are bounded and exclude command arguments,
+environment values, credentials and raw provider frames.
+
 Host.claudePath defaults to an empty string for older stored host snapshots. Task.archived defaults
 false; archiving preserves messages/events/native IDs and hides the chat from ordinary navigation.
 Cmd-K explicitly restores archived chats. Channel sends start a new task instead of reusing an

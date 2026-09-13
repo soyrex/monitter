@@ -1,7 +1,8 @@
 //! Minimal resident ACP v1 stdio transport.
 //!
 //! This module intentionally owns one child per Monitter task.  It never uses
-//! a shell, never retries an uncertain prompt, and treats an EOF as terminal.
+//! a shell, never retries an uncertain prompt, and performs one bounded,
+//! prompt-free session reload after an unexpected transport EOF.
 //! Protocol details are deliberately conservative: unsupported server requests
 //! receive a JSON-RPC error instead of being mistaken for an approval.
 
@@ -58,7 +59,14 @@ pub(crate) fn start(
     prompt: String,
     control: Arc<RunControl>,
 ) {
-    thread::spawn(move || run(service, task_id, prompt, control));
+    thread::spawn(move || run(service, task_id, Some(prompt), control));
+}
+
+/// Reconnect an owned ACP task after its stdio transport ended.  This starts
+/// only the initialize + load/resume handshake: a user prompt is never copied
+/// into this path because an accepted frame might already have reached ACP.
+pub(crate) fn recover(service: Arc<Service>, task_id: String, control: Arc<RunControl>) {
+    thread::spawn(move || run(service, task_id, None, control));
 }
 
 pub(crate) fn send_turn(
@@ -76,7 +84,84 @@ fn fail(
     detail: impl Into<String>,
 ) {
     control.clear_acp_turn_reservation();
-    let _ = service.complete_app_server_turn(task_id, control, None, "error", Some(detail.into()));
+    let detail = detail.into();
+    if !service.complete_app_server_turn(task_id, control, None, "error", Some(detail.clone())) {
+        // Recovery starts from a completed/interrupted durable turn, so its
+        // handshake failure cannot use the ordinary running-turn transition.
+        // Preserve an actionable, redacted activity entry instead of silently
+        // dropping the replacement owner.
+        service.record(
+            task_id,
+            "error",
+            "ACP connection could not be restored",
+            detail,
+        );
+    }
+}
+
+/// A pipe closure is not evidence that a queued prompt was not received.  A
+/// single replacement transport is therefore started without any prompt.  A
+/// recovery start which itself fails goes through `fail` and is not retried:
+/// this bounds one recovery episode and avoids an invisible restart loop.
+fn recover_transport(
+    service: &Arc<Service>,
+    task_id: &str,
+    control: &Arc<RunControl>,
+    detail: impl Into<String>,
+) {
+    let mut detail = detail.into();
+    if let Some(exit) = control.acp_exit_diagnostic() {
+        detail = format!("{detail} {exit}");
+    }
+    let active = control.has_app_server_turn_request();
+    if active {
+        // A prompt request may have been written before transport loss. Keep
+        // the durable user message, interrupt partial output and approvals,
+        // and make the uncertainty explicit; never replay its text.
+        let _ = service.complete_app_server_turn(
+            task_id,
+            control,
+            None,
+            "interrupted",
+            Some(format!(
+                "{detail} Monitter is reconnecting the ACP session but did not replay this turn."
+            )),
+        );
+    }
+    control.clear_acp_turn_reservation();
+    control.retire_acp_transport();
+    match service.replace_acp_transport(task_id, control) {
+        Ok(replacement) => {
+            // Stop the old child after the registry CAS. Its owned Drop only
+            // releases a matching Arc, so it cannot evict this replacement.
+            control.cancel();
+            recover(service.clone(), task_id.into(), replacement);
+        }
+        Err(error) => {
+            // Idle recovery is quiet when it succeeds. Only an unavailable
+            // saved-session recovery needs an actionable activity entry.
+            let terminalized = if !active {
+                service.complete_app_server_turn(
+                    task_id,
+                    control,
+                    None,
+                    "error",
+                    Some(error.clone()),
+                )
+            } else {
+                false
+            };
+            if active || (!terminalized && !control.is_cancelled()) {
+                service.record(
+                    task_id,
+                    "error",
+                    "ACP connection could not be restored",
+                    error,
+                );
+            }
+            control.cancel();
+        }
+    }
 }
 
 fn send(control: &RunControl, value: Value) -> Result<(), String> {
@@ -231,7 +316,16 @@ fn flush_reasoning(
     )
 }
 
-fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunControl>) {
+fn run(
+    service: Arc<Service>,
+    task_id: String,
+    initial_prompt: Option<String>,
+    control: Arc<RunControl>,
+) {
+    // A replacement may not itself start another replacement until it has
+    // completed a subsequent real prompt. This prevents rapid EOF reload
+    // loops while allowing an established chat to recover again later.
+    let mut recovery_budget_exhausted = initial_prompt.is_none();
     let _owned = OwnedRun {
         service: service.clone(),
         task_id: task_id.clone(),
@@ -253,7 +347,11 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         );
         return;
     };
-    let grant = match service.collaboration_grant(&task_id) {
+    let grant = match if initial_prompt.is_some() {
+        service.collaboration_grant(&task_id)
+    } else {
+        service.existing_collaboration_grant(&task_id)
+    } {
         Ok(grant) => grant,
         Err(error) => {
             fail(&service, &task_id, &control, error);
@@ -488,16 +586,19 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         let value = match frames_rx.recv_timeout(wait) {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
-                fail(&service, &task_id, &control, error);
+                if !recovery_budget_exhausted {
+                    recover_transport(&service, &task_id, &control, error);
+                } else {
+                    fail(&service, &task_id, &control, error);
+                }
                 return;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                fail(
-                    &service,
-                    &task_id,
-                    &control,
-                    "ACP output closed; Monitter did not replay this turn.",
-                );
+                if !recovery_budget_exhausted {
+                    recover_transport(&service, &task_id, &control, "ACP output closed.");
+                } else {
+                    fail(&service, &task_id, &control, "ACP recovery output closed.");
+                }
                 return;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -680,31 +781,38 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     );
                     return;
                 };
-                control.set_app_server_thread(session.clone());
                 let session_result = value.get("result").cloned().unwrap_or(Value::Null);
                 control.set_acp_session_result(session_result.clone());
-                if let Err(error) = service.app_server_event(
-                    &task_id,
-                    &control,
-                    None,
-                    Parsed {
-                        native_session_id: Some(session.clone()),
-                        assistant: None,
-                        event: None,
-                        failed: false,
-                    },
-                ) {
-                    fail(&service, &task_id, &control, error);
-                    return;
+                // Publish readiness only once both the session identity and
+                // its model/configuration advertisement are available to a
+                // concurrently accepted explicit send.
+                control.set_app_server_thread(session.clone());
+                if initial_prompt.is_some() {
+                    if let Err(error) = service.app_server_event(
+                        &task_id,
+                        &control,
+                        None,
+                        Parsed {
+                            native_session_id: Some(session.clone()),
+                            assistant: None,
+                            event: None,
+                            failed: false,
+                        },
+                    ) {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
                 }
-                if task.model_settings.as_ref().is_some_and(|settings| {
-                    settings.fast_mode.is_some() || settings.reasoning_effort.is_some()
-                }) {
+                if initial_prompt.is_some()
+                    && task.model_settings.as_ref().is_some_and(|settings| {
+                        settings.fast_mode.is_some() || settings.reasoning_effort.is_some()
+                    })
+                {
                     fail(&service, &task_id, &control, "ACP has not advertised support for saved fast mode or reasoning effort settings.");
                     return;
                 }
-                if let Some((method, params)) =
-                    match crate::acp_session_config::configured_model_request(
+                if initial_prompt.is_some() {
+                    let configured = match crate::acp_session_config::configured_model_request(
                         &session_result,
                         &session,
                         &task.model,
@@ -714,19 +822,29 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                             fail(&service, &task_id, &control, error);
                             return;
                         }
+                    };
+                    if let Some((method, params)) = configured {
+                        if let Err(error) = send(
+                            &control,
+                            acp_protocol::request(json!(MODEL_CONFIG_ID), method, params),
+                        ) {
+                            fail(&service, &task_id, &control, error);
+                            return;
+                        }
+                        phase = "session/model";
+                        phase_deadline = Instant::now() + SESSION_TIMEOUT;
+                        continue;
                     }
-                {
-                    if let Err(error) = send(
-                        &control,
-                        acp_protocol::request(json!(MODEL_CONFIG_ID), method, params),
-                    ) {
-                        fail(&service, &task_id, &control, error);
-                        return;
-                    }
-                    phase = "session/model";
-                    phase_deadline = Instant::now() + SESSION_TIMEOUT;
-                    continue;
                 }
+                let Some(prompt) = initial_prompt.as_deref() else {
+                    // Recovery loaded the exact saved session and has no
+                    // prompt to replay.  Leave the durable interrupted or
+                    // completed turn untouched; the next user send uses this
+                    // new resident transport.
+                    phase = "idle";
+                    phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+                    continue;
+                };
                 turn = format!("acp:{FIRST_PROMPT_ID}");
                 control.set_app_server_turn(turn.clone());
                 if let Err(error) = control.mark_app_server_turn_request(FIRST_PROMPT_ID) {
@@ -766,6 +884,11 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                         return;
                     }
                 }
+                let Some(prompt) = initial_prompt.as_deref() else {
+                    phase = "idle";
+                    phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+                    continue;
+                };
                 turn = format!("acp:{FIRST_PROMPT_ID}");
                 control.set_app_server_turn(turn.clone());
                 // The model request only precedes prompt setup; session id is still held by control.
@@ -852,6 +975,9 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     error,
                 );
                 control.clear_acp_turn_reservation();
+                if status == "completed" {
+                    recovery_budget_exhausted = false;
+                }
                 messages.clear();
                 dirty_messages.clear();
                 phase = "idle";

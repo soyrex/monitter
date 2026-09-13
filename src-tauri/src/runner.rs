@@ -1672,12 +1672,28 @@ impl RunControl {
     }
 
     fn send_acp_turn_reserved(&self, prompt: &str, task: &Task) -> Result<(), String> {
-        let session_id = self
-            .app_server_thread
-            .lock()
-            .map_err(|_| "ACP session state lock failed.".to_string())?
-            .clone()
-            .ok_or("ACP session is not initialized.")?;
+        // Recovery owns the same resident slot while it reloads the saved
+        // session. A newly accepted explicit user send waits through the
+        // bounded handshake rather than falling through to a competing run or
+        // writing to the retired stdin queue.
+        let mut session_id = None;
+        // ACP initializes and loads with separate bounded 20-second phases;
+        // allow that full recovery window on this background sender.
+        for _ in 0..2600 {
+            session_id = self
+                .app_server_thread
+                .lock()
+                .map_err(|_| "ACP session state lock failed.".to_string())?
+                .clone();
+            if self.is_cancelled() || session_id.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        if self.is_cancelled() {
+            return Err("ACP session recovery was cancelled before it became ready.".into());
+        }
+        let session_id = session_id.ok_or("ACP session recovery did not become ready in time.")?;
         if task
             .model_settings
             .as_ref()
@@ -1910,6 +1926,30 @@ impl RunControl {
 
     pub(crate) fn mark_resident(&self) {
         self.resident.store(true, Ordering::SeqCst);
+    }
+
+    /// An ACP reader observed that its stdout has closed.  Do not leave this
+    /// control selectable for another prompt while the replacement handshake
+    /// is running; a queued stdin writer is not proof that the agent received
+    /// a prompt.
+    pub(crate) fn retire_acp_transport(&self) {
+        self.resident.store(false, Ordering::SeqCst);
+        if let Ok(mut sender) = self.acp_control.lock() {
+            *sender = None;
+        }
+    }
+
+    /// Best-effort, deliberately small diagnostic for a closed ACP pipe.  Do
+    /// not expose argv, environment, or provider JSON in the activity log.
+    pub(crate) fn acp_exit_diagnostic(&self) -> Option<String> {
+        let mut child = self.child.lock().ok()?;
+        let status = child.as_mut()?.try_wait().ok().flatten()?;
+        let code = status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".into());
+        *child = None;
+        Some(format!("ACP process exited ({code})."))
     }
 
     pub(crate) fn is_resident(&self) -> bool {

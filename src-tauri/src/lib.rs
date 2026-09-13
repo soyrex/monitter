@@ -7,6 +7,8 @@ mod acp_protocol;
 mod acp_runtime;
 #[cfg(test)]
 mod acp_runtime_tests;
+#[cfg(test)]
+mod acp_recovery_tests;
 mod acp_session_config;
 #[cfg(test)]
 mod acp_stream_tests;

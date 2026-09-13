@@ -5,9 +5,77 @@ use crate::{
     *,
 };
 use serde_json::Value;
-use std::sync::{Arc, Weak};
+use std::{
+    sync::{atomic::Ordering, Arc, Weak},
+};
 
 impl Service {
+    /// Replace a dead ACP stdio owner without releasing this task's saved
+    /// native-session claim.  The old reader may still be unwinding, so this
+    /// is deliberately compare-and-swap by `Arc` identity: its Drop handler
+    /// must never remove the replacement from the registry.
+    pub(crate) fn replace_acp_transport(
+        &self,
+        task_id: &str,
+        old: &Arc<RunControl>,
+    ) -> Result<Arc<RunControl>, String> {
+        if self.stopping.load(Ordering::Acquire) || old.is_cancelled() {
+            return Err("ACP transport recovery was stopped.".into());
+        }
+        // Match cancellation's data -> runs ordering so it cannot cancel the
+        // old owner between validation and the replacement CAS.
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let task = data
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .cloned()
+            .ok_or("Task was not found.")?;
+        let host = data
+            .task_hosts
+            .get(task_id)
+            .cloned()
+            .ok_or("Task host was not found.")?;
+        if task.provider != "acp" || task.archived {
+            return Err("ACP transport recovery is no longer available for this chat.".into());
+        }
+        if task.native_session_id.is_none() {
+            return Err("ACP transport closed before a saved session was established; send a new message to start a fresh chat.".into());
+        }
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+        if self.stopping.load(Ordering::Acquire) || old.is_cancelled() {
+            return Err("ACP transport recovery was stopped.".into());
+        }
+        if !runs
+            .tasks
+            .get(task_id)
+            .is_some_and(|current| Arc::ptr_eq(current, old))
+        {
+            return Err("ACP transport was already replaced or stopped.".into());
+        }
+        let replacement = RunControl::new(host.kind == "ssh");
+        // Publish a recoverable resident owner atomically with the registry
+        // replacement. A fresh send then waits for its bounded session-load
+        // handshake instead of attempting a competing reserve_run.
+        replacement.mark_acp_transport();
+        replacement.mark_resident();
+        runs.tasks.insert(task_id.into(), replacement.clone());
+        // Keep the exact task-owned native session reservation.  A recovery
+        // never changes session identity or opens a replacement session.
+        if let Some(native) = task.native_session_id.as_deref() {
+            runs.native_sessions
+                .insert(native_session_key(&task, &host, native), task_id.into());
+        }
+        Ok(replacement)
+    }
+
     fn app_server_mutate<R>(
         &self,
         task_id: &str,
