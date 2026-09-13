@@ -9,6 +9,8 @@ export const CONTROLLER_MAX_REQUEST_BYTES = 64 * 1024;
 export const CONTROLLER_MAX_RESPONSE_BYTES = 1024 * 1024;
 export const CONTROLLER_MAX_TEXT_LENGTH = 32 * 1024;
 export const CONTROLLER_MAX_SUBJECT_LENGTH = 256;
+/** A durable desktop acknowledgement, deliberately smaller than a Snapshot. */
+export interface ControllerSendReceipt { readonly accepted: true; }
 
 export type ControllerAction =
   | 'getSnapshot'
@@ -33,7 +35,7 @@ export type ControllerRequest =
   | ListTerminalsRequest
   | ReadTerminalRequest;
 
-export type ControllerResult = Snapshot | TerminalSession[] | TerminalRead;
+export type ControllerResult = Snapshot | ControllerSendReceipt | TerminalSession[] | TerminalRead;
 
 export type ControllerErrorCode =
   | 'unauthenticated'
@@ -41,6 +43,7 @@ export type ControllerErrorCode =
   | 'unsupported_action'
   | 'id_conflict'
   | 'dedup_saturated'
+  | 'busy'
   | 'bridge_error'
   | 'response_too_large';
 
@@ -65,7 +68,11 @@ export interface AuthenticatedControllerContext {
 
 export interface ControllerClient {
   getSnapshot(): Promise<Snapshot>;
-  sendMessage(taskId: string, text: string): Promise<Snapshot>;
+  /**
+   * New desktop bridges may return a durable acceptance receipt. Callers that
+   * did not negotiate receipt support must receive a Snapshot instead.
+   */
+  sendMessage(taskId: string, text: string): Promise<Snapshot | ControllerSendReceipt>;
   cancelTask(taskId: string): Promise<Snapshot>;
   resumeTask(taskId: string): Promise<Snapshot>;
   listTerminals(): Promise<TerminalSession[]>;

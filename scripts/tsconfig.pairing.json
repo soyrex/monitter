@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "include": [
+    "../src/lib/components/RemoteControl.svelte",
+    "../src/lib/components/SettingsPane.svelte",
+    "../src/lib/controller/**/*.ts",
+    "../src/lib/workspace-panels.ts"
+  ],
+  "exclude": ["../node_modules"]
+}

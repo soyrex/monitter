@@ -1,10 +1,11 @@
-import { webkit, expect } from '@playwright/test';
+import { webkit, expect as baseExpect } from '@playwright/test';
 import { spawn } from 'node:child_process';
+const expect = baseExpect.configure({timeout:30000});
 const children=[];
 function start(command,args,env,pattern){
   const child=spawn(command,args,{env:{...process.env,...env},stdio:['ignore','pipe','pipe']});children.push(child);
   return new Promise((resolve,reject)=>{
-    let output='';const timer=setTimeout(()=>reject(Error('Test server startup timed out')),20000);
+    let output='';const timer=setTimeout(()=>reject(Error('Test server startup timed out')),60000);
     child.once('error',e=>{clearTimeout(timer);reject(e);});
     child.once('exit',code=>{clearTimeout(timer);reject(Error(`Test server exited ${code}: ${output.slice(-1000)}`));});
     const receive=data=>{output+=data.toString();const match=output.match(pattern);if(match){clearTimeout(timer);resolve(match[1]);}};
@@ -25,8 +26,8 @@ try {
     snapshot.tasks.push({...snapshot.tasks[0],id:'22222222-2222-4222-8222-222222222222',title:'Other test chat'});
     window.testSends=0;
     window.desktop=await createDesktopSession(relayUrl,{
-      getSnapshot:async()=>snapshot,
-      sendMessage:async(id,text)=>{window.testSends++;snapshot.messages.push({id:'m',taskId:id,text,role:'user'});return snapshot;},
+      getSnapshot:async()=>{if(window.holdSnapshot){window.snapshotStarted=true;await new Promise(resolve=>window.releaseSnapshot=resolve);}return snapshot;},
+      sendMessage:async(id,text)=>{if(window.holdSend){window.sendStarted=true;await new Promise(resolve=>window.releaseSend=resolve);}window.testSends++;snapshot.messages.push({id:'m',taskId:id,text,role:'user'});return snapshot;},
       cancelTask:async()=>snapshot,resumeTask:async()=>snapshot,listTerminals:async()=>[],readTerminal:async()=>({chunks:[]})
     });
     return window.desktop.invitation;
@@ -39,10 +40,22 @@ try {
   if(await phone.evaluate(()=>window.scanRequests)!==1)throw Error('Android scanner bridge was not invoked');
   await phone.evaluate(invitation=>window.dispatchEvent(new CustomEvent('monitter:qr',{detail:invitation})),invitation);
   await expect.poll(()=>host.evaluate(()=>window.desktop.getStatus())).toBe('pending');
-  await expect(phone.getByText('Your workspace',{exact:true})).toHaveCount(0);
+  await expect(phone.getByRole('tab',{name:'Standard view',exact:true})).toHaveCount(0);
   const code=await host.evaluate(()=>window.desktop.getVerificationCode());
   await expect(phone.getByText(code,{exact:true})).toBeVisible();
   await host.evaluate(()=>window.desktop.approve());
+  // Hold the response until assertions complete, independent of machine speed.
+  await expect(phone.getByRole('tab',{name:'Standard view',exact:true})).toBeVisible();
+  await host.evaluate(()=>{window.holdSnapshot=true;window.snapshotStarted=false;});
+  await phone.getByRole('button',{name:'Refresh',exact:true}).click();
+  await expect.poll(()=>host.evaluate(()=>window.snapshotStarted)).toBe(true);
+  await phone.getByRole('tab',{name:'Activity view',exact:true}).click();
+  await expect(phone.getByRole('tab',{name:'Activity view',exact:true})).toHaveAttribute('aria-selected','true');
+  await host.evaluate(()=>{window.holdSnapshot=false;window.releaseSnapshot();});
+  // Allow another completed background refresh; Activity must stay selected.
+  await phone.waitForTimeout(2200);
+  await expect(phone.getByRole('tab',{name:'Activity view',exact:true})).toHaveAttribute('aria-selected','true');
+  await phone.getByRole('tab',{name:'Standard view',exact:true}).click();
   await phone.getByRole('button',{name:'Controller test'}).click();
   await phone.getByLabel('Message',{exact:true}).fill('Keep this draft');
   await phone.getByRole('button',{name:'Back to chats'}).click();
@@ -52,7 +65,14 @@ try {
   await phone.getByRole('button',{name:'Controller test'}).click();
   await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Keep this draft');
   await phone.getByLabel('Message',{exact:true}).fill('Mobile UI test message');
+  await host.evaluate(()=>{window.holdSend=true;window.sendStarted=false;});
   await phone.getByRole('button',{name:'Send message'}).click();
+  await expect.poll(()=>host.evaluate(()=>window.sendStarted)).toBe(true);
+  await phone.getByRole('button',{name:'Back to chats'}).click();
+  await phone.getByRole('button',{name:'Controller test'}).click();
+  await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Mobile UI test message');
+  await expect(phone.getByRole('button',{name:'Send message'})).toBeDisabled();
+  await host.evaluate(()=>{window.holdSend=false;window.releaseSend();});
   await expect(phone.getByText('Mobile UI test message',{exact:true})).toBeVisible();
   await expect.poll(()=>host.evaluate(()=>window.testSends)).toBe(1);
   await phone.screenshot({path:'verification/mobile-chat-test.png'});

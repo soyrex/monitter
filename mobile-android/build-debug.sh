@@ -23,7 +23,11 @@ if [ ! -x "$gradle_home/bin/gradle" ]; then
   unzip -q "$gradle_zip" -d "$script_dir/.toolchain"
 fi
 
-# Vite output is owned by the desktop build. This script only packages its existing output.
+# Build fresh assets in this checkout without the desktop build's LAN publisher.
+# Run from a dedicated worktree when desktop development is active.
+if [ "${1:-}" != "--existing-web" ]; then
+  (cd "$repo_dir" && "$repo_dir/node_modules/.bin/vite" build)
+fi
 if [ ! -f "$repo_dir/build/index.html" ]; then
   echo "Expected existing static bundle at $repo_dir/build/index.html." >&2
   exit 1

@@ -56,6 +56,16 @@ assert.equal(sharingSource.approvalRequests.length, 2);
 assert.equal(sharingSource.tasks[0].cwd, '/private/folder');
 const dispatcher = new ControllerDispatcher(client, { maxMutationReceipts: 3 });
 
+// A current bridge can acknowledge a durable send without returning a large
+// Snapshot. The dispatcher exposes that shape only when the peer negotiated it;
+// legacy mobile clients continue to receive the snapshot-shaped response.
+const receiptClient: ControllerClient = { ...client, sendMessage: async () => ({ accepted: true }) };
+const receiptRequest = request('12121212-1212-4212-8212-121212121212', 'sendMessage', { taskId: task, text: 'receipt' });
+const legacyReceipt = JSON.parse(await new ControllerDispatcher(receiptClient).dispatchJson(receiptRequest, context));
+assert.equal(legacyReceipt.ok, true); assert.ok('tasks' in legacyReceipt.result);
+const negotiatedReceipt = JSON.parse(await new ControllerDispatcher(receiptClient).dispatchJson(receiptRequest, context, { allowSendReceipt: true }));
+assert.deepEqual(negotiatedReceipt.result, { accepted: true });
+
 // This is the loopback transport proof: both directions are JSON strings and
 // the authenticated context remains an in-process transport assertion.
 let raw = await dispatcher.dispatchJson(request('33333333-3333-4333-8333-333333333333', 'getSnapshot', {}), context);

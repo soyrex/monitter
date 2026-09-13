@@ -6,9 +6,18 @@ opt-in through the desktop Remote control panel; nothing connects by default.
 
 ## Current development build
 
+Pairing controls now live directly in **Settings → Remote control**, including the
+QR/device key, number comparison, saved phones and inactivity policy. Closing
+Settings or changing category hides only these controls; the root-owned listener
+stays alive. This does not keep the listener alive after quitting the desktop app.
+The relay must report ready before a new QR/code is offered. A socket/join attempt
+is bounded to 15 seconds and remembered sessions retry with backoff; HTTP pairing
+requests show readable timeout/network failures and never automatically retry a
+one-use creation or claim. Scanning a QR still requires a working relay connection.
+
 - `npm run relay`: starts the opaque development relay on 127.0.0.1:8789.
 - Open Remote control in desktop Monitter, create a QR invitation, scan it on mobile, or enter the nine-digit one-use device key, then compare
-  the six-digit verification numbers and approve on desktop. V2 invitations contain only a room and ephemeral desktop public key. Pairing is memory-only and disconnect requires a new invitation.
+  the six-digit verification numbers and approve on desktop. V2 invitations contain a room and desktop public key. Version 0.4.0 and its matching desktop build remember approved phones across app closure and reconnect automatically.
 - `npm run build:ios:web`: packages the mobile web assets into the iOS project.
   Native sources and build instructions are in `mobile-ios/README.md`.
 - `npm run test:controller` and `npm run test:remote`: protocol and real local
@@ -16,8 +25,7 @@ opt-in through the desktop Remote control panel; nothing connects by default.
   clearly test-only desktop bridge.
 - Desktop and mobile have independent navigation; mobile lists existing direct
   chats, reads conversation output, sends messages, and stops running work.
-- No persistent device credentials, automatic reconnect, push,
-  file upload, terminal interaction UI, or mobile harness approvals are shipped.
+- Push, file upload, terminal input, and mobile harness approvals are not shipped.
   Loopback relay URLs work in a simulator on this Mac; a physical phone requires
   a reachable WSS relay. Native WKWebView loads bundled assets via a loopback-only
   server; that local asset server exposes no desktop controller methods.
@@ -128,6 +136,15 @@ Mobile snapshots retain conversations but limit diagnostic events to the most
 recent 100, with 4,000 characters of detail each. Desktop history is unchanged.
 Larger conversation histories still need pagination before broader release.
 
+The encrypted transport opens and seals frames in sequence, but executes up to
+32 authenticated RPCs concurrently. A delayed snapshot therefore cannot block a
+later send, Stop, or `peer_left` close frame. Mobile clients that offer the
+`send-receipt-v1` pairing capability receive a durable `{ accepted: true }` send
+receipt from a current desktop host; they refresh the snapshot independently.
+Older mobile builds receive the legacy Snapshot response, and a new mobile paired
+with an older desktop does the same. No send is automatically retried during this
+compatibility negotiation.
+
 ## Android pairing update
 
 Android 0.2.0 adds the native Google Code Scanner through a main-frame,
@@ -136,9 +153,41 @@ leave the nine-digit fallback available. The fallback is registered for five
 minutes, claimed once, and revoked on desktop cancellation or pairing.
 
 The relay stores only a v2 public invitation. Both endpoints derive transport
-keys using ephemeral P-256 ECDH and display a six-digit verification number;
+keys using P-256 ECDH with fresh connection nonces and display a six-digit verification number;
 the user must compare both displays before approving. Legacy v1 QR invitations
 remain readable for migration, but cannot be registered as numeric device keys.
 
 `npm run test:android-bundle` extracts the APK itself and checks its packaged
 mobile route in Chromium. Native scanner/device testing is a separate check.
+
+## Remembered phones (Android 0.4.0 and matching desktop)
+
+Remote control persists its host identity and owner-approved controller public
+keys in IndexedDB. The phone persists its non-extractable private CryptoKey only
+after a compatible desktop approves it. The relay never receives private keys.
+New encrypted transports use fresh nonces on every reconnect; an encrypted
+pair-request proves possession before a remembered controller is approved.
+Visitor/operator sharing never inherits remembered owner access.
+
+The panel defaults to indefinite access until revoked. A positive inactivity
+limit (1–36,500 whole days) expires from the last authenticated access, renewing
+the full window on subsequent access. For example, using a phone tomorrow moves
+a 14-day deadline forward one day. Expired phones require manual approval again.
+Saved phones show last access, expiry, and connection state with individual and
+complete revocation controls. Stopping the listener retains the saved policy;
+reopening the desktop restores an enabled listener. Explicit phone Disconnect
+forgets its saved desktop; closing/backgrounding the app does not.
+
+Mobile foreground, Android resume, and network restoration reconnect through a
+fresh encrypted session without replaying outstanding mutations. Older desktop
+builds remain usable but display an upgrade notice because they cannot retain
+approval. Both the updated APK and matching desktop frontend are required.
+
+Validation: `node scripts/pairing-storage-test.mjs` exercises Chromium and WebKit
+cold browser restarts and non-extractable key persistence;
+`node scripts/resumable-transport-run.mjs` exercises live relay reconnection,
+revocation, and no mutation replay. After building,
+`node scripts/persistent-pairing-ui-test.mjs` serves the production bundle on an
+isolated local port and checks the policy editor, persisted phone list, reload
+reconnection and revocation. Native Pixel lock/unlock and force-stop
+validation still requires the installed app on a physical device.

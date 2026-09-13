@@ -684,11 +684,19 @@ uploads use browser file bytes. Work executes on the host Mac or its configured 
 `docs/MOBILE-CONTROLLER.md` describes the paired mobile clients and relay.
 Remote control is opt-in. The versioned controller allowlist dispatches only
 approved encrypted sessions through the existing desktop bridge. Desktop and
-mobile navigation stay independent. Pairing uses ephemeral keys, QR invitations
-or one-use nine-digit rendezvous codes, and explicit desktop approval after
-comparing verification numbers. Session closure blocks further requests;
-already accepted desktop work continues. Mutation receipts are session-local,
-so disconnects require new pairing and uncertain sends are never auto-retried.
+mobile navigation stay independent. Initial pairing uses QR invitations or one-use
+nine-digit rendezvous codes and explicit desktop approval after comparing
+verification numbers. Owner-approved phones and desktop identities persist as
+non-extractable P-256 CryptoKeys in IndexedDB. Each reconnection derives fresh
+transport keys and proves the remembered phone identity before approval.
+Remote control lists saved phones and permits individual or complete revocation.
+Its inactivity policy defaults to indefinite; optional whole days slide forward
+on authenticated access. Expired/revoked identities cannot renew themselves or
+dispatch requests. Closing a session blocks further requests; already accepted
+work continues. Phone foreground/resume and interrupted connections reconnect
+automatically. Explicit Disconnect forgets the phone's saved pairing. Mutation
+receipts remain session-local, so uncertain sends are never automatically retried.
+Older desktops remain compatible but cannot remember approval until upgraded.
 
 ## Shared operators
 

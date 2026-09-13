@@ -2908,7 +2908,7 @@
         use hosts, agents, and tasks.
       </div>{/if}
     {#if settingsOpen && snapshot}<div class="settings-surface" class:settings-hidden={pane!=='settings'}>
-      <SettingsPane settings={snapshot.settings} bind:category={settingsCategory} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
+      <SettingsPane settings={snapshot.settings} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
     </div>{/if}
     {#if !snapshot}<div class="loading">
         <LoaderCircle size={22} /><span>Loading your workspace…</span
