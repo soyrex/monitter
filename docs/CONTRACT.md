@@ -123,6 +123,13 @@ Dark mode uses the selected intensity; light mode uses half. System theme follow
 the same rule. Missing/unavailable storage uses the default and failed storage
 writes do not prevent live preview. No backend rebuild is required for this control.
 
+Decorative interface motion is client-local in `monitter.appearance.motion.v1`:
+`system` (default), `subtle`, or `off`. The operating-system reduced-motion
+preference is a hard limit in both System and Subtle modes. Off or OS reduction
+disables spatial transitions and cancels active decorative animations without
+changing navigation, focus, backend operations or progress semantics. Motion
+changes never persist through backend Settings; clients can differ independently.
+
 Base sizes `interfaceFontSize`, `chatFontSize`, and `terminalFontSize` are integer pixels (8–32), defaulting to 14, 13, and 14 respectively. Interface typography retains its relative hierarchy; native interface zoom scales all three exactly once.
 
 Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions.

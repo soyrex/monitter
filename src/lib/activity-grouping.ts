@@ -22,6 +22,19 @@ export function isBlankReasoning(event: RunEvent): boolean {
   return event.kind === 'reasoning' && !reasoningSummary(event.detail);
 }
 
+/**
+ * Codex app-server lifecycle echoes for conversation items are not tool work.
+ * Their completed counterparts are persisted as ordinary bubbles by the adapter;
+ * only a structured native item type is safe to hide here.
+ */
+export function isNativeMessageTransportArtifact(event: RunEvent): boolean {
+  if (event.kind !== 'tool') return false;
+  try {
+    const type = JSON.parse(event.detail)?.type;
+    return typeof type === 'string' && ['usermessage', 'agentmessage'].includes(type.toLowerCase());
+  } catch { return false; }
+}
+
 export type ConversationActivityItem =
   | { type: 'message'; value: Message }
   | { type: 'activity'; value: RunEvent }
@@ -117,7 +130,7 @@ export function groupConversationActivity(
 ): ConversationActivityItem[] {
   const ordered = [
     ...messages.map(value => ({ type: 'message' as const, value, at: value.createdAt })),
-    ...events.map(value => ({ type: 'activity' as const, value, at: value.createdAt })),
+    ...events.filter(event => !isNativeMessageTransportArtifact(event)).map(value => ({ type: 'activity' as const, value, at: value.createdAt })),
     // Resolution is the user-visible event; do not move it back to request creation.
     ...approvals.filter(value => value.status !== 'pending').map(value => ({ type: 'approval' as const, value, at: value.resolvedAt ?? value.createdAt })),
   ].sort((left, right) => left.at - right.at);

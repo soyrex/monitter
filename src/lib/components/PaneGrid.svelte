@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy, tick } from 'svelte';
+  import { animateMotion, motionEnabled } from '$lib/motion';
   import { paneIds, type PaneLayout, type PaneSplit, type PaneTabTransfer } from '$lib/panes';
   type Edge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   let { layout, activePaneId, expandedPaneId=null, dimInactivePanes=true, inactivePaneOpacity=.6, focusFollowsMouse=false, pointerDrag=null, onPointerDragEnd, onactivate, onresize, ondropTab, children }: {
@@ -8,7 +10,65 @@
     children: import('svelte').Snippet<[string]>;
   } = $props();
   let over = $state<{id:string;edge:Edge}|null>(null);
+  let pointerResizing = false;
+  let geometryReady = false;
+  let gridRoot: HTMLElement;
+  let geometryGeneration = 0;
+  const geometryAnimations = new Set<Animation>();
   const mime = 'application/x-monitter-tab';
+
+  function layoutSignature(item: PaneLayout): string {
+    return 'axis' in item
+      ? `${item.id}:${item.axis}:${item.ratio}:${layoutSignature(item.first)}:${layoutSignature(item.second)}`
+      : item.id;
+  }
+  function cancelGeometryAnimations() {
+    for (const animation of geometryAnimations) animation.cancel();
+    geometryAnimations.clear();
+  }
+  function addGeometryAnimation(animation: Animation | null) {
+    if (!animation) return;
+    geometryAnimations.add(animation);
+    void animation.finished.then(
+      () => geometryAnimations.delete(animation),
+      () => geometryAnimations.delete(animation),
+    );
+  }
+  onDestroy(cancelGeometryAnimations);
+
+  // FLIP only retained panes after discrete layout operations. Pointer resizing
+  // updates flex geometry directly; animating those intermediate positions makes
+  // terminal refits and splitter feedback feel delayed.
+  $effect.pre(() => {
+    layoutSignature(layout);
+    expandedPaneId;
+    pointerDrag;
+    const generation = ++geometryGeneration;
+    cancelGeometryAnimations();
+    if (!geometryReady) { geometryReady = true; return; }
+    if (pointerResizing || pointerDrag || !motionEnabled() || !gridRoot) return;
+    const before = new Map(Array.from(gridRoot.querySelectorAll<HTMLElement>('.pane-leaf[data-pane-id]')).map(node => [node.dataset.paneId!, node.getBoundingClientRect()]));
+    void tick().then(() => {
+      if (generation !== geometryGeneration || pointerResizing || pointerDrag || !motionEnabled()) return;
+      for (const node of gridRoot?.querySelectorAll<HTMLElement>('.pane-leaf[data-pane-id]') ?? []) {
+        const previous = before.get(node.dataset.paneId!);
+        if (!previous) {
+          // A new pane may contain a just-restored terminal; opacity-only entry
+          // avoids changing its final geometry or delaying attachment/focus.
+          addGeometryAnimation(animateMotion(node, [{ opacity: 0.96 }, { opacity: 1 }], { duration: 180, easing: 'ease-out' }));
+          continue;
+        }
+        const next = node.getBoundingClientRect();
+        const x = previous.left - next.left;
+        const y = previous.top - next.top;
+        if (Math.abs(x) < 1 && Math.abs(y) < 1) continue;
+        addGeometryAnimation(animateMotion(node, [
+          { transform: `translate(${x}px, ${y}px)`, opacity: 0.96 },
+          { transform: 'translate(0, 0)', opacity: 1 },
+        ], { duration: 200, easing: 'ease-out' }));
+      }
+    });
+  });
   function hoverPane(event:PointerEvent,id:string) {
     if(!focusFollowsMouse || activePaneId===id || event.pointerType!=='mouse' || event.buttons || !document.hasFocus())return;
     // Menus and dialogs keep keyboard focus until dismissed. Dragging must not
@@ -94,9 +154,9 @@
     const handle=event.currentTarget as HTMLElement, container=handle.parentElement!;
     const rect=container.getBoundingClientRect(), horizontal=node.axis==='horizontal';
     const size=horizontal?rect.width:rect.height, origin=horizontal?rect.left:rect.top;
-    handle.setPointerCapture(event.pointerId);event.preventDefault();
+    pointerResizing=true;handle.setPointerCapture(event.pointerId);event.preventDefault();
     const move=(next:PointerEvent)=>onresize(node.id,Math.max(.15,Math.min(.85,((horizontal?next.clientX:next.clientY)-origin)/size)));
-    const finish=()=>{handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',finish);handle.removeEventListener('pointercancel',finish);handle.removeEventListener('lostpointercapture',finish);};
+    const finish=()=>{pointerResizing=false;handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',finish);handle.removeEventListener('pointercancel',finish);handle.removeEventListener('lostpointercapture',finish);};
     handle.addEventListener('pointermove',move);handle.addEventListener('pointerup',finish);handle.addEventListener('pointercancel',finish);handle.addEventListener('lostpointercapture',finish);
   }
   function resizeKey(event:KeyboardEvent,node:PaneSplit) {
@@ -105,7 +165,10 @@
   }
 </script>
 <svelte:window ondragend={()=>over=null}/>
-{#snippet branch(item:PaneLayout)}
+{#snippet branch(node:PaneLayout)}
+  <!-- Freeze each branch identity while a split is pruned or promoted. Outgoing
+       children must not read child properties from an already-replaced parent. -->
+  {#each [node] as item (item.id)}
   {#if 'axis' in item}
     <div class="pane-split" data-split-id={item.id} class:column={item.axis==='vertical'}>
       <div class="split-child" class:focus-hidden={!!expandedPaneId && !paneIds(item.first).includes(expandedPaneId)} style={`flex:${expandedPaneId?1:item.ratio} 1 0%`}>{@render branch(item.first)}</div>
@@ -115,24 +178,29 @@
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (contains independently interactive chat controls) -->
-    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:opacity={activePaneId===item.id || !dimInactivePanes ? 1 : Math.max(.1,Math.min(.9,inactivePaneOpacity))} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
+    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
       {@render children(item.id)}
+      <div class="pane-dim-overlay" aria-hidden="true"></div>
       {#if over?.id===item.id}<div class="pane-drop" data-edge={over.edge}><span>{over.edge==='center'?'Move tab here':`Split ${over.edge}`}</span></div>{/if}
     </section>
   {/if}
+  {/each}
 {/snippet}
-{@render branch(layout)}
+<div class="pane-grid-root" bind:this={gridRoot}>{@render branch(layout)}</div>
 <style>
   :global([data-tab-insert="before"]){box-shadow:inset 2px 0 var(--accent)!important}
   :global([data-tab-insert="after"]){box-shadow:inset -2px 0 var(--accent)!important}
   :global([data-tab-dragging="true"]){opacity:.5}
   :global(.tabs .tab){-webkit-user-drag:none;user-select:none;touch-action:none}
 
-  .pane-split,.split-child,.pane-leaf{display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
+  .pane-grid-root,.pane-split,.split-child,.pane-leaf{display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
   .focus-hidden{display:none!important}
-  .pane-split.column{flex-direction:column}.pane-leaf{position:relative;transition:opacity .14s ease,filter .14s ease}.pane-leaf.active{outline:none}.pane-leaf.dimmed{filter:grayscale(1)}
+  .pane-split.column{flex-direction:column}.pane-leaf{position:relative;background:var(--paper)}.pane-leaf.active{outline:none}
+  .pane-dim-overlay{position:absolute;inset:0;z-index:20;pointer-events:none;opacity:var(--pane-dim-visible);background:color-mix(in srgb,#f4f4f4 calc(var(--pane-dim-strength) * 100%),transparent);transition:opacity .14s ease}
+  :global(:root[data-theme="dark"]) .pane-dim-overlay{background:color-mix(in srgb,#000 calc(var(--pane-dim-strength) * 100%),transparent)}
+  @media(prefers-color-scheme:dark){:global(:root[data-theme="system"]) .pane-dim-overlay{background:color-mix(in srgb,#000 calc(var(--pane-dim-strength) * 100%),transparent)}}
   .pane-resizer{position:relative;flex:0 0 1px;cursor:col-resize;background:var(--line);touch-action:none;z-index:2}.pane-resizer::after{content:"";position:absolute;inset:0 -4px}.column>.pane-resizer{cursor:row-resize}.column>.pane-resizer::after{inset:-4px 0}.pane-resizer:hover,.pane-resizer:focus-visible{background:var(--accent);outline:0}
   .pane-drop{position:absolute;inset:6px;z-index:30;display:grid;place-items:center;border:2px solid var(--accent);border-radius:10px;background:color-mix(in srgb,var(--accent) 16%,var(--panel));opacity:.94;pointer-events:none}
   .pane-drop[data-edge=left]{right:50%}.pane-drop[data-edge=right]{left:50%}.pane-drop[data-edge=top]{bottom:50%}.pane-drop[data-edge=bottom]{top:50%}.pane-drop span{padding:8px;border-radius:6px;background:var(--panel);color:var(--ink);font-size:calc(12px * var(--interface-font-ratio, 1))}
-  @media(prefers-reduced-motion:reduce){.pane-leaf{transition:none}}
+  @media(prefers-reduced-motion:reduce){.pane-dim-overlay{transition:none}}
 </style>

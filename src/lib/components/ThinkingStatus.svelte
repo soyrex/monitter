@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { motionView } from '$lib/motion';
   import { untrack, type Snippet } from 'svelte';
   import { Brain } from '@lucide/svelte';
 
@@ -25,7 +26,7 @@
 
 <div class="activity reasoning-pending" aria-label={starting ? 'Getting ready' : label}>
   {#if avatar}{@render avatar()}{:else}<Brain size={14}/>{/if}
-  <span>{starting ? 'Getting ready' : label}</span>
+  <span use:motionView={{key:starting ? 'Getting ready' : label,y:0,duration:100}}>{starting ? 'Getting ready' : label}</span>
 </div>
 
 <style>

@@ -1,10 +1,22 @@
 import assert from 'node:assert/strict';
-import { contextCompactionPhase, groupConversationActivity, isShellActivity, reasoningSummary, showThinkingFallback } from '../src/lib/activity-grouping.ts';
+import { contextCompactionPhase, groupConversationActivity, isNativeMessageTransportArtifact, isShellActivity, reasoningSummary, showThinkingFallback } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
 const approval = (id, createdAt, resolvedAt = null) => ({ id, taskId: 'task', provider: 'codex', runId: `run:${id}`, tool: 'computer', summary: 'Allow computer use', detail: '', risk: 'medium', status: 'approved', createdAt, resolvedAt, decision: 'approve_once' });
 const groups = (messages, events) => groupConversationActivity(messages, events).filter(item => item.type === 'tool-group');
+
+const nativeTransport = (id, createdAt, type) => event(id, createdAt, type, JSON.stringify({ type, id: `native-${id}` }));
+const transportTimeline = groupConversationActivity(
+  [{ ...message('user-bubble', 1), role: 'user' }, message('assistant-bubble', 4)],
+  [nativeTransport('user-echo', 1.1, 'userMessage'), event('real-tool', 2, 'Run command', '{"type":"command_execution"}'), nativeTransport('agent-echo', 3, 'agentMessage')],
+);
+assert.deepEqual(transportTimeline.map(item => item.type), ['message', 'tool-group', 'message'], 'Native conversation lifecycle echoes are represented by their ordinary bubbles, not tool rows');
+assert.equal(isNativeMessageTransportArtifact(nativeTransport('user-echo', 1, 'userMessage')), true);
+assert.equal(isNativeMessageTransportArtifact(nativeTransport('agent-echo', 1, 'agentMessage')), true);
+assert.equal(isNativeMessageTransportArtifact(event('named-agent-message', 1, 'agentMessage', '{"type":"command_execution","command":"agentMessage"}')), false, 'A real tool is never hidden by its display title');
+assert.equal(isNativeMessageTransportArtifact(event('unstructured', 1, 'userMessage', 'plain text')), false, 'Legacy/unstructured events remain visible rather than being guessed away');
+console.log('native message transport artifacts are absorbed by ordinary chat bubbles');
 
 // Screenshot-style empty and real web searches remain two raw entries together.
 let result = groups([], [event('search-empty', 1, 'Web search', '{"tool":"web_search","query":""}'), event('search-query', 2, 'Web search', '{"tool":"web_search","query":"cats"}')]);

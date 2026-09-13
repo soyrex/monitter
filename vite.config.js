@@ -30,6 +30,8 @@ export default defineConfig(({ command, mode }) => {
         }
       : undefined,
     watch: {
+      // Opt in for isolated worktrees where native filesystem events are missed.
+      ...(process.env.MONITTER_DEV_POLL === '1' ? { usePolling: true, interval: 300 } : {}),
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**", "**/.cargo-target/**"],
     },

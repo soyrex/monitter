@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { X } from "@lucide/svelte";
-  let dialog = $state<HTMLDivElement>();
-  let previouslyFocused: HTMLElement | null = null;
+  import { animateMotion } from "$lib/motion";
   let {
     title,
     open = false,
@@ -14,22 +13,107 @@
     onclose: () => void;
     children: import("svelte").Snippet;
   } = $props();
+  let dialog = $state<HTMLDivElement>();
+  let previouslyFocused: HTMLElement | null = null;
+  let visible = $state(false);
+  let closing = $state(false);
+  let closeRequested = false;
+  let lifecycle = 0;
+  let animations: Animation[] = [];
+  let focusedWhenClosing = false;
+
+  function cancelAnimations() {
+    for (const animation of animations) animation.cancel();
+    animations = [];
+  }
+
+  function requestClose() {
+    if (!open || closeRequested) return;
+    closeRequested = true;
+    onclose();
+    void tick().then(() => {
+      if (open) closeRequested = false;
+    });
+  }
+
+  function finishClose(token: number) {
+    if (token !== lifecycle || open) return;
+    const activeElement = document.activeElement;
+    const shouldRestoreFocus = focusedWhenClosing && (
+      !activeElement || activeElement === document.body || activeElement === document.documentElement || dialog?.contains(activeElement)
+    );
+    visible = false;
+    closing = false;
+    focusedWhenClosing = false;
+    const focusTarget = previouslyFocused;
+    previouslyFocused = null;
+    if (shouldRestoreFocus) {
+      void tick().then(() => {
+        const activeElement = document.activeElement;
+        const focusStillUnclaimed = !activeElement || activeElement === document.body || activeElement === document.documentElement || dialog?.contains(activeElement);
+        if (token === lifecycle && !open && focusStillUnclaimed) focusTarget?.focus();
+      });
+    }
+  }
+
+  function enter() {
+    const token = ++lifecycle;
+    cancelAnimations();
+    closing = false;
+    closeRequested = false;
+    if (!visible) visible = true;
+    if (!previouslyFocused) previouslyFocused = document.activeElement as HTMLElement | null;
+    void tick().then(() => {
+      if (token !== lifecycle || !open || !dialog) return;
+      const preferred = dialog.querySelector<HTMLElement>("[data-autofocus]");
+      (preferred ?? dialog).focus();
+      const backdrop = dialog.parentElement;
+      animations = [
+        ...(backdrop ? [animateMotion(backdrop, [{ opacity: 0 }, { opacity: 1 }], { duration: 170, easing: "ease-out", fill: "both" })] : []),
+        animateMotion(dialog, [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "translateY(0)" }], { duration: 170, easing: "cubic-bezier(.2,.8,.2,1)", fill: "both" }),
+      ].filter((animation): animation is Animation => animation !== null);
+    });
+  }
+
+  function exit() {
+    if (!visible) return;
+    const token = ++lifecycle;
+    cancelAnimations();
+    focusedWhenClosing = !!dialog?.contains(document.activeElement);
+    closing = true;
+    if (!dialog) {
+      finishClose(token);
+      return;
+    }
+    const backdrop = dialog.parentElement;
+    animations = [
+      ...(backdrop ? [animateMotion(backdrop, [{ opacity: 1 }, { opacity: 0 }], { duration: 110, easing: "ease-in", fill: "both" })] : []),
+      animateMotion(dialog, [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(6px)" }], { duration: 110, easing: "ease-in", fill: "both" }),
+    ].filter((animation): animation is Animation => animation !== null);
+    if (!animations.length) {
+      finishClose(token);
+      return;
+    }
+    void Promise.all(animations.map((animation) => animation.finished.catch(() => undefined))).then(() => finishClose(token));
+  }
 
   $effect(() => {
-    if (!open) return;
-    previouslyFocused = document.activeElement as HTMLElement | null;
-    void tick().then(() => {
-      const preferred = dialog?.querySelector<HTMLElement>("[data-autofocus]");
-      (preferred ?? dialog)?.focus();
-    });
-    return () => previouslyFocused?.focus();
+    if (open) untrack(enter);
+    else untrack(exit);
+  });
+
+  onDestroy(() => {
+    ++lifecycle;
+    const restore = dialog?.contains(document.activeElement);
+    cancelAnimations();
+    if (restore) previouslyFocused?.focus();
   });
 
   function handleKeydown(event: KeyboardEvent) {
-    if (!open) return;
+    if (!visible || closing || !dialog?.contains(event.target as Node)) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      onclose();
+      requestClose();
       return;
     }
     if (event.key !== "Tab" || !dialog) return;
@@ -63,15 +147,18 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if open}
+{#if visible}
   <div
     class="backdrop"
+    class:closing
     role="presentation"
-    onclick={(event) => event.currentTarget === event.target && onclose()}
+    onclick={(event) => event.currentTarget === event.target && requestClose()}
   >
     <div
       bind:this={dialog}
       class="modal"
+      data-motion-closing={closing ? 'true' : undefined}
+      inert={closing}
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -79,7 +166,7 @@
     >
       <header>
         <h2>{title}</h2>
-        <button class="icon" aria-label="Close" onclick={onclose}
+        <button class="icon" aria-label="Close" onclick={requestClose}
           ><X size={18} /></button
         >
       </header>

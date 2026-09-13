@@ -3,6 +3,8 @@
   import { workspaceShareOpen } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
   import { surfaceTint } from '$lib/surface-tint';
+  import { initMotion, motionView } from '$lib/motion';
+  import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
   import { collectWorkspaceSidebarTabs, settingsTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import { loadSidebarViewPreference, saveSidebarViewPreference, type SidebarViewClient } from '$lib/sidebar-view-preference';
@@ -188,6 +190,8 @@
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
   const bridge = getBridge();
+  let motionReady = $state(false);
+  onMount(() => { motionReady = true; });
   $effect(() => {
     if (!embedded) document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
   });
@@ -1689,7 +1693,8 @@
     if(!ids.some(id=>!sessions[id]))return;
     untrack(()=>{
       openTerminalIds=ids.filter(id=>sessions[id]);
-      if(pane!=='terminal'||!selectedTerminalId||sessions[selectedTerminalId])return;
+      tabOrder=orderedTabs();
+      if(pane!=='terminal'||!selectedTerminalId||sessions[selectedTerminalId]) { collapseTablessPane(); return; }
       const terminal=openTerminalIds.at(-1);
       const task=snapshot?.tasks.find(task=>task.id===openTaskIds.at(-1));
       const channel=snapshot?.channels.find(channel=>channel.id===openChannelIds.at(-1));
@@ -1699,6 +1704,9 @@
       else if(channel)openChannel(channel);
       else if(draft)openTaskDraft(draft);
       else openOverview();
+      // Runtime terminal removal is also a tab close. Do not retain a blank
+      // split merely because the session disappeared outside the tab button.
+      collapseTablessPane();
     });
   });
   async function closeTerminalTab(id:string, collapse = true) {
@@ -1745,6 +1753,11 @@
     if (embedded || workspaceTransition || !pendingEmptyPaneIds.length) return;
     for (const id of [...pendingEmptyPaneIds]) {
       const state = paneState(id);
+      // A recursive PaneGrid update may briefly unbind an embedded surface
+      // between its tab mutation and the next keyed leaf mount. It is not a
+      // signal that the pane gained a tab: retain the request until its state
+      // is readable (or until the layout no longer contains it).
+      if (!state && paneIds(layout).includes(id)) continue;
       const decision = state ? paneRemovalDecision(state, paneIds(layout).length, layoutPending()) : 'keep';
       if (decision === 'keep') {
         pendingEmptyPaneIds = pendingEmptyPaneIds.filter(candidate => candidate !== id);
@@ -2305,6 +2318,42 @@
       modal = null;
       if (focusedProjectId === projectId) openOverview();
     }
+  }
+  let motionSidebar = $state<HTMLElement>();
+  let motionWorkspace = $state<HTMLElement>();
+  let sidebarMotionDirection = $state(1);
+  let lastMotionSidebarView: SidebarView | undefined;
+  let lastMotionCollapsed: boolean | undefined;
+  let lastMotionDetail: boolean | undefined;
+  $effect.pre(() => {
+    const view = sidebarView;
+    untrack(() => {
+      if (lastMotionSidebarView && lastMotionSidebarView !== view) {
+        sidebarMotionDirection = sidebarViews.findIndex(item => item.id === view) > sidebarViews.findIndex(item => item.id === lastMotionSidebarView) ? 1 : -1;
+        outgoingVisual(motionSidebar?.querySelector<HTMLElement>('.sidebar-mode-content'), -16 * sidebarMotionDirection);
+      }
+      lastMotionSidebarView = view;
+    });
+  });
+  $effect.pre(() => {
+    const collapsed = sidebarCompressed;
+    untrack(() => {
+      if (lastMotionCollapsed !== undefined && lastMotionCollapsed !== collapsed)
+        outgoingVisual(motionSidebar?.querySelector<HTMLElement>('.brand-logo'), 0, 0, 120);
+      lastMotionCollapsed = collapsed;
+    });
+  });
+  $effect.pre(() => {
+    const visible = showDetail;
+    untrack(() => {
+      if (lastMotionDetail && !visible) outgoingVisual(motionWorkspace?.querySelector<HTMLElement>('.run-detail'), 12, 0, 120);
+      lastMotionDetail = visible;
+    });
+  });
+  function toggleSidebarGroup(kind: 'agent' | 'project', id: string, button: HTMLElement) {
+    const collapsed = kind === 'agent' ? collapsedAgents : collapsedProjects;
+    if (!collapsed[id]) outgoingVisual(button.closest('.agent-group, .project-group')?.querySelector<HTMLElement>('.task-tree'), 0, -4, 100);
+    collapsed[id] = !collapsed[id];
   }
   function setSidebarView(view: SidebarView) {
     if (embedded) { selectRootSidebarView(view); return; }
@@ -2901,7 +2950,7 @@
 {/snippet}
 
 {#snippet deliveryStatus(message: OptimisticMessage)}
-  <span class="delivery-status" data-delivery-status={message.status} role="status" aria-label={message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'} title={message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'}>
+  <span use:motionView={{key:message.status,y:0,duration:100}} class="delivery-status" data-delivery-status={message.status} role="status" aria-label={message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'} title={message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'}>
     {#if message.status === 'sending'}<LoaderCircle size={13} class="spin" aria-hidden="true"/>{:else if message.status === 'sent'}<Check size={13} aria-hidden="true"/>{:else}Not confirmed{/if}
   </span>
   {#if message.status === 'not-confirmed'}
@@ -2952,7 +3001,7 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <section class="workspace" class:compact-tabs={useCompactTabPicker} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
+  <section bind:this={motionWorkspace} use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} class="workspace" class:compact-tabs={useCompactTabPicker} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
     <header class="topbar" data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
@@ -3144,6 +3193,7 @@
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                 class="message"
+                  data-live-entry={message.role==='assistant'}
               >
                 <MessageMeta name={message.role === "user" ? "You" : (snapshot?.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
                   {#snippet avatar()}{@render messageAvatar(snapshot?.agents.find(agent=>agent.id===message.agentId))}{/snippet}
@@ -3194,7 +3244,7 @@
         </div>
       </section>
       {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss channel members" onclick={()=>showDetail=false}></button>{/if}
-      <aside class="run-detail channel-members" class:closed={!showDetail} aria-label="Channel members">
+      <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail channel-members" class:closed={!showDetail} aria-label="Channel members">
         <SidebarResize side="right"/>
         <ChannelMembers channel={activeChannel} agents={snapshot.agents} hosts={snapshot.hosts} tasks={snapshot.tasks} {busy} onmembership={changeChannelMembership} onadmin={editActiveChannel} onconversation={configureChannelConversation} onstopconversation={stopChannel} onclose={()=>showDetail=false}/>
       </aside>
@@ -3278,6 +3328,7 @@
                   class:system={message.role === "system"}
                   class:optimistic-message={!!optimistic}
                   class="message"
+                  data-live-entry={message.streamStatus==='streaming'}
                   data-delivery-status={optimistic?.status}
                 >
                   <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
@@ -3321,19 +3372,19 @@
           </div>
         </section>
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
-        <aside class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
+        <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
           <SidebarResize side="right"/>
             {@render detailTabs(compactDetail || mobileSidebar)}
-            <div class="git-slot" class:hidden={detailTab!=='git' || gitState.repository!==true}>
+            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="git-slot" class:hidden={detailTab!=='git' || gitState.repository!==true}>
               <GitPane bind:this={gitPane} taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} onStatus={value=>{gitState=value}}/>
             </div>
-            <div class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
-            <section class="detail-scroll approval-history-panel" class:hidden={detailTab!=='approvals'} aria-label="Approval history">
+            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
+            <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll approval-history-panel" class:hidden={detailTab!=='approvals'} aria-label="Approval history">
               <header><h2>Approvals</h2><p>Saved rules for this agent, host and folder, plus this chat's resolved requests.</p></header>
               {#if selectedApprovalRules.length}<section class="saved-approvals-sidebar" aria-label="Saved approvals for this chat"><h3>Saved rules</h3><p>Revoking affects future requests only; work already approved keeps running.</p><SavedApprovalRules rules={selectedApprovalRules} agents={snapshot.agents} hosts={snapshot.hosts} agentId={selectedTask.agentId} hostId={selectedTask.hostId} cwd={selectedTask.cwd} onrevoke={revokeApprovalRule} revokingId={revokingApprovalRuleId} compact={compactDetail}/></section>{/if}
               {#each resolvedApprovalRequests as request (request.id)}<div id={`approval-history-${paneId}-${request.id}`} tabindex="-1"><ApprovalRequestCard {request}/></div>{:else}<p class="detail-empty">No resolved approvals for this chat.</p>{/each}
             </section>
-            <div class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || (detailTab==='git' && gitState.repository===true)}>
+            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || (detailTab==='git' && gitState.repository===true)}>
               <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
               <dl>
                 <div>
@@ -3389,20 +3440,21 @@
   </section>
 {/snippet}
 
-<main use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
-  {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
+<main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
+  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
-      {#if sidebarCompressed}<img class="brand-app-icon" src="/monitter-mark.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong>{/if}
+      {#if sidebarCompressed}<img use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo" src="/monitter-mark.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo" data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
         {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
       </div>{/if}
     </div>
     {#if !sidebarCompressed}
-    <nav class="side-scroll" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
+    <nav use:motionView={{key:"sidebar",initial:motionReady,x:6,y:0,duration:160}} class="side-scroll" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
       {#if globalPendingApprovals.length}<div class="workspace-approval-list" aria-label="Pending approvals across workspaces">
         {#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span><span>Approval · {item.task.title}</span></button>{/each}
       </div>{/if}
+      <div class="sidebar-mode-content" use:motionView={{key:sidebarView,x:16*sidebarMotionDirection,y:0,duration:180,opacity:0.35}}>
       {#if sidebarView === 'standard'}
       <div class="section-label">
         <span>AGENTS</span>
@@ -3413,9 +3465,9 @@
             ),`agent-chats:${agent.id}`)}
           <section class="agent-group" class:has-chats={(agentTasks.length > 0 || (sidebarWorkspaceTabs[agent.id]?.length ?? 0) > 0) && !collapsedAgents[agent.id]}>
             <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
-              <button class="avatar agent-avatar-toggle" aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={()=>collapsedAgents[agent.id]=!collapsedAgents[agent.id]}>
+              <button class="avatar agent-avatar-toggle" aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={event=>toggleSidebarGroup('agent',agent.id,event.currentTarget)}>
                 {@render avatarVisual(agent, 14)}
-                <span class="avatar-toggle-overlay" aria-hidden="true">{#if collapsedAgents[agent.id]}<ChevronRight size={16}/>{:else}<ChevronDown size={16}/>{/if}</span>
+                <span class="avatar-toggle-overlay" aria-hidden="true"><ChevronDown class="group-chevron" style={collapsedAgents[agent.id]?'transform:rotate(-90deg)':undefined} size={16}/></span>
               </button><button
                 class="agent-name"
                 aria-label={`Open agent ${agent.name}`}
@@ -3434,7 +3486,7 @@
                 onclick={() => routeDraft(agent.id)}><MessageSquarePlus size={15} /></button
               >
             </div>
-            <div class="task-tree" id={`agent-chats-${agent.id}`} hidden={collapsedAgents[agent.id]}>
+            <div class="task-tree" id={`agent-chats-${agent.id}`} hidden={collapsedAgents[agent.id]} use:motionView={{key:String(!collapsedAgents[agent.id]),enabled:!collapsedAgents[agent.id],y:-4,duration:150}}>
               {#if agentTasks.length || !sidebarWorkspaceTabs[agent.id]?.length}{@render sidebarChats(agentTasks)}{/if}
               {@render sidebarWorkspacePanels(agent.id)}
             </div>
@@ -3459,27 +3511,28 @@
           {@const ProjectIcon = projectIconComponent(project.icon)}
           <section class="project-group" aria-label={`Project ${project.name}`}>
             <div use:sidebarReorder={{group:'projects',id:project.id,move:moveSidebar}} class="project-row" class:current={focusedProjectId === project.id || selectedTask?.projectId === project.id}>
-              <button class="folder-toggle" aria-label={`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} project ${project.name}`} aria-expanded={!collapsedProjects[project.id]} onclick={()=>collapsedProjects[project.id]=!collapsedProjects[project.id]}>
-                {#if collapsedProjects[project.id]}<ChevronRight size={13}/>{:else}<ChevronDown size={13}/>{/if}
+              <button class="folder-toggle" aria-label={`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} project ${project.name}`} aria-expanded={!collapsedProjects[project.id]} onclick={event=>toggleSidebarGroup('project',project.id,event.currentTarget)}>
+                <ChevronDown class="group-chevron" style={collapsedProjects[project.id]?'transform:rotate(-90deg)':undefined} size={13}/>
               </button>
               <button class="project-name" aria-label={`Open project ${project.name}`} onclick={()=>{const target=`project:${project.id}` as WorkspaceKey;if(target!==activeWorkspaceKey)void switchWorkspace(target);else openProject(project);}}><ProjectIcon size={14} style={`color:${project.color}`}/><span>{project.name}</span>{#if approvalCount(`project:${project.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`project:${project.id}`)} pending approvals`}>{approvalCount(`project:${project.id}`)}</span>{/if}<small>{projectTasks.length}</small></button>
               <button class="quiet" aria-label={`New chat in ${project.name}`} title="New chat" onclick={()=>routeProjectDraft(project.id)}><Plus size={14}/></button>
               <button class="quiet" aria-label={`Edit project ${project.name}`} title="Edit project" onclick={()=>editProject(project)}><MoreHorizontal size={14}/></button>
             </div>
-            {#if !collapsedProjects[project.id]}<div class="task-tree">
+            {#if !collapsedProjects[project.id]}<div class="task-tree" use:motionView={{key:project.id,initial:motionReady,y:-4,duration:150}}>
               {@render sidebarChats(projectTasks, true)}
             </div>{/if}
           </section>
         {:else}<p class="view-hint">Group chats from any agent in a project.</p>{/each}
         <section class="project-group" aria-label="No project">
-          <button class="unassigned-folder" aria-expanded={!collapsedProjects.unassigned} onclick={()=>collapsedProjects.unassigned=!collapsedProjects.unassigned}>
-            {#if collapsedProjects.unassigned}<ChevronRight size={13}/>{:else}<ChevronDown size={13}/>{/if}<Folder size={14}/><span>No project</span><small>{activityTasks.filter(task=>!task.projectId).length}</small>
+          <button class="unassigned-folder" aria-expanded={!collapsedProjects.unassigned} onclick={event=>toggleSidebarGroup('project','unassigned',event.currentTarget)}>
+            <ChevronDown class="group-chevron" style={collapsedProjects.unassigned?'transform:rotate(-90deg)':undefined} size={13}/><Folder size={14}/><span>No project</span><small>{activityTasks.filter(task=>!task.projectId).length}</small>
           </button>
-          {#if !collapsedProjects.unassigned}<div class="task-tree">
+          {#if !collapsedProjects.unassigned}<div class="task-tree" use:motionView={{key:"unassigned",initial:motionReady,y:-4,duration:150}}>
             {@render sidebarChats(sidebarSorted(activityTasks.filter(task=>!task.projectId),'project-chats:unassigned'), true, 'All chats are organised.')}
           </div>{/if}
         </section>
       {/if}
+      </div>
       <div class="section-label channels-label">
         <span>CHANNELS</span><button
           aria-label="New channel"
@@ -3498,7 +3551,7 @@
           ></button
         >{/each}
     </nav>
-    {:else}<nav class="agent-rail" aria-label="Agents" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
+    {:else}<nav use:motionView={{key:"rail",initial:motionReady,x:-4,y:0,duration:160}} class="agent-rail" aria-label="Agents" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
       {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
       {#each sidebarSorted(snapshot?.agents ?? [],'agents') as agent}<button use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}} class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
         <span class="avatar">{@render avatarVisual(agent, 15)}</span>
@@ -3533,7 +3586,7 @@
 
 
 <CommandPalette open={palette !== null} title={palette === "switch" ? "Switch to" : "Controls"} placeholder={palette === "switch" ? "Find a channel, chat or agent…" : "Find a control or setting…"} items={palette === "switch" ? switchItems : controlItems} onselect={selectPalette} onclose={()=>palette=null}/>
-{#if modal === 'archived' && snapshot}<ArchivedChats {snapshot} onclose={()=>modal=null}
+{#if snapshot}<ArchivedChats {snapshot} open={modal === 'archived'} onclose={()=>modal=null}
   onRestore={async taskId=>applySnapshot(await bridge.setTaskArchived(taskId,false),++snapshotIssued)}
   onDelete={deleteArchivedTask} previewDeletion={taskId=>bridge.previewTaskDeletion(taskId)}/>{/if}
 
@@ -3871,6 +3924,9 @@
 >
 
 <style>
+  .side-scroll, .brand, .agent-group, .project-group { position:relative; }
+  .sidebar-mode-content { position:relative; }
+  :global(.group-chevron) { transition:transform 150ms ease-out; }
   :global(*) {
     box-sizing: border-box;
   }
@@ -4852,10 +4908,8 @@
   .suggestions button:hover { border-color: var(--accent); color: var(--ink); }
   .draft-advanced { margin-top: 24px; color: var(--muted); font-size: calc(12px * var(--interface-font-ratio, 1)); }
   .draft-advanced summary { cursor: pointer; margin-bottom: 12px; }
-  .slash-menu { position:fixed; inset:auto; margin:0; padding:0; overflow:hidden; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--ink); box-shadow:0 5px 20px #0002; animation:slash-rise 160ms ease-out; }
+  .slash-menu { position:fixed; inset:auto; margin:0; padding:0; overflow:hidden; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--ink); box-shadow:0 5px 20px #0002; }
   .slash-options { max-height:min(240px,38vh); overflow-y:auto; overscroll-behavior:contain; }
-  @keyframes slash-rise { from { clip-path:inset(100% -24px -24px); transform:translateY(6px); opacity:0; } to { clip-path:inset(-24px); transform:translateY(0); opacity:1; } }
-  @media (prefers-reduced-motion:reduce) { .slash-menu { animation:none; } }
 
   .slash-menu .slash-caption { font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .06em; }
   .slash-menu button { width: 100%; display: flex; gap: 10px; text-align: left; padding: 9px 11px; }
@@ -5499,14 +5553,12 @@
   .agent-directory article.disabled { opacity: .58; }
   .app-shell.embedded { height: 100%; width: 100%; grid-template-columns: minmax(0,1fr); }
   .embedded .topbar { height: var(--pane-tabbar-height,52px); min-height: 32px; padding: 0.5em 0.5em 0; }
-  .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 12; box-shadow: -10px 0 30px #0003; animation: detail-enter .18s ease-out; }
+  .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 12; box-shadow: -10px 0 30px #0003; }
   .detail-backdrop { position: absolute; inset: 0; z-index: 11; background: #0002; }
-  @keyframes detail-enter { from { transform: translateX(100%); } to { transform: translateX(0); } }
   .app-shell:not(.embedded):not(.sidebar-collapsed) { grid-template-columns: min(40vw, max(230px, var(--left-sidebar-width, 252px))) minmax(0, 1fr); }
   .task-layout:not(.detail-hidden) { grid-template-columns: minmax(0, 1fr) min(40vw, max(260px, var(--right-sidebar-width, 292px)), calc(100% - 300px)); }
   /* An overlay must use the whole task layout, not its absent second grid column. */
   .compact-detail .run-detail { grid-area: auto; width: min(max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
-  @media (prefers-reduced-motion: reduce) { .compact-detail .run-detail { animation: none; } }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
   .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }

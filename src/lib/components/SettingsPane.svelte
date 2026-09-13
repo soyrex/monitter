@@ -4,6 +4,7 @@
   import type { Agent, ApprovalRule, Host, Settings } from "$lib/types";
   import { getBridge } from '$lib/bridge';
   import { surfaceTint, setSurfaceTint, DEFAULT_SURFACE_TINT } from '$lib/surface-tint';
+  import { motionPreference, motionView, setMotionPreference, type MotionPreference } from '$lib/motion';
   import { isLanBrowser } from '$lib/lan';
   import { remoteControlOpen, setRemoteControlTarget } from '$lib/workspace-panels';
   import LanSettings from './LanSettings.svelte';
@@ -169,6 +170,7 @@
       <p class="error" role="alert">{saveError}</p>
     {/if}
 
+    <div class="settings-category" use:motionView={{ key: activeCategory, y: 4, duration: 150, opacity: .9, enabled: visible && active }}>
     {#if activeCategory === "lan"}<LanSettings />
     {:else if activeCategory === "remote"}
       <div class="section-stack">
@@ -222,6 +224,17 @@
           </label>
           <div class="range-footer"><span>0%</span><button type="button" onclick={()=>setSurfaceTint(DEFAULT_SURFACE_TINT)}>Reset to default · {DEFAULT_SURFACE_TINT}%</button><span>50%</span></div>
           <p class="hint">Light mode uses half this intensity. Saved on this device/browser.</p>
+        </section>
+
+        <section class="setting-card" aria-labelledby="motion-heading">
+          <div class="card-heading"><h2 id="motion-heading">Motion</h2><p>Keep interface movement comfortable. Your operating-system reduced-motion setting always takes priority.</p></div>
+          <div class="segmented" aria-label="Motion">
+            {#each ['system', 'subtle', 'off'] as preference}
+              <button type="button" class:chosen={$motionPreference === preference} aria-pressed={$motionPreference === preference}
+                onclick={() => setMotionPreference(preference as MotionPreference)}>{preference[0].toUpperCase() + preference.slice(1)}</button>
+            {/each}
+          </div>
+          <p class="hint">Saved on this device/browser.</p>
         </section>
 
         <section class="setting-card" aria-labelledby="scale-heading">
@@ -311,6 +324,7 @@
         </section>
       </div>
     {/if}
+    </div>
   </div>
 </section>
 
@@ -324,7 +338,7 @@
   .settings-nav span { display:grid; gap:2px; min-width:0; }.settings-nav strong { font-size:calc(12px * var(--interface-font-ratio, 1)); font-weight:600; }.settings-nav small { overflow:hidden; color:var(--muted); font-size:calc(10px * var(--interface-font-ratio, 1)); text-overflow:ellipsis; white-space:nowrap; }
   .settings-content { --scroll-fade:20px; -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); min-width:0; min-height:0; overflow:auto; padding:clamp(18px, 4cqi, 38px); }
   .settings-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; max-width:760px; margin:0 auto 24px; }.settings-header p { margin:0 0 4px; color:var(--muted); font:600 calc(10px * var(--interface-font-ratio, 1)) var(--mono, monospace); letter-spacing:.09em; text-transform:uppercase; }.settings-header h1 { margin:0; font-size:calc(24px * var(--interface-font-ratio, 1)); letter-spacing:-.03em; }.save-state { display:flex; flex:none; align-items:center; gap:5px; margin-top:4px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); white-space:nowrap; }.save-error { color:#b84c44; }.save-state :global(svg.spin) { animation:spin .85s linear infinite; }
-  .section-stack { display:grid; gap:14px; max-width:760px; margin:0 auto; }.setting-card { display:grid; gap:16px; padding:18px; border:1px solid var(--line); border-radius:10px; background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.025); }.card-heading h2 { margin:0 0 4px; font-size:calc(14px * var(--interface-font-ratio, 1)); }.card-heading p,.hint { margin:0; color:var(--muted); font-size:calc(11.5px * var(--interface-font-ratio, 1)); line-height:1.5; }.inline-heading { display:flex; align-items:start; justify-content:space-between; gap:12px; }.inline-heading > strong { color:var(--accent-ink, var(--accent)); font:600 calc(13px * var(--interface-font-ratio, 1)) var(--mono, monospace); }
+  .settings-category { min-width:0; }.section-stack { display:grid; gap:14px; max-width:760px; margin:0 auto; }.setting-card { display:grid; gap:16px; padding:18px; border:1px solid var(--line); border-radius:10px; background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.025); }.card-heading h2 { margin:0 0 4px; font-size:calc(14px * var(--interface-font-ratio, 1)); }.card-heading p,.hint { margin:0; color:var(--muted); font-size:calc(11.5px * var(--interface-font-ratio, 1)); line-height:1.5; }.inline-heading { display:flex; align-items:start; justify-content:space-between; gap:12px; }.inline-heading > strong { color:var(--accent-ink, var(--accent)); font:600 calc(13px * var(--interface-font-ratio, 1)) var(--mono, monospace); }
   .segmented { display:flex; padding:3px; border:1px solid var(--line); border-radius:7px; background:var(--soft); }.segmented button { flex:1; padding:7px 8px; border:0; border-radius:4px; color:var(--muted); background:transparent; font:calc(11.5px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-transform:capitalize; cursor:pointer; }.segmented button.chosen { color:var(--ink); background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.08); }
   .swatches { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }.swatches > button { width:26px; height:26px; padding:0; border:2px solid transparent; border-radius:50%; background:var(--swatch); cursor:pointer; }.swatches > button.chosen { border-color:var(--ink); outline:2px solid var(--paper); outline-offset:-4px; }.colour-picker { display:flex; align-items:center; gap:7px; margin-left:3px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.colour-picker input { width:28px; height:25px; padding:1px; border:1px solid var(--line); border-radius:5px; background:var(--paper); cursor:pointer; }.colour-picker span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
   .range { width:100%; padding:0; accent-color:var(--accent); cursor:pointer; }.range:disabled { cursor:not-allowed; }.range-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; color:var(--muted); font:calc(10px * var(--interface-font-ratio, 1)) var(--mono, monospace); }.range-footer button { padding:0; border:0; color:var(--accent-ink, var(--accent)); background:none; font:calc(11px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); cursor:pointer; }

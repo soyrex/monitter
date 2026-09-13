@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { Archive, Bot, Brain, Columns2, Command, CornerDownLeft, Folder, Grid2X2, MessageSquare, Monitor, Moon, MousePointer2, PanelRight, Radio, Search, Settings2, Sparkles, Square, SquareTerminal, Sun, Users, Wrench, X, ZoomIn, ZoomOut } from "@lucide/svelte";
+  import { animateMotion } from "$lib/motion";
 
   function itemIcon(id: string) {
     const kind = id.split(':')[0];
@@ -61,6 +62,12 @@
   let dialog = $state<HTMLElement>();
   let results = $state<HTMLDivElement>();
   let previouslyFocused: HTMLElement | null = null;
+  let visible = $state(false);
+  let closing = $state(false);
+  let closeRequested = false;
+  let lifecycle = 0;
+  let animations: Animation[] = [];
+  let focusedWhenClosing = false;
 
   const filteredItems = $derived.by(() => {
     const normalizedQuery = query.toLocaleLowerCase().trim();
@@ -91,17 +98,96 @@
     activeIndex = selectableItems.length ? 0 : -1;
   });
 
-  $effect(() => {
-    if (!open) return;
-    previouslyFocused = document.activeElement as HTMLElement | null;
+  function cancelAnimations() {
+    for (const animation of animations) animation.cancel();
+    animations = [];
+  }
+
+  function requestClose() {
+    if (!open || closeRequested) return;
+    closeRequested = true;
+    onclose();
+    void tick().then(() => {
+      if (open) closeRequested = false;
+    });
+  }
+
+  function finishClose(token: number) {
+    if (token !== lifecycle || open) return;
+    const activeElement = document.activeElement;
+    const shouldRestoreFocus = focusedWhenClosing && (
+      !activeElement || activeElement === document.body || activeElement === document.documentElement || dialog?.contains(activeElement)
+    );
+    visible = false;
+    closing = false;
+    focusedWhenClosing = false;
+    const focusTarget = previouslyFocused;
+    previouslyFocused = null;
+    if (shouldRestoreFocus) {
+      void tick().then(() => {
+        const activeElement = document.activeElement;
+        const focusStillUnclaimed = !activeElement || activeElement === document.body || activeElement === document.documentElement || dialog?.contains(activeElement);
+        if (token === lifecycle && !open && focusStillUnclaimed) focusTarget?.focus();
+      });
+    }
+  }
+
+  function enter() {
+    const token = ++lifecycle;
+    cancelAnimations();
+    closing = false;
+    closeRequested = false;
+    if (!visible) visible = true;
+    if (!previouslyFocused) previouslyFocused = document.activeElement as HTMLElement | null;
     query = "";
     activeIndex = 0;
-    void tick().then(() => input?.focus());
-    return () => previouslyFocused?.focus();
+    void tick().then(() => {
+      if (token !== lifecycle || !open || !dialog) return;
+      input?.focus();
+      const backdrop = dialog.parentElement;
+      animations = [
+        ...(backdrop ? [animateMotion(backdrop, [{ opacity: 0 }, { opacity: 1 }], { duration: 170, easing: "ease-out", fill: "both" })] : []),
+        animateMotion(dialog, [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "translateY(0)" }], { duration: 170, easing: "cubic-bezier(.2,.8,.2,1)", fill: "both" }),
+      ].filter((animation): animation is Animation => animation !== null);
+    });
+  }
+
+  function exit() {
+    if (!visible) return;
+    const token = ++lifecycle;
+    cancelAnimations();
+    focusedWhenClosing = !!dialog?.contains(document.activeElement);
+    closing = true;
+    if (!dialog) {
+      finishClose(token);
+      return;
+    }
+    const backdrop = dialog.parentElement;
+    animations = [
+      ...(backdrop ? [animateMotion(backdrop, [{ opacity: 1 }, { opacity: 0 }], { duration: 110, easing: "ease-in", fill: "both" })] : []),
+      animateMotion(dialog, [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(6px)" }], { duration: 110, easing: "ease-in", fill: "both" }),
+    ].filter((animation): animation is Animation => animation !== null);
+    if (!animations.length) {
+      finishClose(token);
+      return;
+    }
+    void Promise.all(animations.map((animation) => animation.finished.catch(() => undefined))).then(() => finishClose(token));
+  }
+
+  $effect(() => {
+    if (open) untrack(enter);
+    else untrack(exit);
+  });
+
+  onDestroy(() => {
+    ++lifecycle;
+    const restore = dialog?.contains(document.activeElement);
+    cancelAnimations();
+    if (restore) previouslyFocused?.focus();
   });
 
   $effect(() => {
-    if (!open || activeIndex < 0) return;
+    if (!visible || activeIndex < 0) return;
     void tick().then(() =>
       results?.querySelector<HTMLElement>("[data-active='true']")?.scrollIntoView({
         block: "nearest",
@@ -147,10 +233,10 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (!open || !dialog?.contains(event.target as Node)) return;
+    if (!visible || closing || !dialog?.contains(event.target as Node)) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      onclose();
+      requestClose();
     } else if (event.key === "Tab") {
       containFocus(event);
     } else if (event.target === input && event.key === "ArrowDown") {
@@ -171,36 +257,34 @@
       ...dialog.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
       ),
-    ];
+    ].filter((element) => element.getClientRects().length > 0 && !element.closest('[inert]'));
     if (!focusable.length) {
       event.preventDefault();
       dialog.focus();
       return;
     }
-    const first = focusable[0];
-    const last = focusable.at(-1)!;
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    event.preventDefault();
+    const current = focusable.indexOf(document.activeElement as HTMLElement);
+    const next = current < 0
+      ? (event.shiftKey ? focusable.at(-1)! : focusable[0])
+      : focusable[(current + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length];
+    next.focus();
   }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if open}
+{#if visible}
   <div
     class="backdrop"
+    class:closing
     role="presentation"
-    onclick={(event) => event.currentTarget === event.target && onclose()}
+    onclick={(event) => event.currentTarget === event.target && requestClose()}
   >
-    <dialog bind:this={dialog} class="palette" open aria-modal="true" aria-label={title} tabindex="-1">
+    <dialog bind:this={dialog} class="palette" inert={closing} data-motion-closing={closing ? 'true' : undefined} open aria-modal="true" aria-label={title} tabindex="-1">
       <header>
         <span class="title"><Command size={15} strokeWidth={2.1} /> {title}</span>
-        <button class="close" type="button" aria-label="Close command palette" onclick={onclose}>
+        <button class="close" type="button" aria-label="Close command palette" onclick={requestClose}>
           <X size={16} />
         </button>
       </header>

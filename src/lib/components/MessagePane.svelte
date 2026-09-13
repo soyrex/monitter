@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { messageArrival } from '$lib/navigation-motion';
   import { onMount, type Snippet } from 'svelte';
   import { ArrowDown } from '@lucide/svelte';
 
@@ -93,7 +94,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (the scroll pane must support keyboard scrolling) -->
   <div class="messages" bind:this={viewport} onscroll={handleScroll} role="region" aria-label="Messages" tabindex="0">
     {#if header}<div class="message-header" bind:this={heading}>{@render header()}</div>{/if}
-    <div class="message-content" bind:this={content}>{@render children()}</div>
+    <div class="message-content" use:messageArrival bind:this={content}>{@render children()}</div>
   </div>
   {#if showJump}
     <button class="jump-latest" aria-label="Jump to latest message" title="Jump to latest message" onclick={() => {

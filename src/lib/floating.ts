@@ -1,3 +1,4 @@
+import { animateMotion } from './motion';
 /** Put transient menus in the browser's top layer, outside pane overflow. */
 export function floating(
   node: HTMLElement,
@@ -22,6 +23,7 @@ export function floating(
   }
 
   position();
+  const entrance = animateMotion(node, [{ opacity: 0, translate: '0 6px' }, { opacity: 1, translate: '0 0' }], { duration: 140, easing: 'ease-out' });
   const observer = new ResizeObserver(position);
   observer.observe(node);
   window.addEventListener('resize', position);
@@ -29,6 +31,7 @@ export function floating(
   if (options.focus !== false) node.querySelector<HTMLElement>('button:not(:disabled)')?.focus();
   return {
     destroy() {
+      entrance?.cancel();
       observer.disconnect();
       window.removeEventListener('resize', position);
       window.removeEventListener('scroll', position, true);
