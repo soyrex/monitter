@@ -2,6 +2,7 @@
   import { localUuid, isLanBrowser } from '$lib/lan';
   import { workspaceShareOpen } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
+  import { tabStripFade } from '$lib/tab-strip-fade';
   import { collectWorkspaceSidebarTabs, settingsTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import { loadSidebarViewPreference, saveSidebarViewPreference, type SidebarViewClient } from '$lib/sidebar-view-preference';
   import "../../app.css";
@@ -2943,10 +2944,10 @@
     <header class="topbar" data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
-      {:else if !activeWorkspaceKey.startsWith('agent:')}
-        {@render workspaceContext()}
+      {:else}
+        {#if activeWorkspaceKey.startsWith('project:')}{@render workspaceContext()}{/if}
       {/if}
-      <nav class="tabs tab-picker" data-tauri-drag-region class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
+      <nav class="tabs tab-picker" use:tabStripFade data-tauri-drag-region class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
         <button class="tab-picker-trigger" type="button" aria-expanded={tabPickerOpen} aria-controls={`open-tabs-${paneId}`} onclick={()=>tabPickerOpen=!tabPickerOpen}><span>{currentTabLabel}</span><ChevronDown size={15}/></button>
         <div class="tab-picker-list" id={`open-tabs-${paneId}`} aria-label="Open tabs">
         {#each orderedTabs() as tab (`${tab.kind}:${tab.id}`)}
@@ -3371,7 +3372,7 @@
   {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
-      {#if !sidebarCompressed}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true">monitter</span><span class="brand-short" aria-hidden="true">m</span></strong>{/if}
+      {#if !sidebarCompressed}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.png" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-wordmark.png" alt="" draggable="false" /></span></strong>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
         {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
       </div>{/if}
@@ -4008,14 +4009,16 @@
     align-self: center;
     font-size: calc(13px * var(--interface-font-ratio, 1));
     line-height: 1;
-    opacity: .8;
+    opacity: 1;
     letter-spacing: -0.02em;
   }
   .brand { height: var(--pane-tabbar-height,52px); box-sizing: border-box; }
-  .brand-full { display:inline-block; }
-  .brand-short { display:none; }
+  .brand-full { display:inline-block; width:110px; height:34px; vertical-align:middle; }
+  .brand-full img { display:block; width:100%; height:100%; object-fit:contain; }
+  .brand-short { display:none; width:25px; height:28px; overflow:hidden; position:relative; vertical-align:middle; }
+  .brand-short img { position:absolute; width:110px; max-width:none; height:auto; left:-4px; top:-4px; }
   .brand:global([data-compact-wordmark="true"]) .brand-full { position:absolute; visibility:hidden; pointer-events:none; }
-  .brand:global([data-compact-wordmark="true"]) .brand-short { display:inline; }
+  .brand:global([data-compact-wordmark="true"]) .brand-short { display:inline-block; }
   .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: calc(12px / var(--interface-scale,1)); gap: 4px; }
   .native-mac.native-fullscreen .brand { padding-left: 13px; }
   .native-mac.native-fullscreen.sidebar-collapsed { grid-template-columns: 56px minmax(0,1fr); }
@@ -4622,6 +4625,10 @@
     scrollbar-width: none;
   }
   .tab-picker-trigger { display:none; }
+  .workspace:not(.compact-tabs) .tabs {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--tab-fade-left, 0px), #000 calc(100% - var(--tab-fade-right, 0px)), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 var(--tab-fade-left, 0px), #000 calc(100% - var(--tab-fade-right, 0px)), transparent);
+  }
   .edit-tab { display:none; }
   .tab-picker-list { display:contents; }
   .tab {
