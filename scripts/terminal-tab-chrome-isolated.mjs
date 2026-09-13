@@ -24,7 +24,7 @@ function rules(selector) {
 const css = [
   '.tabs', '.tab-picker-list', '.tab', '.tab-entry', '.tab-entry .tab',
   '.tab-kind-icon', '.tab-shortcut', '.close-tab', '.tab-entry:focus-within .close-tab',
-  '.compact-tabs', '.tabs > .tab-picker-list > .tab-entry',
+  ':global(.compact-tabs)', '.tabs > .tab-picker-list > .tab-entry',
   '.topbar', '.workspace.modern-tabs:not(.compact-tabs) > .topbar',
   '.modern-tabs:not(.compact-tabs) .tabs', '.modern-tabs:not(.compact-tabs) .tab-entry',
   '.modern-tabs:not(.compact-tabs) .tab',
@@ -103,14 +103,15 @@ try {
     await page.locator('#modern').evaluate(node => { node.classList.add('modern-tabs'); node.style.setProperty('--pane-tabbar-height', '36px'); });
     expect((await page.locator('#modern .topbar').boundingBox()).height).toBe(32);
     const header = page.locator('#chat-header');
-    for (const side of ['top', 'right', 'bottom', 'left']) await expect(header).toHaveCSS(`padding-${side}`, '15px');
+    for (const side of ['top', 'bottom']) await expect(header).toHaveCSS(`padding-${side}`, '8px');
+    for (const side of ['left', 'right']) await expect(header).toHaveCSS(`padding-${side}`, '15px');
     await expect(header.locator('h1')).toHaveCSS('font-size', '13.2px');
     await expect(header.locator('.task-header-avatar')).toHaveCSS('width', '30px');
     await expect(header).toHaveCSS('background-color', 'rgb(250, 250, 250)');
     await expect(header).toHaveCSS('backdrop-filter', 'none');
     await context.close();
   }
-  console.log('Actual AppSurface CSS: all tab keycaps replace left icons; independent Close on desktop/touch; Modern fills bar height with square corners; chat header has 15px padding and 40% smaller title.');
+  console.log('Actual AppSurface CSS: left tab keycaps, independent Close, square Modern tabs and compact chat header padding pass.');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

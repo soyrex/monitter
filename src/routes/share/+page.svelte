@@ -19,6 +19,7 @@
   const projects = $derived(snapshot?.projects ?? []);
   const otherChats = $derived((snapshot?.tasks ?? []).filter(item => !item.projectId));
   const initials = (value: string) => (value.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(word => word[0]).join('') || '?').toUpperCase();
+  function isSnapshot(value: unknown): value is Snapshot { return !!value && typeof value === 'object' && Array.isArray((value as Snapshot).tasks) && Array.isArray((value as Snapshot).agents); }
   function display(message: Message): DisplayMessage {
     const clean = message.text.replace(collaborationHeader, '');
     const tagged = /^@\(([^\r\n)]{1,48})\):\s*([\s\S]*)$/.exec(clean);
@@ -63,7 +64,7 @@
   async function send() {
     if (!session || !selectedId || !draft.trim() || sending || status !== 'connected') return;
     const current = session, text = draft.trim(); sending = true;
-    try { const next = await current.sendMessage(selectedId, text); if (session !== current) return; snapshot = next; draft = ''; await tick(); scrollLatest(); }
+    try { const next = await current.sendMessage(selectedId, text); if (session !== current) return; if (isSnapshot(next)) snapshot = next; else void refresh(); draft = ''; await tick(); scrollLatest(); }
     catch (reason) { if (session === current) error = String(reason); }
     finally { sending = false; }
   }

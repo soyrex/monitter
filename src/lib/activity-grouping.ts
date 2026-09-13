@@ -29,6 +29,13 @@ export type ConversationActivityItem =
   | { type: 'reasoning-group'; values: RunEvent[] }
   | { type: 'tool-group'; values: RunEvent[] };
 
+/** One waiting indicator per conversation, never alongside a reply or approval. */
+export function showThinkingFallback(items: ConversationActivityItem[], working: boolean, awaitingApproval = false): boolean {
+  if (!working || awaitingApproval || items.some(item => item.type === 'reasoning-group')) return false;
+  const latest = items.at(-1);
+  return !(latest?.type === 'message' && latest.value.role === 'assistant');
+}
+
 function toolIdentity(event: RunEvent) {
   const normalize = (value: string) => {
     const title = value.trim().toLowerCase();
@@ -148,5 +155,14 @@ export function groupConversationActivity(
       grouped.push({ type: 'tool-group', values: [item.value] });
     }
   }
-  return grouped;
+  // Empty reasoning is a temporary status, not transcript content. Drop it once
+  // a subsequent message has content (including optimistic sends and streaming
+  // replies), without modifying stored events or joining separate tool groups.
+  const latestMessageAt = new Map<string, number>();
+  for (const message of messages) {
+    if (!message.text.trim() && !message.attachments?.length) continue;
+    latestMessageAt.set(message.taskId, Math.max(latestMessageAt.get(message.taskId) ?? -Infinity, message.createdAt));
+  }
+  return grouped.filter(item => item.type !== 'reasoning-group' ||
+    (latestMessageAt.get(item.values[0].taskId) ?? -Infinity) < item.values.at(-1)!.createdAt);
 }

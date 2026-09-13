@@ -1,10 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import RunActivity from '../../src/lib/components/RunActivity.svelte';
-  import type { RunEvent } from '../../src/lib/types';
+  import ThinkingStatus from '../../src/lib/components/ThinkingStatus.svelte';
+  import type { Message, RunEvent } from '../../src/lib/types';
+  import { groupConversationActivity, showThinkingFallback } from '../../src/lib/activity-grouping';
 
   let running = $state(false);
   let detail = $state('{"content":[],"summary":[],"type":"reasoning"}');
+  let messages = $state<Message[]>([]);
+  let includeEvent = $state(true);
   let compactionRunning = $state(true);
   let compactionEvents = $state<RunEvent[]>([
     { id: 'compact-start', taskId: 'task-1', kind: 'tool', title: 'ContextCompaction', detail: '{"type":"ContextCompaction","id":"compact-1","monitterPhase":"started"}', createdAt: 1 },
@@ -12,12 +16,18 @@
   const event = $derived<RunEvent>({
     id: 'reasoning-1', taskId: 'task-1', kind: 'reasoning', title: 'Reasoning', detail, createdAt: 1,
   });
+  const conversation = $derived(groupConversationActivity(messages, includeEvent ? [event] : []));
 
   onMount(() => {
     (window as Window & { __REASONING_QA__?: Record<string, () => void> }).__REASONING_QA__ = {
       activate: () => { running = true; },
       deactivate: () => { running = false; },
       summary: () => { detail = '{"type":"reasoning","summary":[{"type":"summary_text","text":"I checked the source and found the relevant path."}]}'; },
+      emptyReply: () => { messages = [{ id: 'reply', taskId: 'task-1', role: 'assistant', text: '', createdAt: 2, streamStatus: 'streaming' }]; },
+      reply: () => { messages = [{ id: 'reply', taskId: 'task-1', role: 'assistant', text: 'Here is the reply.', createdAt: 2, streamStatus: 'streaming' }]; },
+      resetReply: () => { messages = []; },
+      beginWaiting: () => { messages = []; includeEvent = false; running = true; detail = ''; },
+      reportReasoning: () => { includeEvent = true; },
       completeCompaction: () => { compactionEvents = [...compactionEvents, { id: 'compact-complete', taskId: 'task-1', kind: 'tool', title: 'ContextCompaction', detail: '{"type":"ContextCompaction","id":"compact-1","monitterPhase":"completed"}', createdAt: 15_301 }]; },
       interruptCompaction: () => { compactionRunning = false; compactionEvents = [compactionEvents[0]]; },
     };
@@ -25,9 +35,19 @@
   });
 </script>
 
-<main><RunActivity {event} {running}/><RunActivity events={compactionEvents} running={compactionRunning}/></main>
+{#snippet avatar()}<span class="message-avatar" role="img" aria-label="Agent avatar">A</span>{/snippet}
+<main>
+  {#each conversation as item (item.type === 'reasoning-group' || item.type === 'tool-group' ? item.values[0].id : item.value.id)}
+    {#if item.type === 'reasoning-group'}<RunActivity events={item.values} {running} {avatar}/>
+    {:else if item.type === 'activity'}<RunActivity event={item.value} {running}/>
+    {:else if item.type === 'message' && item.value.text}<p data-testid="reply">{item.value.text}</p>{/if}
+  {/each}
+  {#if showThinkingFallback(conversation, running)}<ThinkingStatus {running} {avatar}/>{/if}
+  <RunActivity events={compactionEvents} running={compactionRunning}/>
+</main>
 
 <style>
   :global(html, body, #app) { margin: 0; }
   main { padding: 20px; --panel: #fff; --line: #ddd; --muted: #667; --ink: #171717; --accent-ink: #056; --interface-font-ratio: 1; --mono: ui-monospace, monospace; }
+  .message-avatar { display:grid; place-items:center; width:20px; height:20px; background:#056; color:white; border-radius:4px; }
 </style>

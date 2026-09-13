@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import type { Snippet } from 'svelte';
   import { Archive, Brain, ChevronRight, Terminal, SquareTerminal, X } from '@lucide/svelte';
   import type { RunEvent } from '$lib/types';
   import { contextCompactionId, contextCompactionPhase, isContextCompaction, toolFamily, isShellActivity, reasoningSummary } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
   import Markdown from './Markdown.svelte';
   import AnimatedTitle from './AnimatedTitle.svelte';
-  let { event, events = [], compressed = false, running = false }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean } = $props();
+  import ThinkingStatus from './ThinkingStatus.svelte';
+  let { event, events = [], compressed = false, running = false, avatar }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean; avatar?: Snippet } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
   const primary = $derived(items[0]);
   const latest = $derived(items.at(-1));
@@ -14,12 +15,6 @@
   const reasoning = $derived(primary?.kind === 'reasoning');
   const summary = $derived(reasoning ? reasoningSummary(primary?.detail ?? '') : '');
   const emptyReasoning = $derived(reasoning && !summary);
-  const thinkingLabels = [
-    'Thinking', 'Pondering', 'Reasoning', 'Stewing', 'Considering',
-    'Working through it', 'Exploring options', 'Connecting the dots',
-    'Looking closer', 'Deliberating',
-  ];
-  let thinkingLabel = $state(thinkingLabels[0]);
   const family = $derived(compressed && grouped ? 'Tool calls' : primary ? toolFamily(primary) : 'Tool activity');
   const shell = $derived(items.length > 0 && items.every(isShellActivity));
   const compaction = $derived(items.length > 0 && items.every(isContextCompaction));
@@ -78,22 +73,10 @@
       else if(!event.shiftKey && document.activeElement===nodes.at(-1)){event.preventDefault();nodes[0]?.focus();}
     }
   }
-  function nextThinkingLabel() {
-    if (thinkingLabels.length < 2) return;
-    const current = thinkingLabels.indexOf(thinkingLabel);
-    const offset = 1 + Math.floor(Math.random() * (thinkingLabels.length - 1));
-    thinkingLabel = thinkingLabels[(current + offset) % thinkingLabels.length];
-  }
-  $effect(() => {
-    if (!emptyReasoning || !running) return;
-    untrack(nextThinkingLabel);
-    const timer = window.setInterval(nextThinkingLabel, 5_000);
-    return () => window.clearInterval(timer);
-  });
 </script>
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 {#if primary && emptyReasoning}
-  <div class="activity reasoning reasoning-pending" aria-label={thinkingLabel}><Brain size={14}/><span>{thinkingLabel}</span></div>
+  <ThinkingStatus {running} {avatar}/>
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning summary</span><time>{formatTime(primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if primary && latest}
@@ -124,7 +107,6 @@
 {/if}
 <style>
   .activity{margin:12px 0 28px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{border:1px solid var(--line);border-radius:8px;background:var(--panel)}
-  .reasoning-pending{display:flex;align-items:center;gap:8px;padding:8px 12px;color:var(--muted)}
   summary,.activity-trigger{display:flex;align-items:center;gap:8px;padding:11px 12px;color:var(--muted);cursor:pointer;list-style:none;text-align:left}
   .activity-trigger{width:100%;font:inherit;padding:8px 0;background:transparent}.activity-trigger:hover{color:var(--ink)}
   summary::-webkit-details-marker{display:none}

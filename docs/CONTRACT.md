@@ -109,8 +109,12 @@ and `sidebarView` (`standard`, `activity`, or `projects`; default `standard`).
 `tabStyle` is `classic` or `modern`, defaulting to `classic`; missing values from existing saved
 workspaces resolve to `classic`. It is a shared desktop/LAN appearance preference.
 Modern tabs use straight edges and fill a bar four pixels shorter than Classic's base bar height,
-with a 32px minimum. Right-sidebar tabs follow the same style and stay aligned to their sidebar
-column and header divider, with overflow confined to the tab list rather than the pane controls.
+with a 32px minimum. Right-sidebar tabs follow the same style inside the sidebar, below the unified
+chat header. Their row is 34px in Classic and 32px in Modern, with horizontal overflow confined to
+the tab list. Empty workspace tab-strip space remains a native window-drag region; tab buttons
+keep their separate reorder/move behavior.
+Solid accent-colour controls choose black or white foreground icons and labels from the higher WCAG
+contrast ratio. The paired mobile interface uses the same computed foreground.
 Settings tabs display their active section as `Setting: Appearance`, `Setting: Typography`, etc.
 The horizontal tab, compact selector and workspace sidebar use the same section-aware title.
 Missing new fields receive these defaults when older saved workspaces load. Native WebView zoom
@@ -118,6 +122,8 @@ scales the whole interface; window controls keep their native size and reserved 
 Cmd/Ctrl+plus (including Cmd+=) and Cmd/Ctrl+minus adjust the saved setting by five percentage
 points within 80–200%. Rapid shortcuts accumulate while writes are pending; they do not trigger
 an independent browser zoom.
+Cmd+Option+= on macOS and Ctrl+Alt+= on Windows/Linux balance every open pane to the same area while
+preserving the current split arrangement. The same action is available as Balance panes in Controls.
 Activity toggles filter both inline blocks and run detail without deleting captured events.
 Only reasoning summaries emitted by the harness can be rendered; missing reasoning is not fabricated.
 Enter-to-send applies to tasks and channels. Shift+Enter always inserts a newline; IME composition
@@ -130,6 +136,8 @@ New chat opens a local draft tab with message, agent and project choices, starte
 and optional title/native session attachment. No task or harness process is created before the
 first message is sent. Draft fields, unsent text and attachment references are saved with the desktop
 workspace and survive navigation and restart. Closed draft tabs remain discoverable through Cmd-K.
+Submitting that first message immediately replaces the setup form with the standard chat layout and
+shows the optimistic user message there while task creation and harness startup continue.
 A failed send after task creation reuses that task on retry. A delayed send
 completion must not replace the conversation the user has navigated to.
 
@@ -432,8 +440,9 @@ then the selected workspace. “Back to chats” returns to the list without clo
 discarding drafts. This responsive state does not overwrite the saved desktop collapse preference.
 Mobile screen changes slide horizontally; inactive screens are inert, and Reduce Motion disables
 the animation. Screens stay mounted so draft and scroll state survive Back navigation.
-Narrow workspace headers use the current tab title as a toggle for an open-tab picker;
-selecting a tab closes the picker. Desktop keeps its horizontal tab strip.
+Narrow workspace headers use the current tab title as a toggle for an open-tab picker only when
+the pane contains more than one tab; a lone tab remains a regular tab. Selecting a tab closes the
+picker. Desktop keeps its horizontal tab strip.
 Touch screens do not use hover-to-reveal actions: secondary controls remain available,
 avatar hover overlays are disabled, and mouse-style sidebar/tab dragging does not consume
 touch gestures. Mouse hover affordances remain on fine-pointer devices.
@@ -516,10 +525,10 @@ Pointer or keyboard focus immediately marks the receiving pane active; its opaci
 
 
 Dimmed panes also desaturate completely; focusing a pane or disabling dimming restores its colour.
-Task and channel title backgrounds are fully opaque with no backdrop blur. Both use 15px padding
-on every side, a compact title, and an avatar or group icon in the same left-hand slot.
-Headers sit above the message scroller and span the chat and its right sidebar. Mobile keeps its
-compact tab selector without adding a duplicate pane title header.
+Task and channel title backgrounds are fully opaque with no backdrop blur. Both use 8px vertical
+and 15px horizontal padding, a compact title, and an avatar or group icon in the same left-hand slot.
+Headers sit above the message scroller and span the chat and its right sidebar. Mobile uses its
+compact tab selector for multi-tab panes without adding a duplicate pane title header.
 
 Consecutive tool entries of the same tool or connector family share one muted, borderless row
 with extra spacing below. Connector methods such as `gmail.search_emails` and `gmail.read_email`
@@ -658,6 +667,16 @@ show their originating agent and recipient in the queue and can be removed, but 
 rewritten as if the agent authored new text. User-authored queued messages remain editable.
 
 ## LAN browser access
+
+For UI iteration, `npm run dev:web` starts Vite in `monitter-web` mode on port 18450. It uses the
+running desktop's API on loopback port 18436 with the existing access-code and approval checks.
+The dev server listens on IPv4 and allows only loopback, private-LAN and Tailscale peers using a
+current local interface IP. Its proxy rejects foreign origins and originless API writes before
+rewriting Host/Origin for the trusted loopback hop. This is an owner interface, not a read-only
+preview. Use the IP URLs printed by Vite; restart it after local IP/interface changes. `--port`
+can select another free port. It does not publish LAN assets or replace the installed app.
+Svelte/CSS changes use Vite HMR; backend changes still need a desktop rebuild. Normal `npm run dev`
+and production builds do not enable the dev proxy or dev-only browser bridge.
 
 The desktop app owns an internal HTTP server on port 18436. It prefers live web assets
 in the app data folder's `lan-web` directory, with bundled assets as a fallback.

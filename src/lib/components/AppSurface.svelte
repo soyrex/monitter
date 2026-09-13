@@ -91,14 +91,17 @@
     RunEvent,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
+  import { contrastForeground } from '$lib/accent-contrast';
   import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage } from '$lib/operator-sharing';
   import Modal from "$lib/components/Modal.svelte";
   import Markdown from "$lib/components/Markdown.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import TaskActivity from "$lib/components/TaskActivity.svelte";
   import { activeComputerTools } from "$lib/activity";
-  import { groupConversationActivity } from '$lib/activity-grouping';
+  import { groupConversationActivity, showThinkingFallback } from '$lib/activity-grouping';
   import RunActivity from "$lib/components/RunActivity.svelte";
+  import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
+  import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import ApprovalDock from "$lib/components/ApprovalDock.svelte";
   import MessagePane from "$lib/components/MessagePane.svelte";
   import GitPane from "$lib/components/GitPane.svelte";
@@ -107,7 +110,7 @@
   import PaneGrid from '$lib/components/PaneGrid.svelte';
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
-  import { paneIds } from '$lib/panes';
+  import { balancePaneLayout, paneIds } from '$lib/panes';
   import { paneRemovalDecision, paneTabCount, remapPromotedPaneId, remapQueuedPaneRemovals } from '$lib/pane-lifecycle';
   import { insertTab, normalizeTabOrder, type TabKey } from '$lib/tab-order';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
@@ -544,6 +547,7 @@
   }
   const selectedTaskStarting = $derived(!!(selectedTask && (composerPending[`task:${selectedTask.id}`] || (selectedTask.status === 'running' && !taskIsStepping(selectedTask)))));
   const selectedTaskStepping = $derived(!!(selectedTask && taskIsStepping(selectedTask)));
+  const startingTaskDraft = $derived(currentTaskDraft && currentDraftId && composerPending[`draft:${currentDraftId}`] ? currentTaskDraft : null);
   function setComposerPending(key: string, pending: boolean) { if (pending) composerPending[key] = true; else delete composerPending[key]; }
   function watchPane(node: HTMLElement) {
     const resize = new ResizeObserver(() => {
@@ -665,6 +669,7 @@
     if (expandedPaneId && expandedPaneId !== owner) setPaneExpansion(null);
     activePaneId = owner;
     collapsedAgents[agentId] = false;
+    railAgentId = null;
     mobileMain = true;
     if (owner === 'main') focusExistingTab(tab);
     else paneRefs[owner]?.focusExistingTab(tab);
@@ -1337,9 +1342,7 @@
   }
   function applyAppearance(settings: Snapshot["settings"]) {
     const root = document.documentElement,
-      colour = rgb(settings.accent),
-      white = [255, 255, 255],
-      black = [0, 0, 0];
+      colour = rgb(settings.accent);
     root.dataset.theme = settings.theme;
     root.style.setProperty('--interface-font-ratio', String((settings.interfaceFontSize ?? 14) / 14));
     root.style.setProperty('--chat-font-ratio', String((settings.chatFontSize ?? 13) / 13));
@@ -1363,7 +1366,7 @@
     );
     root.style.setProperty(
       "--on-accent",
-      contrast(colour, white) >= contrast(colour, black) ? "#fff" : "#000",
+      contrastForeground(settings.accent),
     );
     const scale = Math.min(200, Math.max(80, settings.interfaceScale ?? 125));
     root.style.setProperty("--interface-scale", String(scale / 100));
@@ -1907,6 +1910,7 @@
     else if (next.kind === 'terminal') openTerminalTab(next.id);
     else if (next.kind === 'empty') { selectedEmptyId=next.id; pane='empty'; }
     else openSettings();
+    focusSelectedTabInput();
   }
   function currentVimTab(): TabKey | null {
     if (pane === 'task') return currentDraftId ? {kind:'draft',id:currentDraftId} : selectedTaskId ? {kind:'task',id:selectedTaskId} : null;
@@ -1923,7 +1927,9 @@
     if(tab.kind==='task'){const item=snapshot?.tasks.find(item=>item.id===tab.id);if(item)openTask(item);}
     else if(tab.kind==='draft'){const item=taskDrafts[tab.id];if(item)openTaskDraft(item);}
     else if(tab.kind==='channel'){const item=snapshot?.channels.find(item=>item.id===tab.id);if(item)openChannel(item);}
-    else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings(); return true;
+    else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings();
+    focusSelectedTabInput();
+    return true;
   }
   async function executeWorkspaceVim(command: VimCommand) {
     if (embedded) { await onVimWorkspace?.(paneId,command); return; }
@@ -1943,7 +1949,7 @@
       return;
     }
     if(command.kind==='close-pane') { const id=command.target?ids[command.target-1]:current; if(id&&ids.length>1) { const destination=ids.find(item=>item!==id)!; const tabs=id==='main'?allTabs():paneRefs[id]?.allTabs()??[]; for(const tab of tabs)await dropTab(destination,'center',tab); await removeEmptyPane(id); } return; }
-    if(command.kind==='equalize-panes') { const equal=(node:PaneLayout):PaneLayout=>'axis'in node?{...node,ratio:.5,first:equal(node.first),second:equal(node.second)}:node; layout=equal(layout);persistWorkspace();return; }
+    if(command.kind==='equalize-panes') { balanceWorkspacePanes();return; }
     if(command.kind==='split') { const previous=activePaneId;await splitPaneForVim(current,command.axis);if(command.size&&activePaneId!==previous)await executeWorkspaceVim({kind:'resize-pane',axis:command.axis,size:command.size});return; }
     const restoreLayout=async(next:PaneLayout)=>{const states:Record<string,PaneState>={main:captureState(),...captureChildren()};persistWorkspace();workspaceTransition=true;try{layout=next;await tick();for(const id of paneIds(next))if(id==='main')restoreState(states.main);else if(states[id])paneRefs[id]?.restoreState(states[id]);}finally{workspaceTransition=false;persistWorkspace();}};
     const exchangeContents = async (sources: string[]) => {
@@ -2117,7 +2123,8 @@
     const textToSend = promptText(composer), attachmentIds=currentAttachments.map(item=>item.id);
     const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId, cwd: taskCwd };
     const values = { modelSettings:draftModelSettings, sandbox:draftSandbox, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null, cwd: captured.projectId ? null : captured.cwd.trim() || null };
-    taskDrafts[draftId] = { ...draft, ...captured };
+    taskDrafts[draftId] = { ...draft, ...captured, title: values.title };
+    taskTitle = values.title;
     // The draft itself retains a recovery copy if task creation fails, while
     // the visible composer is ready for the next thought immediately.
     composer = '';
@@ -2411,9 +2418,26 @@
     if (!(event.target instanceof Element) || !event.target.closest('.agent-rail, .rail-chats')) railAgentId = null;
     if (!(event.target instanceof Element) || !event.target.closest('.tab-picker')) tabPickerOpen = false;
   }
+  let tabInputFocusRequest = 0;
+  function focusSelectedTabInput() {
+    const request = ++tabInputFocusRequest;
+    void tick().then(() => {
+      if (request !== tabInputFocusRequest || modal || palette || taskMenu || (embedded ? !active : activePaneId !== paneId)) return;
+      if (document.querySelector('dialog[open], [role="dialog"]')) return;
+      const root = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(paneId)}"]`);
+      if (!root) return;
+      const target = pane === 'terminal'
+        ? root.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')
+        : pane === 'task' || pane === 'channel'
+          ? root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Task message"], textarea[aria-label="Channel message"]')
+          : null;
+      if (target && !target.hasAttribute('disabled')) target.focus({ preventScroll: true });
+    });
+  }
   function selectTabPicker(select: () => void) {
     select();
     tabPickerOpen = false;
+    focusSelectedTabInput();
   }
   const currentTabLabel = $derived.by(() => {
     if (pane === 'task') return currentDraftId ? taskDrafts[currentDraftId]?.title || 'New chat' : selectedTask?.title || 'Chat';
@@ -2425,6 +2449,11 @@
     if (pane === 'project') return focusedProject?.name || 'Project';
     return 'Workspace';
   });
+  const renderedTabCount = $derived(orderedTabs().length
+    + (pane === 'agent' && focusedAgent ? 1 : 0)
+    + (pane === 'project' && focusedProject ? 1 : 0));
+  const useCompactTabPicker = $derived((mobileSidebar || compactTabs) && renderedTabCount > 1);
+  $effect(() => { if (!useCompactTabPicker) tabPickerOpen = false; });
   function focusAdjacentPane(direction: 'left' | 'right' | 'up' | 'down') {
     if (embedded) return false;
     const current = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"]`);
@@ -2490,6 +2519,11 @@
     if (activePaneId === 'main') toggleDetail();
     else paneRefs[activePaneId]?.toggleDetail();
   }
+  function balanceWorkspacePanes() {
+    if (embedded || paneIds(layout).length < 2) return;
+    layout = balancePaneLayout(layout);
+    persistWorkspace();
+  }
   function handleShortcuts(event: KeyboardEvent) {
     tabIndexModifier = macPlatform ? event.metaKey : event.ctrlKey;
     if (event.key === 'Escape' && tabPickerOpen) { event.preventDefault(); tabPickerOpen = false; return; }
@@ -2501,6 +2535,11 @@
     }
     const inTerminal=event.target instanceof Element && !!event.target.closest('.terminal-pane');
     const commandModifier = macPlatform ? event.metaKey : event.ctrlKey;
+    if (!embedded && commandModifier && event.altKey && !event.isComposing && (event.key === '=' || event.code === 'Equal') && !document.querySelector('[role="dialog"]')) {
+      event.preventDefault();
+      balanceWorkspacePanes();
+      return;
+    }
     if (!embedded && !vimShortcuts && commandModifier && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId) {
       const key = event.key.toLowerCase();
       if (event.shiftKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
@@ -2591,6 +2630,7 @@
   ]);
   const controlItems = $derived([
     ...([{id:'single',label:'One pane'},{id:'columns',label:'Two columns'},{id:'grid',label:'2 × 2 grid'}] as const).map(item=>({id:`layout:${item.id}`,label:item.label,group:'Layout'})),
+    {id:'balance-panes',label:'Balance panes',detail:macPlatform?'⌘⌥=':'Ctrl+Alt+=',keywords:'equalize resize panes',group:'Layout'},
     {id:"new-task",label:"New chat",group:"Create"},
     {id:"vim-command",label:"Vim command",detail:"Open : command mode for workspace controls",keywords:"vim ex command tabnew split terminal quit",group:"Workspace"},
     {id:"new-terminal",label:"New terminal",detail:"Open a shell in this host and folder",group:"Create",disabled:terminalBusy},
@@ -2646,6 +2686,7 @@
     else if (id === "new-terminal") {palette=null;await newTerminal();}
     else if (id === "autoname") { palette=null; await autonameCurrentPane(); }
     else if (id.startsWith('layout:')) {palette=null;setLayout(id.slice(7) as 'single'|'columns'|'grid');}
+    else if (id === 'balance-panes') { palette=null; balanceWorkspacePanes(); }
     else if (id === "tools") await run(()=>saveSettingsPatch({showToolActivity:!settings.showToolActivity}));
     else if (id === "reasoning") await run(()=>saveSettingsPatch({showReasoningSummaries:!settings.showReasoningSummaries}));
     else if (id === "steer-busy") await run(()=>saveSettingsPatch({busyMessageMode:settings.busyMessageMode==='steer'?'queue':'steer'}));
@@ -2819,10 +2860,9 @@
 {/snippet}
 
 {#snippet agentWaiting(agent: Agent | null | undefined, starting = false)}
-  <div class="agent-waiting" role="status" aria-live="polite" aria-label={`${agent?.name ?? 'Agent'} ${starting ? 'is getting ready…' : 'is pondering…'}`}>
-    {@render messageAvatar(agent)}
-    <span class="waiting-spinner" aria-hidden="true"><LoaderCircle size={14}/></span>
-  </div>
+  <ThinkingStatus {starting} running={!starting}>
+    {#snippet avatar()}{@render messageAvatar(agent)}{/snippet}
+  </ThinkingStatus>
 {/snippet}
 
 {#snippet paneExpandControl()}
@@ -2851,14 +2891,14 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <section class="workspace" class:compact-tabs={mobileSidebar || compactTabs} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
+  <section class="workspace" class:compact-tabs={useCompactTabPicker} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
     <header class="topbar" data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
       {:else if !activeWorkspaceKey.startsWith('agent:')}
         {@render workspaceContext()}
       {/if}
-      <nav class="tabs tab-picker" class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
+      <nav class="tabs tab-picker" data-tauri-drag-region class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
         <button class="tab-picker-trigger" type="button" aria-expanded={tabPickerOpen} aria-controls={`open-tabs-${paneId}`} onclick={()=>tabPickerOpen=!tabPickerOpen}><span>{currentTabLabel}</span><ChevronDown size={15}/></button>
         <div class="tab-picker-list" id={`open-tabs-${paneId}`} aria-label="Open tabs">
         {#each orderedTabs() as tab (`${tab.kind}:${tab.id}`)}
@@ -3035,8 +3075,8 @@
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                 class="message"
               >
-                <MessageMeta name={message.role === "user" ? "You" : (snapshot.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
-                  {#snippet avatar()}{@render messageAvatar(snapshot.agents.find(agent=>agent.id===message.agentId))}{/snippet}
+                <MessageMeta name={message.role === "user" ? "You" : (snapshot?.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
+                  {#snippet avatar()}{@render messageAvatar(snapshot?.agents.find(agent=>agent.id===message.agentId))}{/snippet}
                   {#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
                 </MessageMeta>
                 <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
@@ -3089,6 +3129,11 @@
         <ChannelMembers channel={activeChannel} agents={snapshot.agents} hosts={snapshot.hosts} tasks={snapshot.tasks} {busy} onmembership={changeChannelMembership} onadmin={editActiveChannel} onconversation={configureChannelConversation} onstopconversation={stopChannel} onclose={()=>showDetail=false}/>
       </aside>
       </section>
+    {:else if startingTaskDraft}
+      <StartingTaskPane title={startingTaskDraft.title} agentName={taskFormAgent?.name ?? 'agent'} messages={optimisticMessages.filter(message=>message.kind==='draft'&&message.targetId===currentDraftId)} bind:composer showHeader={!mobileSidebar} oncomposer={updateSlash} onkeydown={handleComposerKeydown}>
+        {#snippet avatar()}<span class="avatar task-header-avatar" aria-label={taskFormAgent?.name ?? 'Agent'}>{@render avatarVisual(taskFormAgent,18)}</span>{/snippet}
+        {#snippet expand()}{@render paneExpandControl()}{/snippet}
+      </StartingTaskPane>
     {:else if currentTaskDraft}
       <section class="draft-layout" aria-label="New chat draft">
         <div class="draft-content">
@@ -3137,26 +3182,24 @@
           {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
           {#if showClose}<button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>{/if}
         </div>{/snippet}
-        {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header" class:has-detail-tabs={showDetail && !compactDetail}>
+        {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header">
           <div class="task-heading-identity">
             <span class="avatar task-header-avatar" aria-label={selectedAgent?.name ?? 'Agent'}>{@render avatarVisual(selectedAgent, 18)}</span>
             <h1 class="task-title"><AnimatedTitle text={selectedTask.title} active={$autonaming[`task:${selectedTask.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={()=>{renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Pencil size={14}/></button></h1>
           </div>
-          <div class="task-heading-sidebar">
-            {#if showDetail && !compactDetail}{@render detailTabs(false)}{/if}
             <div class="task-actions">
               {@render paneExpandControl()}
               {@render rightSidebarControl()}
             </div>
-          </div>
           </div>{/if}
-        {#if mobileSidebar && showDetail && !compactDetail}{@render detailTabs()}{/if}
         <section class="conversation">
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
           <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`}>
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}<RunActivity event={item.value} />
-              {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length} />
+              {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length}>
+                {#snippet avatar()}{@render messageAvatar(selectedAgent)}{/snippet}
+              </RunActivity>
               {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
               {:else if item.type === "approval"}{@const approvalText=approvalEventText(item.value)}<button class={`approval-inline ${item.value.status}`} onclick={() => openApprovalHistory(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{date(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
               {:else}{@const message = item.value}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
@@ -3168,7 +3211,7 @@
                   data-delivery-status={optimistic?.status}
                 >
                   <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
-                    {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}
+                    {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot?.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}
                     {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
                   </MessageMeta>
                   <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
@@ -3181,7 +3224,7 @@
                   will appear here.
                 </p>
               </div>{/if}
-            {#if selectedTask.status === 'running' || selectedTaskStarting}
+            {#if showThinkingFallback(conversationItems, selectedTask.status === 'running' || selectedTaskStarting, pendingApprovalRequests.length > 0)}
               {@render agentWaiting(selectedAgent, selectedTask.status !== 'running')}
             {/if}
           </MessagePane>
@@ -3210,7 +3253,7 @@
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
           <SidebarResize side="right"/>
-            {#if compactDetail}{@render detailTabs()}{/if}
+            {@render detailTabs(compactDetail || mobileSidebar)}
             <div class="git-slot" class:hidden={detailTab!=='git' || gitState.repository!==true}>
               <GitPane bind:this={gitPane} taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} onStatus={value=>{gitState=value}}/>
             </div>
@@ -3772,7 +3815,7 @@
     --accent-light-ink: #28764d;
     --accent-dark-ink: #72d69d;
     --accent-ink: var(--accent-light-ink);
-    --on-accent: #fff;
+    --on-accent: #000;
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-family: var(--interface-font, "IBM Plex Sans", system-ui, sans-serif);
     color: var(--ink);
@@ -3980,7 +4023,7 @@
     width: 23px;
     height: 23px;
     border-radius: 6px;
-    color: white;
+    color: var(--on-accent);
     background: var(--accent);
     font: calc(11px * var(--interface-font-ratio, 1)) var(--mono);
   }
@@ -4451,12 +4494,8 @@
   .pane-task-header { grid-column: 1 / -1; grid-row: 1; }
   .task-layout > .conversation { grid-column: 1; grid-row: 2; }
   .task-layout > .run-detail { grid-column: 2; grid-row: 2; }
-  .task-layout > .detail-tabs { grid-column: 2; grid-row: 1; }
   .pane-task-header > .task-actions { margin-left:auto; }
   .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
-  .task-heading-sidebar { display:flex; align-items:center; min-width:0; flex-shrink:0; }
-  .task-heading-sidebar > .task-actions { flex:none; flex-wrap:nowrap; }
-  .task-heading-sidebar > .detail-tabs { flex:1; min-width:0; min-height:30px; padding:15px 0 0; align-self:stretch; overflow-x:auto; border-bottom:0; background:transparent; scrollbar-width:none; }
   .compact-detail > .pane-task-header { position:relative; z-index:13; }
   .conversation {
     --chat-content-max-width: 900px;
@@ -4517,6 +4556,8 @@
   .terminal-tab.active, .terminal-tab.active .tab:hover { background: var(--terminal-background); }
   .terminal-tab.active .tab, .terminal-tab.active .close-tab { color: var(--terminal-foreground); }
   .terminal-tab.active .close-tab:hover { background: #252a31; }
+  /* Only the ancestor mode flag is global; child rules stay scoped. This avoids
+     expensive ancestor expansion through recursive workspace snippets in dev. */
   :global(.compact-tabs) {
     .tabs.tab-picker { position:relative; overflow:visible; min-width:0; }
     .tab-picker-trigger { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; min-width:0; padding:0 8px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--panel); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-align:left; }
@@ -4552,7 +4593,7 @@
   .modern-tabs:not(.compact-tabs) .tab-entry { border:0; border-right:1px solid var(--line); border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:hover { background:var(--soft); }
-  .modern-tabs:not(.compact-tabs) .tab-entry .tab:hover { background:transparent; }
+  .modern-tabs:not(.compact-tabs) .tab-entry > .tab:hover { background:transparent; }
   .modern-tabs:not(.compact-tabs) .workspace-context { padding:0; }
   .modern-tabs:not(.compact-tabs) .top-actions { padding:0 8px; }
   @media (prefers-reduced-motion:reduce) {
@@ -4756,11 +4797,13 @@
     display: flex;
     align-items: flex-end;
     gap: 3px;
-    min-height: var(--pane-tabbar-height, 52px);
-    height: auto;
+    min-height: 34px;
+    height: 34px;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
     align-self: stretch;
-    padding: 0.5em 0.5em 0;
-    /* Same physical rule as the pane header, so both surfaces meet cleanly. */
+    padding: 6px 6px 0;
     border-bottom: 1px solid var(--line);
     background: var(--paper);
   }
@@ -4793,12 +4836,14 @@
   .detail-tab-entry.active { position:relative; z-index:1; margin-bottom:-1px; color: var(--ink); border-color: var(--line); background: var(--sidebar); }
   .detail-tab-entry.active .detail-tab { color: var(--ink); }
   .detail-tab-entry.active .detail-tab:hover { background: var(--sidebar); }
-  .modern-tabs .detail-tabs { padding:0; gap:0; align-items:stretch; }
-  .modern-tabs .task-layout > .detail-tabs { min-height:max(32px, calc(var(--pane-tabbar-height,52px) - 4px)); }
-  .modern-tabs .task-heading-sidebar > .detail-tabs { padding:0; }
+  .modern-tabs .detail-tabs { min-height:32px; height:32px; padding:0; gap:0; align-items:stretch; }
   .modern-tabs .detail-tab-entry { align-self:stretch; margin-bottom:0; border:0; border-right:1px solid var(--line); border-radius:0; }
   .modern-tabs .detail-tab { border-radius:0; }
   .detail-tabs .detail-close {
+    position: sticky;
+    right: 0;
+    flex: none;
+    background: var(--paper);
     width: 30px;
     min-height: 30px;
     margin: 0 0 0 auto;
@@ -4869,6 +4914,15 @@
     border-radius: 3px;
     background: var(--soft);
   }
+  .detail-empty {
+    margin: 0;
+    padding: 2px 0 7px;
+    color: var(--muted);
+    font-size: calc(10.5px * var(--interface-font-ratio, 1));
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .approval-history-panel > .detail-empty { padding-top: 0; }
   .delegated {
     display: flex;
     align-items: flex-start;
@@ -5219,14 +5273,11 @@
   .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
   .task-heading { align-items: center; padding-top: 13px; padding-bottom: 13px; }
   .task-heading > h1 { margin: 0; }
-  .conversation-head.pane-task-header { padding:15px; gap:10px; }
-  .conversation-head.pane-task-header.has-detail-tabs { display:grid; grid-template-columns:subgrid; padding:0; gap:0; align-items:stretch; }
-  .has-detail-tabs > .task-heading-identity { padding:15px; }
-  .has-detail-tabs > .task-heading-sidebar { border-left:1px solid var(--line); padding-right:15px; }
-  .has-detail-tabs > .task-heading-sidebar > .task-actions { margin-left:10px; }
+  .conversation-head.pane-task-header { padding:8px 15px; gap:10px; }
+  .pane-task-header > .task-actions { flex:none; flex-wrap:nowrap; }
   .pane-task-header > h1 { font-size:calc(13.2px * var(--interface-font-ratio, 1)); }
   .pane-task-header > .task-header-avatar { flex:none; width:30px; height:30px; }
-  .task-heading-identity > h1 { font-size:calc(13.2px * var(--interface-font-ratio, 1)); }
+  .task-heading-identity > h1 { margin:0; font-size:calc(13.2px * var(--interface-font-ratio, 1)); }
   .task-heading-identity > .task-header-avatar { flex:none; width:30px; height:30px; }
   .tabs.hide-tab-close .close-tab { display:none; }
   .tabs { counter-reset: tab-index; }
@@ -5303,10 +5354,6 @@
   @media (prefers-reduced-motion: reduce) { .compact-detail .run-detail { animation: none; } }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
-  .agent-waiting { display:flex; align-items:center; gap:8px; margin:8px 0 24px; color:var(--muted); font-family:var(--chat-font,"IBM Plex Sans",system-ui,sans-serif); font-size:var(--chat-font-size,13px); }
-  .waiting-spinner { display:inline-flex; flex:none; color:var(--accent-ink); animation:waiting-turn 1.4s linear infinite; }
-  @keyframes waiting-turn { to { transform:rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .waiting-spinner { animation:none; } }
   .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }

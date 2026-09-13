@@ -26,4 +26,6 @@ assert.ok(!transcript.includes('approval-history'), 'Full approval history cards
 assert.ok(transcript.includes('approval-inline'), 'Transcript must retain concise resolved approval events');
 assert.ok(source.includes('.approval-inline { display:flex; align-items:baseline; width:100%; min-height:30px;') && source.includes('padding:4px 2px; border:0;'), 'Approval events must remain compact borderless rows');
 assert.ok(source.includes('.approval-inline > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }'), 'Approval rows must stay one line while retaining their full accessible title');
+assert.ok(source.includes('.detail-empty {') && source.includes('font-size: calc(10.5px * var(--interface-font-ratio, 1));'), 'Run-detail empty states must use compact secondary text');
+assert.ok(source.includes('.approval-history-panel > .detail-empty { padding-top: 0; }'), 'Approval history must share the compact empty-state treatment');
 console.log('approval history detail contract: persistent Approvals tab, selected-task empty state, concise status-safe inline events, and no transcript history cards');

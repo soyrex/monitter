@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { contextCompactionPhase, groupConversationActivity, isShellActivity, reasoningSummary } from '../src/lib/activity-grouping.ts';
+import { contextCompactionPhase, groupConversationActivity, isShellActivity, reasoningSummary, showThinkingFallback } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
@@ -87,7 +87,22 @@ for (const compress of [false, true]) {
   for (const boundary of [event('tool', 2, 'Run command', '{}'), reasoning('summary', 2, 'Actual summary')]) {
     assert.equal(groupConversationActivity([], [blanks[0], boundary, blanks[2]], compress).length, 3);
   }
-  assert.equal(groupConversationActivity([message('reply', 2)], [blanks[0], blanks[2]], compress).length, 3);
+  assert.deepEqual(groupConversationActivity([message('reply', 2)], [blanks[0], blanks[2]], compress).map(item => item.type), ['message', 'reasoning-group']);
+  assert.deepEqual(groupConversationActivity([message('reply', 4)], blanks, compress).map(item => item.type), ['message']);
+  assert.equal(groupConversationActivity([{ ...message('reply', 4), role: 'user' }], blanks, compress).length, 1, 'A new user message also replaces old placeholders');
+  assert.equal(groupConversationActivity([{ ...message('reply', 4), text: '', streamStatus: 'streaming' }], blanks, compress).length, 2, 'An empty streaming envelope is not a visible replacement');
+  assert.equal(groupConversationActivity([{ ...message('reply', 4), text: '', attachments: [{ id: 'image' }] }], blanks, compress).length, 1, 'Attachment-only replies replace the status');
+  assert.equal(groupConversationActivity([message('reply', 3)], blanks, compress).length, 1, 'Equal-timestamp replies replace placeholders too');
+  assert.equal(groupConversationActivity([{ ...message('reply', 4), taskId: 'other-task' }], blanks, compress).length, 2, 'Another task cannot clear this status');
+  assert.deepEqual(groupConversationActivity([message('reply', 4)], [reasoning('summary', 2, 'Actual summary')], compress).map(item => item.type), ['activity', 'message']);
   assert.equal(groupConversationActivity([], [blanks[0], { ...blanks[1], taskId: 'other-task' }], compress).length, 2);
 }
 console.log('reasoning summary normalization and consecutive grouping assertions passed');
+
+assert.equal(showThinkingFallback([], true), true);
+assert.equal(showThinkingFallback([], false), false);
+assert.equal(showThinkingFallback([], true, true), false);
+assert.equal(showThinkingFallback(groupConversationActivity([], [reasoning('active', 1)]), true), false, 'Reasoning already provides the waiting row');
+assert.equal(showThinkingFallback([{ type: 'message', value: message('reply', 2) }], true), false, 'A reply replaces the waiting row even before run completion');
+assert.equal(showThinkingFallback([{ type: 'message', value: { ...message('sent', 3), role: 'user' } }], true), true);
+console.log('single thinking status and reply/approval suppression assertions passed');

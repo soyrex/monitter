@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export const isLanBrowser = () => typeof document !== 'undefined' && (document.documentElement.hasAttribute('data-monitter-lan') || !!document.querySelector('meta[name="monitter-lan"]'));
+export const isLanBrowser = () => typeof document !== 'undefined' && (
+  (import.meta.env.DEV && import.meta.env.MODE === 'monitter-web') ||
+  document.documentElement.hasAttribute('data-monitter-lan') || !!document.querySelector('meta[name="monitter-lan"]')
+);
 const storageKey = 'monitter.lan.access';
 export function accessKey(): string { return sessionStorage.getItem(storageKey) ?? ''; }
 export function setAccessKey(key: string) { sessionStorage.setItem(storageKey, key.trim()); }

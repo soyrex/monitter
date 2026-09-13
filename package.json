@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
+    "dev:web": "vite dev --mode monitter-web",
     "build": "vite build && node scripts/publish-lan-web.mjs",
     "publish:lan": "node scripts/publish-lan-web.mjs",
     "preview": "vite preview",

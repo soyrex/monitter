@@ -1,11 +1,14 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 import process from "node:process";
+import { webDevPlugin, webDevProxy } from './scripts/vite-web-dev.mjs';
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(() => ({
-  plugins: [sveltekit()],
+export default defineConfig(({ command, mode }) => {
+  const webDev = command === 'serve' && mode === 'monitter-web';
+  return {
+  plugins: [...(webDev ? [webDevPlugin()] : []), sveltekit()],
   // Keep dependency transforms local when isolated worktrees reuse node_modules.
   cacheDir: ".svelte-kit/vite-cache",
 
@@ -15,10 +18,11 @@ export default defineConfig(() => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 18420,
+    port: webDev ? 18450 : 18420,
     strictPort: true,
-    host: host || "127.0.0.1",
-    hmr: host
+    host: webDev ? '0.0.0.0' : host || "127.0.0.1",
+    ...(webDev ? { cors: false, proxy: webDevProxy() } : {}),
+    hmr: !webDev && host
       ? {
           protocol: "ws",
           host,
@@ -30,4 +34,5 @@ export default defineConfig(() => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-}));
+};
+});
