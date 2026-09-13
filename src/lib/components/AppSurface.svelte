@@ -3,10 +3,11 @@
   import { workspaceShareOpen } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
   import { surfaceTint } from '$lib/surface-tint';
+  import { borderOpacity } from '$lib/border-opacity';
   import { initMotion, motionView } from '$lib/motion';
   import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
-  import { collectWorkspaceSidebarTabs, settingsTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
+  import { collectWorkspaceSidebarTabs, settingsTabTitle, terminalTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import { loadSidebarViewPreference, saveSidebarViewPreference, type SidebarViewClient } from '$lib/sidebar-view-preference';
   import "../../app.css";
   import AnimatedTitle from "./AnimatedTitle.svelte";
@@ -194,6 +195,9 @@
   onMount(() => { motionReady = true; });
   $effect(() => {
     if (!embedded) document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
+  });
+  $effect(() => {
+    if (!embedded) document.documentElement.style.setProperty('--border-opacity', `${$borderOpacity}%`);
   });
   const macPlatform = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
   let tabIndexModifier = $state(false);
@@ -663,6 +667,16 @@
     ];
   }
   function orderedTabs(): TabKey[] { return normalizeTabOrder(tabOrder, availableTabs()); }
+  // Selection history belongs to this pane and workspace, not to tab order.
+  const tabSelectionHistory = new Map<string, TabKey[]>();
+  $effect(() => {
+    const tab = currentVimTab(), scope = activeWorkspaceKey;
+    if (!tab) return;
+    untrack(() => {
+      const history = tabSelectionHistory.get(scope) ?? [];
+      tabSelectionHistory.set(scope, [...history.filter(item => item.kind !== tab.kind || item.id !== tab.id), tab]);
+    });
+  });
   function rememberTab(tab: TabKey, before?: TabKey) {
     const current=orderedTabs();
     if (!before && current.some(item=>item.kind===tab.kind && item.id===tab.id)) { tabOrder=current; return; }
@@ -685,7 +699,7 @@
         ? [{ openTerminalIds, settingsOpen, openEmptyIds, openDraftIds, taskDrafts, tabOrder: orderedTabs() },
           ...paneIds(layout).filter(id => id !== 'main').flatMap(id => paneRefs[id] ? [paneRefs[id].captureState()] : [])]
         : saved ? [saved.main, ...Object.values(saved.panes)] : [];
-      result[agent.id] = collectWorkspaceSidebarTabs(states, $terminalSessions);
+      result[agent.id] = collectWorkspaceSidebarTabs(states, $terminalSessions, snapshot?.hosts ?? []);
     }
     return result;
   });
@@ -968,12 +982,13 @@
   async function openGlobalOverview() {
     // `all` is deliberately its own persisted workspace. Returning to it must
     // not reuse or overwrite the current agent/project pane tree.
-    mobileMain = true;
-    railAgentId = null;
     const switched = await switchWorkspace('all');
     if (!switched || activeWorkspaceKey !== 'all') return;
+    mobileMain = true;
+    railAgentId = null;
     if (expandedPaneId) setPaneExpansion(null);
     activePaneId = 'main';
+    overviewOpen = true;
     openOverview();
   }
   function routeTaskWorkspace(task: Task) {
@@ -999,6 +1014,19 @@
     else queueEmptyPaneRemoval(paneId);
   }
   export function takeTab(tab: PaneTabTransfer): TabPayload | null {
+    const active = currentVimTab();
+    const wasActive = active?.kind === tab.kind && active.id === tab.id;
+    const history = [...(tabSelectionHistory.get(activeWorkspaceKey) ?? [])];
+    const payload = takeTabPayload(tab);
+    if (payload && wasActive) {
+      const remaining = orderedTabs();
+      const previous = history.reverse().find(item => remaining.some(candidate => candidate.kind === item.kind && candidate.id === item.id));
+      const next = previous ?? remaining.at(-1);
+      if (next) focusExistingTab(next);
+    }
+    return payload;
+  }
+  function takeTabPayload(tab: PaneTabTransfer): TabPayload | null {
     saveCurrentDraft();
     if (composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`]) return null;
     if(tab.kind==='empty') {
@@ -2563,7 +2591,7 @@
   const currentTabLabel = $derived.by(() => {
     if (pane === 'task') return currentDraftId ? taskDrafts[currentDraftId]?.title || 'New chat' : selectedTask?.title || 'Chat';
     if (pane === 'channel') return activeChannel?.name || 'Channel';
-    if (pane === 'terminal') return selectedTerminal?.title || 'Terminal';
+    if (pane === 'terminal') return selectedTerminal ? terminalTabTitle(selectedTerminal, snapshot?.hosts ?? []) : 'Terminal';
     if (pane === 'empty') return 'New tab';
     if (pane === 'settings') return settingsTabTitle(settingsCategory);
     if (pane === 'agent') return focusedAgent?.name || 'Agent';
@@ -3039,7 +3067,7 @@
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="edit-tab" aria-label={`Edit name for ${channel.name}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openChannel(channel);editActiveChannel();}}><Pencil size={15}/></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} title="Close tab" onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();collapseTablessPane();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'terminal'}{@const session=$terminalSessions[tab.id]}{#if session}
-            <div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><span class="tab-kind-icon" aria-hidden="true"><SquareTerminal size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={session.title} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${session.title}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+            {@const terminalTitle=terminalTabTitle(session,snapshot?.hosts??[])}<div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><span class="tab-kind-icon" aria-hidden="true"><SquareTerminal size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={terminalTitle} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${terminalTitle}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'empty'}
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}><Plus size={13}/><span>New tab</span></button><button class="close-tab" aria-label="Close empty tab" onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
@@ -3945,7 +3973,7 @@
     --terminal-background: #090b0d;
     --terminal-foreground: #e5e7eb;
     --paper-base: #f7f7f7;
-    --sidebar-base: #f0f0f0;
+    --sidebar-base: color-mix(in srgb, #f0f0f0 90%, white);
     --panel-base: #ffffff;
     --line-base: #d8d8d8;
     --soft-base: #eeeeee;
@@ -3955,7 +3983,8 @@
     --paper: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--paper-base));
     --sidebar: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--sidebar-base));
     --panel: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--panel-base));
-    --line: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--line-base));
+    --line-colour: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--line-base));
+    --line: color-mix(in srgb, var(--line-colour) var(--border-opacity, 100%), transparent);
     --soft: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--soft-base));
     --code: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--code-base));
     --ink: #252525;
@@ -4023,7 +4052,7 @@
   :global(:root[data-theme="dark"]) {
     --surface-tint-factor: 1;
     --paper-base: #151515;
-    --sidebar-base: #121212;
+    --sidebar-base: color-mix(in srgb, #121212 85%, black);
     --panel-base: #202020;
     --line-base: #3d3d3d;
     --soft-base: #272727;
@@ -4241,14 +4270,14 @@
   @media (hover:hover) and (pointer:fine) { .task-row.recent:hover { opacity:1; } }
   .recents-divider { display:flex; align-items:center; gap:8px; margin:9px 8px 5px; color:var(--muted); font-size:11px; }
   .recents-divider::after { content:''; flex:1; height:1px; background:var(--line); }
-  .agent-group > .task-tree > .recents-divider { position:relative; margin-left:calc(var(--thread-axis) + 8px); }
+  .agent-group > .task-tree > .recents-divider { position:relative; margin-left:calc(var(--thread-axis) + 10px); }
   .agent-group > .task-tree > .recents-divider::before {
     content:''; position:absolute; pointer-events:none;
-    left:-8.5px; width:1px; top:-9px; bottom:-5px; background:var(--line);
+    left:-10.5px; width:1px; top:-9px; bottom:-5px; background:var(--line);
   }
   .recents-divider :global(svg) { flex:none; }
   .agent-group > .task-tree > .recents-divider :global(svg) {
-    position:absolute; left:-8px; top:50%; transform:translate(-50%,-50%);
+    position:absolute; left:-10px; top:50%; transform:translate(-50%,-50%);
     z-index:1; background:var(--sidebar); border-radius:50%;
   }
   .avatar.small {
@@ -4731,6 +4760,9 @@
   }
   .tab-picker-trigger { display:none; }
   .workspace:not(.compact-tabs) .tabs {
+    /* Keep the trailing border inside the scrollport even when zoom rounds its
+       maximum scroll offset to a fractional pixel. */
+    padding-inline-end: 2px;
     -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--tab-fade-left, 0px), #000 calc(100% - var(--tab-fade-right, 0px)), transparent);
     mask-image: linear-gradient(to right, transparent, #000 var(--tab-fade-left, 0px), #000 calc(100% - var(--tab-fade-right, 0px)), transparent);
   }
@@ -5433,7 +5465,7 @@
     :global(:root[data-theme="system"]) {
       --surface-tint-factor: 1;
       --paper-base: #151515;
-      --sidebar-base: #121212;
+      --sidebar-base: color-mix(in srgb, #121212 85%, black);
       --panel-base: #202020;
       --line-base: #3d3d3d;
       --soft-base: #272727;

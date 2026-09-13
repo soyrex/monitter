@@ -12,12 +12,13 @@ try {
     const colors=await page.evaluate(()=>{
       const root=getComputedStyle(document.documentElement);
       const result={};
-      for(const name of ['paper','sidebar','panel','soft','code','line']) result[name]=root.getPropertyValue(`--${name}`).trim();
+      for(const name of ['paper','sidebar','panel','soft','code','line-colour','line']) result[name]=root.getPropertyValue(`--${name}`).trim();
       result.ink=root.getPropertyValue('--ink').trim();
       result.factor=root.getPropertyValue('--surface-tint-factor').trim();
       return result;
     });
-    for(const name of ['paper','sidebar','panel','soft','code','line']) expect(colors[name]).toContain('5%');
+    for(const name of ['paper','sidebar','panel','soft','code','line-colour']) expect(colors[name]).toContain('5%');
+    expect(colors.line).toContain('100%');
     expect(colors.ink).toBe(theme==='dark'?'#eeeeee':'#252525');
     expect(Number(colors.factor)).toBe(theme==='dark'?1:0.5);
     await expect(page.locator('.workspace-health')).toContainText('1 agent · 0 running');
@@ -36,4 +37,12 @@ try {
   await page.getByRole('button',{name:'Reset to default · 5%',exact:true}).click();
   await expect(slider).toHaveValue('5');
   console.log('Tint slider previews 0–50%, survives reload and resets to 5%.');
+  const borderSlider=page.getByRole('slider',{name:'Border and divider opacity',exact:true});
+  for(const value of [0,35,100]) {
+    await borderSlider.evaluate((input,value)=>{input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));},value);
+    await expect.poll(()=>page.evaluate(()=>document.documentElement.style.getPropertyValue('--border-opacity'))).toBe(`${value}%`);
+  }
+  await page.reload();
+  await expect(borderSlider).toHaveValue('100');
+  console.log('Border opacity slider previews 0–100% and survives reload.');
 } finally {await browser.close();}

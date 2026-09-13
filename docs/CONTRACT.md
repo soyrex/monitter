@@ -123,6 +123,11 @@ Dark mode uses the selected intensity; light mode uses half. System theme follow
 the same rule. Missing/unavailable storage uses the default and failed storage
 writes do not prevent live preview. No backend rebuild is required for this control.
 
+Border and divider opacity is a client-local appearance preference stored in
+`monitter.appearance.border-opacity.v1`. It ranges from 0–100 percent and defaults
+to 100, preserving the existing line strength. It changes the shared structural
+line colour without fading text or content, and does not require a backend rebuild.
+
 Decorative interface motion is client-local in `monitter.appearance.motion.v1`:
 `system` (default), `subtle`, or `off`. The operating-system reduced-motion
 preference is a hard limit in both System and Subtle modes. Off or OS reduction
@@ -512,7 +517,8 @@ or project scope; choosing a different owner routes the draft to a compatible wo
 The selected workspace remains visible independently of the selected chat. There is no workspace picker:
 selecting an agent or project changes context, while choosing Activity returns to All. The active agent
 avatar sits in the desktop chat header, while the project icon remains in the tab bar; the overview
-is not a tab. Agent/project sidebar
+is not a draggable tab. Clicking the sidebar wordmark or compact mark returns to the independently
+persisted All workspace and opens its whole-app overview without altering agent/project workspace state. Agent/project sidebar
 badges and the global approval entry surface pending approvals even in hidden workspaces. Opening an
 approval navigates to the shared owning chat. The left sidebar is always global: its Standard,
 Activity, Projects and collapsed-rail chat lists show chats from every workspace. Selecting one routes

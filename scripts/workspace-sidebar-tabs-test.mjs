@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { collectWorkspaceSidebarTabs, settingsTabTitle } from '../src/lib/workspace-sidebar-tabs.ts';
+import { collectWorkspaceSidebarTabs, settingsTabTitle, terminalTabTitle } from '../src/lib/workspace-sidebar-tabs.ts';
 
 const terminal = (id, title) => ({ id, title, hostId: 'host', cwd: `/tmp/${id}`, status: 'running', exitCode: null });
 const terminals = { one: terminal('one', 'Build shell'), two: terminal('two', 'Server logs') };
+const hosts = [{ id:'host', name:'Mira', kind:'ssh', address:'mira.local', user:'alex', port:22, identityFile:'', defaultCwd:'/tmp', codexPath:'codex', claudePath:'', opencodePath:'', hermesPath:'' }];
+assert.equal(terminalTabTitle(terminal('one', 'Terminal'), hosts), 'SSH: Mira');
+assert.equal(terminalTabTitle({...terminal('one', 'Terminal'), hostId:'missing'}, hosts), 'Terminal');
+assert.equal(terminalTabTitle(terminal('one', 'Terminal: zsh'), hosts), 'Terminal: zsh');
 
 const panes = [
   { openTerminalIds: ['one', 'two'], openDraftIds: ['draft'], openEmptyIds: ['empty'], taskDrafts: { draft: { title: 'Plan release' } }, settingsOpen: true, tabOrder: [{ kind: 'settings', id: 'settings' }, { kind: 'terminal', id: 'two' }, { kind: 'draft', id: 'draft' }, { kind: 'empty', id: 'empty' }, { kind: 'terminal', id: 'one' }] },

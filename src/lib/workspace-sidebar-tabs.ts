@@ -1,4 +1,4 @@
-import type { TerminalSession } from '$lib/types';
+import type { Host, TerminalSession } from '$lib/types';
 
 type WorkspacePaneTabs = {
   openTerminalIds?: unknown;
@@ -31,6 +31,13 @@ export function settingsTabTitle(category: unknown): string {
   return `Setting: ${label}`;
 }
 
+/** Give a new remote shell useful context until it receives a custom/automatic title. */
+export function terminalTabTitle(session: TerminalSession, hosts: readonly Host[] = []): string {
+  if (session.title !== 'Terminal') return session.title;
+  const host = hosts.find(item => item.id === session.hostId);
+  return host?.kind === 'ssh' ? `SSH: ${host.name.trim() || host.address.trim() || 'remote'}` : session.title;
+}
+
 /**
  * Lists the non-chat tabs belonging to one already-scoped workspace. Terminal
  * membership comes from each pane's open IDs, never from host or cwd metadata.
@@ -39,6 +46,7 @@ export function settingsTabTitle(category: unknown): string {
 export function collectWorkspaceSidebarTabs(
   panes: readonly WorkspacePaneTabs[],
   terminals: Record<string, TerminalSession>,
+  hosts: readonly Host[] = [],
 ): SidebarWorkspaceTab[] {
   const tabs: SidebarWorkspaceTab[] = [];
   const seenTerminalIds = new Set<string>();
@@ -51,7 +59,7 @@ export function collectWorkspaceSidebarTabs(
     seenTerminalIds.add(id);
     const terminal = terminals[id];
     tabs.push(terminal
-      ? { kind: 'terminal', id, title: terminal.title }
+      ? { kind: 'terminal', id, title: terminalTabTitle(terminal, hosts) }
       : { kind: 'terminal', id, title: 'Terminal unavailable', disabled: true });
   };
   const addSettings = (category: unknown) => {

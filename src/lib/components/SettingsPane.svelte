@@ -4,6 +4,7 @@
   import type { Agent, ApprovalRule, Host, Settings } from "$lib/types";
   import { getBridge } from '$lib/bridge';
   import { surfaceTint, setSurfaceTint, DEFAULT_SURFACE_TINT } from '$lib/surface-tint';
+  import { borderOpacity, setBorderOpacity, DEFAULT_BORDER_OPACITY } from '$lib/border-opacity';
   import { motionPreference, motionView, setMotionPreference, type MotionPreference } from '$lib/motion';
   import { isLanBrowser } from '$lib/lan';
   import { remoteControlOpen, setRemoteControlTarget } from '$lib/workspace-panels';
@@ -224,6 +225,15 @@
           </label>
           <div class="range-footer"><span>0%</span><button type="button" onclick={()=>setSurfaceTint(DEFAULT_SURFACE_TINT)}>Reset to default · {DEFAULT_SURFACE_TINT}%</button><span>50%</span></div>
           <p class="hint">Light mode uses half this intensity. Saved on this device/browser.</p>
+        </section>
+
+        <section class="setting-card" aria-labelledby="borders-heading">
+          <div class="card-heading"><h2 id="borders-heading">Borders & dividers</h2><p>Adjust the strength of structural lines throughout the interface.</p></div>
+          <label class="range-setting">Line opacity <strong>{$borderOpacity}%</strong>
+            <input class="range" type="range" use:rangeFill={$borderOpacity} aria-label="Border and divider opacity" aria-valuetext={`${$borderOpacity}%`} min="0" max="100" step="1" value={$borderOpacity} oninput={event=>setBorderOpacity(Number(event.currentTarget.value))} />
+          </label>
+          <div class="range-footer"><span>0%</span><button type="button" onclick={()=>setBorderOpacity(DEFAULT_BORDER_OPACITY)}>Reset to default · {DEFAULT_BORDER_OPACITY}%</button><span>100%</span></div>
+          <p class="hint">Saved on this device/browser.</p>
         </section>
 
         <section class="setting-card" aria-labelledby="motion-heading">

@@ -17,6 +17,23 @@
   }
   function apply(value:number){maximum=bounds();expandedWidth=Math.min(maximum,Math.max(minimum,value));width=expandedWidth;document.documentElement.style.setProperty(variable,`${expandedWidth}px`);}
   function save(){try{localStorage.setItem(key,String(expandedWidth));}catch{/* The current width still applies when storage is unavailable. */}}
+  function fitContent(){
+    if(side!=='left')return;
+    if(collapsed){oncollapse?.(false);requestAnimationFrame(fitContent);return;}
+    const parent=handle.parentElement;if(!parent)return;
+    const parentRect=parent.getBoundingClientRect(),scale=parentRect.width/parent.offsetWidth||1;
+    const canvas=document.createElement('canvas'),context=canvas.getContext('2d');
+    if(!context)return;
+    let desired=minimum;
+    const selectors='.agent-name b,.agent-name small,.chat-copy > span,.project-name > span:first-of-type,.channel-row > span,.section-label > span,.empty-tree,.workspace-tab-row .task-select > span:last-child';
+    for(const element of parent.querySelectorAll<HTMLElement>(selectors)){
+      if(!element.offsetParent||!element.textContent?.trim())continue;
+      const style=getComputedStyle(element),rect=element.getBoundingClientRect();context.font=style.font;
+      const left=(rect.left-parentRect.left)/scale;
+      desired=Math.max(desired,left+context.measureText(element.textContent.trim()).width+48);
+    }
+    apply(Math.ceil(desired));save();
+  }
   function drag(event:PointerEvent){
     if(event.button!==0)return;
     activeCleanup();event.preventDefault();event.stopPropagation();
@@ -62,7 +79,7 @@
   });
 </script>
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (keyboard-operable window splitter) -->
-<div bind:this={handle} class="sidebar-resize" class:left={side==='left'} role="separator" tabindex="0" aria-label={`Resize ${side==='left'?'main':'right'} sidebar`} aria-orientation="vertical" aria-valuetext={side==='left'&&collapsed?'Collapsed. Drag outward to expand.':`${Math.round(width)} pixels`} aria-valuemin={Math.min(minimum,maximum,width)} aria-valuemax={Math.round(maximum)} aria-valuenow={Math.round(width)} onpointerdown={drag} onkeydown={keyboard}></div>
+<div bind:this={handle} class="sidebar-resize" class:left={side==='left'} role="separator" tabindex="0" aria-label={`Resize ${side==='left'?'main':'right'} sidebar`} aria-orientation="vertical" aria-valuetext={side==='left'&&collapsed?'Collapsed. Drag outward to expand.':`${Math.round(width)} pixels`} aria-valuemin={Math.min(minimum,maximum,width)} aria-valuemax={Math.round(maximum)} aria-valuenow={Math.round(width)} onpointerdown={drag} ondblclick={fitContent} onkeydown={keyboard}></div>
 <style>
   .sidebar-resize{position:absolute;top:0;bottom:0;left:-4px;width:8px;z-index:15;cursor:col-resize;touch-action:none;outline:none}
   .sidebar-resize.left{left:auto;right:-4px}
