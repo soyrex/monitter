@@ -7,7 +7,7 @@
     request: ApprovalRequest;
     disabled?: boolean;
     resolving?: boolean;
-    onresolve?: (request: ApprovalRequest, decision: 'approve_once' | 'deny') => void;
+    onresolve?: (request: ApprovalRequest, decision: 'approve_once' | 'approve_always' | 'deny') => void;
     oninput?: (request: ApprovalRequest, response: unknown) => void;
   } = $props();
 
@@ -20,7 +20,7 @@
   const command = $derived(typeof action?.command === 'string' ? action.command : Array.isArray(action?.command) ? action.command.join(' ') : '');
   const reason = $derived(typeof action?.reason === 'string' ? action.reason : '');
   const outcome = $derived(
-    request.status === 'approved' ? (request.input ? 'Response submitted' : 'Approved once')
+    request.status === 'approved' ? (request.input ? 'Response submitted' : request.ruleId ? 'Approved by saved rule' : request.decision === 'approve_always' ? 'Always approved' : 'Approved once')
       : request.status === 'denied' ? 'Denied'
       : request.status === 'expired' ? 'Expired before a decision'
       : request.status === 'unsupported' ? 'Unsupported by this backend'
@@ -55,7 +55,9 @@
   {#if isPending}
     {#if request.input}<HarnessInput input={request.input} disabled={disabled || resolving || !oninput} onsubmit={response => oninput?.(request, response)}/>{/if}
     <div class="approval-actions">
-      {#if !request.input}<button class="approve" disabled={disabled || resolving || !onresolve} aria-label="Approve once approval request" onclick={() => onresolve?.(request, 'approve_once')}><Check size={15}/>Approve once</button>{/if}
+      {#if !request.input}<button class="approve" disabled={disabled || resolving || !onresolve} aria-label="Approve once approval request" onclick={() => onresolve?.(request, 'approve_once')}><Check size={15}/>Approve once</button>
+        {#if request.rememberable === true}<button class="always" disabled={disabled || resolving || !onresolve} aria-label="Always approve this exact scope" onclick={() => onresolve?.(request, 'approve_always')}><Check size={15}/>Always approve</button>{/if}
+      {/if}
       <button class="deny" disabled={disabled || resolving} aria-label="Deny approval request" onclick={() => onresolve?.(request, 'deny')}><X size={15}/>Deny</button>
       {#if resolving}<span class="resolving" role="status"><AlertTriangle size={13}/>Resolving…</span>{/if}
     </div>
@@ -82,7 +84,7 @@
   .approval-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
   .approval-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 44px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 6px; font: 600 calc(11px * var(--interface-font-ratio, 1)) var(--interface-font, "IBM Plex Sans", sans-serif); }
   .approval-actions .approve { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
-  .approval-actions .deny { color: #b84c44; }
+  .approval-actions .always { border-color:color-mix(in srgb, var(--accent) 55%, var(--line)); color:var(--accent-ink); background:color-mix(in srgb, var(--accent) 12%, var(--panel)); }.approval-actions .deny { color: #b84c44; }
   .approval-actions button:disabled { opacity: .55; cursor: wait; }
   .resolving { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
   .resolved { padding-block: 10px; opacity: .78; background: color-mix(in srgb, var(--panel) 92%, var(--bg)); }

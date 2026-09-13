@@ -46,6 +46,7 @@ const sharingSource: Snapshot & { futureOwnerOnly: string } = {
     { id: 'hidden-message', taskId: 'unshared-task', role: 'user', text: 'Unshared content', createdAt: 0 },
   ],
   approvalRequests: [approval(task), approval('unshared-task')],
+  approvalRules: [{ id: 'private-rule', agentId: 'agent', hostId: 'private-host', provider: 'claude', cwd: '/private/rule-folder', tool: 'Write', summary: 'Owner rule', detail: 'owner-only-rule-payload', createdAt: 0, lastUsedAt: null, useCount: 0 }],
   futureOwnerOnly: 'future-private-field',
 };
 sharingSource.tasks[0].acp = { command: '/private/acp-command', args: ['private-acp-argument'] };
@@ -56,10 +57,13 @@ for (const selection of [{ taskIds: [task], projectIds: [] }, { taskIds: [], pro
   assert.deepEqual(visitor.messages.map(item => item.id), ['shared-message', 'peer-system']);
   assert.equal(visitor.settings.userName, '');
   assert.deepEqual(visitor.approvalRequests, []);
+  assert.deepEqual(visitor.approvalRules ?? [], []);
   assert.equal(visitor.tasks[0].cwd, '');
   assert.equal(visitor.tasks[0].nativeSessionId, null);
   assert.equal('futureOwnerOnly' in visitor, false);
   assert.ok(!JSON.stringify(visitor).includes('owner-only-approval-payload'));
+  assert.ok(!JSON.stringify(visitor).includes('owner-only-rule-payload'));
+  assert.ok(!JSON.stringify(visitor).includes('private-rule'));
   assert.ok(!JSON.stringify(visitor).includes('Alex Private'));
   assert.ok(!JSON.stringify(visitor).includes('Private saved profile'));
   assert.ok(!JSON.stringify(visitor).includes('private-acp'));
@@ -67,6 +71,7 @@ for (const selection of [{ taskIds: [task], projectIds: [] }, { taskIds: [], pro
   assert.equal('acp' in visitor.agents[0], false);
 }
 assert.equal(sharingSource.approvalRequests.length, 2);
+assert.equal(sharingSource.approvalRules?.length, 1);
 assert.equal(sharingSource.tasks[0].cwd, '/private/folder');
 const dispatcher = new ControllerDispatcher(client, { maxMutationReceipts: 3 });
 

@@ -48,6 +48,7 @@ struct CoreState<'a> {
     collaborations: &'a [crate::model::Collaboration],
     queued_messages: &'a [crate::model::QueuedMessage],
     approval_requests: &'a [crate::model::ApprovalRequest],
+    approval_rules: &'a [crate::model::ApprovalRule],
     #[serde(rename = "_taskHosts")]
     task_hosts: &'a HashMap<String, Host>,
     #[serde(rename = "_attachments")]
@@ -75,6 +76,7 @@ impl<'a> CoreState<'a> {
             collaborations: &snapshot.collaborations,
             queued_messages: &snapshot.queued_messages,
             approval_requests: &snapshot.approval_requests,
+            approval_rules: &snapshot.approval_rules,
             task_hosts,
             attachments,
             event_journal,

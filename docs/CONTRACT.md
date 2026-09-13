@@ -72,6 +72,8 @@ No fake conversations, progress, token counts, host connections or model replies
 - `send_channel_message_fast { channelId: string, text: string, agentIds: string[], attachmentIds?: string[] }`
   -> `{ accepted: true }`, using the same durable channel delivery path.
 - `resume_task { taskId: string }` -> Snapshot (continue the existing native session asynchronously in this chat)
+- `resolve_approval { approvalId: string, decision: 'approve_once' | 'approve_always' | 'deny' }` -> Snapshot
+- `revoke_approval_rule { ruleId: string }` -> Snapshot
 
 Event `monitter:changed` payload `{ taskId?: string }` tells UI to reload snapshot (debounce <=150ms).
 The backend is authoritative; listen before initial snapshot. Errors reject with a readable string.
@@ -267,6 +269,16 @@ records in the right sidebar's Approvals tab, not full cards in the chat. A stop
 provider transport resolves a pending request safely without authorizing work. Never render an approval
 denial as a successful `Tool result`, and never render an enabled approval control unless that live
 provider run can receive the decision.
+
+An eligible exact tool action may also offer `approve_always`. This creates an app-owned, durable and
+revocable rule—not a provider permission grant. Rules are scoped to agent, immutable task host
+configuration, provider, cwd, sandbox, ACP launcher where applicable, and an exact canonical tool input.
+Only non-interaction requests with provider-supplied raw action data are eligible; titles alone,
+questions, forms, URLs, missing/oversized input and unknown semantics are never rememberable. Only known
+provider-envelope correlation IDs are removed at the top level; IDs inside tool arguments remain semantic.
+A matching future request is auditable with its rule ID and `approve_always` decision, but the response sent
+to every native harness is always one-shot approve. Rules never survive a scope change, do not replay stale
+work after cancellation/restart, and can be revoked from Settings or the Approvals sidebar.
 
 Current interactive approval transports include local Codex app-server, Hermes' local full-duplex gateway and Claude's local
 stream-json host protocol. A Claude `can_use_tool` request creates one durable desktop approval and the

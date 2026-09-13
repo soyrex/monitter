@@ -148,23 +148,35 @@ fn handle_permission_request(
             .or_else(|| params.get("title").and_then(Value::as_str))
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("ACP tool action")
-            .chars()
-            .take(512)
-            .collect::<String>();
+            .to_string();
+        let raw_input = params
+            .pointer("/toolCall/rawInput")
+            .or_else(|| params.pointer("/toolCall/input"))
+            .filter(|value| !value.is_null())
+            .cloned();
         let detail = params
             .pointer("/toolCall/rawInput")
             .or_else(|| params.pointer("/toolCall/input"))
             .map(Value::to_string)
             .filter(|detail| detail.len() <= 64 * 1024)
             .unwrap_or_else(|| "ACP supplied a one-time permission request.".into());
+        // A title alone is never a remembered action. Preserve the full
+        // provider context (including rawInput) for exact matching; the UI
+        // detail remains independently bounded above.
+        let action = raw_input.as_ref().map(|raw| serde_json::json!({
+            "kind": params.pointer("/toolCall/kind"), "toolName": params.pointer("/toolCall/toolName"),
+            "title": params.pointer("/toolCall/title"), "locations": params.pointer("/toolCall/locations"),
+            "rawInput": raw,
+        }));
         let request = service.create_approval_request(CreateApprovalRequest {
             task_id: task_id.clone(),
             provider: "acp".into(),
             run_id: format!("acp-permission:{}", id),
-            summary: format!("Allow {tool} once?"),
+            summary: format!("Allow {tool}?"),
             tool,
             detail,
             risk: "unknown".into(),
+            raw_input: action,
         });
         if let Ok(request) = &request {
             if let Ok(mut owners) = service.app_server_approvals.lock() {
@@ -176,8 +188,10 @@ fn handle_permission_request(
                 !control.is_cancelled() && control.matches_app_server_turn(&turn)
             })
         }) {
-            Ok(ApprovalDecision::ApproveOnce) => acp_protocol::permission_outcome(&params, true)
-                .unwrap_or_else(|_| acp_protocol::cancelled_permission()),
+            Ok(ApprovalDecision::ApproveOnce) | Ok(ApprovalDecision::ApproveAlways) => {
+                acp_protocol::permission_outcome(&params, true)
+                    .unwrap_or_else(|_| acp_protocol::cancelled_permission())
+            }
             Ok(ApprovalDecision::Deny) => acp_protocol::permission_outcome(&params, false)
                 .unwrap_or_else(|_| acp_protocol::cancelled_permission()),
             Err(_) => acp_protocol::cancelled_permission(),
@@ -361,10 +375,17 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 if !emitted {
                     if let Some(detail) = runner::provider_stderr_diagnostic(&line) {
                         emitted = true;
-                        let _ = service.app_server_event(&task, &control, None, Parsed {
-                            native_session_id:None, assistant:None,
-                            event:Some(("error".into(),"ACP diagnostic".into(),detail)), failed:false,
-                        });
+                        let _ = service.app_server_event(
+                            &task,
+                            &control,
+                            None,
+                            Parsed {
+                                native_session_id: None,
+                                assistant: None,
+                                event: Some(("error".into(), "ACP diagnostic".into(), detail)),
+                                failed: false,
+                            },
+                        );
                     }
                 }
             }
@@ -942,7 +963,12 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                         if content_type == "image" {
                             turn_images += 1;
                             if turn_images > 16 {
-                                fail(&service, &task_id, &control, "Too many images in one ACP turn.");
+                                fail(
+                                    &service,
+                                    &task_id,
+                                    &control,
+                                    "Too many images in one ACP turn.",
+                                );
                                 return;
                             }
                             let result = content["data"]
