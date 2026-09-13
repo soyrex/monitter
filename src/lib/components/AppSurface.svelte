@@ -3372,7 +3372,7 @@
   {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
-      {#if sidebarCompressed}<img class="brand-app-icon" src="/monitter-app-icon.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.png" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-app-icon.png" alt="" draggable="false" /></span></strong>{/if}
+      {#if sidebarCompressed}<img class="brand-app-icon" src="/monitter-app-icon.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-app-icon.png" alt="" draggable="false" /></span></strong>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
         {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
       </div>{/if}
