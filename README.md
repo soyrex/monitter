@@ -98,6 +98,19 @@ path and working folder. Monitter uses system SSH and its existing keys, agent, 
 and host-key checks. Password/host-key prompts are not handled in the app: complete the normal first
 `ssh <host>` connection in Terminal, then test the host in Monitter.
 
+Use the **same alias** that works in Terminal. `mira` and `mira.local` are different
+SSH configuration and known-host lookup names, even when they resolve to the same
+machine. Changing to an IP can likewise lose the configured user, key or trusted
+host identity. Test the exact saved target noninteractively with
+`ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8 <host> true`.
+For a new host, verify its fingerprint through a trusted channel before accepting
+it in Terminal; do not disable host-key checking or remove a changed key blindly.
+
+ACP discovery and collaboration-helper staging report bounded SSH failure details.
+Host-key errors occur before the agent starts; authentication failures require the
+configured SSH key/agent, while a successful connection followed by “command not
+found” needs the remote executable path. No failed chat is automatically resent.
+
 The selected harness must already be installed and signed in on the remote host. Paths often differ from the Mac,
 and a noninteractive SSH shell may not include npm's bin folder. For the authorized Mira test:
 

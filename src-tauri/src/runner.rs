@@ -538,6 +538,66 @@ pub(crate) fn provider_stderr_diagnostic(line: &str) -> Option<String> {
     }
 }
 
+/// SSH writes connection and trust failures to stderr. Keep only familiar
+/// operational diagnostics, rather than echoing arbitrary remote stderr into
+/// the app's error surface.
+pub(crate) fn ssh_stderr_diagnostic(stderr: &[u8]) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        "host key",
+        "permission denied",
+        "authentication",
+        "connection",
+        "could not resolve",
+        "name or service",
+        "no route",
+        "timed out",
+        "refused",
+        "identity file",
+        "kex",
+        "remote host",
+        "invalid format",
+        "error in libcrypto",
+    ];
+    const LIMIT: usize = 600;
+
+    let details = String::from_utf8_lossy(stderr)
+        .lines()
+        .filter_map(|line| {
+            let compact = line
+                .chars()
+                .filter(|character| !character.is_control() || *character == '\t')
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!compact.is_empty()
+                && MARKERS
+                    .iter()
+                    .any(|marker| compact.to_ascii_lowercase().contains(marker)))
+            .then_some(compact)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if details.is_empty() {
+        return None;
+    }
+    if details.chars().count() > LIMIT {
+        Some(format!(
+            "{}…",
+            details.chars().take(LIMIT).collect::<String>()
+        ))
+    } else {
+        Some(details)
+    }
+}
+
+pub(crate) fn with_ssh_diagnostic(message: impl Into<String>, stderr: &[u8]) -> String {
+    match ssh_stderr_diagnostic(stderr) {
+        Some(diagnostic) => format!("{} SSH diagnostic: {diagnostic}", message.into()),
+        None => message.into(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn build_command(host: &Host, task: &Task) -> Result<Command, String> {
     build_command_with_collaboration(host, task, None)
@@ -2027,7 +2087,7 @@ fn stage_remote_helper(
         .arg("umask 077; d=$(mktemp -d /tmp/monitter-mcp.XXXXXXXX) || exit; cat > \"$d/monitter_mcp.py\" && chmod 700 \"$d/monitter_mcp.py\" && printf '__MONITTER_HELPER_DIR__%s\\n' \"$d\"")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     isolate_child(&mut command);
     let mut child = command
         .spawn()
@@ -2036,76 +2096,98 @@ fn stage_remote_helper(
         terminate_bounded(&mut child);
         return Err("Could not open SSH helper staging input.".into());
     };
-    if let Err(error) = stdin.write_all(&source) {
-        terminate_bounded(&mut child);
-        return Err(format!(
-            "Could not send collaboration helper to SSH host: {error}"
-        ));
-    }
-    drop(stdin);
-    let mut output = String::new();
     let Some(mut stdout) = child.stdout.take() else {
         terminate_bounded(&mut child);
         return Err("Could not read SSH helper staging output.".into());
     };
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result = stdout.read_to_string(&mut output).map(|_| output);
-        let _ = sender.send(result);
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let output = loop {
-        if control.cancelled.load(Ordering::SeqCst) {
-            terminate_bounded(&mut child);
-            return Err("Collaboration helper staging was cancelled.".into());
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            terminate_bounded(&mut child);
-            return Err("Timed out staging collaboration helper on SSH host.".into());
-        }
-        match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
-            Ok(Ok(output)) => break output,
-            Ok(Err(_)) => {
-                terminate_bounded(&mut child);
-                return Err("Could not read SSH helper staging output.".into());
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                terminate_bounded(&mut child);
-                return Err("Could not read SSH helper staging output.".into());
-            }
-        }
+    let Some(stderr) = child.stderr.take() else {
+        terminate_bounded(&mut child);
+        return Err("Could not read SSH helper staging diagnostics.".into());
     };
-    // EOF on SSH stdout can arrive just before the local SSH process is reaped.
-    // Wait only for the remainder of the bounded staging window instead of treating
-    // that normal race as a staging failure.
+    let (write_sender, write_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = stdin
+            .write_all(&source)
+            .and_then(|_| stdin.flush())
+            .map_err(|error| error.to_string());
+        drop(stdin);
+        let _ = write_sender.send(result);
+    });
+    let (stdout_sender, stdout_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut output = String::new();
+        let mut buffer = [0_u8; 8192];
+        let result = (|| {
+            loop {
+                let count = stdout
+                    .read(&mut buffer)
+                    .map_err(|error| error.to_string())?;
+                if count == 0 {
+                    break;
+                }
+                if output.len().saturating_add(count) <= 4096 {
+                    output.push_str(&String::from_utf8_lossy(&buffer[..count]));
+                } else {
+                    // Keep draining so a noisy remote process cannot block,
+                    // but do not accept a valid-looking prefix as staging.
+                    while stdout
+                        .read(&mut buffer)
+                        .map_err(|error| error.to_string())?
+                        != 0
+                    {}
+                    return Err("SSH helper staging output exceeded its limit.".into());
+                }
+            }
+            Ok::<_, String>(output)
+        })();
+        let _ = stdout_sender.send(result);
+    });
+    let stderr = title_reader(stderr, 16 * 1024);
+    let deadline = Instant::now() + Duration::from_secs(20);
     let status = loop {
         if control.cancelled.load(Ordering::SeqCst) {
             terminate_bounded(&mut child);
             return Err("Collaboration helper staging was cancelled.".into());
         }
+        if Instant::now() >= deadline {
+            terminate_bounded(&mut child);
+            return Err("Timed out staging collaboration helper on SSH host.".into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
-            Ok(None) => {
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => {
                 terminate_bounded(&mut child);
-                return Err("Timed out waiting for SSH helper staging to finish.".into());
-            }
-            Err(_) => {
-                terminate_bounded(&mut child);
-                return Err("Could not read SSH helper staging status.".into());
+                return Err(format!("Could not read SSH helper staging status: {error}"));
             }
         }
     };
+    // Reader and writer threads must not retain staging after the SSH child exits.
+    let drain_timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(250))
+        .min(Duration::from_secs(1));
+    let diagnostics = stderr
+        .recv_timeout(drain_timeout)
+        .unwrap_or_else(|_| Ok(Vec::new()))?;
     if !status.success() {
-        return Err(format!(
-            "SSH helper staging exited with {}.",
-            status
-                .code()
-                .map_or("a signal".into(), |code| format!("status {code}"))
+        return Err(with_ssh_diagnostic(
+            format!(
+                "SSH helper staging exited with {}.",
+                status
+                    .code()
+                    .map_or("a signal".into(), |code| format!("status {code}"))
+            ),
+            &diagnostics,
         ));
     }
+    let output = stdout_receiver
+        .recv_timeout(drain_timeout)
+        .map_err(|_| "Could not read SSH helper staging output.".to_string())??;
+    write_receiver
+        .recv_timeout(drain_timeout)
+        .map_err(|_| "Could not send collaboration helper to SSH host.".to_string())?
+        .map_err(|error| format!("Could not send collaboration helper to SSH host: {error}"))?;
     let directory = output
         .strip_prefix("__MONITTER_HELPER_DIR__")
         .and_then(|value| value.lines().next())
@@ -3445,6 +3527,71 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    #[test]
+    fn helper_staging_reports_ssh_host_key_failure_before_stdin_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shim = std::env::temp_dir().join(format!("monitter-ssh-stage-{}", id()));
+        let helper = std::env::temp_dir().join(format!("monitter-helper-{}", id()));
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nprintf '%s\\n' 'Host key verification failed.' >&2\nexit 255\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&helper, "# helper fixture\n").unwrap();
+        let host = host("ssh");
+        let _ssh = override_ssh_for_test(&host.id, &shim);
+        let error = stage_remote_helper(&host, &helper, &RunControl::new(false)).unwrap_err();
+        assert!(error.contains("status 255"));
+        assert!(error.contains("Host key verification failed."));
+        let _ = std::fs::remove_file(shim);
+        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    fn helper_staging_cancellation_bounds_a_writer_blocked_on_ssh_stdin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shim = std::env::temp_dir().join(format!("monitter-ssh-stage-blocked-{}", id()));
+        let helper = std::env::temp_dir().join(format!("monitter-helper-blocked-{}", id()));
+        std::fs::write(&shim, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&helper, vec![b'x'; 256 * 1024]).unwrap();
+        let host = host("ssh");
+        let _ssh = override_ssh_for_test(&host.id, &shim);
+        let control = RunControl::new(false);
+        let started = Instant::now();
+        let error = thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(75));
+                control.cancelled.store(true, Ordering::SeqCst);
+            });
+            stage_remote_helper(&host, &helper, &control).unwrap_err()
+        });
+        assert!(error.contains("cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_file(shim);
+        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    fn helper_staging_rejects_oversized_output_instead_of_accepting_a_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let shim = std::env::temp_dir().join(format!("monitter-ssh-stage-output-{}", id()));
+        let helper = std::env::temp_dir().join(format!("monitter-helper-output-{}", id()));
+        std::fs::write(&shim, "#!/bin/sh\ncat >/dev/null\nhead -c 5000 /dev/zero\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&helper, "# helper fixture\n").unwrap();
+        let host = host("ssh");
+        let _ssh = override_ssh_for_test(&host.id, &shim);
+        let error = stage_remote_helper(&host, &helper, &RunControl::new(false)).unwrap_err();
+        assert!(error.contains("output exceeded its limit"));
+        let _ = std::fs::remove_file(shim);
+        let _ = std::fs::remove_file(helper);
     }
 
     fn opencode_task(session: &str) -> Task {
