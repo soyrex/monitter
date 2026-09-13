@@ -48,6 +48,8 @@ const sharingSource: Snapshot & { futureOwnerOnly: string } = {
   approvalRequests: [approval(task), approval('unshared-task')],
   futureOwnerOnly: 'future-private-field',
 };
+sharingSource.tasks[0].acp = { command: '/private/acp-command', args: ['private-acp-argument'] };
+sharingSource.agents = [{ id: 'agent', name: 'ACP agent', description: '', instructions: 'private instructions', avatar: null, provider: 'acp', model: '', hostId: 'private-host', cwd: '/private/folder', color: '#000', sandbox: 'harness-configured', expertise: [], responsibilities: [], skills: [], collaborationEnabled: true, acp: { command: '/private/acp-agent', args: ['private-acp-agent-argument'] } }];
 for (const selection of [{ taskIds: [task], projectIds: [] }, { taskIds: [], projectIds: ['shared-project'] }]) {
   const visitor = sharedSnapshot(sharingSource, selection);
   assert.deepEqual(visitor.tasks.map(item => item.id), [task]);
@@ -60,6 +62,9 @@ for (const selection of [{ taskIds: [task], projectIds: [] }, { taskIds: [], pro
   assert.ok(!JSON.stringify(visitor).includes('owner-only-approval-payload'));
   assert.ok(!JSON.stringify(visitor).includes('Alex Private'));
   assert.ok(!JSON.stringify(visitor).includes('Private saved profile'));
+  assert.ok(!JSON.stringify(visitor).includes('private-acp'));
+  assert.equal('acp' in visitor.tasks[0], false);
+  assert.equal('acp' in visitor.agents[0], false);
 }
 assert.equal(sharingSource.approvalRequests.length, 2);
 assert.equal(sharingSource.tasks[0].cwd, '/private/folder');

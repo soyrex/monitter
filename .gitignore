@@ -15,4 +15,5 @@ vite.config.ts.timestamp-*
 # Local validation artifacts and installed-build backups
 verification/
 artifacts/
+/.cargo-target/
 .DS_Store

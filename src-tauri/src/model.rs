@@ -29,6 +29,29 @@ pub struct Host {
     pub opencode_path: String,
     pub hermes_path: String,
 }
+
+/// An explicit ACP stdio launcher. Arguments deliberately remain an argv
+/// vector: ACP agents are never launched through a shell.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpLaunch {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+pub fn valid_acp_launch(launch: &AcpLaunch) -> bool {
+    // Keep launch data bounded before it reaches state.json or a process API.
+    // NUL is rejected because it cannot be represented in an argv element.
+    !launch.command.trim().is_empty()
+        && launch.command.len() <= 4096
+        && !launch.command.contains('\0')
+        && launch.args.len() <= 128
+        && launch
+            .args
+            .iter()
+            .all(|arg| arg.len() <= 16 * 1024 && !arg.contains('\0'))
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
@@ -52,6 +75,10 @@ pub struct Agent {
     pub skills: Vec<String>,
     #[serde(default = "default_collaboration_enabled")]
     pub collaboration_enabled: bool,
+    /// ACP is intentionally an explicit launcher rather than a growing list
+    /// of provider-specific executable fields. It is copied into new tasks.
+    #[serde(default)]
+    pub acp: Option<AcpLaunch>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +103,10 @@ pub struct Task {
     pub sandbox: String,
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Immutable ACP launch snapshot. Editing an agent must not alter an
+    /// existing native ACP session or its resumed transport.
+    #[serde(default)]
+    pub acp: Option<AcpLaunch>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -522,12 +553,13 @@ pub fn valid_sandbox_for_provider(provider: &str, sandbox: &str) -> bool {
         "codex" => valid_sandbox(sandbox) || sandbox == "yolo",
         "claude" => sandbox == "harness-configured" || sandbox == "yolo",
         "opencode" | "hermes" => sandbox == "harness-configured",
+        "acp" => sandbox == "harness-configured",
         _ => false,
     }
 }
 
 pub fn known_provider(provider: &str) -> bool {
-    matches!(provider, "codex" | "claude" | "opencode" | "hermes")
+    matches!(provider, "codex" | "claude" | "opencode" | "hermes" | "acp")
 }
 pub fn default_snapshot() -> Snapshot {
     let host_id = id();
@@ -564,6 +596,7 @@ pub fn default_snapshot() -> Snapshot {
             responsibilities: vec![],
             skills: vec![],
             collaboration_enabled: true,
+            acp: None,
         }],
         tasks: vec![],
         messages: vec![],
@@ -606,6 +639,22 @@ pub fn default_snapshot() -> Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_launch_requires_bounded_shell_free_argv_data() {
+        assert!(valid_acp_launch(&AcpLaunch {
+            command: "agent-acp".into(),
+            args: vec!["--stdio".into()],
+        }));
+        assert!(!valid_acp_launch(&AcpLaunch {
+            command: " ".into(),
+            args: vec![],
+        }));
+        assert!(!valid_acp_launch(&AcpLaunch {
+            command: "agent\0acp".into(),
+            args: vec![],
+        }));
+    }
 
     #[test]
     fn old_settings_deserialize_with_appearance_defaults() {
@@ -863,5 +912,8 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
             .clone()
             .unwrap_or_else(|| agent.sandbox.clone()),
         project_id: input.project_id.clone(),
+        acp: (agent.provider == "acp")
+            .then(|| agent.acp.clone())
+            .flatten(),
     }
 }

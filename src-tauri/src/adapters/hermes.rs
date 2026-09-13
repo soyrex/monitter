@@ -279,6 +279,7 @@ mod tests {
             model_settings: None,
             sandbox: "read-only".into(),
             project_id: None,
+            acp: None,
         }
     }
 

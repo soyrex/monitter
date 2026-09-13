@@ -1,3 +1,16 @@
+mod acp_discovery;
+mod acp_collaboration;
+#[cfg(test)]
+mod acp_boundary_tests;
+mod acp_probe;
+mod acp_protocol;
+mod acp_runtime;
+#[cfg(test)]
+mod acp_runtime_tests;
+#[cfg(test)]
+mod acp_stream_tests;
+mod acp_session_config;
+mod acp_transport;
 mod adapters;
 #[cfg(test)]
 mod agent_identity_tests;
@@ -143,7 +156,15 @@ pub(crate) struct Service {
 const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
 
 fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
-    format!("{}:{}:{}", task.provider, host.id, native)
+    // ACP sessions are valid only for their immutable launcher snapshot as
+    // well as their host. This prevents two differently configured ACP
+    // transports from claiming the same provider-supplied session id.
+    let launch = (task.provider == "acp")
+        .then(|| task.acp.as_ref())
+        .flatten()
+        .and_then(|launch| serde_json::to_string(launch).ok())
+        .unwrap_or_default();
+    format!("{}:{}:{}:{}", task.provider, host.id, launch, native)
 }
 
 fn provider_name(provider: &str) -> String {
@@ -152,6 +173,7 @@ fn provider_name(provider: &str) -> String {
         "opencode" => "OpenCode".into(),
         "claude" => "Claude".into(),
         "hermes" => "Hermes".into(),
+        "acp" => "ACP".into(),
         other => other.to_string(),
     }
 }
@@ -400,6 +422,10 @@ impl Service {
                 let mut agent: Agent = arg(&args, "agent")?;
                 validate_agent_avatar(agent.avatar.as_deref())?;
                 validate_collaboration_profile(&agent)?;
+                if agent.provider == "acp" && !agent.acp.as_ref().is_some_and(model::valid_acp_launch) {
+                    return Err("ACP requires a valid executable and bounded argument list.".into());
+                }
+                if agent.provider != "acp" { agent.acp = None; }
                 self.mutate(None, |s| {
                     if agent.id.trim().is_empty() {
                         agent.id = id()
@@ -576,6 +602,27 @@ impl Service {
             "probe_host" => value(tauri::async_runtime::block_on(probe_host(arg(
                 &args, "host",
             )?))?),
+            "discover_acp_agents" => {
+                let host_id = arg::<String>(&args, "hostId")?;
+                let host = self
+                    .snapshot()?
+                    .hosts
+                    .into_iter()
+                    .find(|host| host.id == host_id)
+                    .ok_or("Host was not found.")?;
+                value(acp_discovery::discover(&host)?)
+            }
+            "verify_acp_agent" => {
+                let host_id = arg::<String>(&args, "hostId")?;
+                let launch = arg(&args, "launch")?;
+                let host = self
+                    .snapshot()?
+                    .hosts
+                    .into_iter()
+                    .find(|host| host.id == host_id)
+                    .ok_or("Host was not found.")?;
+                value(acp_probe::verify(&host, &launch)?)
+            }
             "get_model_catalog" => {
                 let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
                 value(tauri::async_runtime::block_on(get_model_catalog(
@@ -924,6 +971,15 @@ impl Service {
         Ok(catalog)
     }
 
+    fn acp_task_model_catalog(&self, task_id: &str) -> Result<ModelCatalog, String> {
+        let control = self.runs.lock().map_err(|_| "Run registry unavailable")?
+            .tasks.get(task_id).cloned();
+        match control {
+            Some(control) => control.acp_model_catalog(),
+            None => acp_session_config::model_catalog(&serde_json::Value::Null),
+        }
+    }
+
     fn set_task_model_settings(
         &self,
         task_id: &str,
@@ -943,7 +999,9 @@ impl Service {
             return Err("Choose a model before setting reasoning effort or Fast mode.".into());
         }
         if !reset {
-            let catalog = self.model_catalog(&host, &task.provider, &task.cwd)?;
+            let catalog = if task.provider == "acp" {
+                self.acp_task_model_catalog(task_id)?
+            } else { self.model_catalog(&host, &task.provider, &task.cwd)? };
             let model = catalog
                 .models
                 .iter()
@@ -1226,6 +1284,8 @@ impl Service {
         let (task, _) = self.task_and_host(task_id)?;
         if task.provider == "codex" {
             control.send_user_turn_with_task(prompt, Some(&task))?;
+        } else if task.provider == "acp" {
+            acp_runtime::send_turn(&control, prompt, &task)?;
         } else {
             control.send_user_turn(prompt)?;
         }
@@ -1260,7 +1320,7 @@ impl Service {
     ) {
         if self
             .task_and_host(task_id)
-            .is_ok_and(|(task, _)| task.provider == "codex")
+            .is_ok_and(|(task, _)| matches!(task.provider.as_str(), "codex" | "acp"))
         {
             // Keep ownership reserved until the app-server reader has reaped
             // this exact child. A failed write must not leave a live process
@@ -1922,6 +1982,8 @@ impl Service {
                 let result = service.task_and_host(&task_id).and_then(|(task, _)| {
                     if task.provider == "codex" {
                         control.send_user_turn_with_task(&prompt, Some(&task))
+                    } else if task.provider == "acp" {
+                        acp_runtime::send_turn(&control, &prompt, &task)
                     } else {
                         control.send_user_turn(&prompt)
                     }
@@ -2983,6 +3045,9 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     if !known_provider(&agent.provider) || !valid_sandbox_for_provider(&agent.provider, sandbox) {
         return Err("Agent provider or sandbox policy is invalid.".into());
     }
+    if agent.provider == "acp" && !agent.acp.as_ref().is_some_and(model::valid_acp_launch) {
+        return Err("ACP agents need a valid command and argument vector.".into());
+    }
     let host = state
         .hosts
         .iter()
@@ -3426,6 +3491,43 @@ async fn probe_host(host: Host) -> Result<ProbeResult, String> {
         .map_err(|error| format!("CLI probe worker failed: {error}"))?
 }
 
+/// Discovery is deliberately desktop-owner only: it uses an already-saved
+/// host and never accepts arbitrary visitor-supplied connection settings.
+#[tauri::command]
+async fn discover_acp_agents(
+    state: State<'_, AppState>,
+    host_id: String,
+) -> Result<Vec<acp_discovery::AcpCandidate>, String> {
+    let host = state
+        .0
+        .snapshot()?
+        .hosts
+        .into_iter()
+        .find(|host| host.id == host_id)
+        .ok_or("Host was not found.")?;
+    tauri::async_runtime::spawn_blocking(move || acp_discovery::discover(&host))
+        .await
+        .map_err(|error| format!("ACP discovery worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn verify_acp_agent(
+    state: State<'_, AppState>,
+    host_id: String,
+    launch: AcpLaunch,
+) -> Result<acp_probe::ProbeResult, String> {
+    let host = state
+        .0
+        .snapshot()?
+        .hosts
+        .into_iter()
+        .find(|host| host.id == host_id)
+        .ok_or("Host was not found.")?;
+    tauri::async_runtime::spawn_blocking(move || acp_probe::verify(&host, &launch))
+        .await
+        .map_err(|error| format!("ACP verification worker failed: {error}"))?
+}
+
 #[tauri::command]
 fn save_agent(state: State<'_, AppState>, mut agent: Agent) -> Result<Snapshot, String> {
     state.0.mutate(None, |snapshot| {
@@ -3442,6 +3544,12 @@ fn save_agent(state: State<'_, AppState>, mut agent: Agent) -> Result<Snapshot, 
                 "Provider '{}' is not implemented in Monitter.",
                 agent.provider
             ));
+        }
+        if agent.provider == "acp" && !agent.acp.as_ref().is_some_and(model::valid_acp_launch) {
+            return Err("ACP agents need a valid command and argument vector.".into());
+        }
+        if agent.provider != "acp" {
+            agent.acp = None;
         }
         if !valid_sandbox_for_provider(&agent.provider, &agent.sandbox) {
             return Err(if agent.provider == "codex" {
@@ -3748,6 +3856,7 @@ impl Service {
                 model_settings: None,
                 sandbox: "read-only".into(),
                 project_id: None,
+                acp: None,
             };
             let mut messages = data
                 .snapshot
@@ -3811,6 +3920,7 @@ impl Service {
                 model_settings: None,
                 sandbox: "read-only".into(),
                 project_id: None,
+                acp: None,
             };
             let mut messages = channel.messages.iter().collect::<Vec<_>>();
             if messages.len() > 12 {
@@ -3865,6 +3975,7 @@ impl Service {
                 model_settings: None,
                 sandbox: "read-only".into(),
                 project_id: None,
+                acp: None,
             };
             (host, task, target.content.unwrap_or_default())
         };
@@ -4777,7 +4888,11 @@ async fn get_model_catalog(
             return Err("Model catalog needs a task or agent target.".into());
         };
         drop(data);
-        let mut catalog = service.model_catalog(&host, &provider, &cwd)?;
+        let mut catalog = if provider == "acp" {
+            if let Some(task_id) = target.task_id.as_deref() {
+                service.acp_task_model_catalog(task_id)?
+            } else { acp_session_config::model_catalog(&serde_json::Value::Null)? }
+        } else { service.model_catalog(&host, &provider, &cwd)? };
         if !selected.model.trim().is_empty() {
             catalog.current.model = selected.model;
             if selected.reasoning_effort.is_some() {
@@ -5062,6 +5177,8 @@ pub fn run() {
             save_host,
             delete_host,
             probe_host,
+            discover_acp_agents,
+            verify_acp_agent,
             save_agent,
             delete_agent,
             create_task,
@@ -6910,6 +7027,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     model_settings: None,
                     sandbox: "read-only".into(),
                     project_id: None,
+                    acp: None,
                 });
                 data.snapshot.projects.push(Project {
                     id: "project".into(),

@@ -13,6 +13,7 @@
   import SidebarResize from "./SidebarResize.svelte";
   import PaneNotice from "./PaneNotice.svelte";
   import SettingsPane from "./SettingsPane.svelte";
+  import AcpAgentPicker from "./AcpAgentPicker.svelte";
   import { saveSettingsPatch } from "$lib/settings-save";
   import MentionComposer from "./MentionComposer.svelte";
   import ChannelMembers from "./ChannelMembers.svelte";
@@ -3527,7 +3528,7 @@
           >Harness<select aria-label="Harness" bind:value={agentDraft.provider}
             onchange={event => { if (agentDraft) { agentDraft.sandbox = event.currentTarget.value === "codex" ? "read-only" : "harness-configured"; agentDraft.model = ""; } }}
             ><option value="codex">Codex</option><option value="claude">Claude Code</option>
-            <option value="opencode">OpenCode</option><option value="hermes">Hermes</option></select
+            <option value="opencode">OpenCode (legacy)</option><option value="hermes">Hermes</option><option value="acp">ACP — browse agents / custom</option></select
           ></label
         ><label
           >Model<input
@@ -3556,6 +3557,9 @@
           >Colour<input type="color" bind:value={agentDraft.color} /></label
         >
       </div>
+      {#if agentDraft.provider === 'acp'}
+        <AcpAgentPicker hostId={agentDraft.hostId} launch={agentDraft.acp} disabled={busy} onchange={(launch, name) => { if (agentDraft) { agentDraft.acp = launch; if (!agentDraft.name.trim() && name) agentDraft.name = name; } }}/>
+      {/if}
       <footer>
         <button
           type="button"

@@ -1,4 +1,16 @@
-export type Provider = 'codex' | 'claude' | 'opencode' | 'hermes';
+export type Provider = 'codex' | 'claude' | 'opencode' | 'hermes' | 'acp';
+/** Explicit stdio launcher, never a shell command. Copied into each new task. */
+export interface AcpLaunch { command: string; args: string[]; }
+/** Finding an executable does not prove protocol support or authentication. */
+export interface AcpCandidate {
+  id: string; name: string; description: string; sourceUrl: string;
+  integration: 'native' | 'bridge'; launch: AcpLaunch; detected: boolean;
+}
+export interface AcpProbeResult {
+  protocolVersion: number; agentName: string | null; agentVersion: string | null;
+  loadSession: boolean; resumeSession: boolean;
+  image: boolean; audio: boolean; embeddedContext: boolean;
+}
 export type Sandbox = 'read-only' | 'workspace-write' | 'harness-configured' | 'yolo';
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
@@ -15,6 +27,7 @@ export interface Agent {
   id: string; name: string; description: string; instructions: string;
   avatar: string | null;
   provider: Provider; model: string; hostId: string; cwd: string;
+  acp?: AcpLaunch | null;
   color: string; sandbox: Sandbox;
   expertise: string[]; responsibilities: string[]; skills: string[];
   collaborationEnabled: boolean;
@@ -24,6 +37,7 @@ export interface Task {
   archived: boolean; status: TaskStatus; createdAt: number; updatedAt: number;
   parentTaskId: string | null; channelId: string | null; projectId: string | null;
   hostId: string; cwd: string; provider: Provider; model: string; sandbox: Sandbox;
+  acp?: AcpLaunch | null;
   modelSettings?: ModelSettings | null;
 }
 export interface Message {

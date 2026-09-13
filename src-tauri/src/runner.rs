@@ -19,6 +19,50 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+static TEST_SSH: std::sync::OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn ssh_command(host: &Host) -> Command {
+    #[cfg(test)]
+    if let Some(path) = TEST_SSH
+        .get()
+        .and_then(|map| map.lock().ok().and_then(|map| map.get(&host.id).cloned()))
+    {
+        return Command::new(path);
+    }
+    Command::new("ssh")
+}
+
+#[cfg(test)]
+pub(crate) struct TestSshOverride {
+    host_id: String,
+}
+#[cfg(test)]
+impl Drop for TestSshOverride {
+    fn drop(&mut self) {
+        if let Some(map) = TEST_SSH.get() {
+            if let Ok(mut map) = map.lock() {
+                map.remove(&self.host_id);
+            }
+        }
+    }
+}
+#[cfg(test)]
+pub(crate) fn override_ssh_for_test(
+    host_id: &str,
+    executable: &std::path::Path,
+) -> TestSshOverride {
+    TEST_SSH
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(host_id.into(), executable.into());
+    TestSshOverride {
+        host_id: host_id.into(),
+    }
+}
+
 pub fn posix_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1318,8 +1362,18 @@ pub struct RunControl {
     app_server_turn: Mutex<Option<String>>,
     app_server_next_request: Mutex<i64>,
     app_server_turn_requests: Mutex<HashSet<i64>>,
+    acp_config_requests: Mutex<HashSet<i64>>,
+    // A later ACP turn is reserved before its optional model configuration is
+    // sent. This makes the config acknowledgement a real ordering barrier and
+    // prevents two UI sends from racing into the same resident transport.
+    acp_turn_reserved: Mutex<bool>,
+    acp_prompt_after_config: Mutex<Option<String>>,
+    acp_session_result: Mutex<Option<Value>>,
     app_server_instance_id: String,
+    acp_transport: AtomicBool,
+    acp_control: Mutex<Option<mpsc::SyncSender<String>>>,
     auxiliary: Mutex<Vec<Child>>,
+    remote_helper_cleanups: Mutex<Vec<(Host, String)>>,
     remote_supervised: bool,
 }
 
@@ -1334,14 +1388,39 @@ impl RunControl {
             app_server_turn: Mutex::new(None),
             app_server_next_request: Mutex::new(10),
             app_server_turn_requests: Mutex::new(HashSet::new()),
+            acp_config_requests: Mutex::new(HashSet::new()),
+            acp_turn_reserved: Mutex::new(false),
+            acp_prompt_after_config: Mutex::new(None),
+            acp_session_result: Mutex::new(None),
             app_server_instance_id: crate::model::id(),
+            acp_transport: AtomicBool::new(false),
+            acp_control: Mutex::new(None),
             auxiliary: Mutex::new(Vec::new()),
+            remote_helper_cleanups: Mutex::new(Vec::new()),
             remote_supervised,
         })
     }
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        if self.acp_transport.load(Ordering::SeqCst) {
+            let session = self
+                .app_server_thread
+                .try_lock()
+                .ok()
+                .and_then(|v| v.clone());
+            if let Some(session) = session {
+                let frame = crate::acp_protocol::notification(
+                    "session/cancel",
+                    serde_json::json!({"sessionId":session}),
+                );
+                let _ = self.send_control(&frame.to_string());
+            }
+            // The ACP writer owns stdin. Give already-notified permission
+            // waiters a short chance to enqueue their cancelled outcome; the
+            // reader then performs ordinary owned bounded teardown.
+            return;
+        }
         // Never hold a service/run lock behind a potentially blocked pipe
         // write. Cancellation is invoked from UI-facing paths, so detach the
         // owned stdin and let a short-lived writer attempt the advisory
@@ -1357,18 +1436,21 @@ impl RunControl {
             .try_lock()
             .ok()
             .and_then(|mut slot| slot.take());
+        let acp_transport = self.acp_transport.load(Ordering::SeqCst);
         if let Some(mut stdin) = stdin {
             thread::spawn(move || {
-                if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
-                    let frame = serde_json::json!({
-                        "id": 0,
-                        "method": "turn/interrupt",
-                        "params": {"threadId": thread_id, "turnId": turn_id}
-                    });
-                    let _ = stdin
-                        .write_all(frame.to_string().as_bytes())
-                        .and_then(|_| stdin.write_all(b"\n"))
-                        .and_then(|_| stdin.flush());
+                if !acp_transport {
+                    if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
+                        let frame = serde_json::json!({
+                            "id": 0,
+                            "method": "turn/interrupt",
+                            "params": {"threadId": thread_id, "turnId": turn_id}
+                        });
+                        let _ = stdin
+                            .write_all(frame.to_string().as_bytes())
+                            .and_then(|_| stdin.write_all(b"\n"))
+                            .and_then(|_| stdin.flush());
+                    }
                 }
                 // EOF is intentional: cancellation ends this resident
                 // transport and its reader performs bounded owned teardown.
@@ -1393,6 +1475,17 @@ impl RunControl {
     /// intentionally persistent stdin channel. This is never used to inject
     /// another user prompt into a completed or unrelated process.
     pub(crate) fn send_control(&self, frame: &str) -> Result<(), String> {
+        if self.acp_transport.load(Ordering::SeqCst) {
+            let sender = self
+                .acp_control
+                .lock()
+                .map_err(|_| "ACP control queue unavailable.".to_string())?
+                .clone()
+                .ok_or("ACP control channel is closed.")?;
+            return sender
+                .try_send(frame.into())
+                .map_err(|_| "ACP control channel is busy or closed.".into());
+        }
         if self.cancelled.load(Ordering::SeqCst) {
             return Err("Task was stopped before the approval response could be sent.".into());
         }
@@ -1497,6 +1590,165 @@ impl RunControl {
         Ok(())
     }
 
+    /// Start a later ACP prompt on the owned resident stdio transport. ACP has
+    /// no universal resume command; the session id is established by its
+    /// initialize/session handshake and all prompt data stays on stdin.
+    pub(crate) fn send_acp_turn(&self, prompt: &str, task: &Task) -> Result<(), String> {
+        {
+            let mut reserved = self
+                .acp_turn_reserved
+                .lock()
+                .map_err(|_| "ACP turn reservation lock failed.".to_string())?;
+            if *reserved {
+                return Err("An ACP turn is already pending for this task.".into());
+            }
+            *reserved = true;
+        }
+        if let Err(error) = self.send_acp_turn_reserved(prompt, task) {
+            self.clear_acp_turn_reservation();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn send_acp_turn_reserved(&self, prompt: &str, task: &Task) -> Result<(), String> {
+        let session_id = self
+            .app_server_thread
+            .lock()
+            .map_err(|_| "ACP session state lock failed.".to_string())?
+            .clone()
+            .ok_or("ACP session is not initialized.")?;
+        if task
+            .model_settings
+            .as_ref()
+            .is_some_and(|s| s.fast_mode.is_some() || s.reasoning_effort.is_some())
+        {
+            return Err(
+                "ACP has not advertised support for saved fast mode or reasoning effort settings."
+                    .into(),
+            );
+        }
+        let config = self
+            .acp_session_result
+            .lock()
+            .map_err(|_| "ACP session configuration lock failed.".to_string())?
+            .clone()
+            .unwrap_or(Value::Null);
+        let model_request =
+            crate::acp_session_config::configured_model_request(&config, &session_id, &task.model)?;
+        let request_id = {
+            let mut next = self
+                .app_server_next_request
+                .lock()
+                .map_err(|_| "ACP request lock failed.".to_string())?;
+            let id = *next;
+            *next = next.saturating_add(1);
+            id
+        };
+        self.mark_app_server_turn_request(request_id)?;
+        self.set_app_server_turn(format!("acp:{request_id}"));
+        let prompt_frame = crate::acp_protocol::request(
+            serde_json::json!(request_id),
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session_id,
+                "prompt": [{"type":"text", "text": prompt}]
+            }),
+        )
+        .to_string();
+        if let Some((method, params)) = model_request {
+            let config_id = {
+                let mut next = self
+                    .app_server_next_request
+                    .lock()
+                    .map_err(|_| "ACP request lock failed.".to_string())?;
+                let id = *next;
+                *next = next.saturating_add(1);
+                id
+            };
+            self.acp_config_requests
+                .lock()
+                .map_err(|_| "ACP config request lock failed.".to_string())?
+                .insert(config_id);
+            *self
+                .acp_prompt_after_config
+                .lock()
+                .map_err(|_| "ACP pending prompt lock failed.".to_string())? = Some(prompt_frame);
+            if let Err(error) = self.send_control(
+                &crate::acp_protocol::request(serde_json::json!(config_id), method, params)
+                    .to_string(),
+            ) {
+                let _ = self.take_acp_config_request(config_id);
+                let _ = self.take_app_server_turn_request(request_id);
+                let _ = self.take_acp_prompt_after_config();
+                return Err(error);
+            }
+            return Ok(());
+        }
+        if let Err(error) = self.send_control(&prompt_frame) {
+            let _ = self.take_app_server_turn_request(request_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_acp_session_result(&self, value: Value) {
+        if let Ok(mut slot) = self.acp_session_result.lock() {
+            *slot = Some(value);
+        }
+    }
+
+    pub(crate) fn acp_model_catalog(&self) -> Result<crate::model::ModelCatalog, String> {
+        let result = self
+            .acp_session_result
+            .lock()
+            .map_err(|_| "ACP session configuration lock failed.")?;
+        crate::acp_session_config::model_catalog(result.as_ref().unwrap_or(&Value::Null))
+    }
+
+    pub(crate) fn update_acp_config_options(&self, options: &Value) -> Result<(), String> {
+        crate::acp_session_config::parse_options(options)?;
+        let mut result = self
+            .acp_session_result
+            .lock()
+            .map_err(|_| "ACP session configuration lock failed.")?;
+        let result = result.get_or_insert_with(|| serde_json::json!({}));
+        if !result.is_object() {
+            *result = serde_json::json!({});
+        }
+        result["configOptions"] = options.clone();
+        Ok(())
+    }
+    pub(crate) fn take_acp_config_request(&self, id: i64) -> bool {
+        self.acp_config_requests
+            .lock()
+            .ok()
+            .is_some_and(|mut ids| ids.remove(&id))
+    }
+
+    pub(crate) fn take_acp_prompt_after_config(&self) -> Option<String> {
+        self.acp_prompt_after_config.lock().ok()?.take()
+    }
+
+    pub(crate) fn clear_acp_turn_reservation(&self) {
+        if let Ok(mut reserved) = self.acp_turn_reserved.lock() {
+            *reserved = false;
+        }
+        if let Ok(mut pending) = self.acp_prompt_after_config.lock() {
+            *pending = None;
+        }
+    }
+
+    pub(crate) fn mark_acp_transport(&self) {
+        self.acp_transport.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn set_acp_control(&self, sender: mpsc::SyncSender<String>) {
+        if let Ok(mut slot) = self.acp_control.lock() {
+            *slot = Some(sender);
+        }
+    }
+
     pub(crate) fn set_app_server_thread(&self, thread_id: String) {
         if let Ok(mut thread) = self.app_server_thread.lock() {
             *thread = Some(thread_id);
@@ -1542,6 +1794,20 @@ impl RunControl {
                 .as_deref()
                 == Some(turn_id)
             && !self.is_cancelled()
+    }
+
+    pub(crate) fn current_app_server_turn(&self) -> Option<String> {
+        self.app_server_turn
+            .lock()
+            .ok()
+            .and_then(|turn| turn.clone())
+    }
+
+    pub(crate) fn current_app_server_thread(&self) -> Option<String> {
+        self.app_server_thread
+            .lock()
+            .ok()
+            .and_then(|thread| thread.clone())
     }
 
     pub(crate) fn matches_app_server_thread(&self, thread_id: &str) -> bool {
@@ -1608,6 +1874,14 @@ impl RunControl {
                 terminate_bounded(child);
             }
             children.clear();
+        }
+        let cleanups = self
+            .remote_helper_cleanups
+            .lock()
+            .map(|mut entries| std::mem::take(&mut *entries))
+            .unwrap_or_default();
+        for (host, directory) in cleanups {
+            cleanup_remote_helper(&host, &directory);
         }
     }
 
@@ -1715,10 +1989,11 @@ pub(crate) fn terminate_bounded(child: &mut Child) {
     }
 }
 
-struct RemoteCollaboration {
+pub(crate) struct RemoteCollaboration {
+    host: Host,
     helper_dir: String,
-    helper_path: String,
-    endpoint: String,
+    pub(crate) helper_path: String,
+    pub(crate) endpoint: String,
     tunnel: Child,
 }
 
@@ -1745,7 +2020,7 @@ fn stage_remote_helper(
 ) -> Result<(String, String), String> {
     let source =
         fs::read(helper).map_err(|error| format!("Cannot read collaboration helper: {error}"))?;
-    let mut command = Command::new("ssh");
+    let mut command = ssh_command(host);
     add_ssh_options(&mut command, host);
     command
         .arg(ssh_target(host)?)
@@ -1854,7 +2129,7 @@ fn start_reverse_tunnel(
     control: &RunControl,
 ) -> Result<(Child, u16), String> {
     let local_port = broker_port(endpoint)?;
-    let mut command = Command::new("ssh");
+    let mut command = ssh_command(host);
     add_ssh_options(&mut command, host);
     command
         .args(["-N", "-v", "-o", "ExitOnForwardFailure=yes", "-R"])
@@ -1915,7 +2190,7 @@ fn start_reverse_tunnel(
     }
 }
 
-fn prepare_remote_collaboration(
+pub(crate) fn prepare_remote_collaboration(
     host: &Host,
     endpoint: &str,
     helper: &PathBuf,
@@ -1924,6 +2199,7 @@ fn prepare_remote_collaboration(
     let (helper_dir, helper_path) = stage_remote_helper(host, helper, control)?;
     match start_reverse_tunnel(host, endpoint, control) {
         Ok((tunnel, port)) => Ok(RemoteCollaboration {
+            host: host.clone(),
             helper_dir,
             helper_path,
             endpoint: format!("http://127.0.0.1:{port}/rpc"),
@@ -1936,11 +2212,40 @@ fn prepare_remote_collaboration(
     }
 }
 
+/// Transfers SSH-only collaboration resources to the same owned run as the
+/// provider process. `RunControl` stops the reverse tunnel before removing the
+/// remote helper, and does both during its normal bounded teardown.
+pub(crate) fn attach_remote_collaboration(remote: RemoteCollaboration, control: &RunControl) {
+    let RemoteCollaboration {
+        host,
+        helper_dir,
+        tunnel,
+        ..
+    } = remote;
+    if let Ok(mut cleanups) = control.remote_helper_cleanups.lock() {
+        cleanups.push((host, helper_dir));
+        drop(cleanups);
+        // `add_auxiliary` checks cancellation itself. If cancellation won the
+        // race it terminates the tunnel, and the registered helper is removed
+        // by the same owned teardown path.
+        control.add_auxiliary(tunnel);
+    } else {
+        let mut tunnel = tunnel;
+        terminate_bounded(&mut tunnel);
+        cleanup_remote_helper(&host, &helper_dir);
+    }
+}
+
+pub(crate) fn abort_remote_collaboration(mut remote: RemoteCollaboration) {
+    terminate_bounded(&mut remote.tunnel);
+    cleanup_remote_helper(&remote.host, &remote.helper_dir);
+}
+
 fn cleanup_remote_helper(host: &Host, helper_dir: &str) {
     let Ok(target) = ssh_target(host) else {
         return;
     };
-    let mut command = Command::new("ssh");
+    let mut command = ssh_command(host);
     add_ssh_options(&mut command, host);
     command
         .arg(target)
@@ -1977,6 +2282,13 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         // task.  Do not route it through exec's one-shot JSONL protocol.
         if task.provider == "codex" && host.kind == "local" {
             crate::codex_app_server::start(service, task_id, prompt, control);
+            return;
+        }
+        // ACP is a resident JSON-RPC transport. Never send it through the
+        // one-shot provider runner: doing so would lose its session and make
+        // a later prompt/recovery ambiguous.
+        if task.provider == "acp" {
+            crate::acp_runtime::start(service, task_id, prompt, control);
             return;
         }
         if task.provider == "claude" && host.kind != "local" {
@@ -2470,6 +2782,7 @@ mod tests {
             model_settings: None,
             sandbox: "read-only".into(),
             project_id: None,
+            acp: None,
         }
     }
 

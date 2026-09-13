@@ -36,7 +36,16 @@ export function sharedTaskIds(snapshot: Snapshot, share: Pick<ActiveOperatorShar
 }
 
 function safeAgent(agent: Agent): Agent {
-  return { ...agent, instructions: '', cwd: '', hostId: '', avatar: null };
+  // Launchers can contain owner-local paths/arguments. Never spread future
+  // owner-only agent fields into the visitor projection.
+  return {
+    id: agent.id, name: agent.name, description: agent.description,
+    instructions: '', cwd: '', hostId: '', avatar: null,
+    provider: agent.provider, model: agent.model, color: agent.color,
+    sandbox: agent.sandbox, expertise: agent.expertise,
+    responsibilities: agent.responsibilities, skills: agent.skills,
+    collaborationEnabled: agent.collaborationEnabled,
+  };
 }
 
 function safeProject(project: Project): Project {
@@ -44,7 +53,14 @@ function safeProject(project: Project): Project {
 }
 
 function safeTask(task: Task): Task {
-  return { ...task, cwd: '', hostId: '', nativeSessionId: null, sandbox: 'read-only' };
+  return {
+    id: task.id, agentId: task.agentId, title: task.title,
+    archived: task.archived, status: task.status, createdAt: task.createdAt,
+    updatedAt: task.updatedAt, parentTaskId: task.parentTaskId,
+    channelId: task.channelId, projectId: task.projectId,
+    provider: task.provider, model: task.model, modelSettings: task.modelSettings,
+    cwd: '', hostId: '', nativeSessionId: null, sandbox: 'read-only',
+  };
 }
 
 function safeMessage(message: Message): Message {

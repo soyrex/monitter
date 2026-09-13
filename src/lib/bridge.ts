@@ -3,6 +3,9 @@ import { isLanBrowser, lanInvoke } from './lan';
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Agent,
+  AcpCandidate,
+  AcpLaunch,
+  AcpProbeResult,
   Goal,
   Channel,
   CreateTaskInput,
@@ -40,6 +43,8 @@ export interface MonitterBridge {
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
   probeHost(host: Host): Promise<ProbeResult>;
+  discoverAcpAgents(hostId: string): Promise<AcpCandidate[]>;
+  verifyAcpAgent(hostId: string, launch: AcpLaunch): Promise<AcpProbeResult>;
   saveAgent(agent: Agent): Promise<Snapshot>;
   deleteAgent(id: string): Promise<Snapshot>;
   createTask(input: CreateTaskInput): Promise<Task>;
@@ -203,6 +208,8 @@ const nativeBridge: MonitterBridge = {
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
   deleteHost: (id) => invoke<Snapshot>("delete_host", { id }),
   probeHost: (host) => invoke<ProbeResult>("probe_host", { host }),
+  discoverAcpAgents: (hostId) => invoke<AcpCandidate[]>('discover_acp_agents', { hostId }),
+  verifyAcpAgent: (hostId, launch) => invoke<AcpProbeResult>('verify_acp_agent', { hostId, launch }),
   saveAgent: (agent) => invoke<Snapshot>("save_agent", { agent }),
   deleteAgent: (id) => invoke<Snapshot>("delete_agent", { id }),
   createTask: (input) => invoke<Task>("create_task", { input }),
@@ -285,6 +292,8 @@ const previewBridge: MonitterBridge = {
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
   probeHost: () => desktopOnly(),
+  discoverAcpAgents: () => desktopOnly(),
+  verifyAcpAgent: () => desktopOnly(),
   saveAgent: () => desktopOnly(),
   deleteAgent: () => desktopOnly(),
   createTask: () => desktopOnly(),
@@ -344,6 +353,8 @@ export function getBridge(): MonitterBridge {
         test.invoke("delete_host", { id }) as Promise<Snapshot>,
       probeHost: (host) =>
         test.invoke("probe_host", { host }) as Promise<ProbeResult>,
+      discoverAcpAgents: (hostId) => test.invoke('discover_acp_agents', { hostId }) as Promise<AcpCandidate[]>,
+      verifyAcpAgent: (hostId, launch) => test.invoke('verify_acp_agent', { hostId, launch }) as Promise<AcpProbeResult>,
       saveAgent: (agent) =>
         test.invoke("save_agent", { agent }) as Promise<Snapshot>,
       deleteAgent: (id) =>

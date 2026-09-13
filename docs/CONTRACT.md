@@ -21,6 +21,21 @@ No fake conversations, progress, token counts, host connections or model replies
 - `save_host { host: Host }` -> Snapshot (empty id creates)
 - `delete_host { id: string }` -> Snapshot (reject referenced/default local host)
 - `probe_host { host: Host }` -> ProbeResult (unsaved settings allowed; versions keyed provider)
+- `discover_acp_agents { hostId: string }` -> `AcpCandidate[]` for a saved host.
+  Owner desktop/LAN only; not a visitor or mobile-controller command. Discovery
+  locates reviewed executable names in known/PATH directories without launching
+  agents, installing packages, reading credentials, or making model requests.
+  Each candidate contains a preset ID/name/description/source URL, native-or-bridge
+  label, `{command,args}` launcher and `detected` flag. Detected does not mean
+  authenticated or protocol-verified. SSH connection failures reject visibly,
+  rather than being reported as an empty list of installed agents.
+- `verify_acp_agent { hostId: string, launch: { command: string, args: string[] } }`
+  -> `AcpProbeResult` for a saved host. Owner desktop/LAN only, not shared visitors
+  or mobile controllers. Explicitly launches the configured executable and sends
+  only ACP `initialize`, bounded to 20 seconds. Never authenticates, creates a
+  session, prompts a model, or services filesystem/terminal callbacks. Returns
+  negotiated version, safe agent name/version and advertised recovery/content
+  capabilities; it does not prove login or model-turn functionality.
 - `save_agent { agent: Agent }` -> Snapshot (empty id creates)
 - `delete_agent { id: string }` -> Snapshot (reject if tasks exist)
 - `save_project { project: Project }` -> Snapshot (empty id creates)
@@ -162,6 +177,22 @@ view. Archived chats stay out of these ordinary lists and remain discoverable th
 Projects participate in the switcher; controls include new project and sidebar view selection.
 
 ## Runtime and persistence
+
+ACP is a generic transport (`provider: "acp"`), not an agent-brand enum. Its
+optional `Agent.acp` / `Task.acp` launcher contains an executable `command` and
+an exact string-array `args`, never a shell command. Older records omit it.
+New ACP tasks copy the agent's launcher; editing the agent does not retarget an
+existing chat. Non-ACP tasks do not carry an ACP launcher. Session ownership
+distinguishes ACP launch configurations. ACP uses `harness-configured` permissions;
+it is not an OS sandbox or a blanket permission bypass.
+
+Agent settings offer searchable presets and a custom ACP launcher. The catalog
+is convenience metadata, not a restriction on which compatible executables can
+be used. Bridges (including Pi ACP) are labelled separately from native ACP.
+Pi's native `--mode rpc` must never be treated as ACP. Existing OpenCode tasks
+remain on their prior adapter; OpenCode ACP is selected explicitly for new chats.
+Launcher paths/arguments remain owner-only and are omitted from shared-visitor
+agent and task projections.
 
 Local Codex chats use one owned `codex app-server` process per task over private stdin/stdout
 JSON-RPC. Initialize once, create/resume the saved native thread, and start each user turn on that
