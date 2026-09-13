@@ -55,6 +55,7 @@ async function rateKey(request: Request): Promise<string> {
 
 function allowedOrigin(value: string | null): string | null {
   if (!value) return null;
+  if (value === 'https://share.monitter.com') return value;
   if (value === 'https://appassets.androidplatform.net' || value === 'tauri://localhost' || value === 'http://tauri.localhost' || value === 'https://tauri.localhost') return value;
   try {
     const url = new URL(value);
@@ -155,6 +156,10 @@ function send(socket: WebSocket, value: object): void {
   try { socket.send(JSON.stringify(value)); } catch { close(socket, 1011, 'send failed'); }
 }
 
+export function openSockets(sockets: WebSocket[]): WebSocket[] {
+  return sockets.filter(socket => socket.readyState === WebSocket.OPEN);
+}
+
 export class RelayRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -171,7 +176,7 @@ export class RelayRoom extends DurableObject<Env> {
       return new Response('Invalid relay route.', { status: 400 });
     }
 
-    const sockets = this.ctx.getWebSockets();
+    const sockets = openSockets(this.ctx.getWebSockets());
     if (sockets.length >= 2) return new Response('Room unavailable.', { status: 409 });
     // A role is reserved as soon as its WebSocket is upgraded. This prevents a
     // concurrent duplicate from racing the later join message.
@@ -245,7 +250,7 @@ export class RelayRoom extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     const now = Date.now();
-    for (const socket of this.ctx.getWebSockets()) {
+    for (const socket of openSockets(this.ctx.getWebSockets())) {
       const state = attachment(socket);
       if (!state) { close(socket, 1008, 'invalid connection'); continue; }
       const deadline = state.joined ? state.openedAt + PAIRING_TTL_MS : state.openedAt + JOIN_TIMEOUT_MS;
@@ -255,11 +260,11 @@ export class RelayRoom extends DurableObject<Env> {
   }
 
   private joinedSockets(): WebSocket[] {
-    return this.ctx.getWebSockets().filter(socket => attachment(socket)?.joined);
+    return openSockets(this.ctx.getWebSockets()).filter(socket => attachment(socket)?.joined);
   }
 
   private async scheduleDeadline(): Promise<void> {
-    const states = this.ctx.getWebSockets().map(socket => attachment(socket)).filter((state): state is Attachment => state !== null);
+    const states = openSockets(this.ctx.getWebSockets()).map(socket => attachment(socket)).filter((state): state is Attachment => state !== null);
     if (states.length === 2 && states.every(state => state.joined)) return this.ctx.storage.deleteAlarm();
     if (states.length === 0) return this.ctx.storage.deleteAlarm();
     const deadline = Math.min(...states.map(state => state.openedAt + (state.joined ? PAIRING_TTL_MS : JOIN_TIMEOUT_MS)));

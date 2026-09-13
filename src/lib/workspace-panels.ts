@@ -3,6 +3,11 @@ import { writable } from 'svelte/store';
 // These panels live at the route root so their secure sessions survive
 // navigation, sidebar changes, and closing the Settings surface.
 export const workspaceShareOpen = writable(false);
+/**
+ * A task-scoped request is consumed by the root-owned share panel. Keeping it
+ * here lets that panel (and its encrypted session) outlive a chat-pane close.
+ */
+export const workspaceShareTaskId = writable<string | null>(null);
 export const remoteControlOpen = writable(false);
 
 // One root-owned listener, presented in a visible Settings pane. Prefer the
