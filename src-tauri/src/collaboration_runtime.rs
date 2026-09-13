@@ -96,6 +96,22 @@ impl Service {
         Ok(Some(grant))
     }
 
+    /// ACP reload may only reuse a grant that was created for this exact
+    /// task's prior live turn. It cannot create a new broker capability while
+    /// the durable task is completed or interrupted.
+    pub(crate) fn existing_collaboration_grant(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<SessionGrant>, String> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err("Monitter is shutting down.".into());
+        }
+        self.collaboration_grants
+            .lock()
+            .map_err(|_| "Collaboration grant lock failed.".to_string())
+            .map(|grants| grants.get(task_id).cloned())
+    }
+
     pub(crate) fn revoke_collaboration_grant(&self, task_id: &str) {
         let grant = self
             .collaboration_grants
