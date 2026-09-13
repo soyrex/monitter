@@ -96,5 +96,6 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
     collaborations: [],
     queuedMessages: [],
     approvalRequests: [],
+    approvalRules: [],
   };
 }

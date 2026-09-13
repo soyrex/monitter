@@ -99,6 +99,7 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         collaborations: snapshot.collaborations.clone(),
         queued_messages: snapshot.queued_messages.clone(),
         approval_requests: snapshot.approval_requests.clone(),
+        approval_rules: snapshot.approval_rules.clone(),
     }
 }
 

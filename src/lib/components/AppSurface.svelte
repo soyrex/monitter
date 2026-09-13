@@ -88,6 +88,7 @@
     AttachmentTarget,
     AttachmentFileData,
     ApprovalRequest,
+    ApprovalRule,
     Sandbox,
     RunEvent,
   } from "$lib/types";
@@ -121,6 +122,7 @@
   import { terminalSessions, registerTerminal, closeTerminalSession, recentTerminalOutput } from '$lib/terminal-runtime';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ApprovalRequestCard from '$lib/components/ApprovalRequestCard.svelte';
+  import SavedApprovalRules from '$lib/components/SavedApprovalRules.svelte';
   import {readBrowserFile,thumbnail,nativeBlob} from '$lib/attachment-files';
   import { floating } from "$lib/floating";
   import { loadWorkspaceSet, remapTerminalIds, saveWorkspaceSet, taskBelongsToWorkspace, workspaceForTask, type PersistedWorkspace, type PersistedWorkspaceSet, type WorkspaceKey } from '$lib/workspace-persistence';
@@ -498,6 +500,10 @@
   const resolvedApprovalRequests = $derived(selectedApprovalRequests
     .filter(request => request.status !== 'pending')
     .sort((left, right) => (left.resolvedAt ?? left.createdAt) - (right.resolvedAt ?? right.createdAt)));
+  const approvalRules = $derived(snapshot?.approvalRules ?? []);
+  const selectedApprovalRules = $derived(selectedTask
+    ? approvalRules.filter(rule => rule.agentId === selectedTask.agentId && rule.hostId === selectedTask.hostId && rule.cwd === selectedTask.cwd && rule.provider === selectedTask.provider)
+    : []);
   const taskOptimisticMessages = $derived(optimisticMessages.filter(message => message.kind === 'task' && message.targetId === selectedTaskId));
   const conversationItems = $derived(groupConversationActivity(
     [...messages, ...taskOptimisticMessages.map(message => ({
@@ -514,7 +520,7 @@
   }
   function approvalEventText(request: ApprovalRequest) {
     const subject = approvalSubject(request);
-    if (request.status === 'approved') return request.input ? `Submitted input for ${subject}` : `Approved ${subject}`;
+    if (request.status === 'approved') return request.input ? `Submitted input for ${subject}` : request.ruleId ? `Approved by saved rule: ${subject}` : request.decision === 'approve_always' ? `Always approved ${subject}` : `Approved ${subject}`;
     if (request.status === 'denied') return `Denied ${subject}`;
     if (request.status === 'expired') return `Approval expired for ${subject}`;
     return `Approval unavailable for ${subject}`;
@@ -815,7 +821,7 @@
       ...fallback, ...saved,
       overviewOpen: saved.overviewOpen !== false,
       settingsOpen: saved.settingsOpen === true,
-      settingsCategory: ['profile','appearance','typography','behaviour','conversation','agents','directory','lan','remote'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
+      settingsCategory: ['profile','appearance','typography','behaviour','conversation','approvals','agents','directory','lan','remote'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openEmptyIds: Array.isArray(saved.openEmptyIds) ? saved.openEmptyIds : fallback.openEmptyIds,
       openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,
@@ -1461,7 +1467,7 @@
       busy = false;
     }
   }
-  async function resolveApproval(request: ApprovalRequest, decision: 'approve_once' | 'deny') {
+  async function resolveApproval(request: ApprovalRequest, decision: 'approve_once' | 'approve_always' | 'deny') {
     if (busy || request.status !== 'pending') return;
     resolvingApprovalId = request.id;
     try {
@@ -1469,6 +1475,13 @@
     } finally {
       resolvingApprovalId = null;
     }
+  }
+  let revokingApprovalRuleId = $state<string | null>(null);
+  async function revokeApprovalRule(rule: ApprovalRule) {
+    if (busy || revokingApprovalRuleId) return;
+    revokingApprovalRuleId = rule.id;
+    try { await run(() => bridge.revokeApprovalRule(rule.id), 'Saved approval revoked.'); }
+    finally { revokingApprovalRuleId = null; }
   }
   async function resolveInput(request: ApprovalRequest, response: unknown) {
     if (busy || request.status !== 'pending') return;
@@ -2949,7 +2962,7 @@
         use hosts, agents, and tasks.
       </div>{/if}
     {#if settingsOpen && snapshot}<div class="settings-surface" class:settings-hidden={pane!=='settings'}>
-      <SettingsPane settings={snapshot.settings} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
+      <SettingsPane settings={snapshot.settings} approvalRules={approvalRules} agents={snapshot.agents} hosts={snapshot.hosts} revokingRuleId={revokingApprovalRuleId} onrevokeRule={revokeApprovalRule} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
     </div>{/if}
     {#if !snapshot}<div class="loading">
         <LoaderCircle size={22} /><span>Loading your workspace…</span
@@ -3260,7 +3273,8 @@
             </div>
             <div class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
             <section class="detail-scroll approval-history-panel" class:hidden={detailTab!=='approvals'} aria-label="Approval history">
-              <header><h2>Approvals</h2><p>Resolved requests for this chat.</p></header>
+              <header><h2>Approvals</h2><p>Saved rules for this agent, host and folder, plus this chat's resolved requests.</p></header>
+              {#if selectedApprovalRules.length}<section class="saved-approvals-sidebar" aria-label="Saved approvals for this chat"><h3>Saved rules</h3><p>Revoking affects future requests only; work already approved keeps running.</p><SavedApprovalRules rules={selectedApprovalRules} agents={snapshot.agents} hosts={snapshot.hosts} agentId={selectedTask.agentId} hostId={selectedTask.hostId} cwd={selectedTask.cwd} onrevoke={revokeApprovalRule} revokingId={revokingApprovalRuleId} compact={compactDetail}/></section>{/if}
               {#each resolvedApprovalRequests as request (request.id)}<div id={`approval-history-${paneId}-${request.id}`} tabindex="-1"><ApprovalRequestCard {request}/></div>{:else}<p class="detail-empty">No resolved approvals for this chat.</p>{/each}
             </section>
             <div class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || (detailTab==='git' && gitState.repository===true)}>
@@ -4872,6 +4886,7 @@
   .approval-history-panel > header { margin:0 0 12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
   .approval-history-panel h2 { margin:0; color:var(--ink); font-size:calc(14px * var(--interface-font-ratio, 1)); }
   .approval-history-panel header p { margin:4px 0 0; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
+  .saved-approvals-sidebar { display:grid; gap:7px; margin:0 0 12px; padding:10px; border:1px solid color-mix(in srgb, var(--accent) 25%, var(--line)); border-radius:8px; background:color-mix(in srgb, var(--accent) 5%, var(--panel)); }.saved-approvals-sidebar h3 { margin:0; font-size:calc(12px * var(--interface-font-ratio, 1)); }.saved-approvals-sidebar > p { margin:0; color:var(--muted); font-size:calc(10px * var(--interface-font-ratio, 1)); line-height:1.35; }
   .approval-history-panel :global(.approval-request) { margin:0 0 11px; }
   .approval-history-panel > div:focus { outline:2px solid var(--accent); outline-offset:3px; border-radius:8px; }
   .run-detail dl {
@@ -5354,7 +5369,8 @@
   @keyframes detail-enter { from { transform: translateX(100%); } to { transform: translateX(0); } }
   .app-shell:not(.embedded):not(.sidebar-collapsed) { grid-template-columns: min(40vw, max(230px, var(--left-sidebar-width, 252px))) minmax(0, 1fr); }
   .task-layout:not(.detail-hidden) { grid-template-columns: minmax(0, 1fr) min(40vw, max(260px, var(--right-sidebar-width, 292px)), calc(100% - 300px)); }
-  .compact-detail .run-detail { width: min(40vw, max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
+  /* An overlay must use the whole task layout, not its absent second grid column. */
+  .compact-detail .run-detail { grid-area: auto; width: min(max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
   @media (prefers-reduced-motion: reduce) { .compact-detail .run-detail { animation: none; } }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }

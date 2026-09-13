@@ -2540,6 +2540,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                                 summary,
                                                 detail,
                                                 risk,
+                                                raw_input: Some(
+                                                    serde_json::json!({"rawInput": input}),
+                                                ),
                                             },
                                         );
                                         let allow = match request.and_then(|request| {
@@ -2553,7 +2556,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                             }
                                             decision
                                         }) {
-                                            Ok(ApprovalDecision::ApproveOnce) => true,
+                                            Ok(ApprovalDecision::ApproveOnce)
+                                            | Ok(ApprovalDecision::ApproveAlways) => true,
                                             Ok(ApprovalDecision::Deny) | Err(_) => false,
                                         };
                                         let frame = adapters::claude::permission_response(
@@ -2592,6 +2596,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                                     summary,
                                                     detail,
                                                     risk: "unknown".into(),
+                                                    raw_input: None,
                                                 },
                                             );
                                             match request.and_then(|request| {
@@ -2605,7 +2610,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                                 }
                                                 decision
                                             }) {
-                                                Ok(ApprovalDecision::ApproveOnce) => {
+                                                Ok(ApprovalDecision::ApproveOnce)
+                                                | Ok(ApprovalDecision::ApproveAlways) => {
                                                     let frame = serde_json::json!({
                                                         "type": "approval_response",
                                                         "request_id": request_id,

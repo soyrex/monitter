@@ -589,6 +589,29 @@ fn read_bounded_line<R: std::io::Read>(
         .map_err(|_| "Codex app-server emitted non-UTF-8 output.".into())
 }
 
+fn remembered_file_change_item(item: &Value) -> Option<Value> {
+    let has_change = item
+        .get("changes")
+        .and_then(Value::as_array)
+        .is_some_and(|changes| !changes.is_empty())
+        || item
+            .get("patch")
+            .and_then(Value::as_str)
+            .is_some_and(|patch| !patch.trim().is_empty());
+    if !has_change {
+        return None;
+    }
+    let mut item = crate::strip_known_approval_envelope(item);
+    if let Some(object) = item.as_object_mut() {
+        // Item lifecycle labels identify the streamed envelope, not the
+        // requested patch. Do not recurse into changes/tool arguments.
+        for key in ["id", "status", "phase", "completedAtMs"] {
+            object.remove(key);
+        }
+    }
+    Some(item)
+}
+
 fn handle_server_request(
     service: Arc<Service>,
     task_id: String,
@@ -793,6 +816,7 @@ fn handle_server_request(
                     summary: "Codex needs your input".into(),
                     detail: params.to_string(),
                     risk: "unknown".into(),
+                    raw_input: None,
                 },
                 Some(InteractionInput {
                     kind: "questions".into(),
@@ -871,6 +895,7 @@ fn handle_server_request(
                         .into(),
                     detail: params.to_string(),
                     risk: "unknown".into(),
+                    raw_input: None,
                 },
                 Some(interaction),
             );
@@ -896,7 +921,7 @@ fn handle_server_request(
             }
             return;
         }
-        let (tool, summary, detail, risk) = match method {
+        let (tool, summary, detail, risk, raw_input) = match method {
             "item/commandExecution/requestApproval" | "execCommandApproval" => (
                 "Command execution".into(),
                 params
@@ -907,6 +932,11 @@ fn handle_server_request(
                     .unwrap_or_else(|| "Codex requests command approval".into()),
                 params.to_string(),
                 "high".into(),
+                params
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|_| params.clone()),
             ),
             "item/fileChange/requestApproval" | "applyPatchApproval" => {
                 let item = params
@@ -916,8 +946,9 @@ fn handle_server_request(
                 (
                     "File change".into(),
                     "Codex requests file-change approval".into(),
-                    json!({"request":params,"item":item}).to_string(),
+                    json!({"request":params,"item":item.clone()}).to_string(),
                     "medium".into(),
+                    item.as_ref().and_then(remembered_file_change_item).map(|item| json!({"request":crate::strip_known_approval_envelope(&params),"item":item})),
                 )
             }
             "item/permissions/requestApproval" => (
@@ -925,6 +956,14 @@ fn handle_server_request(
                 "Codex requests additional permissions".into(),
                 params.to_string(),
                 "high".into(),
+                params
+                    .get("permissions")
+                    .filter(|value| {
+                        !value.is_null()
+                            && (!value.is_object()
+                                || !value.as_object().is_some_and(|object| object.is_empty()))
+                    })
+                    .map(|_| params.clone()),
             ),
             _ => {
                 let _ = send(
@@ -946,6 +985,7 @@ fn handle_server_request(
                 summary,
                 detail,
                 risk,
+                raw_input,
             },
             None,
         ) {
@@ -1629,5 +1669,16 @@ mod tests {
             assert_eq!(detail["id"], "compact-1");
             assert_eq!(detail["monitterPhase"], phase);
         }
+    }
+
+    #[test]
+    fn remembered_file_change_requires_content_and_keeps_change_ids() {
+        assert!(remembered_file_change_item(&json!({"id":"envelope","status":"pending"})).is_none());
+        let item = remembered_file_change_item(&json!({
+            "id":"envelope", "status":"pending", "changes":[{"path":"a.rs","toolArgumentId":"semantic-id"}]
+        })).unwrap();
+        assert!(item.get("id").is_none());
+        assert!(item.get("status").is_none());
+        assert_eq!(item["changes"][0]["toolArgumentId"], "semantic-id");
     }
 }

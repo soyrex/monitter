@@ -266,10 +266,49 @@ pub struct ApprovalRequest {
     pub resolved_at: Option<i64>,
     #[serde(default)]
     pub decision: Option<String>,
+    /// Whether this concrete tool action has enough stable, non-interaction
+    /// input to be safely remembered.  Missing fields from older records are
+    /// intentionally treated as false.
+    #[serde(default)]
+    pub rememberable: bool,
+    #[serde(default)]
+    pub rule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) approval_scope: Option<crate::ApprovalScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<InteractionInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<serde_json::Value>,
+}
+
+/// A user-owned, revocable exact-action approval.  The scope fingerprints are
+/// persisted for matching, but the UI only needs the small descriptive fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRule {
+    pub id: String,
+    pub agent_id: String,
+    pub host_id: String,
+    pub provider: String,
+    pub cwd: String,
+    pub tool: String,
+    pub summary: String,
+    pub detail: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_used_at: Option<i64>,
+    #[serde(default)]
+    pub use_count: u64,
+    /// Hash-like canonical scope data. Kept private to the app state and never
+    /// treated as a provider permission grant.
+    #[serde(default)]
+    pub host_fingerprint: String,
+    #[serde(default)]
+    pub launcher_fingerprint: String,
+    #[serde(default)]
+    pub action_fingerprint: String,
+    #[serde(default)]
+    pub sandbox: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -449,6 +488,8 @@ pub struct Snapshot {
     pub queued_messages: Vec<QueuedMessage>,
     #[serde(default)]
     pub approval_requests: Vec<ApprovalRequest>,
+    #[serde(default)]
+    pub approval_rules: Vec<ApprovalRule>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -606,6 +647,7 @@ pub fn default_snapshot() -> Snapshot {
         collaborations: vec![],
         queued_messages: vec![],
         approval_requests: vec![],
+        approval_rules: vec![],
         settings: Settings {
             user_name: String::new(),
             terminal_font_size: default_terminal_font_size(),

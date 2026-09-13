@@ -440,6 +440,7 @@ mod tests {
                     summary: "Run fixture".into(),
                     detail: "fixture".into(),
                     risk: "high".into(),
+                    raw_input: None,
                 },
                 None,
             )
@@ -474,6 +475,7 @@ mod tests {
                     summary: "Run fixture".into(),
                     detail: "fixture".into(),
                     risk: "high".into(),
+                    raw_input: None,
                 },
                 None,
             )

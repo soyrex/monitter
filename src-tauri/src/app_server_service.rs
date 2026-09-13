@@ -327,6 +327,7 @@ impl Service {
         interaction: Option<InteractionInput>,
     ) -> Result<ApprovalRequest, String> {
         let task_id = input.task_id.clone();
+        let scope = self.approval_scope(&input)?;
         self.app_server_mutate(&task_id, control, Some(turn_id), |data, _| {
             if let Some(existing) = data
                 .snapshot
@@ -349,6 +350,9 @@ impl Service {
                 created_at: now(),
                 resolved_at: None,
                 decision: None,
+                rememberable: scope.is_some() && interaction.is_none(),
+                rule_id: None,
+                approval_scope: scope,
                 input: interaction,
                 response: None,
             };

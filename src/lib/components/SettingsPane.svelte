@@ -1,18 +1,24 @@
 <script lang="ts">
   import { Bot, Users, Check, LoaderCircle, MessageSquare, Palette, ShieldCheck, Smartphone, Type, UserRound } from "@lucide/svelte";
-  import type { Settings } from "$lib/types";
+  import type { Agent, ApprovalRule, Host, Settings } from "$lib/types";
   import { getBridge } from '$lib/bridge';
   import { isLanBrowser } from '$lib/lan';
   import { remoteControlOpen, setRemoteControlTarget } from '$lib/workspace-panels';
   import LanSettings from './LanSettings.svelte';
+  import SavedApprovalRules from './SavedApprovalRules.svelte';
 
-  type Category = "profile" | "appearance" | "typography" | "behaviour" | "conversation" | "agents" | "directory" | "lan" | "remote";
+  type Category = "profile" | "appearance" | "typography" | "behaviour" | "conversation" | "approvals" | "agents" | "directory" | "lan" | "remote";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
   type LineHeightKey = "chatLineHeight" | "terminalLineHeight";
 
   let {
     settings,
+    approvalRules = [],
+    agents = [],
+    hosts = [],
+    revokingRuleId = null,
+    onrevokeRule,
     agentEditor,
     agentDirectory,
     headerActions,
@@ -22,6 +28,11 @@
     active = true,
   }: {
     settings: Settings;
+    approvalRules?: ApprovalRule[];
+    agents?: Agent[];
+    hosts?: Host[];
+    revokingRuleId?: string | null;
+    onrevokeRule?: (rule: ApprovalRule) => void;
     headerActions?: import("svelte").Snippet;
     agentDirectory?: import("svelte").Snippet;
     agentEditor?: import("svelte").Snippet;
@@ -42,6 +53,7 @@
     { id: "appearance", label: "Appearance", detail: "Theme, accent and panes", icon: Palette },
     { id: "typography", label: "Typography", detail: "Fonts and base sizes", icon: Type },
     { id: "behaviour", label: "Permissions & behaviour", detail: "Focus and busy messages", icon: ShieldCheck },
+    { id: "approvals", label: "Approvals", detail: "Saved always-approve rules", icon: ShieldCheck },
     { id: "conversation", label: "Conversation", detail: "Messages and activity", icon: MessageSquare },
   ];
   const fonts: { key: FontKey; sizeKey: FontSizeKey; size: number; label: string; fallback: string }[] = [
@@ -141,6 +153,7 @@
         {:else if activeCategory === "remote"}<span>Desktop pairing</span>
         {:else if activeCategory === "directory"}<span>Browse available agents</span>
       {:else if activeCategory === "agents"}Save changes with Save agent
+        {:else if activeCategory === "approvals"}<span>Rules update immediately</span>
         {:else if pending > 0}<LoaderCircle class="spin" size={14} /> Saving…
         {:else if saveError}<span class="save-error">Could not save</span>
         {:else if savedAt}<Check size={14} /> Saved{:else}Changes save automatically{/if}
@@ -164,6 +177,13 @@
       <div class="section-stack">{#if agentDirectory}{@render agentDirectory()}{/if}</div>
     {:else if activeCategory === "agents"}
       <div class="section-stack">{#if agentEditor}{@render agentEditor()}{/if}</div>
+    {:else if activeCategory === "approvals"}
+      <div class="section-stack" data-approval-rules-settings>
+        <section class="setting-card" aria-labelledby="saved-approvals-heading">
+          <div class="card-heading"><h2 id="saved-approvals-heading">Saved approvals</h2><p>These rules only cover the exact agent, host, folder and launch identity that created them. Revoking a rule affects future requests only; work already approved keeps running.</p></div>
+          <SavedApprovalRules rules={approvalRules} {agents} {hosts} onrevoke={onrevokeRule} revokingId={revokingRuleId}/>
+        </section>
+      </div>
     {:else if activeCategory === "profile"}
       <div class="section-stack">
         <section class="setting-card" aria-labelledby="your-name-heading">

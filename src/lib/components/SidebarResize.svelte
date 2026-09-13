@@ -11,8 +11,9 @@
   function bounds(){
     const parent=handle?.parentElement;
     const area=side==='right'?parent?.closest('.task-layout'):null;
-    const remaining=area?area.getBoundingClientRect().width-(area.classList.contains('compact-detail')?24:300):Infinity;
-    return Math.max(0,Math.min(window.innerWidth*.4,remaining));
+    const overlay=area?.classList.contains('compact-detail')??false;
+    const remaining=area?area.getBoundingClientRect().width-(overlay?24:300):Infinity;
+    return Math.max(0,Math.min(window.innerWidth*(overlay?1:.4),remaining));
   }
   function apply(value:number){maximum=bounds();expandedWidth=Math.min(maximum,Math.max(minimum,value));width=expandedWidth;document.documentElement.style.setProperty(variable,`${expandedWidth}px`);}
   function save(){try{localStorage.setItem(key,String(expandedWidth));}catch{/* The current width still applies when storage is unavailable. */}}

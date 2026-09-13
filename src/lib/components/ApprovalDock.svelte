@@ -7,7 +7,7 @@
     requests: ApprovalRequest[];
     disabled?: boolean;
     resolvingId?: string | null;
-    onresolve?: (request: ApprovalRequest, decision: 'approve_once' | 'deny') => void;
+    onresolve?: (request: ApprovalRequest, decision: 'approve_once' | 'approve_always' | 'deny') => void;
     oninput?: (request: ApprovalRequest, response: unknown) => void;
   } = $props();
 
@@ -81,6 +81,7 @@
       {#if reason}<p class="detail">{reason}</p>{:else if plainDetail}<p class="detail">{plainDetail}</p>{/if}
       {#if action?.permissions}<p class="detail">Permissions requested: {permissionSummary(action.permissions)}</p>{/if}
       {#if action?.changes}<p class="detail">Proposed changes are included in the request.</p>{/if}
+      {#if !request.input && request.rememberable === true}<p class="scope-note">Remembers this exact action for this agent, host and folder. Revoke it in Settings → Approvals.</p>{/if}
       {#if action}<details><summary>Technical request details</summary><pre>{JSON.stringify(action, null, 2)}</pre></details>{/if}
       {#if request.input}
         {#key request.id}<HarnessInput input={request.input} formId={inputFormId} hideSubmit={true} disabled={disabled || resolving || !oninput} onsubmit={response => oninput?.(request, response)}/>{/key}
@@ -89,7 +90,9 @@
 
     <div class="dock-actions">
       {#if request.input}<button class="approve" type="submit" form={inputFormId} disabled={disabled || resolving || !oninput || !inputSubmitSupported}><Check size={17}/>Submit response</button>
-      {:else}<button class="approve" disabled={disabled || resolving || !onresolve} onclick={() => onresolve?.(request, 'approve_once')}><Check size={17}/>Approve once</button>{/if}
+      {:else}<button class="approve" disabled={disabled || resolving || !onresolve} onclick={() => onresolve?.(request, 'approve_once')}><Check size={17}/>Approve once</button>
+        {#if request.rememberable === true}<button class="always" disabled={disabled || resolving || !onresolve} onclick={() => onresolve?.(request, 'approve_always')}><Check size={17}/>Always approve</button>{/if}
+      {/if}
       <button class="deny" disabled={disabled || resolving || !onresolve} onclick={() => onresolve?.(request, 'deny')}><X size={17}/>Deny</button>
       {#if resolving}<span class="resolving" role="status">Sending your response…</span>{/if}
     </div>
@@ -103,7 +106,7 @@
   .heading { min-width: 0; display: grid; gap: 1px; }.heading strong { font-size: calc(13px * var(--interface-font-ratio, 1)); }.heading span { color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); text-transform: capitalize; }
   .request-switcher { margin-left: auto; display: flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }.request-switcher button { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
   .dock-body { flex: 1 1 auto; min-height: 0; max-height: min(220px, calc(100dvh - var(--approval-dock-reserve, 148px) - 108px)); padding: 0 12px; overflow: auto; overscroll-behavior: contain; }.summary { margin: 11px 0 7px; font-weight: 650; line-height: 1.35; }.detail { margin: 8px 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }.command-preview, details pre { margin: 8px 0; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 var(--mono); }.command-preview { max-height: 110px; overflow: auto; } details { margin: 10px 0; color: var(--muted); font-size: 11px; } details pre { max-height: 180px; overflow: auto; }
-  .dock-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-top: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line)); background: color-mix(in srgb, var(--accent) 6%, var(--panel)); }.dock-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 7px; font: 650 calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, "IBM Plex Sans", sans-serif); }.approve { border-color: var(--accent) !important; background: var(--accent); color: var(--on-accent); }.deny { color: #a63f38; background: var(--panel); }.dock-actions button:disabled { opacity: .55; cursor: wait; }.resolving { color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
+  .scope-note { margin:8px 0; color:var(--accent-ink); font-size:calc(11px * var(--interface-font-ratio, 1)); line-height:1.4; }.dock-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-top: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line)); background: color-mix(in srgb, var(--accent) 6%, var(--panel)); }.dock-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 7px; font: 650 calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, "IBM Plex Sans", sans-serif); }.approve { border-color: var(--accent) !important; background: var(--accent); color: var(--on-accent); }.always { border-color:color-mix(in srgb, var(--accent) 55%, var(--line)) !important; background:color-mix(in srgb, var(--accent) 15%, var(--panel)); color:var(--accent-ink); }.deny { color: #a63f38; background: var(--panel); }.dock-actions button:disabled { opacity: .55; cursor: wait; }.resolving { color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   @media (max-width: 560px) { .approval-dock { width: min(var(--chat-content-max-width, 900px), calc(100% - 2 * var(--chat-side-padding, 12px))); margin-bottom: 6px; }.dock-header { padding-inline: 10px; }.heading span { font-size: 9px; }.dock-actions { padding: 8px 10px; }.dock-actions button { flex: 1; }.request-switcher button { width: 30px; height: 30px; } }
   @media (forced-colors: active) { .approval-dock { border-color: Highlight; }.approve { color: HighlightText; background: Highlight; } }

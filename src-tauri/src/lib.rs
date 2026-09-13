@@ -1,15 +1,15 @@
-mod acp_discovery;
-mod acp_collaboration;
 #[cfg(test)]
 mod acp_boundary_tests;
+mod acp_collaboration;
+mod acp_discovery;
 mod acp_probe;
 mod acp_protocol;
 mod acp_runtime;
 #[cfg(test)]
 mod acp_runtime_tests;
+mod acp_session_config;
 #[cfg(test)]
 mod acp_stream_tests;
-mod acp_session_config;
 mod acp_transport;
 mod adapters;
 #[cfg(test)]
@@ -38,6 +38,7 @@ mod terminal;
 
 use model::*;
 use runner::Parsed;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     io::Read,
@@ -98,11 +99,15 @@ pub(crate) struct CreateApprovalRequest {
     pub summary: String,
     pub detail: String,
     pub risk: String,
+    /// Provider-normalized action data, never a display title.  `None` means
+    /// the provider did not give us enough semantics to remember safely.
+    pub raw_input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalDecision {
     ApproveOnce,
+    ApproveAlways,
     Deny,
 }
 
@@ -110,20 +115,102 @@ impl ApprovalDecision {
     fn from_stored(value: &str) -> Result<Self, String> {
         match value {
             "approve_once" => Ok(Self::ApproveOnce),
+            "approve_always" => Ok(Self::ApproveAlways),
             "deny" => Ok(Self::Deny),
-            _ => Err("Approval decision must be approve_once or deny.".into()),
+            _ => Err("Approval decision must be approve_once, approve_always or deny.".into()),
         }
     }
 
     fn stored(self) -> &'static str {
         match self {
             Self::ApproveOnce => "approve_once",
+            Self::ApproveAlways => "approve_always",
             Self::Deny => "deny",
         }
     }
 }
 
 type ApprovalSignal = Result<ApprovalDecision, String>;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApprovalScope {
+    pub(crate) agent_id: String,
+    pub(crate) host_id: String,
+    pub(crate) provider: String,
+    pub(crate) cwd: String,
+    pub(crate) sandbox: String,
+    pub(crate) host_fingerprint: String,
+    pub(crate) launcher_fingerprint: String,
+    pub(crate) action_fingerprint: String,
+}
+
+pub(crate) fn strip_known_approval_envelope(raw: &serde_json::Value) -> serde_json::Value {
+    // This is deliberately shallow. Tool arguments can legitimately contain
+    // IDs, and are never recursively removed from an action fingerprint.
+    let mut value = raw.clone();
+    if let Some(object) = value.as_object_mut() {
+        for key in [
+            "threadId",
+            "turnId",
+            "itemId",
+            "approvalId",
+            "requestId",
+            "startedAtMs",
+        ] {
+            object.remove(key);
+        }
+    }
+    value
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_default(),
+                        canonical_json(&map[key])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn approval_fingerprint(value: &serde_json::Value) -> Option<String> {
+    let canonical = canonical_json(value);
+    // Refuse oversized/ambiguous tool payloads rather than retaining a large
+    // authorization blob. The hash is exact; display detail is never matched.
+    (canonical.len() <= 64 * 1024).then(|| format!("{:x}", Sha256::digest(canonical.as_bytes())))
+}
+
+fn bounded_rule_detail(detail: &str) -> String {
+    const LIMIT: usize = 1000;
+    if detail.chars().count() <= LIMIT {
+        detail.into()
+    } else {
+        format!(
+            "{} [truncated]",
+            detail.chars().take(LIMIT).collect::<String>()
+        )
+    }
+}
 
 pub(crate) struct Service {
     app: Option<AppHandle>,
@@ -422,10 +509,14 @@ impl Service {
                 let mut agent: Agent = arg(&args, "agent")?;
                 validate_agent_avatar(agent.avatar.as_deref())?;
                 validate_collaboration_profile(&agent)?;
-                if agent.provider == "acp" && !agent.acp.as_ref().is_some_and(model::valid_acp_launch) {
+                if agent.provider == "acp"
+                    && !agent.acp.as_ref().is_some_and(model::valid_acp_launch)
+                {
                     return Err("ACP requires a valid executable and bounded argument list.".into());
                 }
-                if agent.provider != "acp" { agent.acp = None; }
+                if agent.provider != "acp" {
+                    agent.acp = None;
+                }
                 self.mutate(None, |s| {
                     if agent.id.trim().is_empty() {
                         agent.id = id()
@@ -545,6 +636,9 @@ impl Service {
                 &arg::<String>(&args, "approvalId")?,
                 ApprovalDecision::from_stored(&arg::<String>(&args, "decision")?)?,
             )?),
+            "revoke_approval_rule" => {
+                snapshot_value(self.revoke_approval_rule(&arg::<String>(&args, "ruleId")?)?)
+            }
             "resolve_input" => snapshot_value(self.resolve_input_request(
                 &arg::<String>(&args, "approvalId")?,
                 arg(&args, "response")?,
@@ -743,6 +837,7 @@ impl Service {
         if !matches!(input.risk.as_str(), "low" | "medium" | "high" | "unknown") {
             return Err("Approval risk must be low, medium, high, or unknown.".into());
         }
+        let scope = self.approval_scope(&input)?;
         self.mutate(Some(input.task_id.clone()), |snapshot| {
             let task = snapshot
                 .tasks
@@ -765,12 +860,72 @@ impl Service {
                 created_at: now(),
                 resolved_at: None,
                 decision: None,
+                rememberable: scope.is_some(),
+                rule_id: None,
+                approval_scope: scope.clone(),
                 input: None,
                 response: None,
             };
             snapshot.approval_requests.push(approval.clone());
             Ok(approval)
         })
+    }
+
+    fn approval_scope(
+        &self,
+        input: &CreateApprovalRequest,
+    ) -> Result<Option<ApprovalScope>, String> {
+        let Some(raw) = input.raw_input.as_ref() else {
+            return Ok(None);
+        };
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.")?;
+        let task = data
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == input.task_id)
+            .ok_or("Task was not found.")?;
+        if task.provider != input.provider {
+            return Err("Approval provider does not match the task's saved provider.".into());
+        }
+        let agent = data
+            .snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.id == task.agent_id)
+            .ok_or("Approval agent was not found.")?;
+        let host = data
+            .task_hosts
+            .get(&task.id)
+            .or_else(|| {
+                data.snapshot
+                    .hosts
+                    .iter()
+                    .find(|host| host.id == task.host_id)
+            })
+            .ok_or("Approval host was not found.")?;
+        Ok(Some(ApprovalScope {
+            agent_id: task.agent_id.clone(),
+            host_id: task.host_id.clone(),
+            provider: task.provider.clone(),
+            cwd: task.cwd.clone(),
+            sandbox: task.sandbox.clone(),
+            host_fingerprint: approval_fingerprint(
+                &serde_json::to_value(host).map_err(|_| "Could not scope approval host.")?,
+            )
+            .ok_or("Approval host scope is too large.")?,
+            launcher_fingerprint: approval_fingerprint(
+                &serde_json::json!({"provider":task.provider,"acp":task.acp,"agentAcp":agent.acp}),
+            )
+            .ok_or("Approval launcher scope is too large.")?,
+            action_fingerprint: match approval_fingerprint(&strip_known_approval_envelope(raw)) {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+        }))
     }
 
     /// Waits for the matching UI decision without polling disk. `keep_waiting`
@@ -783,6 +938,12 @@ impl Service {
     where
         F: Fn() -> bool,
     {
+        // This happens only when the live runner has installed ownership and
+        // reached its normal wait point; creation itself never grants work.
+        if !keep_waiting() {
+            return Err("Approval request was interrupted before a decision.".into());
+        }
+        let _ = self.apply_matching_approval_rule(approval_id)?;
         let (sender, receiver) = mpsc::channel();
         // Hold the waiter registry while observing durable state. Resolution
         // persists first and only then takes this same lock to notify, which
@@ -808,6 +969,15 @@ impl Service {
                     .decision
                     .as_deref()
                     .map(ApprovalDecision::from_stored)
+                    .map(|result| {
+                        result.map(|decision| {
+                            if decision == ApprovalDecision::ApproveAlways {
+                                ApprovalDecision::ApproveOnce
+                            } else {
+                                decision
+                            }
+                        })
+                    })
                     .transpose()?
                     .ok_or_else(|| format!("Approval request is {}.", request.status));
             }
@@ -825,6 +995,69 @@ impl Service {
                 }
             }
         }
+    }
+
+    fn apply_matching_approval_rule(&self, approval_id: &str) -> Result<bool, String> {
+        // Most users have no remembered rules. Do not add a disk write to
+        // ordinary approval delivery; any actual match is rechecked atomically.
+        if self.data.lock().map_err(|_| "Monitter state lock failed.")?.snapshot.approval_rules.is_empty() {
+            return Ok(false);
+        }
+        let matched = self.mutate(None, |snapshot| {
+            let index = snapshot
+                .approval_requests
+                .iter()
+                .position(|request| request.id == approval_id)
+                .ok_or("Approval request was not found.")?;
+            let request = &snapshot.approval_requests[index];
+            if request.status != "pending" {
+                return Ok(false);
+            }
+            if request.input.is_some() || !request.rememberable {
+                return Ok(false);
+            }
+            if !snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == request.task_id && task.status == "running")
+            {
+                return Ok(false);
+            }
+            self.validate_app_server_approval(request, snapshot)?;
+            let Some(scope) = request.approval_scope.as_ref() else {
+                return Ok(false);
+            };
+            let rule_index = snapshot.approval_rules.iter().position(|rule| {
+                rule.agent_id == scope.agent_id
+                    && rule.host_id == scope.host_id
+                    && rule.provider == scope.provider
+                    && rule.cwd == scope.cwd
+                    && rule.tool == request.tool
+                    && rule.host_fingerprint == scope.host_fingerprint
+                    && rule.launcher_fingerprint == scope.launcher_fingerprint
+                    && rule.action_fingerprint == scope.action_fingerprint
+                    && rule.sandbox == scope.sandbox
+            });
+            let Some(rule_index) = rule_index else {
+                return Ok(false);
+            };
+            let timestamp = now();
+            let rule_id = snapshot.approval_rules[rule_index].id.clone();
+            snapshot.approval_rules[rule_index].last_used_at = Some(timestamp);
+            snapshot.approval_rules[rule_index].use_count = snapshot.approval_rules[rule_index]
+                .use_count
+                .saturating_add(1);
+            let request = &mut snapshot.approval_requests[index];
+            request.status = "approved".into();
+            request.resolved_at = Some(timestamp);
+            request.decision = Some("approve_always".into());
+            request.rule_id = Some(rule_id);
+            Ok(true)
+        })?;
+        if matched {
+            self.notify_approval_waiters(approval_id, Ok(ApprovalDecision::ApproveOnce));
+        }
+        Ok(matched)
     }
 
     fn notify_approval_waiters(&self, approval_id: &str, signal: ApprovalSignal) {
@@ -850,33 +1083,136 @@ impl Service {
                 .find(|request| request.id == approval_id)
                 .ok_or("Approval request was not found.")?;
             self.validate_app_server_approval(candidate, snapshot)?;
-            if candidate.input.is_some() && decision == ApprovalDecision::ApproveOnce {
+            if decision == ApprovalDecision::ApproveAlways
+                && !snapshot.tasks.iter().any(|task| task.id == candidate.task_id && task.status == "running")
+            {
+                return Err("This request no longer has a live response channel.".into());
+            }
+            if candidate.input.is_some()
+                && matches!(
+                    decision,
+                    ApprovalDecision::ApproveOnce | ApprovalDecision::ApproveAlways
+                )
+            {
                 return Err("Provide the requested input before submitting.".into());
             }
-            let request = snapshot
+            let index = snapshot
                 .approval_requests
-                .iter_mut()
-                .find(|request| request.id == approval_id)
+                .iter()
+                .position(|request| request.id == approval_id)
                 .ok_or("Approval request was not found.")?;
+            let request = snapshot.approval_requests[index].clone();
             if request.status != "pending" {
                 return Err("Approval request is no longer pending.".into());
             }
+            if decision == ApprovalDecision::ApproveAlways && !request.rememberable {
+                return Err(
+                    "This request cannot be remembered because its action scope is incomplete."
+                        .into(),
+                );
+            }
+            let mut rule_id = None;
+            if decision == ApprovalDecision::ApproveAlways {
+                let scope = request
+                    .approval_scope
+                    .clone()
+                    .ok_or("This request has no durable action scope.")?;
+                let existing = snapshot
+                    .approval_rules
+                    .iter()
+                    .find(|rule| {
+                        rule.agent_id == scope.agent_id
+                            && rule.host_id == scope.host_id
+                            && rule.provider == scope.provider
+                            && rule.cwd == scope.cwd
+                            && rule.tool == request.tool
+                            && rule.host_fingerprint == scope.host_fingerprint
+                            && rule.launcher_fingerprint == scope.launcher_fingerprint
+                            && rule.action_fingerprint == scope.action_fingerprint
+                            && rule.sandbox == scope.sandbox
+                    })
+                    .map(|rule| rule.id.clone());
+                let was_existing = existing.is_some();
+                rule_id = Some(existing.unwrap_or_else(|| {
+                    if snapshot.approval_rules.len() >= 200 {
+                        return String::new();
+                    }
+                    let id = id();
+                    snapshot.approval_rules.push(ApprovalRule {
+                        id: id.clone(),
+                        agent_id: scope.agent_id,
+                        host_id: scope.host_id,
+                        provider: scope.provider,
+                        cwd: scope.cwd,
+                        tool: request.tool.clone(),
+                        summary: request.summary.chars().take(512).collect(),
+                        detail: bounded_rule_detail(&request.detail),
+                        created_at: now(),
+                        last_used_at: Some(now()),
+                        use_count: 1,
+                        host_fingerprint: scope.host_fingerprint,
+                        launcher_fingerprint: scope.launcher_fingerprint,
+                        action_fingerprint: scope.action_fingerprint,
+                        sandbox: scope.sandbox,
+                    });
+                    id
+                }));
+                if rule_id.as_deref() == Some("") {
+                    return Err("Approval rule limit reached; revoke a saved rule first.".into());
+                }
+                if was_existing {
+                    if let Some(rule) = snapshot
+                        .approval_rules
+                        .iter_mut()
+                        .find(|rule| Some(rule.id.as_str()) == rule_id.as_deref())
+                    {
+                        rule.last_used_at = Some(now());
+                        rule.use_count = rule.use_count.saturating_add(1);
+                    }
+                }
+            }
+            let request = &mut snapshot.approval_requests[index];
             request.status = match decision {
                 ApprovalDecision::ApproveOnce => "approved",
+                ApprovalDecision::ApproveAlways => "approved",
                 ApprovalDecision::Deny => "denied",
             }
             .into();
             request.resolved_at = Some(now());
             request.decision = Some(decision.stored().into());
+            request.rule_id = rule_id;
             Ok(snapshot.clone())
         })?;
         // `mutate` has already persisted the decision before a runner can act
         // on it, so an approval never authorizes a tool only in memory.
-        self.notify_approval_waiters(approval_id, Ok(decision));
+        // Providers only ever receive a one-shot response.  Remembering is
+        // Monitter policy, never a native/provider persistent permission.
+        self.notify_approval_waiters(
+            approval_id,
+            Ok(if decision == ApprovalDecision::ApproveAlways {
+                ApprovalDecision::ApproveOnce
+            } else {
+                decision
+            }),
+        );
         if decision == ApprovalDecision::Deny {
             self.notify_input_waiter(approval_id, Err("Request denied.".into()));
         }
         Ok(snapshot)
+    }
+
+    fn revoke_approval_rule(&self, rule_id: &str) -> Result<Snapshot, String> {
+        if rule_id.trim().is_empty() {
+            return Err("Approval rule ID is required.".into());
+        }
+        self.mutate(None, |snapshot| {
+            let before = snapshot.approval_rules.len();
+            snapshot.approval_rules.retain(|rule| rule.id != rule_id);
+            if snapshot.approval_rules.len() == before {
+                return Err("Approval rule was not found.".into());
+            }
+            Ok(snapshot.clone())
+        })
     }
 
     /// Terminal handling for a runner that abandons an unanswered request
@@ -972,8 +1308,13 @@ impl Service {
     }
 
     fn acp_task_model_catalog(&self, task_id: &str) -> Result<ModelCatalog, String> {
-        let control = self.runs.lock().map_err(|_| "Run registry unavailable")?
-            .tasks.get(task_id).cloned();
+        let control = self
+            .runs
+            .lock()
+            .map_err(|_| "Run registry unavailable")?
+            .tasks
+            .get(task_id)
+            .cloned();
         match control {
             Some(control) => control.acp_model_catalog(),
             None => acp_session_config::model_catalog(&serde_json::Value::Null),
@@ -1001,7 +1342,9 @@ impl Service {
         if !reset {
             let catalog = if task.provider == "acp" {
                 self.acp_task_model_catalog(task_id)?
-            } else { self.model_catalog(&host, &task.provider, &task.cwd)? };
+            } else {
+                self.model_catalog(&host, &task.provider, &task.cwd)?
+            };
             let model = catalog
                 .models
                 .iter()
@@ -3284,6 +3627,17 @@ async fn resolve_approval(
 }
 
 #[tauri::command]
+async fn revoke_approval_rule(
+    state: State<'_, AppState>,
+    rule_id: String,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.revoke_approval_rule(&rule_id))
+        .await
+        .map_err(|error| format!("Approval worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn resolve_input(
     state: State<'_, AppState>,
     approval_id: String,
@@ -4891,8 +5245,12 @@ async fn get_model_catalog(
         let mut catalog = if provider == "acp" {
             if let Some(task_id) = target.task_id.as_deref() {
                 service.acp_task_model_catalog(task_id)?
-            } else { acp_session_config::model_catalog(&serde_json::Value::Null)? }
-        } else { service.model_catalog(&host, &provider, &cwd)? };
+            } else {
+                acp_session_config::model_catalog(&serde_json::Value::Null)?
+            }
+        } else {
+            service.model_catalog(&host, &provider, &cwd)?
+        };
         if !selected.model.trim().is_empty() {
             catalog.current.model = selected.model;
             if selected.reasoning_effort.is_some() {
@@ -5170,6 +5528,7 @@ pub fn run() {
             get_task_events,
             get_lan_server_info,
             resolve_approval,
+            revoke_approval_rule,
             resolve_input,
             finish_quit,
             read_attachment_file,
@@ -6396,6 +6755,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     summary: "Write a file".into(),
                     detail: "The harness requested a workspace write.".into(),
                     risk: "medium".into(),
+                    raw_input: Some(serde_json::json!({"command":"printf ok"})),
                 },
                 None,
             )
@@ -6427,6 +6787,191 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }
 
     #[test]
+    fn remembered_approval_rules_persist_match_exactly_and_revoke() {
+        let dir = temp_dir("remembered-approval");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(task_input(agent_id, "Approval", None))
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                let task = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap();
+                task.provider = "claude".into();
+                task.status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let make = |command: &str, run: &str| CreateApprovalRequest {
+            task_id: task.id.clone(),
+            provider: "claude".into(),
+            run_id: run.into(),
+            tool: "Bash".into(),
+            summary: "Run command".into(),
+            detail: command.into(),
+            risk: "high".into(),
+            raw_input: Some(serde_json::json!({"threadId":run,"rawInput":{"command":command}})),
+        };
+        let first = service
+            .create_approval_request(make("printf exact", "one"))
+            .unwrap();
+        assert!(first.rememberable);
+        service
+            .resolve_approval_request(&first.id, ApprovalDecision::ApproveAlways)
+            .unwrap();
+        let rule = service.snapshot().unwrap().approval_rules[0].clone();
+        drop(service);
+        let service = Service::open(None, dir.clone()).unwrap();
+        // Restart must not inherit a dead runner; a subsequent live run is
+        // represented explicitly before an exact rule can apply.
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let same = service
+            .create_approval_request(make("printf exact", "two"))
+            .unwrap();
+        assert_eq!(
+            service.wait_for_approval(&same.id, || true).unwrap(),
+            ApprovalDecision::ApproveOnce
+        );
+        let matched = service
+            .snapshot()
+            .unwrap()
+            .approval_requests
+            .into_iter()
+            .find(|request| request.id == same.id)
+            .unwrap();
+        assert_eq!(matched.rule_id.as_deref(), Some(rule.id.as_str()));
+        assert_eq!(matched.decision.as_deref(), Some("approve_always"));
+        let duplicate = service.create_approval_request(make("printf exact", "duplicate")).unwrap();
+        service.resolve_approval_request(&duplicate.id, ApprovalDecision::ApproveAlways).unwrap();
+        let rules = service.snapshot().unwrap().approval_rules;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].use_count, 3);
+        assert_eq!(service.wait_for_approval(&duplicate.id, || true).unwrap(), ApprovalDecision::ApproveOnce);
+        // Every identity dimension must participate, not just the action hash.
+        for field in ["agent", "host", "provider", "cwd", "sandbox", "host-config", "launcher", "action"] {
+            let request = service.create_approval_request(make("printf exact", field)).unwrap();
+            service.mutate(None, |snapshot| {
+                let scope = snapshot.approval_requests.iter_mut().find(|r| r.id == request.id).unwrap().approval_scope.as_mut().unwrap();
+                let value = match field {
+                    "agent" => &mut scope.agent_id, "host" => &mut scope.host_id,
+                    "provider" => &mut scope.provider, "cwd" => &mut scope.cwd,
+                    "sandbox" => &mut scope.sandbox, "host-config" => &mut scope.host_fingerprint,
+                    "launcher" => &mut scope.launcher_fingerprint, _ => &mut scope.action_fingerprint,
+                };
+                value.push_str("-changed");
+                Ok(())
+            }).unwrap();
+            assert!(!service.apply_matching_approval_rule(&request.id).unwrap(), "scope mismatch: {field}");
+        }
+        let mut changed_arguments = make("printf exact", "argument-id");
+        changed_arguments.raw_input = Some(serde_json::json!({"rawInput":{"command":"printf exact","requestId":"semantic-tool-argument"}}));
+        let changed_arguments = service.create_approval_request(changed_arguments).unwrap();
+        assert!(!service.apply_matching_approval_rule(&changed_arguments.id).unwrap());
+        let structured = service.create_approval_request(make("printf exact", "structured")).unwrap();
+        service.mutate(None, |snapshot| {
+            let request = snapshot.approval_requests.iter_mut().find(|r| r.id == structured.id).unwrap();
+            request.input = Some(serde_json::from_value(serde_json::json!({"kind":"questions","questions":[],"schema":null,"url":null})).unwrap());
+            Ok(())
+        }).unwrap();
+        assert!(!service.apply_matching_approval_rule(&structured.id).unwrap());
+        assert!(service.resolve_approval_request(&structured.id, ApprovalDecision::ApproveAlways).is_err());
+        let other = service
+            .create_approval_request(make("printf different", "three"))
+            .unwrap();
+        assert!(!service.apply_matching_approval_rule(&other.id).unwrap());
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .cwd = "/different-scope".into();
+                Ok(())
+            })
+            .unwrap();
+        let changed_scope = service
+            .create_approval_request(make("printf exact", "scope-change"))
+            .unwrap();
+        assert!(!service.apply_matching_approval_rule(&changed_scope.id).unwrap());
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .cwd = task.cwd.clone();
+                Ok(())
+            })
+            .unwrap();
+        let insufficient = service
+            .create_approval_request(CreateApprovalRequest {
+                task_id: task.id.clone(),
+                provider: "claude".into(),
+                run_id: "missing".into(),
+                tool: "Bash".into(),
+                summary: "Unknown".into(),
+                detail: String::new(),
+                risk: "unknown".into(),
+                raw_input: None,
+            })
+            .unwrap();
+        assert!(!insufficient.rememberable);
+        assert!(service
+            .resolve_approval_request(&insufficient.id, ApprovalDecision::ApproveAlways)
+            .is_err());
+        let stale = service
+            .create_approval_request(make("printf stale", "stale"))
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "interrupted".into();
+                Ok(())
+            })
+            .unwrap();
+        assert!(service
+            .resolve_approval_request(&stale.id, ApprovalDecision::ApproveAlways)
+            .is_err());
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        service.revoke_approval_rule(&rule.id).unwrap();
+        let after_revoke = service
+            .create_approval_request(make("printf exact", "four"))
+            .unwrap();
+        assert!(!service.apply_matching_approval_rule(&after_revoke.id).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn cancelling_a_task_expires_its_pending_approvals() {
         let dir = temp_dir("approval-cancel");
         let service = Service::open(None, dir.clone()).unwrap();
@@ -6454,6 +6999,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 summary: "Write a file".into(),
                 detail: String::new(),
                 risk: "high".into(),
+                raw_input: None,
             })
             .unwrap();
         service.cancel(&task.id).unwrap();

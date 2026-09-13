@@ -60,7 +60,8 @@ export interface MonitterBridge {
   cancelQueuedMessage(id: string): Promise<Snapshot>;
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
-  resolveApproval(approvalId: string, decision: 'approve_once' | 'deny'): Promise<Snapshot>;
+  resolveApproval(approvalId: string, decision: 'approve_once' | 'approve_always' | 'deny'): Promise<Snapshot>;
+  revokeApprovalRule(ruleId: string): Promise<Snapshot>;
   resolveInput(approvalId: string, response: unknown): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;
   saveChannel(channel: Channel): Promise<Snapshot>;
@@ -226,6 +227,7 @@ const nativeBridge: MonitterBridge = {
   editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
   cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
   resolveApproval: (approvalId, decision) => invoke<Snapshot>("resolve_approval", { approvalId, decision }),
+  revokeApprovalRule: (ruleId) => invoke<Snapshot>("revoke_approval_rule", { ruleId }),
   resolveInput: (approvalId, response) => invoke<Snapshot>("resolve_input", { approvalId, response }),
   saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
   saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
@@ -275,6 +277,7 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   collaborations: [],
   queuedMessages: [],
   approvalRequests: [],
+  approvalRules: [],
   settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125,
     showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard', busyMessageMode: 'queue' },
 });
@@ -310,6 +313,7 @@ const previewBridge: MonitterBridge = {
   editQueuedMessage: () => desktopOnly(),
   cancelTask: () => desktopOnly(),
   resolveApproval: () => desktopOnly(),
+  revokeApprovalRule: () => desktopOnly(),
   resolveInput: () => desktopOnly(),
   saveSettings: () => desktopOnly(),
   saveChannel: () => desktopOnly(),
@@ -379,6 +383,7 @@ export function getBridge(): MonitterBridge {
         test.invoke("cancel_task", { taskId }) as Promise<Snapshot>,
       resolveApproval: (approvalId, decision) =>
         test.invoke("resolve_approval", { approvalId, decision }) as Promise<Snapshot>,
+      revokeApprovalRule: (ruleId) => test.invoke('revoke_approval_rule', { ruleId }) as Promise<Snapshot>,
       resolveInput: (approvalId, response) => test.invoke("resolve_input", { approvalId, response }) as Promise<Snapshot>,
       saveSettings: (settings) =>
         test.invoke("save_settings", { settings }) as Promise<Snapshot>,

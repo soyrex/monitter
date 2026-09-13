@@ -86,9 +86,18 @@ export interface ApprovalRequest {
   risk: 'low' | 'medium' | 'high' | 'unknown';
   status: 'pending' | 'approved' | 'denied' | 'expired' | 'unsupported';
   createdAt: number; resolvedAt: number | null;
-  decision: 'approve_once' | 'deny' | null;
+  decision: 'approve_once' | 'approve_always' | 'deny' | null;
   input?: InteractionInput | null;
   response?: unknown;
+  /** Missing means an older runtime that cannot create a remembered rule. */
+  rememberable?: boolean;
+  ruleId?: string | null;
+}
+/** An app-owned, exact-scope approval rule. Native harness permissions remain one-shot. */
+export interface ApprovalRule {
+  id: string; agentId: string; hostId: string; provider: Provider; cwd: string; tool: string;
+  summary: string; detail: string; createdAt: number; lastUsedAt: number | null; useCount: number;
+  scopeDescription?: string;
 }
 export interface InteractionInput {
   kind: 'questions' | 'form' | 'url';
@@ -117,6 +126,8 @@ export interface Snapshot {
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
   collaborations: Collaboration[]; queuedMessages: QueuedMessage[];
   approvalRequests: ApprovalRequest[];
+  /** Omitted by older runtimes and deliberately absent from visitor projections. */
+  approvalRules?: ApprovalRule[];
 }
 export interface ProbeResult { ok: boolean; versions: Record<string, string>; message: string; }
 export interface CreateTaskInput {
