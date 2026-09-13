@@ -3643,11 +3643,11 @@
         /></label
       >{#if hostDraft.kind === "ssh"}<div class="form-grid">
           <label
-            >Address<input
+            >SSH alias or address<input
               required
               bind:value={hostDraft.address}
-              placeholder="server.example.com"
-            /></label
+              placeholder="e.g. mira or server.example.com"
+            /><small>Use the exact host name that works with SSH in Terminal. An alias and its .local address can use different keys and settings.</small></label
           ><label
             >User<input
               bind:value={hostDraft.user}

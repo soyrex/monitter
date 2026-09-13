@@ -237,7 +237,7 @@ pub fn discover(host: &Host) -> Result<Vec<AcpCandidate>, String> {
                 return Err("Invalid SSH target for ACP discovery.".into());
             }
             let script = discovery_script(&candidates, host);
-            let mut command = Command::new("ssh");
+            let mut command = runner::ssh_command(host);
             runner::add_ssh_options(&mut command, host);
             command
                 .arg("--")
@@ -305,7 +305,7 @@ fn bounded_discovery_with_timeout(
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     runner::isolate_child(&mut command);
     let mut child = command
         .spawn()
@@ -314,6 +314,10 @@ fn bounded_discovery_with_timeout(
         .stdout
         .take()
         .ok_or("SSH discovery stdout unavailable.")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("SSH discovery diagnostics unavailable.")?;
     let (tx, rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -323,20 +327,51 @@ fn bounded_discovery_with_timeout(
             .map(|_| bytes);
         let _ = tx.send(result);
     });
-    let result = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
-    // A remote startup script can hold stdout or keep running after closing it.
-    // EOF alone is not a successful exit, and try_wait can briefly race EOF.
-    let mut status = child.try_wait().ok().flatten();
-    while status.is_none() && result.is_ok() && std::time::Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-        status = child.try_wait().ok().flatten();
-    }
+    let (diagnostic_tx, diagnostic_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stderr
+            .take(16 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = diagnostic_tx.send(result);
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => break None,
+            Err(_) => break None,
+        }
+    };
+    // Also signal an exited SSH parent: a remote descendant may still retain
+    // stdout/stderr and otherwise keep the reader threads alive.
     runner::terminate_bounded(&mut child);
-    let bytes = result
-        .map_err(|_| "SSH agent discovery timed out. Check the saved host connection.")?
+    let drain_timeout = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .max(Duration::from_millis(250))
+        .min(Duration::from_secs(1));
+    let diagnostics = diagnostic_rx
+        .recv_timeout(drain_timeout)
+        .unwrap_or_else(|_| Ok(Vec::new()))
+        .map_err(|_| "Could not read SSH agent discovery diagnostics.")?;
+    if status.is_none() {
+        return Err(runner::with_ssh_diagnostic(
+            "SSH agent discovery timed out. Check the saved host connection.",
+            &diagnostics,
+        ));
+    }
+    let bytes = rx
+        .recv_timeout(drain_timeout)
+        .map_err(|_| "Could not read SSH agent discovery output.".to_string())?
         .map_err(|_| "Could not read SSH agent discovery output.")?;
     if !status.is_some_and(|s| s.success()) {
-        return Err("SSH agent discovery failed. Check host keys, authentication and the saved host connection.".into());
+        return Err(runner::with_ssh_diagnostic(
+            "SSH agent discovery failed. Check host keys, authentication and the saved host connection.",
+            &diagnostics,
+        ));
     }
     if bytes.len() > 32 * 1024 {
         return Err("SSH discovery output exceeded its limit.".into());
@@ -362,6 +397,18 @@ mod tests {
             bounded_discovery_with_timeout(command, Duration::from_secs(1)).unwrap(),
             "candidate\t/bin/sh\n"
         );
+    }
+
+    #[test]
+    fn discovery_reports_sanitized_ssh_failure_diagnostic() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'WARNING: ignored startup noise\\nHost key verification failed.\\n' >&2; exit 255",
+        ]);
+        let error = bounded_discovery_with_timeout(command, Duration::from_secs(1)).unwrap_err();
+        assert!(error.contains("Host key verification failed."));
+        assert!(!error.contains("ignored startup noise"));
     }
 
     #[test]
