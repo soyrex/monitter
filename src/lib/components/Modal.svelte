@@ -96,7 +96,7 @@
     display: grid;
     place-items: center;
     padding: 24px;
-    background: rgba(32, 27, 20, 0.42);
+    background: rgba(0, 0, 0, 0.3);
     backdrop-filter: blur(3px);
   }
   .modal {
@@ -106,7 +106,7 @@
     border: 1px solid var(--line);
     border-radius: 13px;
     background: var(--panel);
-    box-shadow: 0 22px 70px rgba(40, 31, 18, 0.27);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8) !important;
   }
   header {
     position: sticky;

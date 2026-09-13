@@ -5,3 +5,70 @@
 [data-sort-edge="after"] { box-shadow:inset 0 -2px var(--accent); }
 [data-sort-dragging="true"] { opacity:.5; }
 [data-sidebar-sort-group] img { -webkit-user-drag:none;user-select:none; }
+[data-theme="light"], :root:not([data-theme]) { color-scheme: light; --range-track: rgba(255,255,255,0.5); }
+[data-theme="dark"] { color-scheme: dark; --range-track: rgba(0,0,0,0.5); }
+[data-theme="system"] { color-scheme: light; --range-track: rgba(255,255,255,0.5); }
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] { color-scheme: dark; --range-track: rgba(0,0,0,0.5); }
+}
+
+/* Native form controls must follow the chosen app theme, not the OS theme. */
+select {
+  color: var(--ink);
+  background-color: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 9px;
+  font: inherit;
+}
+select option { color: var(--ink); background-color: var(--panel); }
+:root input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0;
+  height: 20px;
+  background: transparent;
+  box-sizing: border-box;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 8px;
+  background: linear-gradient(to right, var(--accent) 0 var(--range-fill, 0%), var(--range-track) var(--range-fill, 0%) 100%);
+  border: 1px solid color-mix(in srgb, color-mix(in srgb, #808080 50%, var(--accent) 50%) 30%, transparent);
+  box-sizing: border-box;
+  border-radius: 999px;
+}
+input[type="range"]::-moz-range-track {
+  height: 8px;
+  background: linear-gradient(to right, var(--accent) 0 var(--range-fill, 0%), var(--range-track) var(--range-fill, 0%) 100%);
+  border: 1px solid color-mix(in srgb, color-mix(in srgb, #808080 50%, var(--accent) 50%) 30%, transparent);
+  box-sizing: border-box;
+  border-radius: 999px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+/* Bare icons stay lighter; contained icon tiles have a stronger outline. */
+svg.lucide { stroke-width: 1.5px; }
+:is(.avatar, .primary, .secondary, .pane-choice, .project-icon-options button,
+    .view-toggle[aria-pressed="true"], .danger.composer-control,
+    [data-icon-surface="tile"]) svg.lucide { stroke-width: 2px; }
+@media (hover: hover) and (pointer: fine) {
+  :is(.icon:hover, .view-toggle:hover) svg.lucide { stroke-width: 2px; }
+}
+/* Keep the panel shadow even when the modal itself receives keyboard focus. */
+[aria-modal="true"]:is(dialog, [role="dialog"]) {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8) !important;
+}

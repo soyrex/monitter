@@ -116,6 +116,13 @@ is shown in the sidebar.
 
 ## Appearance and conversation preferences
 
+Surface tint intensity is a client-local appearance preference stored in
+`monitter.appearance.surface-tint.v1`, not a backend Settings field. The slider
+ranges from 0–50 in integer percentages, defaults to 5, and previews on input.
+Dark mode uses the selected intensity; light mode uses half. System theme follows
+the same rule. Missing/unavailable storage uses the default and failed storage
+writes do not prevent live preview. No backend rebuild is required for this control.
+
 Base sizes `interfaceFontSize`, `chatFontSize`, and `terminalFontSize` are integer pixels (8–32), defaulting to 14, 13, and 14 respectively. Interface typography retains its relative hierarchy; native interface zoom scales all three exactly once.
 
 Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions.

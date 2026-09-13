@@ -257,7 +257,7 @@
 
 <style>
   .backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .3); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
-  .palette { position: relative; inset: auto; box-sizing: border-box; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: min(620px, 100%); height: min(530px, calc(100vh - 40px)); min-height: min(340px, calc(100vh - 40px)); margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; color: var(--ink); background: var(--panel); box-shadow: 0 22px 70px rgba(40, 31, 18, .27); }
+  .palette { position: relative; inset: auto; box-sizing: border-box; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: min(620px, 100%); height: min(530px, calc(100vh - 40px)); min-height: min(340px, calc(100vh - 40px)); margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; color: var(--ink); background: var(--panel); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8) !important; }
   header, footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-color: var(--line); background: var(--panel); }
   header { border-bottom: 1px solid var(--line); }
   .title { display: flex; align-items: center; gap: 7px; font: 600 calc(11px * var(--interface-font-ratio, 1)) var(--mono); color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }

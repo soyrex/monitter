@@ -1,5 +1,5 @@
 <script lang="ts">
-  import {Check, X} from '@lucide/svelte';
+  import {Check, CircleAlert, X} from '@lucide/svelte';
   let {message,blocking=false,ondismiss}: {message:string;blocking?:boolean;ondismiss:()=>void}=$props();
   let hovered=$state(false),focused=$state(false),fading=$state(false);
   $effect(()=>{
@@ -12,7 +12,7 @@
   });
 </script>
 <div class="alert" class:error={blocking} class:notice={!blocking} class:fading role={blocking?'alert':'status'} onpointerenter={()=>hovered=true} onpointerleave={()=>hovered=false} onfocusin={()=>focused=true} onfocusout={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))focused=false;}}>
-  <span class="icon-slot" aria-hidden="true">{#if blocking}<X size={16}/>{:else}<Check size={16}/>{/if}</span>
+  <span class="icon-slot" aria-hidden="true">{#if blocking}<CircleAlert size={16}/>{:else}<Check size={16}/>{/if}</span>
   <span class="notice-text">{message}</span>
   <button class="close-slot" aria-label={blocking?'Dismiss error':'Dismiss notice'} onclick={ondismiss}><X size={15}/></button>
 </div>

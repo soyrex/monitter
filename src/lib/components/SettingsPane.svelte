@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { rangeFill } from '$lib/range-fill';
   import { Bot, Users, Check, LoaderCircle, MessageSquare, Palette, ShieldCheck, Smartphone, Type, UserRound } from "@lucide/svelte";
   import type { Agent, ApprovalRule, Host, Settings } from "$lib/types";
   import { getBridge } from '$lib/bridge';
+  import { surfaceTint, setSurfaceTint, DEFAULT_SURFACE_TINT } from '$lib/surface-tint';
   import { isLanBrowser } from '$lib/lan';
   import { remoteControlOpen, setRemoteControlTarget } from '$lib/workspace-panels';
   import LanSettings from './LanSettings.svelte';
@@ -215,17 +217,22 @@
             {/each}
             <label class="colour-picker"><span>Custom accent colour</span><input aria-label="Custom accent colour" type="color" value={settings.accent} onchange={(event) => void save({ accent: event.currentTarget.value })} /></label>
           </div>
+          <label class="range-setting">Tint intensity <strong>{$surfaceTint}%</strong>
+            <input class="range" type="range" use:rangeFill={$surfaceTint} aria-label="Tint intensity" aria-valuetext={`${$surfaceTint}%`} min="0" max="50" step="1" value={$surfaceTint} oninput={event=>setSurfaceTint(Number(event.currentTarget.value))} />
+          </label>
+          <div class="range-footer"><span>0%</span><button type="button" onclick={()=>setSurfaceTint(DEFAULT_SURFACE_TINT)}>Reset to default · {DEFAULT_SURFACE_TINT}%</button><span>50%</span></div>
+          <p class="hint">Light mode uses half this intensity. Saved on this device/browser.</p>
         </section>
 
         <section class="setting-card" aria-labelledby="scale-heading">
           <div class="card-heading inline-heading"><div><h2 id="scale-heading">Interface scale</h2><p>Resize text and controls together.</p></div><strong>{settings.interfaceScale ?? 125}%</strong></div>
-          <input class="range" type="range" aria-label="Interface scale" min="80" max="200" step="5" value={settings.interfaceScale ?? 125} onchange={(event) => void save({ interfaceScale: Number(event.currentTarget.value) })} />
+          <input class="range" type="range" use:rangeFill={settings.interfaceScale ?? 125} aria-label="Interface scale" min="80" max="200" step="5" value={settings.interfaceScale ?? 125} onchange={(event) => void save({ interfaceScale: Number(event.currentTarget.value) })} />
           <div class="range-footer"><span>80%</span><button type="button" onclick={() => void save({ interfaceScale: 125 })}>Reset to default · 125%</button><span>200%</span></div>
         </section>
 
         <section class="setting-card" aria-labelledby="density-heading">
           <div class="card-heading"><h2 id="density-heading">Interface density</h2><p>Adjust the height and spacing of tabs, sidebars and pane controls.</p></div>
-          <input class="range density-range" type="range" aria-label="Interface density" aria-valuetext={density} min="0" max="2" step="1" value={densities.indexOf(density)} onchange={(event) => void save({ interfaceDensity: densities[Number(event.currentTarget.value)] ?? 'normal' })} />
+          <input class="range density-range" type="range" use:rangeFill={densities.indexOf(density)} aria-label="Interface density" aria-valuetext={density} min="0" max="2" step="1" value={densities.indexOf(density)} onchange={(event) => void save({ interfaceDensity: densities[Number(event.currentTarget.value)] ?? 'normal' })} />
           <div class="density-labels" aria-hidden="true">
             {#each densities as option}<button type="button" class:chosen={density === option} onclick={() => void save({ interfaceDensity: option })}>{option}</button>{/each}
           </div>
@@ -243,7 +250,7 @@
         <section class="setting-card" aria-labelledby="panes-heading">
           <div class="card-heading"><h2 id="panes-heading">Pane appearance</h2><p>Keep the active workspace easy to identify.</p></div>
           <label class="switch-row"><span><strong>Dim inactive panes</strong><small>Reduce visual weight for panes that are not active.</small></span><input type="checkbox" role="switch" aria-label="Dim inactive panes" checked={settings.dimInactivePanes ?? true} onchange={(event) => void save({ dimInactivePanes: event.currentTarget.checked })} /></label>
-          <label class:disabled={settings.dimInactivePanes === false} class="range-setting">Inactive pane opacity <strong>{Math.round((settings.inactivePaneOpacity ?? 0.6) * 100)}%</strong><input class="range" type="range" aria-label="Inactive pane opacity" min="10" max="90" step="5" disabled={settings.dimInactivePanes === false} value={(settings.inactivePaneOpacity ?? 0.6) * 100} onchange={(event) => void save({ inactivePaneOpacity: Number(event.currentTarget.value) / 100 })} /></label>
+          <label class:disabled={settings.dimInactivePanes === false} class="range-setting">Inactive pane opacity <strong>{Math.round((settings.inactivePaneOpacity ?? 0.6) * 100)}%</strong><input class="range" type="range" use:rangeFill={(settings.inactivePaneOpacity ?? 0.6) * 100} aria-label="Inactive pane opacity" min="10" max="90" step="5" disabled={settings.dimInactivePanes === false} value={(settings.inactivePaneOpacity ?? 0.6) * 100} onchange={(event) => void save({ inactivePaneOpacity: Number(event.currentTarget.value) / 100 })} /></label>
         </section>
       </div>
     {:else if activeCategory === "typography"}
@@ -264,8 +271,8 @@
         </section>
         <section class="setting-card" aria-labelledby="line-height-heading">
           <div class="card-heading"><h2 id="line-height-heading">Line height</h2><p>Control the vertical space in chat messages and terminal output.</p></div>
-          <label class="range-setting">Chat line height <strong>{(settings.chatLineHeight ?? 1.65).toFixed(2)}×</strong><input class="range" type="range" aria-label="Chat line height" min="1" max="2.5" step="0.05" value={settings.chatLineHeight ?? 1.65} onchange={(event) => saveLineHeight(event, "chatLineHeight", 1.65)} /></label>
-          <label class="range-setting">Terminal line height <strong>{(settings.terminalLineHeight ?? 1).toFixed(2)}×</strong><input class="range" type="range" aria-label="Terminal line height" min="1" max="2.5" step="0.05" value={settings.terminalLineHeight ?? 1} onchange={(event) => saveLineHeight(event, "terminalLineHeight", 1)} /></label>
+          <label class="range-setting">Chat line height <strong>{(settings.chatLineHeight ?? 1.65).toFixed(2)}×</strong><input class="range" type="range" use:rangeFill={settings.chatLineHeight ?? 1.65} aria-label="Chat line height" min="1" max="2.5" step="0.05" value={settings.chatLineHeight ?? 1.65} onchange={(event) => saveLineHeight(event, "chatLineHeight", 1.65)} /></label>
+          <label class="range-setting">Terminal line height <strong>{(settings.terminalLineHeight ?? 1).toFixed(2)}×</strong><input class="range" type="range" use:rangeFill={settings.terminalLineHeight ?? 1} aria-label="Terminal line height" min="1" max="2.5" step="0.05" value={settings.terminalLineHeight ?? 1} onchange={(event) => saveLineHeight(event, "terminalLineHeight", 1)} /></label>
           <p class="hint">These values are relative to each surface’s chosen font size. Terminal changes refit open terminal tabs immediately.</p>
         </section>
       </div>

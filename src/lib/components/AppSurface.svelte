@@ -2,6 +2,7 @@
   import { localUuid, isLanBrowser } from '$lib/lan';
   import { workspaceShareOpen } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
+  import { surfaceTint } from '$lib/surface-tint';
   import { tabStripFade } from '$lib/tab-strip-fade';
   import { collectWorkspaceSidebarTabs, settingsTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import { loadSidebarViewPreference, saveSidebarViewPreference, type SidebarViewClient } from '$lib/sidebar-view-preference';
@@ -31,6 +32,7 @@
     Archive,
     Activity,
     Clock,
+    Check,
     ArrowUp,
     ArrowLeft,
     Search,
@@ -186,6 +188,9 @@
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
   const bridge = getBridge();
+  $effect(() => {
+    if (!embedded) document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
+  });
   const macPlatform = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
   let tabIndexModifier = $state(false);
   const modifierLabel = macPlatform ? '⌘' : 'Ctrl+';
@@ -1466,11 +1471,14 @@
     });
     if (remaining.length !== optimisticMessages.length) optimisticMessages = remaining.map(message => ({...message, baselineIds: new Set([...message.baselineIds, ...used]), baselineQueuedIds: new Set([...message.baselineQueuedIds, ...usedQueued])}));
   }
+  let workspaceConnected = $state<boolean | null>(null);
   async function reload() {
     const ticket = ++snapshotIssued;
     try {
       applySnapshot(await bridge.getSnapshot(), ticket);
+      workspaceConnected = bridge.available;
     } catch (reason) {
+      workspaceConnected = false;
       error = text(reason);
     }
   }
@@ -2893,8 +2901,8 @@
 {/snippet}
 
 {#snippet deliveryStatus(message: OptimisticMessage)}
-  <span class="delivery-status" data-delivery-status={message.status} role="status">
-    {#if message.status === 'sending'}<AnimatedTitle text="Sending" active={true} activeTooltip="Sending your message…"/>{:else}{message.status === 'sent' ? 'Sent' : 'Not confirmed'}{/if}
+  <span class="delivery-status" data-delivery-status={message.status} role="status" aria-label={message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'} title={message.status === 'sending' ? 'Sending' : message.status === 'sent' ? 'Sent' : 'Not confirmed'}>
+    {#if message.status === 'sending'}<LoaderCircle size={13} class="spin" aria-hidden="true"/>{:else if message.status === 'sent'}<Check size={13} aria-hidden="true"/>{:else}Not confirmed{/if}
   </span>
   {#if message.status === 'not-confirmed'}
     <button class="delivery-retry" onclick={() => retryOptimisticMessage(message.id)}>Retry</button>
@@ -3029,9 +3037,14 @@
     {:else if pane === "overview" || (pane === "task" && !selectedTask && !currentTaskDraft) || (pane === "channel" && !activeChannel) || (pane === 'project' && !focusedProject) || (pane==='terminal' && !selectedTerminal)}<section
         class="overview dashboard-overview"
       >
-        <div class="overview-head"><div class="overview-expand">{@render paneExpandControl()}</div>
+        <div class="overview-head">
           <div>
             <p class="eyebrow">WORKSPACE · {workspaceLabel}</p>
+            {#if !embedded}<div class="workspace-health" role="status" title="Connection reflects the latest workspace refresh; counts cover all saved agents and active tasks.">
+              <span class="connection-light" class:connected={workspaceConnected===true} aria-hidden="true"></span>
+              <span>{!bridge.available?'Preview only':workspaceConnected===true?'Connected':workspaceConnected===false?'Connection unavailable':'Connecting…'}</span>
+              <span>{snapshot.agents.length} {snapshot.agents.length===1?'agent':'agents'} · {snapshot.tasks.filter(task=>task.status==='running'&&!task.archived).length} running</span>
+            </div>{/if}
             <h1>
               {snapshot.agents.length
                 ? "Everything in motion."
@@ -3043,16 +3056,20 @@
                 : "Create a Codex agent, choose where it works, then give it a task."}
             </p>
           </div>
-          <button
+          <div class="overview-create-actions"><button
             class="primary"
             onclick={() =>
               snapshot!.agents.length
                 ? openTaskComposer()
                 : routeAgentSettings(blankAgent())}
             ><Plus size={16} />{snapshot.agents.length
-              ? "Start a task"
+              ? "New chat"
               : "Create agent"}</button
           >
+          <button class="secondary" disabled={terminalBusy} onclick={newTerminal}>
+            {#if terminalBusy}<LoaderCircle size={16} class="spin" />{:else}<SquareTerminal size={16} />{/if}
+            New terminal
+          </button></div>
         </div>
         {#if !snapshot.hosts.length || !snapshot.agents.length}<section
             class="onboarding"
@@ -3130,7 +3147,7 @@
               >
                 <MessageMeta name={message.role === "user" ? "You" : (snapshot?.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
                   {#snippet avatar()}{@render messageAvatar(snapshot?.agents.find(agent=>agent.id===message.agentId))}{/snippet}
-                  {#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
+                  {#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
                 <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
               </article>{/each}
@@ -3265,7 +3282,7 @@
                 >
                   <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
                     {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot?.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}
-                    {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status">Sent</span>{/if}
+                    {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                   </MessageMeta>
                   <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
                   {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
@@ -3376,7 +3393,7 @@
   {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
-      {#if sidebarCompressed}<img class="brand-app-icon" src="/monitter-app-icon.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-app-icon.png" alt="" draggable="false" /></span></strong>{/if}
+      {#if sidebarCompressed}<img class="brand-app-icon" src="/monitter-mark.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
         {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
       </div>{/if}
@@ -3860,14 +3877,22 @@
   :global(:root) {
     --terminal-background: #090b0d;
     --terminal-foreground: #e5e7eb;
-    --paper: #fbf8f2;
-    --sidebar: #f2ede3;
-    --panel: #fffdf8;
-    --ink: #28231c;
-    --muted: #756b5c;
-    --line: rgba(52, 43, 30, 0.13);
-    --soft: #f5f1e8;
-    --code: #eee9df;
+    --paper-base: #f7f7f7;
+    --sidebar-base: #f0f0f0;
+    --panel-base: #ffffff;
+    --line-base: #d8d8d8;
+    --soft-base: #eeeeee;
+    --code-base: #e8e8e8;
+    --surface-tint-factor: 0.5;
+    --effective-surface-tint: calc(var(--surface-tint, 5%) * var(--surface-tint-factor));
+    --paper: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--paper-base));
+    --sidebar: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--sidebar-base));
+    --panel: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--panel-base));
+    --line: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--line-base));
+    --soft: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--soft-base));
+    --code: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--code-base));
+    --ink: #252525;
+    --muted: #747474;
     --accent: #3f9d6a;
     --accent-light-ink: #28764d;
     --accent-dark-ink: #72d69d;
@@ -3891,7 +3916,7 @@
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-family: var(--interface-font, "IBM Plex Sans", system-ui, sans-serif);
     color: var(--ink);
-    background: #e9e3d8;
+    background: var(--paper);
     font-synthesis: none;
   }
   :global(:root[data-density="tight"]) {
@@ -3929,16 +3954,17 @@
     --density-tab-min-height: 32px;
   }
   :global(:root[data-theme="dark"]) {
-    --paper: #191918;
-    --sidebar: #121211;
-    --panel: #20201e;
-    --ink: #eeece7;
-    --muted: #aaa59b;
-    --line: rgba(255, 255, 255, 0.105);
-    --soft: #272725;
-    --code: #292926;
+    --surface-tint-factor: 1;
+    --paper-base: #151515;
+    --sidebar-base: #121212;
+    --panel-base: #202020;
+    --line-base: #3d3d3d;
+    --soft-base: #272727;
+    --code-base: #292929;
+    --ink: #eeeeee;
+    --muted: #a4a4a4;
     --accent-ink: var(--accent-dark-ink);
-    background: #0d0d0c;
+    background: var(--paper);
   }
   :global(html),
   :global(body) {
@@ -3956,7 +3982,6 @@
   :global(*::-webkit-scrollbar-thumb) { min-height:28px; border:2px solid transparent; border-radius:999px; background:color-mix(in srgb, var(--muted) 42%, transparent); background-clip:padding-box; }
   :global(*:hover::-webkit-scrollbar-thumb) { background:color-mix(in srgb, var(--muted) 68%, transparent); background-clip:padding-box; }
   :global(*::-webkit-scrollbar-corner) { background:transparent; }
-  :global(svg.lucide) { stroke-width: .5px; }
   :global(button),
   :global(input),
   :global(textarea),
@@ -4006,6 +4031,8 @@
     padding: 0 13px;
   }
   .brand strong {
+    display: flex;
+    align-items: center;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -4024,7 +4051,7 @@
   .brand-app-icon { width:32px; height:32px; object-fit:contain; flex:none; }
   .brand:global([data-compact-wordmark="true"]) .brand-full { position:absolute; visibility:hidden; pointer-events:none; }
   .brand:global([data-compact-wordmark="true"]) .brand-short { display:inline-block; }
-  .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: calc(12px / var(--interface-scale,1)); gap: 4px; }
+  .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: 0; padding-bottom: 0; gap: 4px; }
   .native-mac.native-fullscreen .brand { padding-left: 13px; }
   .native-mac.native-fullscreen.sidebar-collapsed { grid-template-columns: 48px minmax(0,1fr); }
   .native-mac .sidebar-views { gap: 0; }
@@ -4264,7 +4291,7 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #aaa092;
+    background: #999999;
   }
   .dot.running {
     background: var(--accent);
@@ -4432,7 +4459,7 @@
     border: 1px solid var(--line);
     border-radius: 7px;
     background: var(--panel);
-    box-shadow: 0 7px 18px rgba(32, 26, 18, 0.14);
+    box-shadow: 0 7px 18px rgba(0, 0, 0, 0.14);
     font-size: calc(12px * var(--interface-font-ratio, 1));
   }
   .preview-banner {
@@ -4487,6 +4514,12 @@
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
     letter-spacing: 0.12em;
   }
+  .overview-create-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; flex-shrink:0; }
+  .workspace-health { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0 0 12px; font-size:calc(11px * var(--interface-font-ratio,1)); color:var(--muted); }
+  .connection-light { width:7px; height:7px; flex:none; border-radius:50%; background:var(--muted); }
+  .connection-light.connected { background:var(--accent); }
+  .overview-create-actions button { white-space:nowrap; }
+  .dashboard-overview .overview-head { flex-wrap:wrap; }
   .overview h1,
   .conversation h1 {
     margin: 0;
@@ -4509,7 +4542,7 @@
     padding: 24px;
     border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
     border-radius: 11px;
-    background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+    background: var(--panel);
   }
   .onboard-number {
     color: var(--accent-ink);
@@ -4687,7 +4720,7 @@
     .tab-picker-list > .tab-entry { width:100%; min-height:max(36px, calc(var(--density-tab-min-height) + 12px)); border:1px solid transparent; border-radius:5px; background:transparent; }
     .tab-picker-list > .tab-entry.active { border-color:var(--line); background:var(--soft); }
     .tab-picker-list > .tab-entry:hover, .tab-picker-list > .tab-entry:focus-within { background:var(--soft); }
-    .tab-picker-list > .tab-entry.active:hover, .tab-picker-list > .tab-entry.active:focus-within { background:color-mix(in srgb,var(--soft) 78%,var(--accent) 8%); }
+    .tab-picker-list > .tab-entry.active:hover, .tab-picker-list > .tab-entry.active:focus-within { background:var(--soft); }
     .tab-picker-list > .tab-entry > .tab { flex:1; width:0; min-width:0; max-width:none; min-height:max(36px, calc(var(--density-tab-min-height) + 12px)); padding-right:8px; border:0; border-radius:5px; background:transparent; }
     .tab-picker-list > .tab-entry > .edit-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:1; pointer-events:auto; }
     .tab-picker-list > .tab-entry > .close-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:0; pointer-events:none; }
@@ -4708,8 +4741,9 @@
   .workspace.modern-tabs:not(.compact-tabs) > .topbar { height:max(30px, calc(var(--pane-tabbar-height) - 4px)); padding:0; gap:0; }
   .modern-tabs:not(.compact-tabs) .tabs { gap:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry { border:0; border-right:1px solid var(--line); border-radius:0; }
+  .modern-tabs:not(.compact-tabs) .tab-entry:first-child { border-left:1px solid var(--line); }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
-  .modern-tabs:not(.compact-tabs) .tab-entry:hover { background:var(--soft); }
+  .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { background:var(--soft); }
   .modern-tabs:not(.compact-tabs) .tab-entry > .tab:hover { background:transparent; }
   .modern-tabs:not(.compact-tabs) .workspace-context { padding:0; }
   .modern-tabs:not(.compact-tabs) .top-actions { padding:0 8px; }
@@ -4770,7 +4804,7 @@
     color: var(--muted);
   }
   .optimistic-message { border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
-  .delivery-status { margin-left:auto; color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+  .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
   .delivery-status[data-delivery-status="sending"] { color: var(--accent); }
   .delivery-status[data-delivery-status="not-confirmed"], .delivery-error { color: #bd655b; }
   .delivery-retry { width: auto; min-height: 20px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--panel); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
@@ -5332,16 +5366,17 @@
   }
   @media (prefers-color-scheme: dark) {
     :global(:root[data-theme="system"]) {
-      --paper: #191918;
-      --sidebar: #121211;
-      --panel: #20201e;
-      --ink: #eeece7;
-      --muted: #aaa59b;
-      --line: rgba(255, 255, 255, 0.105);
-      --soft: #272725;
-      --code: #292926;
+      --surface-tint-factor: 1;
+      --paper-base: #151515;
+      --sidebar-base: #121212;
+      --panel-base: #202020;
+      --line-base: #3d3d3d;
+      --soft-base: #272727;
+      --code-base: #292929;
+      --ink: #eeeeee;
+      --muted: #a4a4a4;
       --accent-ink: var(--accent-dark-ink);
-      background: #0d0d0c;
+      background: var(--paper);
     }
   }
   @media (max-width: 900px) {
