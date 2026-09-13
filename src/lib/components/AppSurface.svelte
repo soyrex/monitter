@@ -577,14 +577,18 @@
   const startingTaskDraft = $derived(currentTaskDraft && currentDraftId && composerPending[`draft:${currentDraftId}`] ? currentTaskDraft : null);
   function setComposerPending(key: string, pending: boolean) { if (pending) composerPending[key] = true; else delete composerPending[key]; }
   function watchPane(node: HTMLElement) {
+    let disposed = false;
     const resize = new ResizeObserver(() => {
-      compactTabs = node.clientWidth <= 620;
-      const narrow = node.clientWidth < 700;
+      const width = node.clientWidth;
+      if (disposed || !node.isConnected || width <= 0) return;
+      // Use the pane's phone-width breakpoint, not the wider sidebar layout.
+      compactTabs = width <= 430;
+      const narrow = width < 700;
       if (narrow && !compactDetail) showDetail = false;
       compactDetail = narrow;
     });
     resize.observe(node);
-    return { destroy: () => resize.disconnect() };
+    return { destroy: () => { disposed = true; resize.disconnect(); } };
   }
   function focusExistingChat(kind: 'task' | 'channel', id: string, requester: string): boolean {
     if (embedded) return onExistingChat?.(kind, id, requester) ?? false;
@@ -2501,7 +2505,7 @@
   const renderedTabCount = $derived(orderedTabs().length
     + (pane === 'agent' && focusedAgent ? 1 : 0)
     + (pane === 'project' && focusedProject ? 1 : 0));
-  const useCompactTabPicker = $derived((mobileSidebar || compactTabs) && renderedTabCount > 1);
+  const useCompactTabPicker = $derived(compactTabs && renderedTabCount > 1);
   $effect(() => { if (!useCompactTabPicker) tabPickerOpen = false; });
   function focusAdjacentPane(direction: 'left' | 'right' | 'up' | 'down') {
     if (embedded) return false;
