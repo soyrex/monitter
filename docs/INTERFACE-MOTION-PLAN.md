@@ -18,8 +18,8 @@ Web-only delivery: no native rebuild is part of this change.
   during teardown, and temporary missing pane references no longer discard removal.
 - Native userMessage/agentMessage lifecycle echoes are omitted from tool groups;
   their ordinary conversation bubbles remain the visible representation.
-- Compact sidebar blades use a full-window 50% black/white blurred backdrop and
-  stay above the pane header. Normal docked sidebars are unchanged.
+- Compact sidebar blades and their 50% black/white blurred backdrops are confined
+  to the pane content below its header. Normal docked sidebars are unchanged.
 - Large outgoing trees (over 512 descendant elements) skip the optional visual
   copy; incoming motion still runs. This bounds snapshot work on long sidebars.
 - Sidebar width and pointer resizing remain immediate; terminal contents are not

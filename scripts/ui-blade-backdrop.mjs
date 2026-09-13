@@ -37,17 +37,23 @@ async function check(browserType, name, theme) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 240_000 });
   await expect(page.locator('.sidebar')).toBeVisible({ timeout: 120_000 });
   const backdrop = await openCompactBlade(page);
-  const viewport = page.viewportSize();
+  const content = await page.locator('.pane-leaf[data-pane-id="main"] .conversation').boundingBox();
   const box = await backdrop.boundingBox();
   expect(box).not.toBeNull();
-  expect(Math.round(box.x)).toBe(0);
-  expect(Math.round(box.y)).toBe(0);
-  expect(Math.round(box.width)).toBe(viewport.width);
-  expect(Math.round(box.height)).toBe(viewport.height);
+  for (const axis of ['x', 'y', 'width', 'height']) expect(Math.abs(box[axis] - content[axis])).toBeLessThan(2);
+  const blade = await page.locator('.run-detail:not(.closed)').boundingBox();
+  expect(Math.abs(blade.y - content.y)).toBeLessThan(2);
+  const header = page.locator('.pane-leaf[data-pane-id="main"] .pane-task-header');
+  const headerBox = await header.boundingBox();
+  expect(headerBox.y + headerBox.height).toBeLessThanOrEqual(box.y + 1);
+  expect(await header.evaluate(node => {
+    const r = node.getBoundingClientRect();
+    return node.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+  })).toBe(true);
   const expectedBackdrop = theme === 'dark' ? 'rgba(0, 0, 0, 0.5)' : 'rgba(255, 255, 255, 0.5)';
   await expect.poll(() => backdrop.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe(expectedBackdrop);
   await expect.poll(() => backdrop.evaluate((node) => getComputedStyle(node).backdropFilter || getComputedStyle(node).webkitBackdropFilter)).toContain('blur');
-  expect(await page.evaluate(() => document.elementFromPoint(12, 300)?.classList.contains('detail-backdrop'))).toBe(true);
+  expect(await page.evaluate(() => document.elementFromPoint(12, 300)?.classList.contains('detail-backdrop'))).toBe(false);
 
   const detailTab = page.locator('.run-detail .detail-tab', { hasText: 'Timeline' });
   await expect(detailTab).toBeVisible();
@@ -82,10 +88,11 @@ async function checkMobileTransform(browserType, name) {
   const backdrop = page.locator('.detail-backdrop');
   await expect(backdrop).toBeVisible();
   const box = await backdrop.boundingBox();
-  const viewport = page.viewportSize();
+  const content = await page.locator('.conversation:visible').boundingBox();
   expect(box).not.toBeNull();
-  expect(Math.round(box.width)).toBe(viewport.width);
-  expect(Math.round(box.height)).toBe(viewport.height);
+  for (const axis of ['x', 'y', 'width', 'height']) expect(Math.abs(box[axis] - content[axis])).toBeLessThan(2);
+  const blade = await page.locator('.run-detail:not(.closed)').boundingBox();
+  expect(Math.abs(blade.y - content.y)).toBeLessThan(2);
   expect(await page.locator('.mobile-navigation > .pane-grid').evaluate((node) => getComputedStyle(node).transform)).not.toBe('none');
   await backdrop.click({ position: { x: 12, y: 300 } });
   await expect(backdrop).toHaveCount(0);

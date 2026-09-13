@@ -5554,13 +5554,13 @@
   .app-shell.embedded { height: 100%; width: 100%; grid-template-columns: minmax(0,1fr); }
   .embedded .topbar { height: var(--pane-tabbar-height,52px); min-height: 32px; padding: 0.5em 0.5em 0; }
   .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 22; box-shadow: -10px 0 30px #0003; }
-  .detail-backdrop { position: fixed; inset: 0; z-index: 21; background:rgb(255 255 255 / .5); backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px); }
+  .detail-backdrop { position: absolute; inset: 0; grid-column: 1 / -1; grid-row: 2 / 3; z-index: 21; background:rgb(255 255 255 / .5); backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px); }
   :global(:root[data-theme="dark"]) .detail-backdrop { background:rgb(0 0 0 / .5); }
   @media (prefers-color-scheme:dark) { :global(:root[data-theme="system"]) .detail-backdrop { background:rgb(0 0 0 / .5); } }
   .app-shell:not(.embedded):not(.sidebar-collapsed) { grid-template-columns: min(40vw, max(230px, var(--left-sidebar-width, 252px))) minmax(0, 1fr); }
   .task-layout:not(.detail-hidden) { grid-template-columns: minmax(0, 1fr) min(40vw, max(260px, var(--right-sidebar-width, 292px)), calc(100% - 300px)); }
-  /* An overlay must use the whole task layout, not its absent second grid column. */
-  .compact-detail .run-detail { grid-area: auto; width: min(max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
+  /* Anchor overlays to the content row, keeping the pane header and neighbours clear. */
+  .compact-detail .run-detail { grid-column: 1 / -1; grid-row: 2 / 3; width: min(max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
   .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }
