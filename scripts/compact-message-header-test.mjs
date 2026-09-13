@@ -64,7 +64,7 @@ async function desktopCheck(url, browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.goto(url, { timeout: 90000 });
-  await expect(page.getByRole('button', { name: 'New agent', exact: true }).first()).toBeVisible();
+  await expect(page.locator('.app-shell').first()).toBeVisible();
   await page.evaluate(value => window.__MONITTER_QA__.setSnapshot(value), snapshot(100));
   await page.locator('.sidebar .task-select').filter({ hasText: 'Compact metadata chat' }).click();
   const regular = await assertHeaders(page, 'desktop 100%', '.markdown');
@@ -87,7 +87,7 @@ async function desktopCheck(url, browser) {
     await route.fulfill({ response, body: (await response.text()).replace('<html', '<html data-monitter-lan="1"') });
   });
   await lan.goto(url, { timeout: 90000 });
-  await expect(lan.getByRole('button', { name: 'New agent', exact: true }).first()).toBeVisible();
+  await expect(lan.locator('.app-shell').first()).toBeVisible();
   await lan.evaluate(value => window.__MONITTER_QA__.setSnapshot(value), snapshot(100));
   await lan.locator('.sidebar .task-select').filter({ hasText: 'Compact metadata chat' }).click();
   const lanMetrics = await assertHeaders(lan, 'LAN narrow', '.markdown');
