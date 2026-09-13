@@ -4,6 +4,7 @@
   "description": "Your agents, together. Native local and SSH agent workspace.",
   "type": "module",
   "scripts": {
+    "build:share": "vite build --config share-web/vite.config.mjs",
     "dev": "vite dev",
     "dev:web": "vite dev --mode monitter-web",
     "build": "vite build && node scripts/publish-lan-web.mjs",

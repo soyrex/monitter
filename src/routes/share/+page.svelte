@@ -1,33 +1,52 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import type { Message, Snapshot, Task } from '$lib/types';
+  import { splitOperatorMessage } from '$lib/operator-sharing';
   import { createMobileSession } from '$lib/controller/remote-client';
   import { redeemPairingCode } from '$lib/controller/pairing-code';
 
   type VisitorSession = Awaited<ReturnType<typeof createMobileSession>>;
-  type DisplayMessage = { name: string; text: string };
-  const collaborationHeader = /^\[Two human operators are collaborating[^\n]*\]\s*\n/i;
+  type DisplayMessage = { id?: string; name: string; text: string; timestamp: number; delivery?: 'sending' | 'sent' | 'uncertain' };
+  type LocalOutgoing = DisplayMessage & { id: string; taskId: string; baselineIds: Set<string> };
   let invite = $state(''), code = $state(''), name = $state(''), status = $state('disconnected');
   let verification = $state(''), error = $state(''), connecting = $state(false), sending = $state(false);
   let session = $state<VisitorSession | null>(null), snapshot = $state<Snapshot | null>(null);
   let selectedId = $state<string | null>(null), draft = $state(''), messagesPane = $state<HTMLElement>();
+  let localOutgoing = $state<LocalOutgoing[]>([]);
   let unlisten: (() => void) | undefined, generation = 0, refreshing = false;
   const validName = $derived(/^[\p{L}\p{N}][\p{L}\p{N} ._'’-]{1,47}$/u.test(name.trim()));
   const validCode = $derived(/^\d{9}$/.test(code.replace(/[\s-]/g, '')));
   const task = $derived(snapshot?.tasks.find(item => item.id === selectedId) ?? null);
   const messages = $derived(snapshot?.messages.filter(item => item.taskId === selectedId) ?? []);
+  const visibleMessages = $derived([
+    ...messages.map(message => display(message)),
+    ...localOutgoing.filter(item => item.taskId === selectedId),
+  ].sort((a, b) => a.timestamp - b.timestamp));
   const projects = $derived(snapshot?.projects ?? []);
   const otherChats = $derived((snapshot?.tasks ?? []).filter(item => !item.projectId));
   const initials = (value: string) => (value.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(word => word[0]).join('') || '?').toUpperCase();
   function isSnapshot(value: unknown): value is Snapshot { return !!value && typeof value === 'object' && Array.isArray((value as Snapshot).tasks) && Array.isArray((value as Snapshot).agents); }
   function display(message: Message): DisplayMessage {
-    const clean = message.text.replace(collaborationHeader, '');
-    const tagged = /^@\(([^\r\n)]{1,48})\):\s*([\s\S]*)$/.exec(clean);
-    if (tagged?.[1].trim()) return { name: tagged[1].trim(), text: tagged[2] };
-    return { name: message.role === 'user' ? 'You' : 'Monitter', text: clean };
+    const tagged = message.role === 'user' ? splitOperatorMessage(message.text) : { name: null, text: message.text };
+    const agent = message.senderAgentId ? snapshot?.agents.find(item => item.id === message.senderAgentId) : task?.agentId ? snapshot?.agents.find(item => item.id === task.agentId) : null;
+    const name = tagged.name || (message.role === 'assistant' ? agent?.name || 'Agent' : message.role === 'system' ? 'Monitter' : 'Shared participant');
+    return { id: message.id, name, text: tagged.text, timestamp: message.createdAt };
   }
+  function formatTime(value: number) { return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(value); }
   function scrollLatest() { if (messagesPane) messagesPane.scrollTop = messagesPane.scrollHeight; }
   function select(item: Task) { selectedId = item.id; void tick().then(scrollLatest); }
+  function reconcile(next: Snapshot) {
+    const consumed = new Set<string>();
+    localOutgoing = localOutgoing.filter(item => {
+      const match = next.messages.find(message => {
+        if (consumed.has(message.id) || item.baselineIds.has(message.id) || message.taskId !== item.taskId || message.role !== 'user') return false;
+        const parsed = splitOperatorMessage(message.text);
+        return parsed.text === item.text && (parsed.name ?? '') === item.name;
+      });
+      if (match) { consumed.add(match.id); return false; }
+      return true;
+    });
+  }
   async function refresh() {
     if (!session || refreshing || status !== 'connected') return;
     const current = session; refreshing = true;
@@ -35,8 +54,10 @@
       const next = await current.getSnapshot();
       if (session !== current) return;
       snapshot = next;
+      reconcile(next);
       if (selectedId && !next.tasks.some(item => item.id === selectedId)) selectedId = null;
-      error = ''; await tick(); scrollLatest();
+      if (!selectedId && next.tasks.length === 1) selectedId = next.tasks[0].id;
+      error = ''; await tick();
     } catch (reason) { if (session === current) error = String(reason); }
     finally { refreshing = false; }
   }
@@ -60,16 +81,32 @@
     } catch (reason) { if (currentGeneration === generation) { status = 'error'; error = String(reason); } }
     finally { if (currentGeneration === generation) connecting = false; }
   }
-  function leave() { generation++; unlisten?.(); unlisten = undefined; session?.close(); session = null; snapshot = null; selectedId = null; draft = ''; verification = ''; status = 'disconnected'; }
+  function leave() { generation++; unlisten?.(); unlisten = undefined; session?.close(); session = null; snapshot = null; selectedId = null; draft = ''; localOutgoing = []; verification = ''; status = 'disconnected'; }
   async function send() {
     if (!session || !selectedId || !draft.trim() || sending || status !== 'connected') return;
-    const current = session, text = draft.trim(); sending = true;
-    try { const next = await current.sendMessage(selectedId, text); if (session !== current) return; if (isSnapshot(next)) snapshot = next; else void refresh(); draft = ''; await tick(); scrollLatest(); }
-    catch (reason) { if (session === current) error = String(reason); }
+    const current = session, taskId = selectedId, text = draft.trim(), localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const baselineIds = new Set((snapshot?.messages ?? []).filter(message => message.taskId === taskId).map(message => message.id));
+    sending = true;
+    localOutgoing = [...localOutgoing, { id: localId, taskId, name: name.trim(), text, timestamp: Date.now(), delivery: 'sending', baselineIds }];
+    if (draft.trim() === text) draft = '';
+    try {
+      const next = await current.sendMessage(taskId, text);
+      if (session !== current) return;
+      localOutgoing = localOutgoing.map(item => item.id === localId ? { ...item, delivery: 'sent' } : item);
+      if (isSnapshot(next)) { snapshot = next; reconcile(next); } else void refresh();
+      await tick();
+    } catch (reason) {
+      if (session === current) { localOutgoing = localOutgoing.map(item => item.id === localId ? { ...item, delivery: 'uncertain' } : item); error = `Message not confirmed: ${String(reason)}`; }
+    }
     finally { sending = false; }
   }
   onMount(() => {
-    invite = new URLSearchParams(window.location.search).get('invite') ?? '';
+    const url = new URL(window.location.href);
+    const fragment = new URLSearchParams(url.hash.replace(/^#/, ''));
+    let rawFragmentInvite = '';
+    if (!url.hash.includes('=')) { try { rawFragmentInvite = decodeURIComponent(url.hash.slice(1)); } catch { rawFragmentInvite = ''; } }
+    invite = fragment.get('invite') || rawFragmentInvite || new URLSearchParams(url.search).get('invite') || '';
+    if (invite) { url.searchParams.delete('invite'); url.hash = ''; window.history.replaceState({}, '', url); }
     const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 2500);
     return () => { window.clearInterval(timer); generation++; unlisten?.(); session?.close(); };
   });
@@ -95,10 +132,10 @@
       {#if !projects.length && !otherChats.length}<p class="empty">The host has not shared any chats yet.</p>{/if}
     </section>
   {:else}
-    <section class="conversation" aria-label={task.title || 'Shared chat'}><div class="top"><button class="back" onclick={() => selectedId = null} aria-label="Back to shared chats">‹</button><div><p class="eyebrow">SHARED CHAT</p><h1>{task.title || 'Untitled chat'}</h1></div></div><div class="messages" bind:this={messagesPane} aria-live="polite">{#each messages as message (message.id)}{@const item = display(message)}<article class:mine={item.name === name.trim()}><span class="avatar">{initials(item.name)}</span><div><b>{item.name}</b><p>{item.text}</p></div></article>{:else}<p class="empty">No messages are shared in this chat.</p>{/each}</div><form onsubmit={event => { event.preventDefault(); void send(); }}><label class="sr" for="message">Message</label><textarea id="message" bind:value={draft} rows="2" maxlength="32000" placeholder="Write a message…"></textarea><button class="send" disabled={!draft.trim() || sending || status !== 'connected'}>{sending ? 'Sending…' : 'Send'}</button></form></section>
+    <section class="conversation" aria-label={task.title || 'Shared chat'}><div class="top"><button class="back" onclick={() => selectedId = null} aria-label="Back to shared chats">‹</button><div><p class="eyebrow">SHARED CHAT</p><h1>{task.title || 'Untitled chat'}</h1></div></div><div class="messages" bind:this={messagesPane} aria-live="polite">{#each visibleMessages as item (item.id ?? `${item.timestamp}-${item.text}`)}<article class:mine={item.name === name.trim()}><span class="avatar">{initials(item.name)}</span><div><header><b>{item.name}</b><time>{formatTime(item.timestamp)}</time></header><p>{item.text}</p>{#if item.delivery}<small class:uncertain={item.delivery === 'uncertain'}>{item.delivery === 'sending' ? 'Sending…' : item.delivery === 'sent' ? 'Sent' : 'Not confirmed'}</small>{/if}</div></article>{:else}<p class="empty">No messages are shared in this chat.</p>{/each}</div><form onsubmit={event => { event.preventDefault(); void send(); }}><label class="sr" for="message">Message</label><textarea id="message" bind:value={draft} rows="2" maxlength="32000" placeholder="Write a message…"></textarea><button class="send" disabled={!draft.trim() || sending || status !== 'connected'}>{sending ? 'Sending…' : 'Send'}</button></form></section>
   {/if}
 </main>
 
 <style>
-  :global(*){box-sizing:border-box}:global(body){margin:0;background:#f6f7f3;color:#18201c}.share{min-height:100dvh;max-width:760px;margin:auto;padding:env(safe-area-inset-top) 20px env(safe-area-inset-bottom);font:400 16px/1.5 'IBM Plex Sans',system-ui,sans-serif;display:flex;flex-direction:column}header{min-height:72px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dce1d8}header a{color:inherit;font-size:21px;font-weight:600;text-decoration:none}h1,h2,p{margin:0}h1{font-size:clamp(28px,7vw,42px);line-height:1.08;letter-spacing:-1.3px}h2{font-size:19px}.eyebrow{color:#45775c;font-size:11px;font-weight:600;letter-spacing:1.2px;margin-bottom:8px}.join,.workspace,.conversation{width:100%;flex:1;padding:48px 0 24px}.join{max-width:460px;margin:auto;display:flex;flex-direction:column;justify-content:center;gap:17px}.join>p,.project>p,.empty{color:#57625b}label{display:grid;gap:7px;color:#344239;font-weight:500;font-size:14px}input,textarea{width:100%;border:1px solid #bfc9be;border-radius:12px;padding:13px 14px;background:#fff;color:inherit;font:inherit}input:focus,textarea:focus,button:focus-visible{outline:3px solid #8ac7a4;outline-offset:2px}small{color:#667169;font-size:12px}button{font:inherit;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.5}.primary,.secondary,.send{min-height:48px;border-radius:12px;padding:10px 16px;font-weight:600}.primary,.send{border:0;background:#367a52;color:#fff}.secondary{border:1px solid #9eaba1;background:transparent;color:inherit}.quiet,.back{border:0;background:transparent;color:#275f40;padding:8px}.notice,.verification{padding:12px 14px;border-radius:10px;background:#e4f1e8;color:#275f40!important}.verification{display:block;padding:20px;font:600 38px/1 'IBM Plex Mono',monospace;letter-spacing:6px;text-align:center}.loading{color:#367a52}.error{margin:14px 0 -20px;padding:12px 14px;border-radius:10px;background:#f8ded9;color:#802b20;font-size:14px}.top{display:flex;align-items:center;justify-content:space-between;gap:14px}.project{padding:25px 0;border-bottom:1px solid #dce1d8;display:grid;gap:8px}.chat{width:100%;display:flex;align-items:center;gap:12px;border:0;border-radius:12px;padding:12px 8px;background:transparent;color:inherit;text-align:left}.chat:hover{background:#ebeee9}.chat>span:nth-child(2){flex:1;min-width:0}.chat b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat small{display:block}.avatar{flex:none;width:34px;height:34px;display:inline-grid;place-items:center;border-radius:50%;background:#d8ebdd;color:#275f40;font-size:12px;font-weight:600}.conversation{display:flex;flex-direction:column;min-height:0;padding-bottom:0}.conversation .top{padding-bottom:20px}.conversation .top>div{flex:1;min-width:0}.conversation h1{font-size:25px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.back{font-size:37px;line-height:1}.messages{flex:1;min-height:160px;overflow:auto;padding:8px 0 20px}.messages article{display:flex;align-items:flex-start;gap:10px;margin:14px 0}.messages article>div{max-width:min(85%,590px);padding:10px 13px;border-radius:4px 14px 14px;background:#e7ebe5}.messages article.mine{flex-direction:row-reverse}.messages article.mine>div{background:#d6efdf;border-radius:14px 4px 14px 14px}.messages b{font-size:13px;color:#31523e}.messages article p{white-space:pre-wrap;overflow-wrap:anywhere}.conversation form{display:flex;align-items:flex-end;gap:9px;padding:14px 0 calc(14px + env(safe-area-inset-bottom));border-top:1px solid #dce1d8}.conversation textarea{flex:1;resize:vertical;min-height:48px;max-height:180px}.send{flex:none}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}@media(max-width:520px){.share{padding-left:16px;padding-right:16px}.join,.workspace,.conversation{padding-top:32px}.send{min-width:72px}}@media(prefers-color-scheme:dark){:global(body){background:#151a16;color:#edf2eb}.share header,.project,.conversation form{border-color:#374239}.join>p,.project>p,.empty,small{color:#abb6ac}label{color:#d4ddd5}input,textarea{background:#202820;border-color:#566358;color:#edf2eb}.notice,.verification{background:#203b29;color:#bce6c9!important}.chat:hover{background:#222b23}.avatar{background:#294434;color:#c2efd0}.messages article>div{background:#28312a}.messages article.mine>div{background:#244633}.messages b{color:#bce6c9}.error{background:#542d29;color:#ffd8d2}}
+  :global(*){box-sizing:border-box}:global(body){margin:0;background:#f6f7f3;color:#18201c}.share{min-height:100dvh;max-width:760px;margin:auto;padding:env(safe-area-inset-top) 20px env(safe-area-inset-bottom);font:400 16px/1.5 'IBM Plex Sans',system-ui,sans-serif;display:flex;flex-direction:column}header{min-height:72px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dce1d8}header a{color:inherit;font-size:21px;font-weight:600;text-decoration:none}h1,h2,p{margin:0}h1{font-size:clamp(28px,7vw,42px);line-height:1.08;letter-spacing:-1.3px}h2{font-size:19px}.eyebrow{color:#45775c;font-size:11px;font-weight:600;letter-spacing:1.2px;margin-bottom:8px}.join,.workspace,.conversation{width:100%;flex:1;padding:48px 0 24px}.join{max-width:460px;margin:auto;display:flex;flex-direction:column;justify-content:center;gap:17px}.join>p,.project>p,.empty{color:#57625b}label{display:grid;gap:7px;color:#344239;font-weight:500;font-size:14px}input,textarea{width:100%;border:1px solid #bfc9be;border-radius:12px;padding:13px 14px;background:#fff;color:inherit;font:inherit}input:focus,textarea:focus,button:focus-visible{outline:3px solid #8ac7a4;outline-offset:2px}small{color:#667169;font-size:12px}button{font:inherit;cursor:pointer}button:disabled{cursor:not-allowed;opacity:.5}.primary,.secondary,.send{min-height:48px;border-radius:12px;padding:10px 16px;font-weight:600}.primary,.send{border:0;background:#367a52;color:#fff}.secondary{border:1px solid #9eaba1;background:transparent;color:inherit}.quiet,.back{border:0;background:transparent;color:#275f40;padding:8px}.notice,.verification{padding:12px 14px;border-radius:10px;background:#e4f1e8;color:#275f40!important}.verification{display:block;padding:20px;font:600 38px/1 'IBM Plex Mono',monospace;letter-spacing:6px;text-align:center}.loading{color:#367a52}.error{margin:14px 0 -20px;padding:12px 14px;border-radius:10px;background:#f8ded9;color:#802b20;font-size:14px}.top{display:flex;align-items:center;justify-content:space-between;gap:14px}.project{padding:25px 0;border-bottom:1px solid #dce1d8;display:grid;gap:8px}.chat{width:100%;display:flex;align-items:center;gap:12px;border:0;border-radius:12px;padding:12px 8px;background:transparent;color:inherit;text-align:left}.chat:hover{background:#ebeee9}.chat>span:nth-child(2){flex:1;min-width:0}.chat b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat small{display:block}.avatar{flex:none;width:34px;height:34px;display:inline-grid;place-items:center;border-radius:50%;background:#d8ebdd;color:#275f40;font-size:12px;font-weight:600}.conversation{display:flex;flex-direction:column;min-height:0;padding-bottom:0}.conversation .top{padding-bottom:20px}.conversation .top>div{flex:1;min-width:0}.conversation h1{font-size:25px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.back{font-size:37px;line-height:1}.messages{flex:1;min-height:160px;overflow:auto;padding:8px 0 20px}.messages article{display:flex;align-items:flex-start;gap:10px;margin:14px 0}.messages article>div{max-width:min(85%,590px);padding:10px 13px;border-radius:4px 14px 14px;background:#e7ebe5}.messages article.mine{flex-direction:row-reverse}.messages article.mine>div{background:#d6efdf;border-radius:14px 4px 14px 14px}.messages header{min-height:0;border:0;display:flex;align-items:baseline;gap:8px}.messages b{font-size:13px;color:#31523e}.messages time{color:#718078;font-size:11px;white-space:nowrap}.messages article p{white-space:pre-wrap;overflow-wrap:anywhere}.messages article small{display:block;margin-top:5px}.messages article small.uncertain{color:#a24e42}.conversation form{display:flex;align-items:flex-end;gap:9px;padding:14px 0 calc(14px + env(safe-area-inset-bottom));border-top:1px solid #dce1d8}.conversation textarea{flex:1;resize:vertical;min-height:48px;max-height:180px}.send{flex:none}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}@media(max-width:520px){.share{padding-left:16px;padding-right:16px}.join,.workspace,.conversation{padding-top:32px}.send{min-width:72px}}@media(prefers-color-scheme:dark){:global(body){background:#151a16;color:#edf2eb}.share header,.project,.conversation form{border-color:#374239}.join>p,.project>p,.empty,small{color:#abb6ac}label{color:#d4ddd5}input,textarea{background:#202820;border-color:#566358;color:#edf2eb}.notice,.verification{background:#203b29;color:#bce6c9!important}.chat:hover{background:#222b23}.avatar{background:#294434;color:#c2efd0}.messages article>div{background:#28312a}.messages article.mine>div{background:#244633}.messages b{color:#bce6c9}.error{background:#542d29;color:#ffd8d2}}
 </style>

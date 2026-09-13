@@ -1,6 +1,6 @@
 <script lang="ts">
   import { localUuid, isLanBrowser } from '$lib/lan';
-  import { workspaceShareOpen } from '$lib/workspace-panels';
+  import { workspaceShareOpen, workspaceShareTaskId } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
   import { surfaceTint } from '$lib/surface-tint';
   import { borderOpacity } from '$lib/border-opacity';
@@ -1282,6 +1282,12 @@
     const share = operatorShareFor(taskId);
     return share ? formatOperatorMessage([share.primary, share.visitor], share.primary, value) : value;
   };
+  function shareSelectedChat() {
+    if (!selectedTask || selectedTask.archived || selectedTask.channelId) return;
+    workspaceShareTaskId.set(selectedTask.id);
+    workspaceShareOpen.set(true);
+    taskMenu = false;
+  }
   const delegated = $derived(
     selectedTask
       ? (snapshot?.tasks.filter((t) => t.parentTaskId === selectedTask.id) ??
@@ -3347,6 +3353,12 @@
             <h1 class="task-title"><AnimatedTitle text={selectedTask.title} active={$autonaming[`task:${selectedTask.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={()=>{renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Pencil size={14}/></button></h1>
           </div>
             <div class="task-actions">
+              <div class="task-overflow">
+                <button bind:this={taskMenuAnchor} class="icon" aria-label="Chat actions" aria-haspopup="menu" aria-expanded={taskMenu} onclick={()=>taskMenu=!taskMenu}><MoreHorizontal size={17}/></button>
+                {#if taskMenu && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Chat actions">
+                  {#if !isLanBrowser()}<button role="menuitem" onclick={shareSelectedChat}><Share2 size={15}/>Share this chat</button>{/if}
+                </div>{/if}
+              </div>
               {@render paneExpandControl()}
               {@render rightSidebarControl()}
             </div>
@@ -3609,7 +3621,7 @@
       <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
       <button class="icon" aria-label="Agent directory" title="Agent directory" onclick={()=>{directoryQuery='';routeSettings('directory')}}><Bot size={16}/></button>
       <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
-      {#if !isLanBrowser()}<button class="icon" aria-label="Share workspace" title="Share workspace" onclick={()=>workspaceShareOpen.set(true)}><Share2 size={16}/></button>{/if}
+      {#if !isLanBrowser()}<button class="icon" aria-label="Share workspace" title="Share workspace" onclick={()=>{workspaceShareTaskId.set(null);workspaceShareOpen.set(true);}}><Share2 size={16}/></button>{/if}
     </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>

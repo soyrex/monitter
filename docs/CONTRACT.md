@@ -805,6 +805,44 @@ the UI state. Send acknowledgements do not wait for a subsequent snapshot fetch.
 pickers, arbitrary native file reads, and quitting the host app are not browser actions;
 uploads use browser file bytes. Work executes on the host Mac or its configured SSH hosts.
 
+## Visitor chat sharing
+
+Visitor sharing is a temporary capability separate from owner-level LAN access and
+remembered mobile controllers. A share is bound to one approved remote public key,
+one named visitor, and an explicit set of chat IDs. The invitation is a one-use
+rendezvous: presenting it does not grant access until the desktop operator compares
+the verification code and approves the named visitor. A second peer cannot join the
+same active invitation. Ending the share, rejecting the visitor, closing the desktop
+session, or removing a chat from the selection revokes that access.
+
+The share URL uses an explicitly configured, publicly reachable HTTPS origin serving
+the visitor `/share` application. A Tauri, loopback, or LAN owner-control origin is
+never copied into a visitor link, and an owner access code is never embedded in it. If
+no hosted visitor origin is configured, link creation fails visibly.
+
+Each visitor request is authorized at execution time, not merely when received. The
+desktop re-reads the authoritative snapshot and rechecks the live share generation,
+approved peer identity, and exact selected chat immediately before invoking a command.
+Revocation during an asynchronous check therefore denies the command. The visitor
+command surface contains only the scoped snapshot read and sending a text message to
+an allowed, unarchived, non-channel chat. It does not expose task cancellation/resume,
+channels, terminals, approvals, settings changes, filesystem or Git operations,
+attachments, agent setup, or any other owner command.
+
+Visitor snapshots are constructed as an explicit allowlist. They contain only the
+selected tasks, their ordinary shared transcript, and the minimum agent/project display
+records needed to render those chats. They omit hosts and local paths, native session
+IDs, launch commands and arguments, saved instructions, attachment metadata, system
+profile messages, activity and diagnostic events, collaborations, queued messages,
+approval requests and remembered approval rules. Adding a field to `Snapshot` does not
+make it visitor-visible automatically.
+
+Human attribution comes from the desktop's approved operator identities. The visitor
+cannot choose a message prefix or payload that causes the owner, an agent, or another
+person to be shown as its author. The model prompt and both UIs distinguish the primary
+user from the named visitor. Names are display identity rather than authentication
+claims; the approved transport key is the authority for the active visitor session.
+
 ## Mobile controller
 
 `docs/MOBILE-CONTROLLER.md` describes the paired mobile clients and relay.

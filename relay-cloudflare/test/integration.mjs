@@ -57,6 +57,12 @@ try {
       if (attempt === 479) throw new Error(`local Worker did not start: ${workerError}`);
     }
     assert.equal((await fetch(`http://127.0.0.1:${port}/relay`)).status, 426);
+    const sharePreflight = await fetch(`${httpOrigin}/pairing`, { method: 'OPTIONS', headers: { Origin: 'https://share.monitter.com' } });
+    assert.equal(sharePreflight.status, 204);
+    assert.equal(sharePreflight.headers.get('Access-Control-Allow-Origin'), 'https://share.monitter.com');
+    for (const origin of ['https://share.monitter.com.evil.example', 'http://share.monitter.com', 'https://evil.example']) {
+      assert.equal((await fetch(`${httpOrigin}/pairing`, { method: 'OPTIONS', headers: { Origin: origin } })).status, 403);
+    }
     assert.equal((await fetch(`http://127.0.0.1:${port}/relay?room=bad&role=desktop`)).status, 426);
 
     const publicKey = Buffer.concat([Buffer.from([4]), Buffer.alloc(64)]).toString('base64url');
