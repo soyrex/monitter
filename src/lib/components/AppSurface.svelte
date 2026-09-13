@@ -3372,7 +3372,7 @@
   {#if !embedded}<aside class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
-      {#if !sidebarCompressed}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.png" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-wordmark.png" alt="" draggable="false" /></span></strong>{/if}
+      {#if sidebarCompressed}<img class="brand-app-icon" src="/monitter-app-icon.png" alt="Monitter" draggable="false" data-tauri-drag-region />{:else}<strong data-tauri-drag-region aria-label="Monitter"><span class="brand-full" aria-hidden="true"><img src="/monitter-wordmark.png" alt="" draggable="false" /></span><span class="brand-short" aria-hidden="true"><img src="/monitter-app-icon.png" alt="" draggable="false" /></span></strong>{/if}
       {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
         {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
       </div>{/if}
@@ -4016,12 +4016,13 @@
   .brand-full { display:inline-block; width:110px; height:34px; vertical-align:middle; }
   .brand-full img { display:block; width:100%; height:100%; object-fit:contain; }
   .brand-short { display:none; width:25px; height:28px; overflow:hidden; position:relative; vertical-align:middle; }
-  .brand-short img { position:absolute; width:110px; max-width:none; height:auto; left:-4px; top:-4px; }
+  .brand-short img { display:block; width:100%; height:100%; object-fit:contain; }
+  .brand-app-icon { width:32px; height:32px; object-fit:contain; flex:none; }
   .brand:global([data-compact-wordmark="true"]) .brand-full { position:absolute; visibility:hidden; pointer-events:none; }
   .brand:global([data-compact-wordmark="true"]) .brand-short { display:inline-block; }
   .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: calc(12px / var(--interface-scale,1)); gap: 4px; }
   .native-mac.native-fullscreen .brand { padding-left: 13px; }
-  .native-mac.native-fullscreen.sidebar-collapsed { grid-template-columns: 56px minmax(0,1fr); }
+  .native-mac.native-fullscreen.sidebar-collapsed { grid-template-columns: 48px minmax(0,1fr); }
   .native-mac .sidebar-views { gap: 0; }
   .app-shell { --pane-tabbar-height: var(--density-tabbar-height); }
   .native-mac { --pane-tabbar-height: max(36px, calc(var(--density-native-tabbar-height) / var(--interface-scale, 1))); }
@@ -5427,10 +5428,11 @@
   .avatar-preview img { width: 34px; height: 34px; border-radius: 7px; object-fit: cover; }
 
   .floating-panel { position: fixed; inset: auto; z-index: 50; margin: 0; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--panel); box-shadow: 0 12px 30px #0003; }
-  .app-shell.sidebar-collapsed { grid-template-columns: 56px minmax(0,1fr); }
+  .app-shell.sidebar-collapsed { grid-template-columns: 48px minmax(0,1fr); }
   .sidebar-collapsed .sidebar { min-width: 0; }
   .sidebar-collapsed .brand { justify-content: center; padding: 0; height: var(--pane-tabbar-height,52px); }
-  .native-mac.sidebar-collapsed { grid-template-columns: max(56px,calc(124px / var(--interface-scale,1))) minmax(0,1fr); }
+  .native-mac.sidebar-collapsed { grid-template-columns: max(48px,calc(88px / var(--interface-scale,1))) minmax(0,1fr); }
+  .native-mac.sidebar-collapsed:not(.native-fullscreen) .brand { height:calc(var(--pane-tabbar-height) + 36px); align-items:flex-end; padding-bottom:4px; }
   .agent-rail { display: flex; align-items: center; gap: 8px; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; padding: 10px 4px; }
   .rail-avatar { position: relative; flex: none; padding: 4px; border: 1px solid transparent; border-radius: 9px; }
   .rail-avatar.current, .rail-avatar:hover { border-color: var(--line); background: var(--soft); }
