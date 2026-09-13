@@ -155,16 +155,18 @@ Projects participate in the switcher; controls include new project and sidebar v
 
 ## Runtime and persistence
 
-Local Codex chats use one owned `codex app-server` process per task over private stdin/stdout
+Codex chats use one owned `codex app-server --listen stdio://` process per task over private stdin/stdout
 JSON-RPC. Initialize once, create/resume the saved native thread, and start each user turn on that
-connection. No HTTP/WebSocket listener is exposed. SSH Codex retains `exec --json` and
-`exec resume --json <id>` and does not advertise interactive approvals.
+connection. Local hosts launch the process directly; SSH hosts carry the same full-duplex protocol
+through an owned `ssh -T` connection. No HTTP/WebSocket listener is exposed. SSH uses the remote
+host's CLI, authentication, configuration and working folder, without copying local credentials.
+It does not use the one-shot `exec --json` supervisor for chat turns.
 Codex app-server bounds initialize to 20 seconds, thread start/resume to 150 seconds, and each
 turn start to 20 seconds with independent clocks; notifications never extend a pending request.
 Resume requests exclude stored native turns because Monitter preserves the local transcript.
 Resume is explicit by native session ID. Users may attach an existing idle native session by ID; old
 transcript import and live takeover of another Desktop/TUI process are not implied.
-Local Codex replies use item text deltas and authoritative completed items. The same durable
+Codex replies use item text deltas and authoritative completed items. The same durable
 message is updated rather than appending a message per token; `Message.streamStatus` is optionally
 `streaming`, `complete`, or `interrupted`. Legacy messages omit this field. Partial text survives
 restart as interrupted. Only completed replies mirror into channels or trigger peer routing.
@@ -219,11 +221,11 @@ provider transport resolves a pending request safely without authorizing work. N
 denial as a successful `Tool result`, and never render an enabled approval control unless that live
 provider run can receive the decision.
 
-Current interactive approval transports include local Codex app-server, Hermes' local full-duplex gateway and Claude's local
+Current interactive approval transports include local and SSH Codex app-server, Hermes' local full-duplex gateway and Claude's local
 stream-json host protocol. A Claude `can_use_tool` request creates one durable desktop approval and the
 chosen one-time allow or deny is returned to that exact control request ID with the provider's original
 tool input preserved. SSH Hermes and SSH Claude remain safe-deny/unsupported until their remote
-supervisor supports the same persistent full-duplex channel. SSH Codex `exec` and OpenCode `run` do not
+supervisor supports the same persistent full-duplex channel. OpenCode `run` does not
 show enabled interactive approval buttons. No auto-resubmission after
 errors.
 
@@ -241,6 +243,11 @@ SSH uses the system client, keys/agent/config, BatchMode, bounded connection tim
 verification. Quote each remote argument using POSIX single quote escaping; prompts always stdin.
 Do not disable StrictHostKeyChecking or expose a public network listener. Killing a local process must not
 kill unrelated agents. Cancellation and app quit must clean up owned children as far as transport permits.
+SSH Codex uses a bounded remote supervisor that keeps stdin open for JSON-RPC and terminates its
+owned process group on transport EOF, cancellation or process exit. Collaboration still uses only
+an owned remote-loopback reverse forward and private temporary helper. Setup failures include bounded
+SSH diagnostics; strict host-key failures require fixing the saved host/trust configuration, not an
+automatic trust bypass. Disconnects expire approvals and never replay an uncertain turn.
 No purchase or paid provisioning; existing authorized Codex account usage only.
 
 ## Activity and navigation

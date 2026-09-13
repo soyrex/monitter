@@ -10,7 +10,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
-    process::{Child, ChildStdin, Command, ExitStatus, Stdio},
+    process::{Child, ChildStderr, ChildStdin, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -18,6 +18,63 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::{collections::HashMap, path::Path, sync::OnceLock};
+
+#[cfg(test)]
+fn test_ssh_overrides() -> &'static Mutex<HashMap<String, PathBuf>> {
+    static OVERRIDES: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Test-only, host-scoped SSH executable replacement.  This intentionally
+/// avoids mutating PATH, which would make concurrent harness tests flaky.
+#[cfg(test)]
+pub(crate) struct TestSshOverride {
+    host_id: String,
+    previous: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for TestSshOverride {
+    fn drop(&mut self) {
+        if let Ok(mut overrides) = test_ssh_overrides().lock() {
+            match self.previous.take() {
+                Some(path) => {
+                    overrides.insert(self.host_id.clone(), path);
+                }
+                None => {
+                    overrides.remove(&self.host_id);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn override_ssh_for_test(host_id: &str, executable: &Path) -> TestSshOverride {
+    let previous = test_ssh_overrides()
+        .lock()
+        .ok()
+        .and_then(|mut overrides| overrides.insert(host_id.into(), executable.into()));
+    TestSshOverride {
+        host_id: host_id.into(),
+        previous,
+    }
+}
+
+fn ssh_command(host: &Host) -> Command {
+    #[cfg(test)]
+    if let Some(path) = test_ssh_overrides()
+        .lock()
+        .ok()
+        .and_then(|overrides| overrides.get(&host.id).cloned())
+    {
+        return Command::new(path);
+    }
+    Command::new("ssh")
+}
 
 pub fn posix_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -281,6 +338,10 @@ pub(crate) fn add_ssh_options(command: &mut Command, host: &Host) {
         "ConnectTimeout=8",
         "-o",
         "StrictHostKeyChecking=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=2",
     ]);
     if host.port != 0 {
         command.arg("-p").arg(host.port.to_string());
@@ -718,7 +779,7 @@ fn build_command_with_options(
         command.args(&args).current_dir(&task.cwd);
         command
     } else if host.kind == "ssh" {
-        let mut command = Command::new("ssh");
+        let mut command = ssh_command(host);
         add_ssh_options(&mut command, host);
         command.arg(ssh_target(host)?).arg(remote_runner(
             if task.provider == "hermes" {
@@ -1316,6 +1377,9 @@ pub struct RunControl {
     // notifications cannot mutate a later task turn.
     app_server_thread: Mutex<Option<String>>,
     app_server_turn: Mutex<Option<String>>,
+    // SSH bootstrap expands remote `~/` without ever consulting local HOME.
+    // It is transport-only state and is not persisted into Task snapshots.
+    app_server_cwd: Mutex<Option<String>>,
     app_server_next_request: Mutex<i64>,
     app_server_turn_requests: Mutex<HashSet<i64>>,
     app_server_instance_id: String,
@@ -1332,6 +1396,7 @@ impl RunControl {
             control_stdin: Mutex::new(None),
             app_server_thread: Mutex::new(None),
             app_server_turn: Mutex::new(None),
+            app_server_cwd: Mutex::new(None),
             app_server_next_request: Mutex::new(10),
             app_server_turn_requests: Mutex::new(HashSet::new()),
             app_server_instance_id: crate::model::id(),
@@ -1450,7 +1515,8 @@ impl RunControl {
             "input": [{"type":"text", "text":prompt, "text_elements": []}]
         });
         if let Some(task) = task {
-            params["cwd"] = Value::String(task.cwd.clone());
+            let cwd = self.app_server_cwd().unwrap_or_else(|| task.cwd.clone());
+            params["cwd"] = Value::String(cwd.clone());
             params["approvalPolicy"] = Value::String(
                 if task.sandbox == "yolo" {
                     "never"
@@ -1461,7 +1527,7 @@ impl RunControl {
             );
             params["sandboxPolicy"] = match task.sandbox.as_str() {
                 "workspace-write" => {
-                    serde_json::json!({"type":"workspaceWrite","writableRoots":[task.cwd],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false})
+                    serde_json::json!({"type":"workspaceWrite","writableRoots":[cwd],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false})
                 }
                 "yolo" => serde_json::json!({"type":"dangerFullAccess"}),
                 _ => serde_json::json!({"type":"readOnly","networkAccess":false}),
@@ -1501,6 +1567,19 @@ impl RunControl {
         if let Ok(mut thread) = self.app_server_thread.lock() {
             *thread = Some(thread_id);
         }
+    }
+
+    pub(crate) fn set_app_server_cwd(&self, cwd: String) {
+        if let Ok(mut value) = self.app_server_cwd.lock() {
+            *value = Some(cwd);
+        }
+    }
+
+    pub(crate) fn app_server_cwd(&self) -> Option<String> {
+        self.app_server_cwd
+            .lock()
+            .ok()
+            .and_then(|value| value.clone())
     }
 
     pub(crate) fn set_app_server_turn(&self, turn_id: String) {
@@ -1722,6 +1801,411 @@ struct RemoteCollaboration {
     tunnel: Child,
 }
 
+/// Keeps the private remote MCP helper alive exactly as long as its app-server
+/// transport.  The adapter deliberately holds this guard until its OwnedRun
+/// has closed and reaped the SSH child, so an in-flight server never loses its
+/// configured MCP command during normal teardown.
+pub(crate) struct RemoteAppServerCleanup {
+    host: Host,
+    helper_dir: String,
+}
+
+impl Drop for RemoteAppServerCleanup {
+    fn drop(&mut self) {
+        cleanup_remote_helper(&self.host, &self.helper_dir);
+    }
+}
+
+pub(crate) struct SpawnedAppServer {
+    pub child: Child,
+    pub helper_path: Option<String>,
+    pub remote_cleanup: Option<RemoteAppServerCleanup>,
+    pub stderr: Option<ChildStderr>,
+    pub cwd: String,
+    /// SSH diagnostics emitted before the authenticated remote bootstrap is
+    /// ready (for example host-key or auth failures). Never includes stdin.
+    pub startup_diagnostics: String,
+}
+
+// The first (and only) non-RPC frame supplies short-lived collaboration
+// credentials.  Once consumed, every byte is passed through unchanged between
+// SSH stdio and Codex app-server.  The input reader owns process-group cleanup
+// so EOF, disconnect and local cancellation cannot leave a remote daemon.
+const REMOTE_APP_SERVER_BOOTSTRAP: &str = r#"import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+PREFIX = b"MONITTER/CODEX-APP-SERVER/1 "
+def limited_line(limit):
+    value = bytearray()
+    while len(value) <= limit:
+        byte = sys.stdin.buffer.read1(1)
+        if not byte:
+            break
+        value += byte
+        if byte == bytes([10]):
+            return bytes(value)
+    raise SystemExit("invalid Monitter Codex app-server bootstrap")
+
+header = limited_line(256)
+if not header.startswith(PREFIX):
+    raise SystemExit("invalid Monitter Codex app-server bootstrap")
+try:
+    size = int(header[len(PREFIX):].strip())
+except ValueError:
+    raise SystemExit("invalid Monitter Codex app-server bootstrap")
+if size < 2 or size > 64 * 1024:
+    raise SystemExit("invalid Monitter Codex app-server bootstrap")
+payload = sys.stdin.buffer.read(size)
+if len(payload) != size:
+    raise SystemExit("incomplete Monitter Codex app-server bootstrap")
+try:
+    config = json.loads(payload)
+except ValueError:
+    raise SystemExit("invalid Monitter Codex app-server bootstrap")
+if not isinstance(config, dict):
+    raise SystemExit("invalid Monitter Codex app-server bootstrap")
+endpoint = config.get("endpoint")
+token = config.get("token")
+if endpoint is not None or token is not None:
+    if not isinstance(endpoint, str) or not endpoint or not isinstance(token, str) or not token:
+        raise SystemExit("invalid Monitter collaboration bootstrap")
+    os.environ["MONITTER_ENDPOINT"] = endpoint
+    os.environ["MONITTER_TOKEN"] = token
+
+cwd = os.path.abspath(os.path.expanduser(sys.argv[1]))
+program = os.path.expanduser(sys.argv[2])
+process = None
+
+stopping = False
+stop_requested = threading.Event()
+def stop_owned():
+    global stopping
+    if stopping or process is None:
+        return
+    stopping = True
+    # Teardown belongs to the main thread. A second signal must not abort its
+    # bounded escalation before resistant tool descendants have been stopped.
+    for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, signal.SIG_IGN)
+    for sig, timeout in ((signal.SIGINT, 1), (signal.SIGTERM, 1), (signal.SIGKILL, 0)):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            return
+        if timeout:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(process.pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(0.05)
+
+def handle_signal(signum, _frame):
+    raise SystemExit(128 + signum)
+
+def forward_stderr():
+    try:
+        while True:
+            chunk = process.stderr.read1(8192)
+            if not chunk:
+                return
+            sys.stderr.buffer.write(chunk)
+            sys.stderr.buffer.flush()
+    except BrokenPipeError:
+        return
+
+def forward_input():
+    try:
+        while True:
+            chunk = sys.stdin.buffer.read1(8192)
+            if not chunk:
+                break
+            process.stdin.write(chunk)
+            process.stdin.flush()
+    except BrokenPipeError:
+        pass
+    finally:
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+        stop_requested.set()
+
+reader = threading.Thread(target=forward_input, daemon=True)
+diagnostics = threading.Thread(target=forward_stderr, daemon=True)
+try:
+    signal.signal(signal.SIGHUP, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+    process = subprocess.Popen(
+        [program, "app-server", "--listen", "stdio://"], cwd=cwd,
+        stdin=subprocess.PIPE, stdout=sys.stdout.buffer, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdin is not None
+    assert process.stderr is not None
+    # Even a disconnect while reporting readiness enters owned teardown.
+    sys.stderr.write("__MONITTER_APP_SERVER_CWD__" + json.dumps(cwd) + chr(10))
+    sys.stderr.flush()
+    reader.start()
+    diagnostics.start()
+    while process.poll() is None and not stop_requested.wait(0.05):
+        pass
+    code = process.poll()
+finally:
+    stop_owned()
+    if process is not None:
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+    if diagnostics.ident is not None:
+        diagnostics.join(timeout=0.2)
+raise SystemExit(code if code is not None else process.returncode or 0)
+"#;
+
+fn remote_app_server_runner(cli: &str, cwd: &str) -> String {
+    [
+        posix_quote("python3"),
+        posix_quote("-c"),
+        posix_quote(REMOTE_APP_SERVER_BOOTSTRAP),
+        remote_path(cwd),
+        remote_path(cli),
+    ]
+    .join(" ")
+}
+
+fn wait_for_remote_app_server_ready(
+    stderr: &mut ChildStderr,
+    control: &RunControl,
+    redacted_token: Option<&str>,
+) -> Result<(String, String), String> {
+    #[cfg(unix)]
+    let original_flags = {
+        use std::os::fd::AsRawFd;
+        let fd = stderr.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err("Could not read SSH Codex app-server startup diagnostics.".into());
+        }
+        flags
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut pending = Vec::new();
+    let mut diagnostics = String::new();
+    let result = 'ready: loop {
+        if Instant::now() >= deadline {
+            break Err(if diagnostics.is_empty() {
+                "Timed out starting SSH Codex app-server.".into()
+            } else {
+                format!("Timed out starting SSH Codex app-server: {diagnostics}")
+            });
+        }
+        if control.is_cancelled() {
+            break Err("SSH Codex app-server startup was cancelled.".into());
+        }
+        // Read a byte at a time until the authenticated marker. This preserves
+        // any immediately-following provider stderr for the normal diagnostic
+        // reader instead of silently consuming it during startup.
+        let mut chunk = [0_u8; 1];
+        match stderr.read(&mut chunk) {
+            Ok(0) => {
+                break Err(if diagnostics.is_empty() {
+                    "SSH Codex app-server closed before it was ready.".into()
+                } else {
+                    format!("SSH Codex app-server closed before it was ready: {diagnostics}")
+                })
+            }
+            Ok(count) => {
+                pending.extend_from_slice(&chunk[..count]);
+                while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                    let line = String::from_utf8_lossy(&pending[..end]).to_string();
+                    pending.drain(..=end);
+                    if let Some(encoded) = line.strip_prefix("__MONITTER_APP_SERVER_CWD__") {
+                        match serde_json::from_str::<String>(encoded) {
+                            Ok(cwd)
+                                if !cwd.is_empty()
+                                    && !cwd.contains('\0')
+                                    && std::path::Path::new(&cwd).is_absolute() =>
+                            {
+                                break 'ready Ok((cwd, diagnostics))
+                            }
+                            _ => {
+                                break 'ready Err(
+                                    "SSH Codex app-server returned an invalid working directory."
+                                        .into(),
+                                )
+                            }
+                        }
+                    }
+                    if diagnostics.len() < 8 * 1024 {
+                        let remaining = 8 * 1024 - diagnostics.len();
+                        let line = redacted_token
+                            .filter(|token| !token.is_empty())
+                            .map(|token| line.replace(token, "[redacted]"))
+                            .unwrap_or(line);
+                        diagnostics.push_str(&line.chars().take(remaining).collect::<String>());
+                        diagnostics.push('\n');
+                    }
+                }
+                if pending.len() > 16 * 1024 {
+                    break Err("SSH Codex app-server startup diagnostics were too large.".into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20))
+            }
+            Err(error) => {
+                break Err(format!(
+                    "Could not read SSH Codex app-server startup diagnostics: {error}"
+                ))
+            }
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let _ = unsafe { libc::fcntl(stderr.as_raw_fd(), libc::F_SETFL, original_flags) };
+    }
+    result
+}
+
+/// Launches the resident Codex app-server protocol for either a local or SSH
+/// host.  SSH sends a bounded bootstrap on stdin before JSON-RPC begins; the
+/// token never appears in argv, diagnostics, or a shell fragment.
+pub(crate) fn spawn_codex_app_server(
+    host: &Host,
+    task: &Task,
+    collaboration: Option<(&str, &str, &PathBuf)>,
+    control: &RunControl,
+) -> Result<SpawnedAppServer, String> {
+    if task.provider != "codex" {
+        return Err("Codex app-server requires a Codex task.".into());
+    }
+    if task.cwd.trim().is_empty() {
+        return Err("Task folder cannot be empty.".into());
+    }
+    let mut helper_path = None;
+    let mut remote_cleanup = None;
+    let mut ssh_bootstrap: Option<(Option<String>, Option<String>)> = None;
+    let mut command = if host.kind == "local" {
+        let executable = resolve_local(&host.codex_path)?;
+        let mut command = Command::new(executable);
+        command
+            .args(["app-server", "--listen", "stdio://"])
+            .current_dir(&task.cwd);
+        if let Some((_, _, helper)) = collaboration {
+            helper_path = helper.to_str().map(str::to_owned);
+        }
+        command
+    } else if host.kind == "ssh" {
+        let (remote_endpoint, token) = if let Some((endpoint, token, helper)) = collaboration {
+            let (dir, path) = stage_remote_helper(host, helper, control)?;
+            match start_reverse_tunnel(host, endpoint, control) {
+                Ok((tunnel, port)) => {
+                    control.add_auxiliary(tunnel);
+                    helper_path = Some(path);
+                    remote_cleanup = Some(RemoteAppServerCleanup {
+                        host: host.clone(),
+                        helper_dir: dir,
+                    });
+                    (
+                        Some(format!("http://127.0.0.1:{port}/rpc")),
+                        Some(token.to_owned()),
+                    )
+                }
+                Err(error) => {
+                    cleanup_remote_helper(host, &dir);
+                    return Err(error);
+                }
+            }
+        } else {
+            (None, None)
+        };
+        let mut command = ssh_command(host);
+        add_ssh_options(&mut command, host);
+        command
+            .arg("-T")
+            .arg(ssh_target(host)?)
+            .arg(remote_app_server_runner(
+                remote_cli(host, "codex")?,
+                &task.cwd,
+            ));
+        // Bootstrap is written after spawn below. These values never enter the
+        // command environment or argv, and are dropped after that write.
+        ssh_bootstrap = Some((remote_endpoint, token));
+        command
+    } else {
+        return Err("Host kind must be local or ssh.".into());
+    };
+    isolate_child(&mut command);
+    if host.kind == "local" {
+        if let Some((endpoint, token, _)) = collaboration {
+            command
+                .env("MONITTER_ENDPOINT", endpoint)
+                .env("MONITTER_TOKEN", token);
+        }
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Err(format!("Could not start Codex app-server: {error}")),
+    };
+    let mut stderr = child.stderr.take();
+    let (cwd, startup_diagnostics) = if host.kind == "ssh" {
+        let (endpoint, token) = ssh_bootstrap.take().unwrap_or((None, None));
+        let bootstrap = serde_json::json!({"endpoint": &endpoint, "token": &token}).to_string();
+        let result = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "Could not open Codex app-server stdin.".to_string())
+            .and_then(|stdin| {
+                stdin
+                    .write_all(
+                        format!("MONITTER/CODEX-APP-SERVER/1 {}\n", bootstrap.len()).as_bytes(),
+                    )
+                    .and_then(|_| stdin.write_all(bootstrap.as_bytes()))
+                    .and_then(|_| stdin.flush())
+                    .map_err(|error| format!("Could not bootstrap SSH Codex app-server: {error}"))
+            });
+        if let Err(error) = result {
+            terminate_bounded(&mut child);
+            return Err(error);
+        }
+        let Some(stderr_pipe) = stderr.as_mut() else {
+            terminate_bounded(&mut child);
+            return Err("Could not read SSH Codex app-server diagnostics.".into());
+        };
+        match wait_for_remote_app_server_ready(stderr_pipe, control, token.as_deref()) {
+            Ok(value) => value,
+            Err(error) => {
+                terminate_bounded(&mut child);
+                return Err(error);
+            }
+        }
+    } else {
+        (task.cwd.clone(), String::new())
+    };
+    control.set_app_server_cwd(cwd.clone());
+    Ok(SpawnedAppServer {
+        child,
+        helper_path,
+        remote_cleanup,
+        stderr,
+        cwd,
+        startup_diagnostics,
+    })
+}
+
 fn broker_port(endpoint: &str) -> Result<u16, String> {
     let address = endpoint
         .strip_prefix("http://127.0.0.1:")
@@ -1745,14 +2229,14 @@ fn stage_remote_helper(
 ) -> Result<(String, String), String> {
     let source =
         fs::read(helper).map_err(|error| format!("Cannot read collaboration helper: {error}"))?;
-    let mut command = Command::new("ssh");
+    let mut command = ssh_command(host);
     add_ssh_options(&mut command, host);
     command
         .arg(ssh_target(host)?)
         .arg("umask 077; d=$(mktemp -d /tmp/monitter-mcp.XXXXXXXX) || exit; cat > \"$d/monitter_mcp.py\" && chmod 700 \"$d/monitter_mcp.py\" && printf '__MONITTER_HELPER_DIR__%s\\n' \"$d\"")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     isolate_child(&mut command);
     let mut child = command
         .spawn()
@@ -1761,23 +2245,25 @@ fn stage_remote_helper(
         terminate_bounded(&mut child);
         return Err("Could not open SSH helper staging input.".into());
     };
-    if let Err(error) = stdin.write_all(&source) {
-        terminate_bounded(&mut child);
-        return Err(format!(
-            "Could not send collaboration helper to SSH host: {error}"
-        ));
-    }
-    drop(stdin);
-    let mut output = String::new();
-    let Some(mut stdout) = child.stdout.take() else {
+    // Do not block the setup deadline or Stop behind a stalled SSH stdin.
+    // Drain stderr concurrently so an early host-key failure survives a broken
+    // upload pipe and is reported instead of the secondary write error.
+    let (write_sender, write_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = stdin.write_all(&source);
+        drop(stdin);
+        let _ = write_sender.send(result);
+    });
+    let Some(stdout) = child.stdout.take() else {
         terminate_bounded(&mut child);
         return Err("Could not read SSH helper staging output.".into());
     };
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result = stdout.read_to_string(&mut output).map(|_| output);
-        let _ = sender.send(result);
-    });
+    let Some(stderr) = child.stderr.take() else {
+        terminate_bounded(&mut child);
+        return Err("Could not read SSH helper staging diagnostics.".into());
+    };
+    let receiver = title_reader(stdout, 8 * 1024);
+    let diagnostics = title_reader(stderr, 8 * 1024);
     let deadline = Instant::now() + Duration::from_secs(20);
     let output = loop {
         if control.cancelled.load(Ordering::SeqCst) {
@@ -1790,7 +2276,7 @@ fn stage_remote_helper(
             return Err("Timed out staging collaboration helper on SSH host.".into());
         }
         match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
-            Ok(Ok(output)) => break output,
+            Ok(Ok(output)) => break String::from_utf8_lossy(&output).into_owned(),
             Ok(Err(_)) => {
                 terminate_bounded(&mut child);
                 return Err("Could not read SSH helper staging output.".into());
@@ -1824,11 +2310,34 @@ fn stage_remote_helper(
         }
     };
     if !status.success() {
+        let detail = diagnostics
+            .recv_timeout(Duration::from_secs(1))
+            .ok()
+            .and_then(Result::ok)
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|text| !text.is_empty())
+            .map(|text| text.chars().take(800).collect::<String>());
         return Err(format!(
-            "SSH helper staging exited with {}.",
+            "SSH helper staging exited with {}{}",
             status
                 .code()
-                .map_or("a signal".into(), |code| format!("status {code}"))
+                .map_or("a signal".into(), |code| format!("status {code}")),
+            detail
+                .map(|text| format!(": {text}"))
+                .unwrap_or_else(|| ".".into())
+        ));
+    }
+    if let Err(error) = write_receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| "SSH helper upload did not finish.".to_string())?
+    {
+        return Err(format!(
+            "Could not send collaboration helper to SSH host: {error}"
         ));
     }
     let directory = output
@@ -1854,7 +2363,7 @@ fn start_reverse_tunnel(
     control: &RunControl,
 ) -> Result<(Child, u16), String> {
     let local_port = broker_port(endpoint)?;
-    let mut command = Command::new("ssh");
+    let mut command = ssh_command(host);
     add_ssh_options(&mut command, host);
     command
         .args(["-N", "-v", "-o", "ExitOnForwardFailure=yes", "-R"])
@@ -1940,7 +2449,7 @@ fn cleanup_remote_helper(host: &Host, helper_dir: &str) {
     let Ok(target) = ssh_target(host) else {
         return;
     };
-    let mut command = Command::new("ssh");
+    let mut command = ssh_command(host);
     add_ssh_options(&mut command, host);
     command
         .arg(target)
@@ -1975,7 +2484,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         };
         // Codex uses one owned, resident app-server connection per Monitter
         // task.  Do not route it through exec's one-shot JSONL protocol.
-        if task.provider == "codex" && host.kind == "local" {
+        if task.provider == "codex" {
             crate::codex_app_server::start(service, task_id, prompt, control);
             return;
         }
@@ -2451,6 +2960,99 @@ mod tests {
     use crate::model::{id, now};
     use std::ffi::OsString;
 
+    struct BootstrapScratch(PathBuf);
+    impl Drop for BootstrapScratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn bootstrap_fixture(exit_after_first: bool) -> (Child, BootstrapScratch) {
+        let scratch =
+            BootstrapScratch(std::env::temp_dir().join(format!("monitter-bootstrap-{}", id())));
+        fs::create_dir_all(&scratch.0).unwrap();
+        let program = scratch.0.join("fixture.py");
+        let exit_after_first = if exit_after_first { "True" } else { "False" };
+        let source = format!(
+            r#"#!/usr/bin/env python3
+import signal,subprocess,sys
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+grandchild=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGINT, signal.SIG_IGN); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
+open('grandchild.pid','w').write(str(grandchild.pid))
+for line in sys.stdin.buffer:
+    sys.stdout.buffer.write(line); sys.stdout.buffer.flush()
+    if {exit_after_first}: break
+"#
+        );
+        fs::write(&program, source).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let child = Command::new("python3")
+            .args([
+                "-c",
+                REMOTE_APP_SERVER_BOOTSTRAP,
+                scratch.0.to_str().unwrap(),
+                program.to_str().unwrap(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        (child, scratch)
+    }
+
+    fn bootstrap_ready(child: &mut Child) {
+        let config = r#"{"endpoint":null,"token":null}"#;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin
+            .write_all(format!("MONITTER/CODEX-APP-SERVER/1 {}\n", config.len()).as_bytes())
+            .unwrap();
+        stdin.write_all(config.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(&mut stderr)
+                .read_line(&mut line)
+                .map(|_| line);
+            let _ = sender.send(result);
+        });
+        assert!(receiver
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap()
+            .starts_with("__MONITTER_APP_SERVER_CWD__"));
+    }
+
+    fn fixture_grandchild(scratch: &BootstrapScratch) -> i32 {
+        let path = scratch.0.join("grandchild.pid");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(value) = fs::read_to_string(&path) {
+                return value.trim().parse().unwrap();
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("fixture did not write its grandchild pid")
+    }
+
+    fn assert_pid_gone(pid: i32) {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("remote descendant {pid} survived bounded cleanup")
+    }
+
     fn task(native: Option<&str>, model: &str) -> Task {
         Task {
             id: id(),
@@ -2835,7 +3437,7 @@ mod tests {
             .read_to_string(&mut output)
             .unwrap();
         drop(stdin);
-        assert!(child.wait().unwrap().success());
+        let _ = child.wait().unwrap();
         assert_eq!(output, "http://127.0.0.1:4444/rpc:not-in-argv");
     }
 
@@ -3192,5 +3794,76 @@ mod tests {
         assert!(result.unwrap_err().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(5));
         let _ = std::fs::remove_file(executable);
+    }
+
+    #[test]
+    fn ssh_app_server_bootstrap_has_bounded_full_duplex_cleanup_guards() {
+        // Keep the protocol guarantees reviewable without exposing the remote
+        // helper as a shell file. End-to-end SSH fixtures exercise the same
+        // source through the host-scoped executable override.
+        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("limited_line(256)"));
+        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("read1(8192)"));
+        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("stderr=subprocess.PIPE"));
+        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("__MONITTER_APP_SERVER_CWD__"));
+        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("signal.SIGHUP"));
+        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("os.killpg(process.pid"));
+        assert!(!REMOTE_APP_SERVER_BOOTSTRAP.contains("REMOTE_SUPERVISOR"));
+    }
+
+    #[test]
+    fn ssh_bootstrap_forwards_fragmented_jsonl_without_waiting_for_a_full_buffer() {
+        let (mut child, _scratch) = bootstrap_fixture(false);
+        bootstrap_ready(&mut child);
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+            let _ = sender.send(result);
+        });
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"{\"method\":").unwrap();
+        stdin.flush().unwrap();
+        assert!(receiver.recv_timeout(Duration::from_millis(120)).is_err());
+        stdin.write_all(b"\"ping\"}\n").unwrap();
+        stdin.flush().unwrap();
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            "{\"method\":\"ping\"}\n"
+        );
+        drop(child.stdin.take());
+        let _ = child.wait().unwrap();
+    }
+
+    #[test]
+    fn ssh_bootstrap_eof_reaps_descendants_after_the_leader_exits() {
+        let (mut child, scratch) = bootstrap_fixture(true);
+        bootstrap_ready(&mut child);
+        let pid = fixture_grandchild(&scratch);
+        child.stdin.as_mut().unwrap().write_all(b"{}\n").unwrap();
+        child.stdin.as_mut().unwrap().flush().unwrap();
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert_pid_gone(pid);
+    }
+
+    #[test]
+    fn ssh_bootstrap_sighup_reaps_resistant_descendants() {
+        let (mut child, scratch) = bootstrap_fixture(false);
+        bootstrap_ready(&mut child);
+        let pid = fixture_grandchild(&scratch);
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGHUP) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "bootstrap did not exit after SIGHUP"
+        );
+        assert_pid_gone(pid);
     }
 }

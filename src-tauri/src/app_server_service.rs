@@ -1,4 +1,4 @@
-//! Durable, ownership-checked boundary for the local Codex app-server transport.
+//! Durable, ownership-checked boundary for local and SSH Codex app-server transports.
 use crate::{
     model::*,
     runner::{Parsed, RunControl},

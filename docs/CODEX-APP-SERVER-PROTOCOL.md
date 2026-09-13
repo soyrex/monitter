@@ -44,11 +44,29 @@ the same lifecycle. User-input requests carry questions and require an
 
 ## Scope boundaries
 
-Local desktop-hosted Codex chats use this adapter, including when operated
-through Monitter's LAN browser. SSH-hosted Codex remains on the existing
-`exec --json` adapter and does not advertise interactive approval support.
+Local and SSH-hosted Codex chats use this adapter, including when operated
+through Monitter's LAN browser or paired mobile controller. SSH provides the
+private full-duplex transport to remote `codex app-server --listen stdio://`;
+the protocol, resident turns, approval and input handling are shared with local
+Codex. The remote CLI keeps its own account, configuration and working folder.
 Other harnesses retain their existing transports. No automatic retry or replay
 occurs after an uncertain delivery failure.
+
+### SSH transport
+
+Monitter uses the saved SSH address/alias, port, identity and user with strict
+host-key checking and batch authentication. It neither installs a remote
+service nor exposes a Codex TCP/WebSocket listener. Python 3 is required on the
+remote host for the owned stdio supervisor and optional collaboration helper.
+The supervisor retains bidirectional input for later turns and control replies;
+EOF or cancellation ends the owned remote process group with bounded escalation.
+SSH keepalives bound detection of a lost connection.
+
+For collaboration, a private temporary helper and a reverse forward bound to
+remote loopback connect back to Monitter's task-scoped broker. The bearer grant
+travels in an initial bounded SSH-stdin bootstrap, not command arguments, saved
+state or diagnostics. The helper and tunnel are cleaned up when the resident
+connection closes. No startup error silently falls back to `exec resume`.
 
 MCP tool result `content` is an unconstrained JSON array in Codex 0.154.0.
 Monitter recognizes image blocks and validates their base64 image signatures
@@ -82,6 +100,32 @@ Serve the feature's `build/` directory on a separate loopback QA port and run
 `scripts/generated-image-ui-test.mjs` with `MONITTER_TEST_URL` pointing to it.
 These WebKit tests cover desktop/mobile controls, optimistic sending, inline
 images and updates to one streamed message.
+
+The SSH tests run the actual remote Python supervisor through a host-scoped
+SSH fixture, without modifying global PATH or SSH configuration:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --lib ssh_ -- --test-threads=1
+```
+
+They verify fragmented input, resident follow-ups, approvals and structured
+answers, Stop/resume without prompt replay, a real loopback-forwarded broker
+call, private helper cleanup, secret-free command arguments, useful host-key
+errors, and resistant subprocess cleanup after EOF or SIGHUP.
+
+An optional real-host handshake starts and stops the remote app-server without
+creating a native thread or sending a model turn. Supply an already trusted
+SSH alias and the remote CLI/folder; this does not rewrite Monitter's saved host:
+
+```sh
+MONITTER_LIVE_SSH_CODEX=1 MONITTER_TEST_SSH_HOST=trusted-alias \
+MONITTER_TEST_SSH_CODEX='~/.npm-global/bin/codex' MONITTER_TEST_SSH_CWD='~/project' \
+cargo test --manifest-path src-tauri/Cargo.toml --lib live_ssh_codex_app_server_handshake -- --ignored --nocapture
+```
+
+The handshake was verified against Mira's existing Codex 0.154.0 using its
+trusted `mira` alias. The separately saved `mira.local` host-key failure is not
+bypassed by the adapter and still requires correcting that host configuration.
 
 Live tests are deliberately ignored by default. They use the existing local
 Codex account, temporary Monitter state and a scratch working directory:

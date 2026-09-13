@@ -1,4 +1,4 @@
-//! Resident, local-only Codex app-server adapter.
+//! Resident Codex app-server adapter for local and SSH hosts.
 //!
 //! App-server is JSON-RPC over the owned child stdio pipes.  It deliberately
 //! never exposes a listener and never substitutes `exec resume` when a live
@@ -6,14 +6,13 @@
 
 use crate::{
     model::{InputOption, InputQuestion, InteractionInput, Task},
-    runner::{resolve_local, RunControl},
+    runner::{RemoteAppServerCleanup, RunControl, SpawnedAppServer},
     ApprovalDecision, CreateApprovalRequest, Parsed, Service,
 };
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
@@ -111,11 +110,15 @@ struct OwnedRun {
     service: Arc<Service>,
     task_id: String,
     control: Arc<RunControl>,
+    // Removed after reaping the transport and before releasing ownership.
+    // A live remote MCP child must never lose its helper.
+    remote_cleanup: Option<RemoteAppServerCleanup>,
 }
 
 impl Drop for OwnedRun {
     fn drop(&mut self) {
         self.control.terminate_owned();
+        drop(self.remote_cleanup.take());
         self.service
             .release_app_server_run(&self.task_id, &self.control);
     }
@@ -126,23 +129,13 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
 }
 
 fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunControl>) {
-    let _owned = OwnedRun {
+    let mut owned = OwnedRun {
         service: service.clone(),
         task_id: task_id.clone(),
         control: control.clone(),
+        remote_cleanup: None,
     };
-    let (task, host) = match service.task_and_host(&task_id) {
-        Ok(value) => value,
-        Err(error) => {
-            service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
-            return;
-        }
-    };
-    if host.kind != "local" {
-        service.complete_app_server_turn(&task_id, &control, None, "error", Some("Codex app-server interactive sessions currently require a local desktop host. Monitter will not fall back to an uncertain exec resume turn on an SSH host.".into()));
-        return;
-    }
-    let executable = match resolve_local(&host.codex_path) {
+    let (mut task, host) = match service.task_and_host(&task_id) {
         Ok(value) => value,
         Err(error) => {
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
@@ -166,32 +159,31 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         },
         None => std::path::PathBuf::new(),
     };
-    let mut command = Command::new(executable);
-    command
-        .arg("app-server")
-        .current_dir(&task.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::runner::isolate_child(&mut command);
-    if let Some(grant) = &grant {
-        command
-            .env("MONITTER_ENDPOINT", &grant.endpoint)
-            .env("MONITTER_TOKEN", &grant.token);
-    }
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let SpawnedAppServer {
+        mut child,
+        helper_path,
+        remote_cleanup,
+        stderr,
+        cwd,
+        startup_diagnostics,
+    } = match crate::runner::spawn_codex_app_server(
+        &host,
+        &task,
+        grant
+            .as_ref()
+            .map(|grant| (grant.endpoint.as_str(), grant.token.as_str(), &helper)),
+        &control,
+    ) {
+        Ok(transport) => transport,
         Err(error) => {
-            service.complete_app_server_turn(
-                &task_id,
-                &control,
-                None,
-                "error",
-                Some(format!("Could not start Codex app-server: {error}")),
-            );
+            service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
     };
+    owned.remote_cleanup = remote_cleanup;
+    // Use the remote process's expanded folder in protocol parameters only.
+    // Attachment ownership and the saved task snapshot keep their original cwd.
+    task.cwd = cwd;
     let Some(stdin) = child.stdin.take() else {
         crate::runner::terminate_bounded(&mut child);
         service.complete_app_server_turn(
@@ -214,7 +206,6 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         );
         return;
     };
-    let stderr = child.stderr.take();
     if let Err((mut child, _)) = control.install(child, Some(stdin)) {
         super::runner::terminate_bounded(&mut child);
         service.complete_app_server_turn(&task_id, &control, None, "interrupted", None);
@@ -224,16 +215,43 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     if let Some(stderr) = stderr {
         let service = service.clone();
         let task = task_id.clone();
+        let control = control.clone();
+        let token = grant.as_ref().map(|grant| grant.token.clone());
         thread::spawn(move || {
             let mut emitted = false;
-            let mut reader = BufReader::new(stderr);
-            while let Ok(Some(line)) = read_bounded_line(&mut reader, 64 * 1024) {
+            let mut emit = |line: &str| {
                 if !emitted {
-                    if let Some(line) = crate::runner::provider_stderr_diagnostic(&line) {
+                    if let Some(line) = crate::runner::provider_stderr_diagnostic(line) {
                         emitted = true;
-                        service.record(&task, "error", "Codex app-server diagnostic", line);
+                        let line = token
+                            .as_deref()
+                            .filter(|token| !token.is_empty())
+                            .map_or_else(
+                                || line.clone(),
+                                |token| line.replace(token, "[redacted]"),
+                            );
+                        let _ = service.app_server_event(
+                            &task,
+                            &control,
+                            None,
+                            Parsed {
+                                event: Some((
+                                    "error".into(),
+                                    "Codex app-server diagnostic".into(),
+                                    line,
+                                )),
+                                ..Default::default()
+                            },
+                        );
                     }
                 }
+            };
+            for line in startup_diagnostics.lines() {
+                emit(line);
+            }
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_bounded_line(&mut reader, 64 * 1024) {
+                emit(&line);
             }
         });
     }
@@ -407,7 +425,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     .and_then(|_| {
                         send(
                             &control,
-                            thread_request(&task, helper.to_str(), grant.is_some()),
+                            thread_request(&task, helper_path.as_deref(), grant.is_some()),
                         )
                     })
                     .is_err()

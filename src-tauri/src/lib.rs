@@ -18,6 +18,10 @@ mod menu;
 pub mod model;
 mod models;
 mod runner;
+#[cfg(test)]
+mod ssh_app_server_live_tests;
+#[cfg(test)]
+mod ssh_app_server_tests;
 mod store;
 mod terminal;
 
@@ -5700,7 +5704,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        assert_eq!(arguments, ["app-server"]);
+        assert_eq!(arguments, ["app-server", "--listen", "stdio://"]);
         assert!(std::fs::read_to_string(prompt)
             .unwrap()
             .trim_end()
