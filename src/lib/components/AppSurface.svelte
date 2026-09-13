@@ -4517,7 +4517,7 @@
   .terminal-tab.active, .terminal-tab.active .tab:hover { background: var(--terminal-background); }
   .terminal-tab.active .tab, .terminal-tab.active .close-tab { color: var(--terminal-foreground); }
   .terminal-tab.active .close-tab:hover { background: #252a31; }
-  .compact-tabs {
+  :global(.compact-tabs) {
     .tabs.tab-picker { position:relative; overflow:visible; min-width:0; }
     .tab-picker-trigger { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; min-width:0; padding:0 8px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--panel); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); text-align:left; }
     .tab-picker-trigger > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -4525,19 +4525,20 @@
     .tab-picker-open .tab-picker-trigger :global(svg) { transform:rotate(180deg); }
     .tab-picker-list { position:absolute; z-index:40; top:calc(100% + 6px); left:0; right:0; display:grid; gap:3px; max-height:min(60vh,420px); padding:5px; overflow:auto; border:1px solid var(--line); border-radius:8px; background:var(--panel); box-shadow:0 10px 26px #0003; opacity:0; visibility:hidden; pointer-events:none; transform:translateY(-6px); transition:opacity .16s ease,transform .16s ease,visibility .16s step-end; }
     .tab-picker-open .tab-picker-list { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); transition:opacity .16s ease,transform .16s ease; }
-    .tab-picker-list .tab-entry { width:100%; min-height:44px; border:1px solid transparent; border-radius:5px; background:transparent; }
-    .tab-picker-list .tab-entry.active { border-color:var(--line); background:var(--soft); }
-    .tab-picker-list .tab-entry:hover, .tab-picker-list .tab-entry:focus-within { background:var(--soft); }
-    .tab-picker-list .tab-entry.active:hover, .tab-picker-list .tab-entry.active:focus-within { background:color-mix(in srgb,var(--soft) 78%,var(--accent) 8%); }
-    .tab-picker-list .tab { flex:1; width:0; min-width:0; max-width:none; min-height:44px; padding-right:8px; border:0; border-radius:5px; background:transparent; }
-    .tab-picker-list .edit-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:1; pointer-events:auto; }
-    .tab-picker-list .close-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:0; pointer-events:none; }
-    .tab-picker-list .tab-status { position:absolute; z-index:3; right:0; top:0; display:grid; place-items:center; width:44px; height:44px; padding:0; transform:none; color:var(--muted); opacity:1; pointer-events:none; }
-    .tab-picker-list .tab-entry:hover .tab-status, .tab-picker-list .tab-entry:focus-within .tab-status { opacity:0; }
-    .tab-picker-list .tab-entry:hover .close-tab, .tab-picker-list .tab-entry:focus-within .close-tab { opacity:1; pointer-events:auto; }
-    .tab-picker-list .edit-tab:disabled { opacity:.5; }
-    .tab-picker-list .edit-tab:focus-visible, .tab-picker-list .close-tab:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-    .tab-picker-list .tab-entry:hover .tab, .tab-picker-list .tab-entry:focus-within .tab { background:transparent; }
+    /* Bound tab matching to this picker instead of recursively nested panes. */
+    .tab-picker-list > .tab-entry { width:100%; min-height:44px; border:1px solid transparent; border-radius:5px; background:transparent; }
+    .tab-picker-list > .tab-entry.active { border-color:var(--line); background:var(--soft); }
+    .tab-picker-list > .tab-entry:hover, .tab-picker-list > .tab-entry:focus-within { background:var(--soft); }
+    .tab-picker-list > .tab-entry.active:hover, .tab-picker-list > .tab-entry.active:focus-within { background:color-mix(in srgb,var(--soft) 78%,var(--accent) 8%); }
+    .tab-picker-list > .tab-entry > .tab { flex:1; width:0; min-width:0; max-width:none; min-height:44px; padding-right:8px; border:0; border-radius:5px; background:transparent; }
+    .tab-picker-list > .tab-entry > .edit-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:1; pointer-events:auto; }
+    .tab-picker-list > .tab-entry > .close-tab { position:static; display:grid; place-items:center; flex:none; width:44px; height:44px; padding:0; border:0; border-radius:4px; transform:none; color:var(--muted); opacity:0; pointer-events:none; }
+    .tab-picker-list > .tab-entry > .tab-status { position:absolute; z-index:3; right:0; top:0; display:grid; place-items:center; width:44px; height:44px; padding:0; transform:none; color:var(--muted); opacity:1; pointer-events:none; }
+    .tab-picker-list > .tab-entry:hover > .tab-status, .tab-picker-list > .tab-entry:focus-within > .tab-status { opacity:0; }
+    .tab-picker-list > .tab-entry:hover > .close-tab, .tab-picker-list > .tab-entry:focus-within > .close-tab { opacity:1; pointer-events:auto; }
+    .tab-picker-list > .tab-entry > .edit-tab:disabled { opacity:.5; }
+    .tab-picker-list > .tab-entry > .edit-tab:focus-visible, .tab-picker-list > .tab-entry > .close-tab:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+    .tab-picker-list > .tab-entry:hover > .tab, .tab-picker-list > .tab-entry:focus-within > .tab { background:transparent; }
   }
   .workspace.compact-tabs > .topbar { padding-block:.5em; }
   .workspace.compact-tabs > .topbar > .workspace-context,
@@ -5249,8 +5250,8 @@
   @media (hover:hover) and (pointer:fine) { .identity-avatar-button:hover .avatar-edit-overlay { opacity:1; } }
   @media (hover:none), (pointer:coarse) {
     .chat-actions, .close-tab, .task-title-edit { opacity:1; pointer-events:auto; }
-    .tab-status, .compact-tabs .tab-picker-list .tab-status { opacity:0; }
-    .compact-tabs .tab-picker-list .close-tab { opacity:1; pointer-events:auto; }
+    .tab-status, :global(.compact-tabs) .tab-picker-list > .tab-entry > .tab-status { opacity:0; }
+    :global(.compact-tabs) .tab-picker-list > .tab-entry > .close-tab { opacity:1; pointer-events:auto; }
     .avatar-toggle-overlay, .avatar-edit-overlay { display:none; }
     button, .app-shell :global(a), summary { touch-action:manipulation; }
   }

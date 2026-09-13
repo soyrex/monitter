@@ -9,9 +9,10 @@ for (const expected of [
   '<MessageSquare size={13}/><span class="tab-shortcut"></span>',
   '<span class="tab-status" aria-label={`Status: ${task.status}`}><span class={`dot ${task.status}`}></span></span>',
   '.tab-entry:focus-within .tab-status { opacity:0; }',
-  '.tab-picker-list .tab-status { position:absolute;',
-  '.tab-picker-list .tab-entry:hover, .tab-picker-list .tab-entry:focus-within { background:var(--soft); }',
-  '.tab-picker-list .tab { flex:1; width:0; min-width:0; max-width:none; min-height:44px; padding-right:8px; border:0; border-radius:5px; background:transparent; }',
+  ':global(.compact-tabs) {',
+  '.tab-picker-list > .tab-entry > .tab-status { position:absolute;',
+  '.tab-picker-list > .tab-entry:hover, .tab-picker-list > .tab-entry:focus-within { background:var(--soft); }',
+  '.tab-picker-list > .tab-entry > .tab { flex:1; width:0; min-width:0; max-width:none; min-height:44px; padding-right:8px; border:0; border-radius:5px; background:transparent; }',
   ".tabs.show-tab-index > .tab-picker-list > .tab-entry .tab-shortcut::after { content:counter(tab-index); }",
   '.tab-status { opacity:0; }',
 ]) assert.ok(source.includes(expected), `Missing task-tab UI contract: ${expected}`);
