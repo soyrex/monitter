@@ -4,13 +4,16 @@
   let state = {
     hosts:[local],
     agents:[{id:'atlas',avatar:null,name:'Atlas',description:'Coding partner',instructions:'Work carefully and explain the result.',provider:'codex',model:'',hostId:'local',cwd:local.defaultCwd,color:'#397e61',sandbox:'read-only',expertise:[],responsibilities:[],skills:[],collaborationEnabled:true}],
-    tasks:[],messages:[],events:[],channels:[],projects:[],collaborations:[],queuedMessages:[],settings:{accent:'#3f9d6a',theme:'light',interfaceScale:125,showToolActivity:true,showReasoningSummaries:true,sendWithEnter:false,sidebarView:'standard'}
+    tasks:[],messages:[],events:[],channels:[],projects:[],collaborations:[],queuedMessages:[],approvalRequests:[],approvalRules:[],settings:{accent:'#3f9d6a',theme:'light',interfaceScale:125,showToolActivity:true,showReasoningSummaries:true,sendWithEnter:false,sidebarView:'standard'}
   };
   const clone = value => JSON.parse(JSON.stringify(value));
   const callbacks = new Set();
   const calls = [];
   const attachments = new Map();
   const terminals = new Map();
+  const metricCpu = [12, 18, 18, 45, 45, 70, 70, 95, 95];
+  const metricMemoryMib = [196, 201, 201, 700, 700, 1400, 1400, 2500, 2500];
+  let metricIndex = 0, metricCpuTime = 1_000;
   const terminalBytes = text => Array.from(new TextEncoder().encode(text));
   const terminalTarget = target => {
     const task = state.tasks.find(task => task.id === target.taskId);
@@ -40,6 +43,7 @@
   window.__MONITTER_QA__ = { calls, snapshot:copy, emit:notify, setSnapshot:s=>{state=clone(s);notify();}, terminals:()=>clone([...terminals.values()]), terminalOutput:(id,data)=>{const terminal=terminals.get(id);if(!terminal)throw Error('Terminal was not found.');terminalChunk(terminal,data);}, terminalCloseFailure:null };
   window.__MONITTER_BRIDGE__ = {
     available:true, getSnapshot:async()=>copy(),
+    getProcessMetrics:async()=>{const index=metricIndex++%metricCpu.length;metricCpuTime+=metricCpu[index]*20;return {cpuTimeMs:metricCpuTime,residentMemoryBytes:metricMemoryMib[index]*1024*1024,sampledAt:10_000+metricIndex*2_000};},
     setChannelMembership:async(channelId,agentId,member)=>{record('setChannelMembership',{channelId,agentId,member});const c=state.channels.find(c=>c.id===channelId);if(!c||!state.agents.some(a=>a.id===agentId))throw Error('Channel or agent was not found.');c.agentIds=member?[...new Set([...c.agentIds,agentId])]:c.agentIds.filter(id=>id!==agentId);if(!member)state.tasks.filter(t=>t.channelId===channelId&&t.agentId===agentId&&t.status==='running').forEach(t=>t.status='interrupted');notify();return copy();},
     saveHost:async h=>{record('saveHost',h);return save('hosts',h);},
     deleteHost:async id=>{record('deleteHost',id);state.hosts=state.hosts.filter(h=>h.id!==id);notify();return copy();},

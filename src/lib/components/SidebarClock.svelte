@@ -5,9 +5,12 @@
   import type { ProcessMetricsSample } from '$lib/types';
   import ProcessMetricsModal from './ProcessMetricsModal.svelte';
 
-  let { expanded = $bindable(true) } = $props<{ expanded?: boolean }>();
+  let { expanded = $bindable(true), compact = false } = $props<{ expanded?: boolean; compact?: boolean }>();
 
   const ticks = Array.from({ length: 12 });
+  const historyLimit = 30;
+  const sparkWidth = 58;
+  const sparkHeight = 18;
   const storageKey = 'monitter.sidebar-clock-expanded.v1';
   const bridge = getBridge();
   let now = $state(new Date());
@@ -16,6 +19,8 @@
   let metricsModalOpen = $state(false);
   let previousMetrics: ProcessMetricsSample | null = null;
   let cpuPercent = $state<number | null>(null);
+  let cpuHistory = $state<number[]>([]);
+  let memoryHistory = $state<number[]>([]);
   let metricsError = $state('');
   let metricsLoading = false;
 
@@ -26,6 +31,9 @@
     hour: '2-digit',
     minute: '2-digit',
   }).format(now));
+  const timezone = $derived(new Intl.DateTimeFormat(undefined, {
+    timeZoneName: 'short',
+  }).formatToParts(now).find(part => part.type === 'timeZoneName')?.value ?? 'LOCAL');
   const fullTime = $derived(new Intl.DateTimeFormat(undefined, {
     hour: 'numeric',
     minute: '2-digit',
@@ -33,14 +41,59 @@
   }).format(now));
   const cpuText = $derived(cpuPercent === null ? '···' : `${cpuPercent.toFixed(cpuPercent >= 100 ? 0 : 1)}%`);
   const memoryText = $derived(metrics ? formatMemory(metrics.residentMemoryBytes) : '···');
+  const compactCpuText = $derived(cpuPercent === null ? '···' : `${Math.round(cpuPercent)}%`);
+  const compactMemoryText = $derived(metrics ? formatCompactMemory(metrics.residentMemoryBytes) : '···');
+  const memoryMib = $derived(metrics ? metrics.residentMemoryBytes / (1024 * 1024) : null);
+  const cpuLevel = $derived(levelForCpu(cpuPercent));
+  const memoryLevel = $derived(levelForMemory(memoryMib));
+  const cpuPoints = $derived(sparklinePoints(cpuHistory, 100));
+  const memoryCeiling = $derived(Math.max(512, ...memoryHistory) * 1.08);
+  const memoryPoints = $derived(sparklinePoints(memoryHistory, memoryCeiling));
 
   function formatMemory(bytes: number) {
     const mib = bytes / (1024 * 1024);
     return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GB` : `${Math.round(mib)} MB`;
   }
 
+  function formatCompactMemory(bytes: number) {
+    const mib = bytes / (1024 * 1024);
+    return mib >= 1024 ? `${(mib / 1024).toFixed(1)}G` : `${Math.round(mib)}M`;
+  }
+
+  function append(history: number[], value: number) {
+    return [...history, value].slice(-historyLimit);
+  }
+
+  function levelForCpu(value: number | null) {
+    if (value === null) return 'unknown';
+    if (value < 35) return 'low';
+    if (value < 60) return 'medium';
+    if (value < 85) return 'high';
+    return 'critical';
+  }
+
+  function levelForMemory(value: number | null) {
+    if (value === null) return 'unknown';
+    if (value < 512) return 'low';
+    if (value < 1024) return 'medium';
+    if (value < 2048) return 'high';
+    return 'critical';
+  }
+
+  function sparklinePoints(values: number[], ceiling: number) {
+    if (!values.length) return '';
+    const usableWidth = sparkWidth - 2;
+    const usableHeight = sparkHeight - 2;
+    const divisor = Math.max(1, values.length - 1);
+    return values.map((value, index) => {
+      const x = 1 + index / divisor * usableWidth;
+      const y = 1 + (1 - Math.min(Math.max(value, 0), ceiling) / ceiling) * usableHeight;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+  }
+
   async function updateMetrics() {
-    if ((!expanded && !metricsModalOpen) || metricsLoading) return;
+    if ((!expanded && !compact && !metricsModalOpen) || metricsLoading) return;
     metricsLoading = true;
     try {
       const sample = await bridge.getProcessMetrics();
@@ -54,11 +107,15 @@
       if (previousMetrics) {
         const elapsed = next.sampledAt - previousMetrics.sampledAt;
         const cpuElapsed = next.cpuTimeMs - previousMetrics.cpuTimeMs;
-        if (elapsed > 0 && cpuElapsed >= 0) cpuPercent = Math.max(0, cpuElapsed / elapsed * 100);
+        if (elapsed > 0 && cpuElapsed >= 0) {
+          cpuPercent = Math.max(0, cpuElapsed / elapsed * 100);
+          cpuHistory = append(cpuHistory, cpuPercent);
+        }
       }
       previousMetrics = next;
       metrics = next;
       metricSamples = [...metricSamples, next].slice(-90);
+      memoryHistory = append(memoryHistory, next.residentMemoryBytes / (1024 * 1024));
       metricsError = '';
     } catch (reason) {
       metricsError = String(reason || 'Process metrics are unavailable.');
@@ -89,13 +146,20 @@
   }
 </script>
 
-<section class="sidebar-clock-widget" class:expanded aria-label="Clock and Monitter usage widget">
-  <button class="widget-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-clock-body" onclick={toggle}>
-    <span>LOCAL TIME</span>
-    <time datetime={now.toISOString()}>{shortTime}</time>
-    <ChevronDown class="widget-chevron" size={13} aria-hidden="true" />
-  </button>
-  {#if expanded}
+<section class="sidebar-clock-widget" class:expanded class:compact aria-label="Clock and Monitter usage widget">
+  {#if compact}
+    <div class="compact-time" title={`Local time in ${timezone}`}>
+      <span>{timezone.toUpperCase()}</span>
+      <time datetime={now.toISOString()}>{shortTime}</time>
+    </div>
+  {:else}
+    <button class="widget-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-clock-body" onclick={toggle}>
+      <span title={`Local timezone: ${timezone}`}>LOCAL TIME · {timezone.toUpperCase()}</span>
+      <time datetime={now.toISOString()}>{shortTime}</time>
+      <ChevronDown class="widget-chevron" size={13} aria-hidden="true" />
+    </button>
+  {/if}
+  {#if expanded || compact}
     <div class="widget-body" id="sidebar-clock-body">
       <svg class="clock-face" viewBox="0 0 60 60" width="60" height="60" role="img" aria-label={`Analog clock showing ${fullTime}`}>
         <circle class="clock-rim" cx="30" cy="30" r="27.5" />
@@ -111,8 +175,20 @@
         {#if metricsError}
           <span class="metrics-error">METRICS<br />UNAVAILABLE</span>
         {:else}
-          <span class="metric-row"><span>CPU</span><strong>{cpuText}</strong></span>
-          <span class="metric-row"><span>RAM</span><strong>{memoryText}</strong></span>
+          <span class="metric-row" class:level-low={cpuLevel==='low'} class:level-medium={cpuLevel==='medium'} class:level-high={cpuLevel==='high'} class:level-critical={cpuLevel==='critical'} title={`Monitter CPU: ${cpuText}`}>
+            <svg class="sparkline" viewBox={`0 0 ${sparkWidth} ${sparkHeight}`} preserveAspectRatio="none" aria-hidden="true">
+              <line x1="1" y1={sparkHeight - 1} x2={sparkWidth - 1} y2={sparkHeight - 1} />
+              {#if cpuPoints}<polyline points={cpuPoints} />{/if}
+            </svg>
+            <span>CPU</span><strong>{compact ? compactCpuText : cpuText}</strong>
+          </span>
+          <span class="metric-row" class:level-low={memoryLevel==='low'} class:level-medium={memoryLevel==='medium'} class:level-high={memoryLevel==='high'} class:level-critical={memoryLevel==='critical'} title={`Monitter RAM: ${memoryText}`}>
+            <svg class="sparkline" viewBox={`0 0 ${sparkWidth} ${sparkHeight}`} preserveAspectRatio="none" aria-hidden="true">
+              <line x1="1" y1={sparkHeight - 1} x2={sparkWidth - 1} y2={sparkHeight - 1} />
+              {#if memoryPoints}<polyline points={memoryPoints} />{/if}
+            </svg>
+            <span>RAM</span><strong>{compact ? compactMemoryText : memoryText}</strong>
+          </span>
         {/if}
       </button>
     </div>
@@ -173,9 +249,28 @@
   .clock-pin { fill: var(--accent); stroke: var(--panel); stroke-width: 1; }
   .process-metrics { display:grid; flex:1; min-width:0; align-self:stretch; align-content:center; gap:7px; padding:5px 7px; border-radius:7px; text-align:left; }
   .process-metrics:hover { background:var(--soft); }
-  .metric-row { display:flex; align-items:baseline; justify-content:space-between; gap:7px; min-width:0; }
+  .metric-row { --metric-color:var(--muted); display:grid; grid-template-columns:minmax(34px,1fr) auto minmax(48px,auto); align-items:center; gap:8px; min-width:0; }
+  .metric-row.level-low { --metric-color:#45ad78; }
+  .metric-row.level-medium { --metric-color:#d4ad2f; }
+  .metric-row.level-high { --metric-color:#e48632; }
+  .metric-row.level-critical { --metric-color:#df5656; }
+  .sparkline { width:100%; height:18px; overflow:visible; color:var(--metric-color); }
+  .sparkline line { stroke:color-mix(in srgb,var(--line) 72%,transparent); stroke-width:1; vector-effect:non-scaling-stroke; }
+  .sparkline polyline { fill:none; stroke:currentColor; stroke-linecap:round; stroke-linejoin:round; stroke-width:1.6; vector-effect:non-scaling-stroke; }
   .process-metrics span { color:var(--muted); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.08em; }
-  .process-metrics strong { overflow:hidden; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
+  .process-metrics strong { overflow:hidden; color:var(--metric-color); text-align:right; text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
   .process-metrics .metrics-error { color:var(--muted); line-height:1.45; }
+  .compact.sidebar-clock-widget { bottom:calc(180px + var(--sidebar-footer-safe-area,0px)); }
+  .compact-time { display:grid; place-items:center; gap:1px; height:29px; box-sizing:border-box; padding:3px 2px; color:var(--muted); border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
+  .compact-time span { overflow:hidden; max-width:100%; font-size:7px; font-weight:600; letter-spacing:.04em; text-overflow:ellipsis; white-space:nowrap; }
+  .compact-time time { font:500 8px var(--mono); }
+  .compact .widget-body { display:grid; justify-items:center; gap:4px; height:108px; padding:5px 4px 7px; }
+  .compact .clock-face { width:38px; height:38px; }
+  .compact .process-metrics { align-self:auto; width:38px; max-width:100%; gap:4px; padding:0; border-radius:0; }
+  .compact .metric-row { grid-template-columns:minmax(0,1fr); grid-template-areas:"label" "value" "spark"; justify-items:center; gap:0; }
+  .compact .metric-row > span { grid-area:label; font-size:7px; letter-spacing:.03em; }
+  .compact .metric-row > strong { grid-area:value; width:100%; overflow:visible; font-size:7px; letter-spacing:0; text-align:center; text-overflow:clip; }
+  .compact .sparkline { grid-area:spark; height:8px; }
+  .compact .metrics-error { overflow:hidden; max-width:100%; font-size:7px; text-align:center; }
   @media (prefers-reduced-motion: reduce) { .widget-toggle :global(.widget-chevron) { transition: none; } }
 </style>
