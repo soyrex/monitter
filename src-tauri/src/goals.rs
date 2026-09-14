@@ -1,6 +1,6 @@
 use crate::{
     model::{Host, Task},
-    runner::{add_ssh_options, remote_path, resolve_local, ssh_target},
+    runner::{add_ssh_options, remote_exec, resolve_local, ssh_target},
 };
 use serde_json::{json, Value};
 use std::{
@@ -44,7 +44,7 @@ fn app_server_command(host: &Host) -> Result<Command, String> {
         add_ssh_options(&mut command, host);
         command
             .arg(ssh_target(host)?)
-            .arg(format!("exec {} app-server", remote_path(cli)));
+            .arg(remote_exec(cli, ["app-server"]));
         command
     } else {
         return Err("Host kind must be local or ssh.".into());

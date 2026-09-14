@@ -306,6 +306,37 @@ pub(crate) fn remote_path(value: &str) -> String {
     }
 }
 
+fn remote_executable_directory(executable: &str) -> Option<&str> {
+    let executable = executable.trim();
+    let (directory, filename) = executable.rsplit_once('/')?;
+    if filename.is_empty() {
+        return None;
+    }
+    Some(if directory.is_empty() { "/" } else { directory })
+}
+
+/// Build an argument-safe remote exec command. When a configured executable is
+/// an npm/NVM-style wrapper, its shebang commonly uses `/usr/bin/env node`.
+/// Non-interactive SSH does not load the user's shell startup files, so expose
+/// the executable's own directory to that shebang without invoking a shell or
+/// copying the user's authentication/configuration.
+pub(crate) fn remote_exec<'a>(executable: &str, args: impl IntoIterator<Item = &'a str>) -> String {
+    let executable = executable.trim();
+    let command = std::iter::once("exec".to_string())
+        .chain(std::iter::once(remote_path(executable)))
+        .chain(args.into_iter().map(posix_quote))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(directory) = remote_executable_directory(executable) {
+        format!(
+            "PATH={}:\"$PATH\"; export PATH; {command}",
+            remote_path(directory)
+        )
+    } else {
+        command
+    }
+}
+
 pub(crate) fn ssh_target(host: &Host) -> Result<String, String> {
     if host.address.trim().is_empty() {
         return Err("SSH host needs an address or configured alias.".into());
@@ -411,6 +442,10 @@ environment.pop("CODEX_THREAD_ID", None)
 environment.pop("CODEX_SESSION_ID", None)
 program = os.path.expanduser(sys.argv[2])
 cwd = os.path.expanduser(sys.argv[1])
+program_directory = os.path.dirname(program)
+if program_directory:
+    current_path = environment.get("PATH", "")
+    environment["PATH"] = program_directory + (os.pathsep + current_path if current_path else "")
 process = subprocess.Popen(
     [program, *sys.argv[3:]],
     cwd=cwd,
@@ -882,10 +917,9 @@ fn opencode_export_command(host: &Host, task: &Task, session_id: &str) -> Result
         let mut command = Command::new("ssh");
         add_ssh_options(&mut command, host);
         command.arg(ssh_target(host)?).arg(format!(
-            "cd {} && exec {} export {}",
+            "cd {} && {}",
             remote_path(&task.cwd),
-            remote_path(remote_cli(host, "opencode")?),
-            posix_quote(session_id),
+            remote_exec(remote_cli(host, "opencode")?, ["export", session_id]),
         ));
         command
     } else {
@@ -1039,10 +1073,9 @@ pub fn build_probe_command(host: &Host, provider: &str) -> Result<Command, Strin
     } else if host.kind == "ssh" {
         let mut command = Command::new("ssh");
         add_ssh_options(&mut command, host);
-        command.arg(ssh_target(host)?).arg(format!(
-            "exec {} --version",
-            remote_path(remote_cli(host, provider)?)
-        ));
+        command
+            .arg(ssh_target(host)?)
+            .arg(remote_exec(remote_cli(host, provider)?, ["--version"]));
         command
     } else {
         return Err("Host kind must be local or ssh.".into());
@@ -3034,6 +3067,25 @@ mod tests {
     }
 
     #[test]
+    fn remote_exec_exposes_an_explicit_executables_sibling_runtime() {
+        assert_eq!(
+            remote_exec(
+                "/Users/alex/.nvm/versions/node/v22.17.0/bin/codex",
+                ["--version"]
+            ),
+            "PATH='/Users/alex/.nvm/versions/node/v22.17.0/bin':\"$PATH\"; export PATH; exec '/Users/alex/.nvm/versions/node/v22.17.0/bin/codex' '--version'"
+        );
+        assert_eq!(
+            remote_exec("codex", ["--version"]),
+            "exec 'codex' '--version'"
+        );
+        assert_eq!(
+            remote_exec("~/bin/codex'; echo unsafe", ["arg'; echo unsafe"]),
+            "PATH=\"$HOME\"/'bin':\"$PATH\"; export PATH; exec \"$HOME\"/'bin/codex'\\''; echo unsafe' 'arg'\\''; echo unsafe'"
+        );
+    }
+
+    #[test]
     fn remote_command_quotes_every_dynamic_value_and_omits_default_options() {
         let task = task(Some("id'; echo pwned"), "model'; echo pwned");
         let command = build_command(&host("ssh"), &task).unwrap();
@@ -3396,6 +3448,52 @@ mod tests {
             .unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(output, frame);
+    }
+
+    #[test]
+    fn remote_supervisor_exposes_the_launchers_sibling_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!("monitter-remote-runtime-path-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let runtime = directory.join("monitter-node");
+        let launcher = directory.join("codex");
+        std::fs::write(
+            &runtime,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'sibling-runtime-found'\n",
+        )
+        .unwrap();
+        std::fs::write(&launcher, "#!/usr/bin/env monitter-node\n").unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut command = Command::new("python3");
+        command
+            .args(["-c", REMOTE_SUPERVISOR])
+            .arg(&directory)
+            .arg(&launcher)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"MONITTER/1 2\nok").unwrap();
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        drop(stdin);
+        let result = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(output, "sibling-runtime-found");
     }
 
     #[test]

@@ -429,6 +429,9 @@ SSH host port 0 means use the existing SSH config/default (omit `-p`). An empty 
 also preserves the SSH config. Expand remote `~/` relative to the remote home, never the local home.
 SSH uses the system client, keys/agent/config, BatchMode, bounded connection timeout and normal host-key
 verification. Quote each remote argument using POSIX single quote escaping; prompts always stdin.
+When a configured remote CLI is an explicit path, its parent directory is prepended to that owned
+process's PATH for probes, turns and read-only catalog/goal helpers. This lets NVM/npm launchers find
+their sibling runtime in non-interactive SSH without sourcing shell profiles or changing remote config.
 Do not disable StrictHostKeyChecking or expose a public network listener. Killing a local process must not
 kill unrelated agents. Cancellation and app quit must clean up owned children as far as transport permits.
 No purchase or paid provisioning; existing authorized Codex account usage only.
