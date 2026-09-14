@@ -36,6 +36,7 @@ mod lan_sync;
 mod menu;
 pub mod model;
 mod models;
+mod process_metrics;
 mod runner;
 mod store;
 mod terminal;
@@ -496,6 +497,7 @@ impl Service {
         }
         match command {
             "get_snapshot" => value(self.snapshot()?),
+            "get_process_metrics" => value(process_metrics::sample()?),
             "get_ui_snapshot" => {
                 value(self.ui_snapshot(args.get("revision").and_then(|value| value.as_str()))?)
             }
@@ -3690,6 +3692,11 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
     state.0.snapshot()
 }
 
+#[tauri::command]
+fn get_process_metrics() -> Result<process_metrics::ProcessMetricsSample, String> {
+    process_metrics::sample()
+}
+
 /// Native desktop only. This command is deliberately absent from the LAN
 /// dispatcher and Snapshot because MCP environment/header values are private.
 #[tauri::command]
@@ -5665,6 +5672,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_process_metrics,
             get_extension_config,
             save_extension_config,
             get_ui_snapshot,

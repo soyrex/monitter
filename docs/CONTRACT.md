@@ -18,6 +18,10 @@ No fake conversations, progress, token counts, host connections or model replies
   truncated detail is explicitly labelled. Each page has at most 100 events and 128 KiB of
   detail. Original diagnostics remain stored locally. The UI refreshes these pages only while
   the timeline is visible; this traffic is independent of ordinary chat refreshes.
+- `get_process_metrics {}` -> `{ cpuTimeMs: number, residentMemoryBytes: number, sampledAt: number }`.
+  Read-only native/LAN sample of the Monitter host process. CPU time is cumulative so clients can
+  calculate interval usage without shared sampling state; resident memory is current physical
+  memory. Unsupported platforms fail visibly instead of returning fabricated values.
 - `save_host { host: Host }` -> Snapshot (empty id creates)
 - `delete_host { id: string }` -> Snapshot (reject referenced/default local host)
 - `probe_host { host: Host }` -> ProbeResult (unsaved settings allowed; versions keyed provider)

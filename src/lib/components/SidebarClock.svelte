@@ -1,12 +1,20 @@
 <script lang="ts">
   import { ChevronDown } from '@lucide/svelte';
   import { onMount } from 'svelte';
+  import { getBridge } from '$lib/bridge';
+  import type { ProcessMetricsSample } from '$lib/types';
 
   let { expanded = $bindable(true) } = $props<{ expanded?: boolean }>();
 
   const ticks = Array.from({ length: 12 });
   const storageKey = 'monitter.sidebar-clock-expanded.v1';
+  const bridge = getBridge();
   let now = $state(new Date());
+  let metrics = $state<ProcessMetricsSample | null>(null);
+  let previousMetrics: ProcessMetricsSample | null = null;
+  let cpuPercent = $state<number | null>(null);
+  let metricsError = $state('');
+  let metricsLoading = false;
 
   const hourAngle = $derived(((now.getHours() % 12) + now.getMinutes() / 60) * 30);
   const minuteAngle = $derived((now.getMinutes() + now.getSeconds() / 60) * 6);
@@ -20,12 +28,33 @@
     minute: '2-digit',
     second: '2-digit',
   }).format(now));
-  const date = $derived(new Intl.DateTimeFormat(undefined, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  }).format(now));
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone.replaceAll('_', ' ');
+  const cpuText = $derived(cpuPercent === null ? '···' : `${cpuPercent.toFixed(cpuPercent >= 100 ? 0 : 1)}%`);
+  const memoryText = $derived(metrics ? formatMemory(metrics.residentMemoryBytes) : '···');
+
+  function formatMemory(bytes: number) {
+    const mib = bytes / (1024 * 1024);
+    return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GB` : `${Math.round(mib)} MB`;
+  }
+
+  async function updateMetrics() {
+    if (!expanded || metricsLoading) return;
+    metricsLoading = true;
+    try {
+      const next = await bridge.getProcessMetrics();
+      if (previousMetrics) {
+        const elapsed = next.sampledAt - previousMetrics.sampledAt;
+        const cpuElapsed = next.cpuTimeMs - previousMetrics.cpuTimeMs;
+        if (elapsed > 0 && cpuElapsed >= 0) cpuPercent = Math.max(0, cpuElapsed / elapsed * 100);
+      }
+      previousMetrics = next;
+      metrics = next;
+      metricsError = '';
+    } catch (reason) {
+      metricsError = String(reason || 'Process metrics are unavailable.');
+    } finally {
+      metricsLoading = false;
+    }
+  }
 
   onMount(() => {
     try {
@@ -33,17 +62,23 @@
       if (stored === 'true' || stored === 'false') expanded = stored === 'true';
     } catch { /* Keep the expanded default when local storage is unavailable. */ }
 
-    const timer = window.setInterval(() => { now = new Date(); }, 1_000);
-    return () => window.clearInterval(timer);
+    void updateMetrics();
+    const clockTimer = window.setInterval(() => { now = new Date(); }, 1_000);
+    const metricsTimer = window.setInterval(() => { void updateMetrics(); }, 2_000);
+    return () => {
+      window.clearInterval(clockTimer);
+      window.clearInterval(metricsTimer);
+    };
   });
 
   function toggle() {
     expanded = !expanded;
     try { localStorage.setItem(storageKey, String(expanded)); } catch { /* The live state still works. */ }
+    if (expanded) void updateMetrics();
   }
 </script>
 
-<section class="sidebar-clock-widget" class:expanded aria-label="Clock widget">
+<section class="sidebar-clock-widget" class:expanded aria-label="Clock and Monitter usage widget">
   <button class="widget-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-clock-body" onclick={toggle}>
     <span>LOCAL TIME</span>
     <time datetime={now.toISOString()}>{shortTime}</time>
@@ -61,10 +96,13 @@
         <line class="second-hand" x1="30" y1="34" x2="30" y2="9" transform={`rotate(${secondAngle} 30 30)`} />
         <circle class="clock-pin" cx="30" cy="30" r="2" />
       </svg>
-      <div class="clock-copy">
-        <time datetime={now.toISOString()}>{fullTime}</time>
-        <span>{date}</span>
-        <small>{timezone}</small>
+      <div class="process-metrics" aria-label="Monitter process usage" title={metricsError || 'Current Monitter host process usage'}>
+        {#if metricsError}
+          <span class="metrics-error">METRICS<br />UNAVAILABLE</span>
+        {:else}
+          <div><span>CPU</span><strong>{cpuText}</strong></div>
+          <div><span>RAM</span><strong>{memoryText}</strong></div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -121,15 +159,10 @@
   .clock-face .minute-hand { stroke: var(--ink); stroke-width: 1.8; }
   .clock-face .second-hand { stroke: var(--accent); stroke-width: 1; }
   .clock-pin { fill: var(--accent); stroke: var(--panel); stroke-width: 1; }
-  .clock-copy { display: grid; min-width: 0; gap: 2px; }
-  .clock-copy time { color: var(--ink); font: 500 calc(13px * var(--interface-font-ratio, 1)) var(--mono); }
-  .clock-copy span, .clock-copy small {
-    overflow: hidden;
-    color: var(--muted);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: calc(10px * var(--interface-font-ratio, 1));
-  }
-  .clock-copy small { font-size: calc(9px * var(--interface-font-ratio, 1)); }
+  .process-metrics { display:grid; flex:1; min-width:0; align-self:stretch; align-content:center; gap:7px; }
+  .process-metrics > div { display:flex; align-items:baseline; justify-content:space-between; gap:7px; min-width:0; }
+  .process-metrics span { color:var(--muted); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.08em; }
+  .process-metrics strong { overflow:hidden; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
+  .process-metrics .metrics-error { color:var(--muted); line-height:1.45; }
   @media (prefers-reduced-motion: reduce) { .widget-toggle :global(.widget-chevron) { transition: none; } }
 </style>

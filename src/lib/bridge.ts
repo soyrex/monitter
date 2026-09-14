@@ -33,6 +33,7 @@ import type {
   RunEvent,
   UiSnapshotResponse,
   TaskEventsPage,
+  ProcessMetricsSample,
   SendAccepted,
   ExtensionConfig,
 } from "./types";
@@ -41,6 +42,7 @@ export interface MonitterBridge {
   available: boolean;
   getSnapshot(): Promise<Snapshot>;
   getTaskEvents(taskId: string, before?: number, limit?: number): Promise<TaskEventsPage>;
+  getProcessMetrics(): Promise<ProcessMetricsSample>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
   probeHost(host: Host): Promise<ProbeResult>;
@@ -209,6 +211,7 @@ const nativeBridge: MonitterBridge = {
     (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
   getSnapshot: () => getCachedSnapshot(),
   getTaskEvents: (taskId, before, limit) => invoke<TaskEventsPage>('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
+  getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
   deleteHost: (id) => invoke<Snapshot>("delete_host", { id }),
   probeHost: (host) => invoke<ProbeResult>("probe_host", { host }),
@@ -297,6 +300,7 @@ const previewBridge: MonitterBridge = {
   available: false,
   getSnapshot: async () => emptyPreviewSnapshot(),
   getTaskEvents: async () => ({ events: [], nextBefore: null }),
+  getProcessMetrics: () => desktopOnly(),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
   probeHost: () => desktopOnly(),
@@ -358,6 +362,7 @@ export function getBridge(): MonitterBridge {
       available: true,
       getSnapshot: () => test.invoke("get_snapshot") as Promise<Snapshot>,
       getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,
+      getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,
       deleteHost: (id) =>
