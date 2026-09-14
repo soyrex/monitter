@@ -225,16 +225,19 @@ try {
   await page.evaluate(() => {
     const qa = window.__MONITTER_QA__, s = qa.snapshot();
     s.events.push({ id: 'qa-large-diagnostic', taskId: s.tasks.at(-1).id, kind: 'error', title: 'Large harness diagnostic', detail: 'Diagnostic preview. ' + 'x'.repeat(50000) + ' END_OF_DIAGNOSTIC', createdAt: Date.now() });
+    s.events.push({ id: 'qa-json-activity', taskId: s.tasks.at(-1).id, kind: 'reasoning', title: 'JSON activity', detail: JSON.stringify({content:[],id:'rs_example',summary:[],type:'reasoning'}), createdAt: Date.now() + 1 });
     qa.setSnapshot(s);
   });
-  const fullDetail = page.getByLabel('Full detail for Large harness diagnostic', { exact: true });
-  await expect(fullDetail).not.toBeVisible();
-  await page.getByLabel('Show full detail for Large harness diagnostic', { exact: true }).click();
+  const fullDetail = page.getByLabel('Detail for Large harness diagnostic', { exact: true });
   await expect(fullDetail).toBeVisible();
+  expect(await fullDetail.evaluate(el => getComputedStyle(el).webkitLineClamp)).toBe('3');
+  const jsonDetail = page.getByLabel('Detail for JSON activity', { exact: true });
+  expect(await jsonDetail.evaluate(el => el.textContent)).toContain('{\n  "content": [],\n  "id": "rs_example"');
+  await page.getByLabel('Show full detail for Large harness diagnostic', { exact: true }).click();
   await expect(fullDetail).toContainText('END_OF_DIAGNOSTIC');
   expect(await fullDetail.evaluate(el => el.clientHeight)).toBeLessThanOrEqual(250);
-  await page.getByLabel('Show full detail for Large harness diagnostic', { exact: true }).click();
-  results.push('large harness diagnostics collapse with full bounded details available');
+  await page.getByLabel('Show less detail for Large harness diagnostic', { exact: true }).click();
+  results.push('activity JSON is pretty printed and long details default to three lines with bounded expansion');
 
   // Earlier draft-first creation checks intentionally send several chats. Reset their fixture
   // statuses so this section can still prove Stop is scoped to each of these two chats.

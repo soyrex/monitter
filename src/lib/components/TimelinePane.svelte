@@ -1,4 +1,59 @@
-<script lang="ts">import type { RunEvent } from '$lib/types'; let { events = [], goalError = '', provider = '', loading = false, error = '', hasMore = false, onloadolder, onretry }: { events?: RunEvent[]; goalError?: string; provider?: string; loading?: boolean; error?: string; hasMore?: boolean; onloadolder?: () => void; onretry?: () => void } = $props(); const stamp=(value:number)=>new Date(value).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); const long=(v:string)=>v.length>1200; const preview=(v:string)=>v.slice(0,360)+(v.length>360?'…':''); const title=(event:RunEvent)=>event.title==='Codex process failed' && provider && provider!=='codex'?`${provider[0].toUpperCase()}${provider.slice(1)} process failed`:event.title;</script>
-<section class="timeline" aria-label="Timeline">{#if goalError}<details class="error"><summary>Goal status unavailable</summary><p>{goalError}</p></details>{/if}{#if error}<p class="error" role="alert">{error} {#if onretry}<button type="button" class="retry" disabled={loading} onclick={onretry}>Retry</button>{/if}</p>{/if}{#if loading && !events.length}<p class="empty">Loading full activity…</p>{/if}{#each events as event (event.id)}{@const eventTitle=title(event)}<article class={event.kind}><time>{stamp(event.createdAt)}</time><div><b>{eventTitle}</b>{#if event.detail}{#if long(event.detail)}<p>{preview(event.detail)}</p><details><summary aria-label={`Show full detail for ${eventTitle || "timeline event"}`}>Show full detail · {event.detail.length} characters</summary><!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable diagnostic output must be keyboard reachable) -->
-<pre tabindex="0" aria-label={`Full detail for ${eventTitle || "timeline event"}`}>{event.detail}</pre></details>{:else}<p>{event.detail}</p>{/if}{/if}</div></article>{:else}{#if !loading}<p class="empty">Run events will appear here as the CLI reports them.</p>{/if}{/each}{#if hasMore}<button type="button" class="older" disabled={loading} onclick={onloadolder}>{loading ? 'Loading…' : 'Load older activity'}</button>{/if}</section>
-<style>.timeline{overflow:auto;padding:10px;min-width:0}.timeline article{display:grid;grid-template-columns:48px minmax(0,1fr);gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:calc(11px * var(--interface-font-ratio, 1));min-width:0}.timeline time{color:var(--muted);font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}.timeline p,.timeline pre{margin:3px 0;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0}.timeline pre{max-height:240px;overflow:auto;padding:7px;background:var(--soft)}.timeline summary{cursor:pointer;color:var(--muted);font-size:calc(10px * var(--interface-font-ratio, 1))}.empty,.error{color:var(--muted);font-size:calc(11px * var(--interface-font-ratio, 1))}.error,.error b{color:#b54a55}.tool b{color:var(--accent-ink)}.older{width:100%;margin-top:10px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--muted);cursor:pointer}.retry{margin-left:6px;border:1px solid currentColor;border-radius:4px;background:transparent;color:inherit;cursor:pointer}</style>
+<script lang="ts">
+  import type { RunEvent } from '$lib/types';
+
+  let { events = [], goalError = '', provider = '', loading = false, error = '', hasMore = false, onloadolder, onretry }: { events?: RunEvent[]; goalError?: string; provider?: string; loading?: boolean; error?: string; hasMore?: boolean; onloadolder?: () => void; onretry?: () => void } = $props();
+  let expanded = $state<Record<string, boolean>>({});
+
+  const stamp = (value: number) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const title = (event: RunEvent) => event.title === 'Codex process failed' && provider && provider !== 'codex' ? `${provider[0].toUpperCase()}${provider.slice(1)} process failed` : event.title;
+  const formatDetail = (value: string) => {
+    try { return JSON.stringify(JSON.parse(value), null, 2); }
+    catch { return value; }
+  };
+  const hasMoreDetail = (value: string) => value.split('\n').length > 3 || value.length > 180;
+</script>
+
+<section class="timeline" aria-label="Timeline">
+  {#if goalError}<details class="error"><summary>Goal status unavailable</summary><p>{goalError}</p></details>{/if}
+  {#if error}<p class="error" role="alert">{error} {#if onretry}<button type="button" class="retry" disabled={loading} onclick={onretry}>Retry</button>{/if}</p>{/if}
+  {#if loading && !events.length}<p class="empty">Loading full activity…</p>{/if}
+  {#each events as event (event.id)}
+    {@const eventTitle = title(event)}
+    <article class={event.kind}>
+      <time>{stamp(event.createdAt)}</time>
+      <div class="entry">
+        <b>{eventTitle}</b>
+        {#if event.detail}
+          {@const detail = formatDetail(event.detail)}
+          {@const expandable = hasMoreDetail(detail)}
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable diagnostic output must be keyboard reachable when expanded) -->
+          <pre class:collapsed={expandable && !expanded[event.id]} class:expanded={expanded[event.id]} tabindex={expanded[event.id] ? 0 : undefined} aria-label={`Detail for ${eventTitle || 'timeline event'}`}>{detail}</pre>
+          {#if expandable}<button type="button" class="detail-toggle" aria-expanded={expanded[event.id] ?? false} aria-label={`${expanded[event.id] ? 'Show less detail for' : 'Show full detail for'} ${eventTitle || 'timeline event'}`} onclick={() => expanded[event.id] = !expanded[event.id]}>{expanded[event.id] ? 'Less' : 'More'}</button>{/if}
+        {/if}
+      </div>
+    </article>
+  {:else}
+    {#if !loading}<p class="empty">Run events will appear here as the CLI reports them.</p>{/if}
+  {/each}
+  {#if hasMore}<button type="button" class="older" disabled={loading} onclick={onloadolder}>{loading ? 'Loading…' : 'Load older activity'}</button>{/if}
+</section>
+
+<style>
+  .timeline{overflow:auto;padding:10px;min-width:0}
+  .timeline article{display:grid;grid-template-columns:48px minmax(0,1fr);gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:calc(11px * var(--interface-font-ratio, 1));min-width:0}
+  .timeline time{color:var(--muted);font:calc(9.5px * var(--interface-font-ratio, 1)) var(--mono)}
+  .entry{min-width:0}
+  .timeline p,.timeline pre{margin:3px 0;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0}
+  .timeline pre{font:calc(9.5px * var(--interface-font-ratio, 1))/1.35 var(--mono);letter-spacing:-.01em}
+  .timeline pre.collapsed{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+  .timeline pre.expanded{max-height:240px;overflow:auto;padding:7px;background:var(--soft);border-radius:5px}
+  .timeline summary{cursor:pointer;color:var(--muted);font-size:calc(10px * var(--interface-font-ratio, 1))}
+  .detail-toggle{display:inline;padding:0;border:0;background:transparent;color:var(--accent-ink);font:500 calc(9.5px * var(--interface-font-ratio, 1))/1.4 var(--sans);cursor:pointer;text-decoration:none}
+  .detail-toggle:hover{text-decoration:underline}
+  .detail-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+  .empty,.error{color:var(--muted);font-size:calc(11px * var(--interface-font-ratio, 1))}
+  .error,.error b{color:#b54a55}
+  .tool b{color:var(--accent-ink)}
+  .older{width:100%;margin-top:10px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--muted);cursor:pointer}
+  .retry{margin-left:6px;border:1px solid currentColor;border-radius:4px;background:transparent;color:inherit;cursor:pointer}
+</style>
