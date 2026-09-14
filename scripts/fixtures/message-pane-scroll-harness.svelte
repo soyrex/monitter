@@ -6,6 +6,7 @@
   const paragraph = 'A deliberately long Monitter conversation entry stays inside the message viewport while its layout settles. ';
   let resetKey = $state('initial');
   let entries = $state<Entry[]>(Array.from({ length: 18 }, (_, id) => ({ id, text: `Initial message ${id}. ${paragraph.repeat(10)}`, tall: false })));
+  let thinking = $state(false);
   let nextId = 18;
 
   function append(label: string, tall = false) {
@@ -38,6 +39,8 @@
       send: () => { append('Sent message'); resetKey = `send:${nextId}`; },
       growThenScrollBeforeObserver,
       shrinkThenGrow,
+      beginThinking: () => { thinking = true; },
+      endThinking: () => { thinking = false; },
     };
     return () => { delete (window as Window & { __PANE_QA__?: unknown }).__PANE_QA__; };
   });
@@ -48,6 +51,9 @@
     {#each entries as entry (entry.id)}
       <article class:tall={entry.tall}>{entry.text}</article>
     {/each}
+    {#if thinking}
+      <div class="reasoning-pending"><span class="animated-title" aria-busy="true">Thinking</span></div>
+    {/if}
   </MessagePane>
 </main>
 

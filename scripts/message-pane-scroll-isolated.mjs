@@ -80,6 +80,14 @@ try {
     await setBottomGap(50);
     await expect(page.getByRole('button', { name: 'Jump to latest message' })).toBeVisible();
     await expect(jumpButton).toHaveCSS('opacity', '1');
+    const restingBorder = await jumpButton.evaluate(node => getComputedStyle(node).borderColor);
+    await invoke('beginThinking');
+    await expect(jumpButton).toHaveCSS('border-color', 'rgb(0, 102, 102)');
+    expect(await jumpButton.evaluate(node => getComputedStyle(node).animationName)).toContain('jump-attention-glow');
+    expect(await jumpButton.evaluate(node => getComputedStyle(node, '::before').content)).not.toBe('none');
+    expect(await jumpButton.evaluate(node => getComputedStyle(node, '::before').animationName)).toContain('jump-attention-twinkle');
+    await invoke('endThinking');
+    await expect(jumpButton).toHaveCSS('border-color', restingBorder);
     const manual = await metrics();
     const manualGap = manual.total - manual.height - manual.top;
     await page.waitForTimeout(1_100);
@@ -116,7 +124,7 @@ try {
       expect(clearance.padding).toBeGreaterThanOrEqual(clearance.fade + 8);
     }
     expect(errors).toEqual([]);
-    assertions.push(`${profile.name}: strict 50px intent threshold, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance`);
+    assertions.push(`${profile.name}: strict 50px intent threshold, thinking-aware jump sparkle, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance`);
     await context.close();
   }
   console.log(`${messagePaneRef ? `${messagePaneRef}: ` : 'working tree: '}${assertions.join('\n')}`);
