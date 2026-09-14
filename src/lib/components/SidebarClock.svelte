@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { getBridge } from '$lib/bridge';
   import type { ProcessMetricsSample } from '$lib/types';
+  import ProcessMetricsModal from './ProcessMetricsModal.svelte';
 
   let { expanded = $bindable(true) } = $props<{ expanded?: boolean }>();
 
@@ -11,6 +12,8 @@
   const bridge = getBridge();
   let now = $state(new Date());
   let metrics = $state<ProcessMetricsSample | null>(null);
+  let metricSamples = $state<ProcessMetricsSample[]>([]);
+  let metricsModalOpen = $state(false);
   let previousMetrics: ProcessMetricsSample | null = null;
   let cpuPercent = $state<number | null>(null);
   let metricsError = $state('');
@@ -37,10 +40,17 @@
   }
 
   async function updateMetrics() {
-    if (!expanded || metricsLoading) return;
+    if ((!expanded && !metricsModalOpen) || metricsLoading) return;
     metricsLoading = true;
     try {
-      const next = await bridge.getProcessMetrics();
+      const sample = await bridge.getProcessMetrics();
+      // Keep the compact widget usable while a newly hot-reloaded frontend is
+      // briefly connected to an older native binary during development.
+      const next: ProcessMetricsSample = {
+        ...sample,
+        rootPid: sample.rootPid ?? 0,
+        processes: sample.processes ?? [],
+      };
       if (previousMetrics) {
         const elapsed = next.sampledAt - previousMetrics.sampledAt;
         const cpuElapsed = next.cpuTimeMs - previousMetrics.cpuTimeMs;
@@ -48,6 +58,7 @@
       }
       previousMetrics = next;
       metrics = next;
+      metricSamples = [...metricSamples, next].slice(-90);
       metricsError = '';
     } catch (reason) {
       metricsError = String(reason || 'Process metrics are unavailable.');
@@ -96,17 +107,18 @@
         <line class="second-hand" x1="30" y1="34" x2="30" y2="9" transform={`rotate(${secondAngle} 30 30)`} />
         <circle class="clock-pin" cx="30" cy="30" r="2" />
       </svg>
-      <div class="process-metrics" aria-label="Monitter and harness process usage" title={metricsError || 'Current Monitter, CLI and ACP harness process usage'}>
+      <button type="button" class="process-metrics" aria-label="Open Monitter and harness resource usage" title={metricsError || 'Open Monitter, CLI and ACP harness resource usage'} onclick={()=>metricsModalOpen=true}>
         {#if metricsError}
           <span class="metrics-error">METRICS<br />UNAVAILABLE</span>
         {:else}
-          <div><span>CPU</span><strong>{cpuText}</strong></div>
-          <div><span>RAM</span><strong>{memoryText}</strong></div>
+          <span class="metric-row"><span>CPU</span><strong>{cpuText}</strong></span>
+          <span class="metric-row"><span>RAM</span><strong>{memoryText}</strong></span>
         {/if}
-      </div>
+      </button>
     </div>
   {/if}
 </section>
+<ProcessMetricsModal open={metricsModalOpen} samples={metricSamples} error={metricsError} onclose={()=>metricsModalOpen=false}/>
 
 <style>
   .sidebar-clock-widget {
@@ -159,8 +171,9 @@
   .clock-face .minute-hand { stroke: var(--ink); stroke-width: 1.8; }
   .clock-face .second-hand { stroke: var(--accent); stroke-width: 1; }
   .clock-pin { fill: var(--accent); stroke: var(--panel); stroke-width: 1; }
-  .process-metrics { display:grid; flex:1; min-width:0; align-self:stretch; align-content:center; gap:7px; }
-  .process-metrics > div { display:flex; align-items:baseline; justify-content:space-between; gap:7px; min-width:0; }
+  .process-metrics { display:grid; flex:1; min-width:0; align-self:stretch; align-content:center; gap:7px; padding:5px 7px; border-radius:7px; text-align:left; }
+  .process-metrics:hover { background:var(--soft); }
+  .metric-row { display:flex; align-items:baseline; justify-content:space-between; gap:7px; min-width:0; }
   .process-metrics span { color:var(--muted); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.08em; }
   .process-metrics strong { overflow:hidden; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
   .process-metrics .metrics-error { color:var(--muted); line-height:1.45; }

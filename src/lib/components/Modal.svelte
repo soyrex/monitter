@@ -5,11 +5,13 @@
   let {
     title,
     open = false,
+    wide = false,
     onclose,
     children,
   }: {
     title: string;
     open?: boolean;
+    wide?: boolean;
     onclose: () => void;
     children: import("svelte").Snippet;
   } = $props();
@@ -157,6 +159,7 @@
     <div
       bind:this={dialog}
       class="modal"
+      class:wide
       data-motion-closing={closing ? 'true' : undefined}
       inert={closing}
       role="dialog"
@@ -195,6 +198,7 @@
     background: var(--panel);
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8) !important;
   }
+  .modal.wide { width: min(860px, 100%); }
   header {
     position: sticky;
     top: 0;

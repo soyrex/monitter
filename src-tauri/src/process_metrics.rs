@@ -9,6 +9,19 @@ pub struct ProcessMetricsSample {
     pub cpu_time_ms: u64,
     pub resident_memory_bytes: u64,
     pub sampled_at: i64,
+    pub root_pid: libc::pid_t,
+    pub processes: Vec<ProcessMetricsProcess>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessMetricsProcess {
+    pub pid: libc::pid_t,
+    pub parent_pid: libc::pid_t,
+    pub name: String,
+    pub started_at: i64,
+    pub cpu_time_ms: u64,
+    pub resident_memory_bytes: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -69,7 +82,46 @@ fn process_tree_pids(root: libc::pid_t) -> Result<Vec<libc::pid_t>, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_usage(pid: libc::pid_t) -> Option<(u64, u64)> {
+fn process_identity(pid: libc::pid_t) -> Option<(libc::pid_t, String, i64)> {
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    let bytes = info
+        .pbi_name
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    let fallback = info
+        .pbi_comm
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    let name = String::from_utf8_lossy(if bytes.is_empty() { &fallback } else { &bytes })
+        .trim()
+        .to_string();
+    let started_at = info
+        .pbi_start_tvsec
+        .saturating_mul(1_000)
+        .saturating_add(info.pbi_start_tvusec / 1_000)
+        .min(i64::MAX as u64) as i64;
+    Some((info.pbi_ppid as libc::pid_t, name, started_at))
+}
+
+#[cfg(target_os = "macos")]
+fn process_usage(pid: libc::pid_t) -> Option<(u64, u64, u64)> {
     let mut info = unsafe { std::mem::zeroed::<libc::rusage_info_v2>() };
     let status = unsafe {
         libc::proc_pid_rusage(
@@ -83,32 +135,41 @@ fn process_usage(pid: libc::pid_t) -> Option<(u64, u64)> {
     }
     // Darwin reports these CPU counters in nanoseconds. Child counters cover
     // already-reaped descendants; live descendants are sampled separately.
-    let cpu_time_ns = info
-        .ri_user_time
-        .saturating_add(info.ri_system_time)
+    let own_cpu_time_ns = info.ri_user_time.saturating_add(info.ri_system_time);
+    let tree_cpu_time_ns = own_cpu_time_ns
         .saturating_add(info.ri_child_user_time)
         .saturating_add(info.ri_child_system_time);
-    Some((cpu_time_ns, info.ri_resident_size))
+    Some((own_cpu_time_ns, tree_cpu_time_ns, info.ri_resident_size))
 }
 
 #[cfg(target_os = "macos")]
 pub fn sample() -> Result<ProcessMetricsSample, String> {
     let root = unsafe { libc::getpid() };
-    let root_usage = process_usage(root)
-        .ok_or_else(|| "Could not read Monitter process metrics.".to_string())?;
-    let mut cpu_time_ns = root_usage.0;
-    let mut resident_memory_bytes = root_usage.1;
-
-    for pid in process_tree_pids(root)?
-        .into_iter()
-        .filter(|pid| *pid != root)
-    {
+    let mut cpu_time_ns = 0_u64;
+    let mut resident_memory_bytes = 0_u64;
+    let mut processes = Vec::new();
+    for pid in process_tree_pids(root)? {
         // Processes can exit between discovery and sampling. Their CPU usage
         // moves into the parent's child counters once reaped, so skipping a
         // vanished PID is safer than failing the whole widget.
-        if let Some((cpu, memory)) = process_usage(pid) {
-            cpu_time_ns = cpu_time_ns.saturating_add(cpu);
+        if let Some((own_cpu, tree_cpu, memory)) = process_usage(pid) {
+            cpu_time_ns = cpu_time_ns.saturating_add(tree_cpu);
             resident_memory_bytes = resident_memory_bytes.saturating_add(memory);
+            let (parent_pid, name, started_at) = process_identity(pid).unwrap_or((
+                0,
+                if pid == root { "Monitter" } else { "Process" }.into(),
+                0,
+            ));
+            processes.push(ProcessMetricsProcess {
+                pid,
+                parent_pid,
+                name,
+                started_at,
+                cpu_time_ms: own_cpu / 1_000_000,
+                resident_memory_bytes: memory,
+            });
+        } else if pid == root {
+            return Err("Could not read Monitter process metrics.".into());
         }
     }
 
@@ -116,6 +177,8 @@ pub fn sample() -> Result<ProcessMetricsSample, String> {
         cpu_time_ms: cpu_time_ns / 1_000_000,
         resident_memory_bytes,
         sampled_at: crate::model::now(),
+        root_pid: root,
+        processes,
     })
 }
 
@@ -132,6 +195,7 @@ mod tests {
         let sample = super::sample().expect("process metrics should be readable");
         assert!(sample.sampled_at > 0);
         assert!(sample.resident_memory_bytes > 0);
+        assert_eq!(sample.processes[0].pid, sample.root_pid);
     }
 
     #[cfg(target_os = "macos")]
@@ -144,6 +208,11 @@ mod tests {
         let root = unsafe { libc::getpid() };
         let tree = super::process_tree_pids(root).expect("discover process tree");
         assert!(tree.contains(&(child.id() as libc::pid_t)));
+        let sample = super::sample().expect("sample process tree");
+        assert!(sample
+            .processes
+            .iter()
+            .any(|process| process.pid == child.id() as libc::pid_t));
         let _ = child.kill();
         let _ = child.wait();
     }
