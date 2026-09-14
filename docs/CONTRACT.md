@@ -22,6 +22,10 @@ No fake conversations, progress, token counts, host connections or model replies
   Read-only native/LAN sample of the Monitter host process. CPU time is cumulative so clients can
   calculate interval usage without shared sampling state; resident memory is current physical
   memory. Unsupported platforms fail visibly instead of returning fabricated values.
+- `get_task_event_detail { taskId: string, eventId: string, offset?: number, limit?: number }` ->
+  `{ chunk: string, nextOffset: number | null, totalBytes: number }`. Full tool detail remains in
+  the local journal and is read only after its activity row is expanded. Chunks default to 32 KiB
+  and are capped at 64 KiB. Task and event IDs must match; offsets are UTF-8 byte boundaries.
 - `save_host { host: Host }` -> Snapshot (empty id creates)
 - `delete_host { id: string }` -> Snapshot (reject referenced/default local host)
 - `probe_host { host: Host }` -> ProbeResult (unsaved settings allowed; versions keyed provider)

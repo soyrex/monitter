@@ -1,7 +1,7 @@
 <script lang="ts">
   import { type Snippet } from 'svelte';
   import { Check, CircleStop, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
-  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, Message, Snapshot, Task } from '$lib/types';
+  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, Message, RunEvent, Snapshot, Task } from '$lib/types';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
   import { floating } from '$lib/floating';
@@ -57,6 +57,7 @@
     formatTime,
     onOpenCollaboration,
     onOpenApproval,
+    onLoadFullEventDetail,
     onStop,
     onEditTask,
     onShare,
@@ -93,6 +94,7 @@
     formatTime: (value: number) => string;
     onOpenCollaboration: (value: CollaborationRecord) => void;
     onOpenApproval: (request: ApprovalRequest) => void;
+    onLoadFullEventDetail: (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
     onStop: () => void;
     onEditTask: () => void;
     onShare: () => void;
@@ -139,13 +141,13 @@
         {#snippet children(item, _index)}
           {#if item.type === 'activity'}
             {@const collaboration=item.value.kind==='collaboration' ? collaborationFor(item.value.detail) : null}
-            {#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>onOpenCollaboration(collaboration)}/>{:else}<RunActivity event={item.value}/>{/if}
+            {#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>onOpenCollaboration(collaboration)}/>{:else}<RunActivity event={item.value} onloaddetail={onLoadFullEventDetail}/>{/if}
           {:else if item.type === 'reasoning-group'}
-            <RunActivity events={item.values} running={task.status === 'running' && item === conversationItems.at(-1) && !pendingApprovals.length}>
+            <RunActivity events={item.values} onloaddetail={onLoadFullEventDetail} running={task.status === 'running' && item === conversationItems.at(-1) && !pendingApprovals.length}>
               {#snippet avatar()}{@render messageAvatar(agent)}{/snippet}
             </RunActivity>
           {:else if item.type === 'tool-group'}
-            <RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={task.status === 'running'}/>
+            <RunActivity events={item.values} onloaddetail={onLoadFullEventDetail} compressed={snapshot.settings.compressToolCalls === true} running={task.status === 'running'}/>
           {:else if item.type === 'approval'}
             {@const approvalText=approvalEventText(item.value)}
             <button class={`approval-inline ${item.value.status}`} onclick={()=>onOpenApproval(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{formatTime(item.value.resolvedAt ?? item.value.createdAt)}</time></button>

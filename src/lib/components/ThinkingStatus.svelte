@@ -68,7 +68,7 @@
 <div class="activity reasoning-pending" aria-label={starting ? 'Getting ready' : label}>
   {#if avatar}{@render avatar()}{:else}<Brain size={14}/>{/if}
   <span class="reasoning-label" use:motionView={{key:starting ? 'Getting ready' : label,y:0,duration:100}}><AnimatedTitle text={starting ? 'Getting ready' : label} active={running && !starting} activeTooltip="In progress"/></span>
-  {#if running || starting}<time aria-label="Elapsed time" datetime={`PT${elapsedSeconds}S`}>{elapsed}</time>{/if}
+  {#if running || starting}<time aria-label="Elapsed time" datetime={`PT${elapsedSeconds}S`}><AnimatedTitle text={elapsed} active activeTooltip="Elapsed time"/></time>{/if}
 </div>
 
 <style>

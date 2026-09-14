@@ -551,6 +551,35 @@
       timelinePages = { ...timelinePages, [taskId]: { events: page?.events ?? [], nextBefore: page?.nextBefore ?? null, loading: false, error: `Could not load full activity: ${text(reason)}`, loadedOlder: page?.loadedOlder ?? false } };
     }
   }
+  let eventDetailChunksSupported: boolean | null = null;
+  async function loadFullEventDetail(event: RunEvent, onChunk: (detail: string) => void): Promise<string> {
+    if (eventDetailChunksSupported !== false) {
+      let detail = '';
+      let offset: number | undefined;
+      try {
+        for (let chunks = 0; chunks < 512; chunks += 1) {
+          const page = await bridge.getTaskEventDetail(event.taskId, event.id, offset, 32 * 1024);
+          eventDetailChunksSupported = true;
+          detail += page.chunk;
+          onChunk(detail);
+          if (page.nextOffset === null) return detail;
+          if (page.nextOffset === offset) throw new Error('Event detail did not advance.');
+          offset = page.nextOffset;
+        }
+        throw new Error('Event detail exceeded the supported chunk count.');
+      } catch (reason) {
+        if (eventDetailChunksSupported === true) throw reason;
+        eventDetailChunksSupported = false;
+      }
+    }
+    // Compatibility with a running desktop that predates the exact-detail
+    // command. This request still happens only after the activity is opened.
+    const page = await bridge.getTaskEvents(event.taskId, undefined, 100);
+    const full = page.events.find(candidate => candidate.id === event.id);
+    if (!full) throw new Error('Full activity detail is no longer in the recent event page.');
+    onChunk(full.detail);
+    return full.detail;
+  }
   const timelineVisible = $derived(showDetail && pane === 'task' && detailTab === 'timeline' && Boolean(selectedTask));
   $effect(() => { const taskId = selectedTask?.id; if (timelineVisible && taskId && !timelinePages[taskId]) void loadTimeline(taskId); });
   const compactTimelineKey = $derived(timelineVisible && selectedTask ? `${selectedTask.id}:${(indexes?.eventsByTask.get(selectedTask.id) ?? []).map(event => event.id).join(',')}` : '');
@@ -3524,6 +3553,7 @@
           formatTime={date}
           onOpenCollaboration={openCollaborationTask}
           onOpenApproval={openApprovalHistory}
+          onLoadFullEventDetail={loadFullEventDetail}
           onStop={() => { void run(() => bridge.cancelTask(selectedTask.id), "Stopping task…"); }}
           onEditTask={() => { renameTitle = selectedTask.title; taskProjectId = selectedTask.projectId ?? ''; modal = 'taskSettings'; }}
           onShare={shareSelectedChat}

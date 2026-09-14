@@ -14,6 +14,7 @@ pub const MAX_LIVE_DETAIL: usize = 1_000;
 pub const MAX_ERROR_DETAIL: usize = 300;
 pub const MAX_EVENT_PAGE: usize = 100;
 pub const MAX_EVENT_PAGE_DETAIL_BYTES: usize = 128 * 1024;
+pub const MAX_EVENT_DETAIL_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +28,44 @@ pub struct UiSnapshot {
 pub struct TaskEventsPage {
     pub events: Vec<RunEvent>,
     pub next_before: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventDetailChunk {
+    pub chunk: String,
+    pub next_offset: Option<usize>,
+    pub total_bytes: usize,
+}
+
+pub fn event_detail_chunk(
+    snapshot: &Snapshot,
+    task_id: &str,
+    event_id: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<EventDetailChunk, String> {
+    let event = snapshot
+        .events
+        .iter()
+        .find(|event| event.task_id == task_id && event.id == event_id)
+        .ok_or_else(|| "Task event was not found.".to_string())?;
+    let start = offset.unwrap_or(0).min(event.detail.len());
+    if !event.detail.is_char_boundary(start) {
+        return Err("Invalid event detail offset.".into());
+    }
+    let limit = limit
+        .unwrap_or(32 * 1024)
+        .clamp(1_024, MAX_EVENT_DETAIL_CHUNK_BYTES);
+    let mut end = start.saturating_add(limit).min(event.detail.len());
+    while end > start && !event.detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(EventDetailChunk {
+        chunk: event.detail[start..end].to_string(),
+        next_offset: (end < event.detail.len()).then_some(end),
+        total_bytes: event.detail.len(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -248,5 +287,23 @@ mod tests {
                 .sum::<usize>(),
             MAX_EVENT_PAGE_DETAIL_BYTES
         );
+    }
+
+    #[test]
+    fn event_detail_is_lazy_chunked_and_task_scoped() {
+        let mut snapshot = default_snapshot();
+        snapshot
+            .events
+            .push(event("a", 1, "tool", "🚀".repeat(40_000)));
+        let first = event_detail_chunk(&snapshot, "a", "a-1", None, Some(32 * 1024)).unwrap();
+        assert!(first.chunk.len() <= 32 * 1024);
+        assert_eq!(first.total_bytes, "🚀".repeat(40_000).len());
+        let offset = first.next_offset.expect("large detail has another chunk");
+        let second =
+            event_detail_chunk(&snapshot, "a", "a-1", Some(offset), Some(32 * 1024)).unwrap();
+        assert!(!second.chunk.is_empty());
+        assert!(event_detail_chunk(&snapshot, "other", "a-1", None, None).is_err());
+        assert!(event_detail_chunk(&snapshot, "a", "missing", None, None).is_err());
+        assert!(event_detail_chunk(&snapshot, "a", "a-1", Some(1), None).is_err());
     }
 }

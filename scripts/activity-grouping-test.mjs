@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { CANCELLATION_EVENT_TITLE, contextCompactionPhase, groupConversationActivity, isCancellationEvent, isCancellationMessage, isNativeMessageTransportArtifact, isShellActivity, reasoningSummary, showThinkingFallback } from '../src/lib/activity-grouping.ts';
+import { CANCELLATION_EVENT_TITLE, contextCompactionPhase, groupConversationActivity, isCancellationEvent, isCancellationMessage, isNativeMessageTransportArtifact, isShellActivity, readableToolDetail, reasoningSummary, showThinkingFallback, toolCategory, toolFileChanges, toolPresentation } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
@@ -145,3 +145,29 @@ assert.equal(showThinkingFallback([{ type: 'message', value: message('reply', 2)
 assert.equal(showThinkingFallback([{ type: 'message', value: { ...message('sent', 3), role: 'user' } }], true), true);
 assert.equal(showThinkingFallback([{ type: 'reasoning-group', values: [reasoning('old', 1, 'Old summary')] }, { type: 'message', value: { ...message('sent', 3), role: 'user' } }], true), true, 'Historical reasoning does not suppress a later turn waiting state');
 console.log('single thinking status and reply/approval suppression assertions passed');
+
+const category = (title, detail = '') => toolCategory(event(`tool-${title}`, 0, title, detail));
+assert.equal(category('fileChange', '{"type":"fileChange"}'), 'edit');
+assert.equal(category('file_change', '{"type":"file_change"}'), 'edit');
+assert.equal(category('apply_patch'), 'edit');
+assert.equal(category('commandExecution'), 'shell');
+assert.equal(category('imageView'), 'image');
+assert.equal(category('ToolSearch'), 'tool_search');
+assert.equal(category('ScheduleWakeup'), 'schedule');
+assert.equal(category('gmail.read_email'), 'mcp');
+assert.deepEqual(toolPresentation(event('file', 0, 'fileChange', '{"type":"fileChange"}'), true), { icon: 'file-pen', label: 'Edit a file' });
+assert.deepEqual(toolPresentation(event('file', 0, 'fileChange', '{"type":"fileChange"}'), false), { icon: 'file-pen', label: 'Edited a file' });
+assert.equal(readableToolDetail(event('file', 0, 'fileChange', JSON.stringify({ type: 'fileChange', id: 'opaque', changes: [{ path: '/tmp/example.txt', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n-old\n+new\n' }] }))), 'Updated /tmp/example.txt (+1 −1)');
+const encodedChange = JSON.stringify(JSON.stringify({ type: 'fileChange', changes: [{ path: '/tmp/double-encoded.txt', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n-before\n+after\n' }] }));
+assert.equal(readableToolDetail(event('encoded-file', 0, 'fileChange', encodedChange)), 'Updated /tmp/double-encoded.txt (+1 −1)');
+assert.equal(toolFileChanges(event('encoded-file', 0, 'fileChange', encodedChange))[0].path, '/tmp/double-encoded.txt');
+const wrappedChange = JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ changes: [{ path: '/tmp/wrapped.txt', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n-old\n+new\n' }] }) }] });
+assert.equal(readableToolDetail(event('wrapped-file', 0, 'fileChange', wrappedChange)), 'Updated /tmp/wrapped.txt (+1 −1)');
+assert.equal(toolFileChanges(event('wrapped-file', 0, 'fileChange', wrappedChange))[0].path, '/tmp/wrapped.txt');
+const truncatedChange = '{"changes":[{"diff":"@@ -1 +1 @@\\n-old\\n+new\\n","kind":{"type":"update"},"path":"/tmp/large-file.ts… [truncated]';
+assert.equal(readableToolDetail(event('truncated-file', 0, 'fileChange', truncatedChange)), 'Updated /tmp/large-file.ts (+1 −1)');
+assert.equal(toolFileChanges(event('truncated-file', 0, 'fileChange', truncatedChange))[0].diff, '@@ -1 +1 @@\n-old\n+new\n');
+assert.equal(readableToolDetail(event('tools', 0, 'ToolSearch', '{"query":"select:mcp__monitter__list_agents,mcp__gmail__read_email","max_results":2}')), 'Tools requested:\n• monitter.list agents\n• gmail.read email');
+assert.equal(readableToolDetail(event('image', 0, 'imageView', '{"type":"imageView","id":"opaque","path":"/tmp/screenshot.png"}')), 'Viewed /tmp/screenshot.png');
+assert.equal(readableToolDetail(event('gmail', 0, 'gmail.search_emails', JSON.stringify({ content: [{ type: 'text', text: 'Action completed.' }], structured_content: { emails: [{ subject: 'Shipment update', from_: 'Carrier' }, { subject: 'Invoice', from_: 'Supplier' }] } }))), '2 emails\n\n• Shipment update — Carrier\n\n• Invoice — Supplier');
+console.log('tool activity names are normalized into human-friendly labels and icons');

@@ -65,6 +65,7 @@
 <ImageLightbox bind:image={lightbox} returnFocus={lightboxOpener}/>
 
 <style>
+  .markdown { min-width:0; max-width:100%; overflow:hidden; overflow-wrap:anywhere; }
   .markdown :global(p) {
     margin: 0 0 0.7em;
   }
@@ -72,10 +73,13 @@
     margin-bottom: 0;
   }
   .markdown :global(pre) {
-    overflow: auto;
+    max-width:100%;
+    overflow:hidden;
     padding: 10px 12px;
     border-radius: 7px;
     background: var(--code);
+    white-space:pre;
+    text-overflow:ellipsis;
     font: calc(12px * var(--chat-font-ratio, 1))/var(--chat-line-height, 1.65) var(--mono);
   }
   .markdown :global(code) {

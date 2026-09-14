@@ -431,6 +431,20 @@ impl Service {
         ))
     }
 
+    fn task_event_detail(
+        &self,
+        task_id: &str,
+        event_id: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<lan_sync::EventDetailChunk, String> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        lan_sync::event_detail_chunk(&data.snapshot, task_id, event_id, offset, limit)
+    }
+
     fn start_lan(self: &Arc<Self>, roots: Vec<PathBuf>) -> Result<(), String> {
         match lan::Server::start(Arc::clone(self), roots) {
             Ok(server) => {
@@ -509,6 +523,22 @@ impl Service {
                         .map(serde_json::from_value)
                         .transpose()
                         .map_err(|_| "Invalid before.")?,
+                    args.get("limit")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid limit.")?,
+                )?,
+            ),
+            "get_task_event_detail" => value(
+                self.task_event_detail(
+                    &arg::<String>(&args, "taskId")?,
+                    &arg::<String>(&args, "eventId")?,
+                    args.get("offset")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid offset.")?,
                     args.get("limit")
                         .cloned()
                         .map(serde_json::from_value)
@@ -3746,6 +3776,22 @@ async fn get_task_events(
         .map_err(|error| format!("Task event worker failed: {error}"))?
 }
 
+#[tauri::command]
+async fn get_task_event_detail(
+    state: State<'_, AppState>,
+    task_id: String,
+    event_id: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<lan_sync::EventDetailChunk, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.task_event_detail(&task_id, &event_id, offset, limit)
+    })
+    .await
+    .map_err(|error| format!("Task event detail worker failed: {error}"))?
+}
+
 /// The token is generated in memory on each app launch and is never written to
 /// the workspace. It is intentionally returned only to the native renderer.
 #[tauri::command]
@@ -5677,6 +5723,7 @@ pub fn run() {
             save_extension_config,
             get_ui_snapshot,
             get_task_events,
+            get_task_event_detail,
             get_lan_server_info,
             resolve_approval,
             revoke_approval_rule,

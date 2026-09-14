@@ -34,6 +34,7 @@ import type {
   UiSnapshotResponse,
   TaskEventsPage,
   ProcessMetricsSample,
+  EventDetailChunk,
   SendAccepted,
   ExtensionConfig,
 } from "./types";
@@ -43,6 +44,7 @@ export interface MonitterBridge {
   getSnapshot(): Promise<Snapshot>;
   getTaskEvents(taskId: string, before?: number, limit?: number): Promise<TaskEventsPage>;
   getProcessMetrics(): Promise<ProcessMetricsSample>;
+  getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
   probeHost(host: Host): Promise<ProbeResult>;
@@ -212,6 +214,7 @@ const nativeBridge: MonitterBridge = {
   getSnapshot: () => getCachedSnapshot(),
   getTaskEvents: (taskId, before, limit) => invoke<TaskEventsPage>('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
   getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
+  getTaskEventDetail: (taskId, eventId, offset, limit) => invoke<EventDetailChunk>('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
   deleteHost: (id) => invoke<Snapshot>("delete_host", { id }),
   probeHost: (host) => invoke<ProbeResult>("probe_host", { host }),
@@ -301,6 +304,7 @@ const previewBridge: MonitterBridge = {
   getSnapshot: async () => emptyPreviewSnapshot(),
   getTaskEvents: async () => ({ events: [], nextBefore: null }),
   getProcessMetrics: () => desktopOnly(),
+  getTaskEventDetail: () => desktopOnly(),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
   probeHost: () => desktopOnly(),
@@ -363,6 +367,7 @@ export function getBridge(): MonitterBridge {
       getSnapshot: () => test.invoke("get_snapshot") as Promise<Snapshot>,
       getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,
       getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
+      getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,
       deleteHost: (id) =>

@@ -32,7 +32,7 @@ has(app, /if\s*\(fromBridge\s*&&\s*next\s*===\s*lastBridgeSnapshot\)\s*return/, 
 // scroll containers so a future transcript window can bound DOM work without
 // changing the surrounding layout contract.
 has(app, /getTaskEvents\(taskId,\s*before,\s*100\)/, 'timeline reads must use a bounded page size');
-has(messagePane, /class="messages"[^>]*\boverflow:\s*auto|\.messages\s*\{[^}]*overflow:\s*auto/, 'transcripts must use a scroll viewport');
+has(messagePane, /class="messages"[^>]*\boverflow:\s*auto|\.messages\s*\{[^}]*(?:overflow:\s*auto|overflow-y:\s*auto)/, 'transcripts must use a scroll viewport');
 
 // Activity-aware work must have a teardown path. MessagePane no longer needs a
 // periodic repair timer; observers exist only while the pane is active.

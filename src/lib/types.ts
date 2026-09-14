@@ -66,6 +66,7 @@ export interface SendAccepted { accepted: true; }
 /** Full diagnostic activity is deliberately loaded only when its pane is opened. */
 export interface TaskEventsPage { events: RunEvent[]; nextBefore: number | null; }
 export interface ProcessMetricsSample { cpuTimeMs: number; residentMemoryBytes: number; sampledAt: number; }
+export interface EventDetailChunk { chunk: string; nextOffset: number | null; totalBytes: number; }
 export interface ChannelMessage {
   id: string; role: 'user' | 'assistant'; agentId: string | null;
   text: string; createdAt: number; taskId: string | null;
