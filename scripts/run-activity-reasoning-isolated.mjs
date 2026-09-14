@@ -48,7 +48,7 @@ try {
     return { border: style.borderTopWidth, background: style.backgroundColor, padding: style.paddingLeft };
   })).toEqual({ border: '0px', background: 'rgba(0, 0, 0, 0)', padding: '0px' });
   const compaction = page.locator('.activity.compaction');
-  await expect(compaction).toHaveText('Compacting context...');
+  await expect(compaction.getByRole('button', { name: 'Compacting context...' })).toBeVisible();
   await expect(compaction.locator('.animated-title')).toHaveAttribute('aria-busy', 'true');
   await expect(compaction.locator('.animated-title')).toHaveAttribute('title', 'Compacting context...');
   expect(await compaction.locator('.animated-title').evaluate(node => getComputedStyle(node.parentElement).overflow)).toBe('visible');
@@ -57,6 +57,8 @@ try {
   await page.waitForTimeout(5_200);
   await expect(pending).toHaveText(inactiveLabel || 'Thinking');
   await page.evaluate(() => window.__REASONING_QA__.activate());
+  await expect(pending.locator('.animated-title')).toHaveAttribute('aria-busy', 'true');
+  await expect(pending.locator('.animated-title')).toHaveAttribute('title', 'In progress');
   const activeLabel = await pending.textContent();
   await page.waitForTimeout(5_200);
   const rotatedLabel = await pending.textContent();

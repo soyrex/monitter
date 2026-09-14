@@ -2,6 +2,7 @@
   import { motionView } from '$lib/motion';
   import { untrack, type Snippet } from 'svelte';
   import { Brain } from '@lucide/svelte';
+  import AnimatedTitle from './AnimatedTitle.svelte';
 
   let { avatar, running = false, starting = false }: {
     avatar?: Snippet; running?: boolean; starting?: boolean;
@@ -26,7 +27,7 @@
 
 <div class="activity reasoning-pending" aria-label={starting ? 'Getting ready' : label}>
   {#if avatar}{@render avatar()}{:else}<Brain size={14}/>{/if}
-  <span use:motionView={{key:starting ? 'Getting ready' : label,y:0,duration:100}}>{starting ? 'Getting ready' : label}</span>
+  <span use:motionView={{key:starting ? 'Getting ready' : label,y:0,duration:100}}><AnimatedTitle text={starting ? 'Getting ready' : label} active={running && !starting} activeTooltip="In progress"/></span>
 </div>
 
 <style>
