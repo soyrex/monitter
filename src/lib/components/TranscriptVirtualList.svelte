@@ -1,5 +1,5 @@
 <script lang="ts" generics="T">
-  import { onMount, tick, type Snippet } from 'svelte';
+  import { onMount, tick, untrack, type Snippet } from 'svelte';
 
   /** Bounded renderer for rich MessagePane rows. */
   let { items, getKey, children, estimateHeight = 120, overscan = 6, stickyKey, active = true }: {
@@ -61,7 +61,9 @@
       add(next, index, value);
     }
     metrics = next;
-    metricsRevision += 1;
+    // This runs inside an effect keyed by the item inputs. Avoid subscribing
+    // that effect to the revision it increments, which would self-trigger.
+    metricsRevision = untrack(() => metricsRevision) + 1;
   }
   const totalHeight = $derived(offsetFor(metrics.values.length));
   const stickyIndex = $derived(stickyKey ? metrics.indexByKey.get(stickyKey) ?? -1 : -1);
