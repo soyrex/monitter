@@ -4,7 +4,7 @@ import { contextCompactionPhase, groupConversationActivity, isNativeMessageTrans
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
 const approval = (id, createdAt, resolvedAt = null) => ({ id, taskId: 'task', provider: 'codex', runId: `run:${id}`, tool: 'computer', summary: 'Allow computer use', detail: '', risk: 'medium', status: 'approved', createdAt, resolvedAt, decision: 'approve_once' });
-const groups = (messages, events) => groupConversationActivity(messages, events).filter(item => item.type === 'tool-group');
+const groups = (messages, events, compress = false) => groupConversationActivity(messages, events, compress).filter(item => item.type === 'tool-group');
 
 const nativeTransport = (id, createdAt, type) => event(id, createdAt, type, JSON.stringify({ type, id: `native-${id}` }));
 const transportTimeline = groupConversationActivity(
@@ -26,9 +26,13 @@ assert.equal(result.length, 1); assert.deepEqual(result[0].values.map(item => it
 result = groups([], [event('one', 1, 'Web search', '{"tool":"web_search","query":"one"}'), event('two', 2, 'Web search', '{"tool":"web_search","query":"two"}')]);
 assert.equal(result.length, 1);
 
-// A message or reasoning activity is a hard boundary.
+// Messages are hard turn boundaries. Reasoning only separates tools when
+// compression is off; compressed summaries span thinking time.
 assert.equal(groups([message('reply', 2)], [event('before', 1, 'Web search', '{}'), event('after', 3, 'Web search', '{}')]).length, 2);
 assert.equal(groups([], [event('before', 1, 'Web search', '{}'), { ...event('reasoning', 2, 'Reasoning', 'thinking'), kind: 'reasoning' }, event('after', 3, 'Web search', '{}')]).length, 2);
+result = groups([], [event('before', 1, 'Web search', '{}'), { ...event('reasoning', 2, 'Reasoning', 'thinking'), kind: 'reasoning' }, event('after', 3, 'Web search', '{}')], true);
+assert.equal(result.length, 1);
+assert.equal(result[0].values.length, 2);
 
 // Generic tool_result envelopes cannot collapse because their type/name is not a tool identity.
 assert.equal(groups([], [event('a', 1, 'Tool result', '{"type":"tool_result","name":"first"}'), event('b', 2, 'Tool result', '{"type":"tool_result","name":"second"}')]).length, 2);
@@ -55,9 +59,9 @@ assert.equal(groupConversationActivity([], [], false, [{ ...approval('pending', 
 console.log('approval resolution appears inline at its resolution timestamp');
 
 const mixed = [event('cmd1',1,'/bin/zsh -lc ls',''),event('web',2,'web_search',''),event('cmd2',3,'/bin/zsh -lc pwd','')];
-assert.equal(groupConversationActivity([],mixed,true).length,1);
-assert.equal(groupConversationActivity([],mixed,true)[0].values.length,3);
-assert.equal(groupConversationActivity([message('boundary',2.5)],mixed,true).length,3);
+assert.equal(groupConversationActivity([],mixed,true).length,2);
+assert.deepEqual(groupConversationActivity([],mixed,true).map(item=>item.type === 'tool-group' ? item.values.map(value=>value.id) : []),[['web'],['cmd1','cmd2']]);
+assert.equal(groupConversationActivity([message('boundary',2.5)],mixed,true).length,4);
 assert.equal(groupConversationActivity([],mixed,false).length,3);
 
 assert.equal(isShellActivity(event('shell',1,'/bin/zsh -lc git status','')),true);
@@ -96,9 +100,10 @@ for (const compress of [false, true]) {
   assert.equal(combined[0].type, 'reasoning-group');
   assert.deepEqual(combined[0].values, blanks);
   assert.equal(blanks[0].detail, emptyPayload, 'Stored payloads must remain untouched');
-  for (const boundary of [event('tool', 2, 'Run command', '{}'), reasoning('summary', 2, 'Actual summary')]) {
-    assert.equal(groupConversationActivity([], [blanks[0], boundary, blanks[2]], compress).length, 3);
-  }
+  assert.equal(groupConversationActivity([], [blanks[0], event('tool', 2, 'Run command', '{}'), blanks[2]], compress).length, 2, 'Later tool activity replaces an earlier pending-thinking row');
+  const withSummary = groupConversationActivity([], [blanks[0], reasoning('summary', 2, 'Actual summary'), blanks[2]], compress);
+  assert.equal(withSummary.length, 1, 'Neighboring pending and completed reasoning updates share one bubble');
+  assert.equal(withSummary[0].values.length, 3);
   assert.deepEqual(groupConversationActivity([message('reply', 2)], [blanks[0], blanks[2]], compress).map(item => item.type), ['message', 'reasoning-group']);
   assert.deepEqual(groupConversationActivity([message('reply', 4)], blanks, compress).map(item => item.type), ['message']);
   assert.equal(groupConversationActivity([{ ...message('reply', 4), role: 'user' }], blanks, compress).length, 1, 'A new user message also replaces old placeholders');
@@ -106,9 +111,24 @@ for (const compress of [false, true]) {
   assert.equal(groupConversationActivity([{ ...message('reply', 4), text: '', attachments: [{ id: 'image' }] }], blanks, compress).length, 1, 'Attachment-only replies replace the status');
   assert.equal(groupConversationActivity([message('reply', 3)], blanks, compress).length, 1, 'Equal-timestamp replies replace placeholders too');
   assert.equal(groupConversationActivity([{ ...message('reply', 4), taskId: 'other-task' }], blanks, compress).length, 2, 'Another task cannot clear this status');
-  assert.deepEqual(groupConversationActivity([message('reply', 4)], [reasoning('summary', 2, 'Actual summary')], compress).map(item => item.type), ['activity', 'message']);
+  assert.deepEqual(groupConversationActivity([message('reply', 4)], [reasoning('summary', 2, 'Actual summary')], compress).map(item => item.type), ['reasoning-group', 'message']);
   assert.equal(groupConversationActivity([], [blanks[0], { ...blanks[1], taskId: 'other-task' }], compress).length, 2);
 }
+const summaries = groupConversationActivity([], [reasoning('s1', 1, 'First check.'), reasoning('s2', 2, 'Second check.'), reasoning('s3', 3, 'Second check.')]);
+assert.equal(summaries.length, 1, 'Consecutive visible reasoning summaries render as one bubble');
+assert.deepEqual(summaries[0].values.map(value=>value.id), ['s1','s2','s3']);
+assert.deepEqual(groupConversationActivity([message('boundary', 2)], [reasoning('before', 1, 'Before.'), reasoning('after', 3, 'After.')]).map(item=>item.type), ['reasoning-group','message','reasoning-group']);
+const acrossThinking = groupConversationActivity([], [
+  event('web-1', 1, 'Web search', '{}'), event('web-2', 2, 'Web search', '{}'),
+  reasoning('pending-1', 3),
+  event('web-3', 4, 'Web search', '{}'), event('web-4', 5, 'Web search', '{}'),
+  compaction('middle', 6, 'started'), compaction('middle', 7, 'completed'),
+  reasoning('pending-2', 8),
+  event('web-5', 9, 'Web search', '{}'), event('web-6', 10, 'Web search', '{}'),
+], true);
+assert.deepEqual(acrossThinking.map(item=>item.type), ['tool-group','tool-group']);
+assert.equal(acrossThinking[0].values.every(item=>item.title === 'ContextCompaction'), true);
+assert.deepEqual(acrossThinking[1].values.map(item=>item.id), ['web-1','web-2','web-3','web-4','web-5','web-6']);
 console.log('reasoning summary normalization and consecutive grouping assertions passed');
 
 assert.equal(showThinkingFallback([], true), true);
@@ -117,4 +137,5 @@ assert.equal(showThinkingFallback([], true, true), false);
 assert.equal(showThinkingFallback(groupConversationActivity([], [reasoning('active', 1)]), true), false, 'Reasoning already provides the waiting row');
 assert.equal(showThinkingFallback([{ type: 'message', value: message('reply', 2) }], true), false, 'A reply replaces the waiting row even before run completion');
 assert.equal(showThinkingFallback([{ type: 'message', value: { ...message('sent', 3), role: 'user' } }], true), true);
+assert.equal(showThinkingFallback([{ type: 'reasoning-group', values: [reasoning('old', 1, 'Old summary')] }, { type: 'message', value: { ...message('sent', 3), role: 'user' } }], true), true, 'Historical reasoning does not suppress a later turn waiting state');
 console.log('single thinking status and reply/approval suppression assertions passed');

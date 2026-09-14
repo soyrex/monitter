@@ -13,7 +13,7 @@
   const latest = $derived(items.at(-1));
   const grouped = $derived(items.length > 1);
   const reasoning = $derived(primary?.kind === 'reasoning');
-  const summary = $derived(reasoning ? reasoningSummary(primary?.detail ?? '') : '');
+  const summary = $derived(reasoning ? [...new Set(items.map(item=>reasoningSummary(item.detail)).filter(Boolean))].join('\n\n') : '');
   const emptyReasoning = $derived(reasoning && !summary);
   const family = $derived(compressed && grouped ? 'Tool calls' : primary ? toolFamily(primary) : 'Tool activity');
   const shell = $derived(items.length > 0 && items.every(isShellActivity));
@@ -78,7 +78,7 @@
 {#if primary && emptyReasoning}
   <ThinkingStatus {running} {avatar}/>
 {:else if primary && reasoning}
-  <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning summary</span><time>{formatTime(primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
+  <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning summary</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if primary && latest}
   <div class="activity" class:grouped class:compressed={compressed && grouped} class:compaction>
     <button class="activity-trigger" bind:this={anchor} aria-haspopup={compressed && grouped ? undefined : 'dialog'} aria-expanded={open} aria-label={compaction ? compactionDescription : `Tool activity: ${description}, ${items.length} ${items.length===1?'entry':'entries'}`} onclick={()=>open=!open}>
@@ -106,7 +106,7 @@
   </div>
 {/if}
 <style>
-  .activity{margin:12px 0 28px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  .activity{margin:4px 0 10px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{border:1px solid var(--line);border-radius:8px;background:var(--panel)}
   summary,.activity-trigger{display:flex;align-items:center;gap:8px;padding:11px 12px;color:var(--muted);cursor:pointer;list-style:none;text-align:left}
   .activity-trigger{width:100%;font:inherit;padding:8px 0;background:transparent}.activity-trigger:hover{color:var(--ink)}
   summary::-webkit-details-marker{display:none}
@@ -124,4 +124,5 @@
   .calls{display:grid;gap:6px;max-height:min(420px,65vh);overflow:auto;overscroll-behavior:contain}
   .call{border:1px solid var(--line);border-radius:6px}.call summary{padding:8px 9px;font-size:calc(11px * var(--interface-font-ratio, 1))}.call pre{padding:0 9px 9px;max-height:220px;overflow:auto}
   pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(11px * var(--interface-font-ratio, 1))/1.6 var(--mono)}
+  @media (max-width:640px){.activity{margin:2px 0 7px}.activity-trigger{padding:6px 0}}
 </style>

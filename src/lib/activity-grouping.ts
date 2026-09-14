@@ -44,8 +44,9 @@ export type ConversationActivityItem =
 
 /** One waiting indicator per conversation, never alongside a reply or approval. */
 export function showThinkingFallback(items: ConversationActivityItem[], working: boolean, awaitingApproval = false): boolean {
-  if (!working || awaitingApproval || items.some(item => item.type === 'reasoning-group')) return false;
+  if (!working || awaitingApproval) return false;
   const latest = items.at(-1);
+  if (latest?.type === 'reasoning-group') return false;
   return !(latest?.type === 'message' && latest.value.role === 'assistant');
 }
 
@@ -72,11 +73,6 @@ function toolIdentity(event: RunEvent) {
   return specificTitle ? title : `event:${event.id}`;
 }
 
-/**
- * Groups only neighboring tool events of the same reported tool or connector family. Since
- * grouping happens after messages and reasoning are merged into the timeline,
- * it can never span a response or user-turn boundary.
- */
 /** Connector methods (gmail.search_emails / gmail.read_email) share a family. */
 export function toolFamily(event: RunEvent) {
   const identity = toolIdentity(event);
@@ -137,7 +133,7 @@ export function groupConversationActivity(
 
   const grouped: ConversationActivityItem[] = [];
   for (const item of ordered) {
-    if (item.type === 'activity' && isBlankReasoning(item.value)) {
+    if (item.type === 'activity' && item.value.kind === 'reasoning') {
       const previous = grouped.at(-1);
       if (previous?.type === 'reasoning-group' && previous.values[0].taskId === item.value.taskId) {
         previous.values.push(item.value);
@@ -161,21 +157,60 @@ export function groupConversationActivity(
     if (previous?.type === 'tool-group' && (
       compactionLifecycle
         ? previousCompactionId !== null && previousCompactionId === currentCompactionId
-        : compressToolCalls || toolFamily(previous.values[0]) === toolFamily(item.value)
+        : toolFamily(previous.values[0]) === toolFamily(item.value)
     )) {
       previous.values.push(item.value);
     } else {
       grouped.push({ type: 'tool-group', values: [item.value] });
     }
   }
-  // Empty reasoning is a temporary status, not transcript content. Drop it once
-  // a subsequent message has content (including optimistic sends and streaming
-  // replies), without modifying stored events or joining separate tool groups.
-  const latestMessageAt = new Map<string, number>();
+  // Empty reasoning is a temporary waiting status, not transcript content. Any
+  // later visible event replaces it; only the current trailing status survives.
+  const latestReplacementAt = new Map<string, number>();
   for (const message of messages) {
     if (!message.text.trim() && !message.attachments?.length) continue;
-    latestMessageAt.set(message.taskId, Math.max(latestMessageAt.get(message.taskId) ?? -Infinity, message.createdAt));
+    latestReplacementAt.set(message.taskId, Math.max(latestReplacementAt.get(message.taskId) ?? -Infinity, message.createdAt));
   }
-  return grouped.filter(item => item.type !== 'reasoning-group' ||
-    (latestMessageAt.get(item.values[0].taskId) ?? -Infinity) < item.values.at(-1)!.createdAt);
+  for (const event of events) {
+    if (isNativeMessageTransportArtifact(event) || isBlankReasoning(event)) continue;
+    latestReplacementAt.set(event.taskId, Math.max(latestReplacementAt.get(event.taskId) ?? -Infinity, event.createdAt));
+  }
+  for (const approval of approvals) {
+    if (approval.status === 'pending') continue;
+    latestReplacementAt.set(approval.taskId, Math.max(latestReplacementAt.get(approval.taskId) ?? -Infinity, approval.resolvedAt ?? approval.createdAt));
+  }
+  const visible = grouped.filter(item => item.type !== 'reasoning-group' || item.values.some(value => !isBlankReasoning(value)) ||
+    (latestReplacementAt.get(item.values[0].taskId) ?? -Infinity) < item.values.at(-1)!.createdAt);
+  if (!compressToolCalls) return visible;
+
+  // Compression is turn-scoped rather than adjacency-scoped. Transient thinking,
+  // reasoning summaries and compaction rows may sit between calls without
+  // fragmenting one family into repeated 2-call summaries. Move an aggregate to
+  // its latest occurrence so the compact timeline still reads chronologically.
+  const compacted: ConversationActivityItem[] = [];
+  const families = new Map<string, Extract<ConversationActivityItem, { type: 'tool-group' }>>();
+  for (const item of visible) {
+    if (item.type === 'message' || item.type === 'approval') {
+      families.clear();
+      compacted.push(item);
+      continue;
+    }
+    if (item.type !== 'tool-group' || item.values.every(isContextCompaction)) {
+      compacted.push(item);
+      continue;
+    }
+    const family = item.values.every(isShellActivity) ? 'command_execution' : toolFamily(item.values[0]);
+    const key = `${item.values[0].taskId}:${family}`;
+    const existing = families.get(key);
+    if (!existing) {
+      families.set(key, item);
+      compacted.push(item);
+      continue;
+    }
+    existing.values.push(...item.values);
+    const earlier = compacted.indexOf(existing);
+    if (earlier >= 0) compacted.splice(earlier, 1);
+    compacted.push(existing);
+  }
+  return compacted;
 }

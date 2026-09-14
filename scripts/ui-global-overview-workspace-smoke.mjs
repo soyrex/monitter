@@ -37,20 +37,37 @@ try {
   });
   await expect(page.getByRole('button', { name: 'Open global overview', exact: true })).toBeVisible({ timeout: 60000 });
   await expect(page.locator('.dashboard-overview')).toBeVisible({ timeout: 60000 });
+  await expect(page.locator('.workspace > .topbar')).toHaveCount(0);
   await page.getByRole('button', { name: 'Open agent North', exact: true }).click();
   await expect.poll(activeWorkspace).toBe('agent:north');
+  await expect(page.locator('.workspace > .topbar')).toBeVisible();
 
   await page.getByRole('button', { name: 'Open global overview', exact: true }).click();
   await expect.poll(activeWorkspace).toBe('all');
   await expect(page.locator('.dashboard-overview')).toBeVisible();
+  await expect(page.locator('.workspace > .topbar')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Open terminal'})).toHaveCount(0);
   await expect(page.locator('.dashboard-overview')).toContainText('North task');
   await expect(page.locator('.dashboard-overview')).toContainText('South task');
 
   const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('monitter.workspaces.v2')));
   expect(stored.activeWorkspaceKey).toBe('all');
   expect(stored.workspaces['agent:north']).toBeTruthy();
+
+  const mobile = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await mobile.addInitScript({ path: 'scripts/ui-fixture.js' });
+  await mobile.addInitScript(() => {
+    localStorage.removeItem('monitter.workspace.v1');
+    localStorage.removeItem('monitter.workspaces.v2');
+  });
+  await mobile.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await expect(mobile.locator('.dashboard-overview')).toBeVisible({ timeout:60000 });
+  await expect(mobile.locator('.workspace > .topbar.overview-nav-only')).toBeVisible();
+  await expect(mobile.getByRole('button',{name:'Back to chats',exact:true})).toBeVisible();
+  await expect(mobile.locator('.workspace > .topbar .tabs')).toHaveCount(0);
+  await expect(mobile.getByRole('button',{name:'Open terminal'})).toHaveCount(0);
   expect(pageErrors).toEqual([]);
-  console.log('Wordmark returns to the independent All activity dashboard with whole-app task context.');
+  console.log('Global overview owns the desktop workspace and keeps only mobile back navigation.');
 } finally {
   await browser.close();
 }
