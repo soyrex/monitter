@@ -30,5 +30,6 @@
 </div>
 
 <style>
-  .reasoning-pending { display:flex; align-items:center; gap:8px; margin:12px 0 28px; padding:8px 0; color:var(--muted); font-size:calc(12px * var(--interface-font-ratio, 1)); }
+  .reasoning-pending { display:flex; align-items:center; gap:8px; margin:4px 0 10px; padding:6px 0; color:var(--muted); font-size:calc(12px * var(--interface-font-ratio, 1)); }
+  @media (max-width:640px) { .reasoning-pending { margin:2px 0 7px; padding:5px 0; } }
 </style>

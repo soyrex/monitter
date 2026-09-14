@@ -155,10 +155,12 @@ restores each palette's own accent. A legacy single-preset selection is migrated
 selection exists. Density, motion, scale, tabs, pane controls, and terminal themes remain independent.
 No backend rebuild is required.
 
-The browser `theme-color` meta value follows the effective sidebar colour, including the active light
-or dark palette, shared accent override, and surface tint. System mode updates it when the operating
-system colour scheme changes. This lets supporting mobile Safari versions tint their status-bar and
-overscroll chrome to the app instead of retaining a fixed page colour.
+The browser `theme-color` meta value and the document background follow the effective sidebar colour,
+including the active light or dark palette, shared accent override, and surface tint. System mode updates
+both when the operating-system colour scheme changes. The calculated light/dark pair and last appearance
+mode are cached in `monitter.appearance.browser-colours.v1` and `monitter.appearance.mode.v1` so the next
+page load can set the document colour before Safari captures its surrounding chrome. This covers both
+older Safari theme-colour behavior and Safari 26's document-background colour extension.
 
 Settings include `accent`, `theme`, `interfaceScale` (integer percent, 80–200, default 125),
 `showToolActivity` and `showReasoningSummaries` (default true), and `sendWithEnter` (default false).
@@ -753,12 +755,14 @@ the pane types with run detail or channel-member sidebars. Compact sidebar blade
 their own close control. Expansion controls remain reachable when their tab bar is hidden.
 
 
-`Settings.compressToolCalls` defaults to false. When enabled, consecutive visible tool
-events across tool families render as one count (for example `9 tool calls · 4.6s`).
-Messages and displayed reasoning remain boundaries. The duration is the recorded
+`Settings.compressToolCalls` defaults to false. When enabled, calls from the same tool
+family are aggregated across intervening thinking, reasoning summaries, and context
+compaction within one message-bounded turn (for example `Searched the web · 6 tool calls · 4.6s`).
+Messages and resolved approvals remain boundaries. The duration is the recorded
 first-to-last event span, not summed tool execution time. Clicking expands an inline
-scrollable box containing every original event; disabling compression restores family
-grouping. Stored events remain unchanged.
+scrollable box containing every original event; disabling compression restores adjacent
+family grouping. Empty thinking statuses are transient and disappear after later visible
+activity arrives. Stored events remain unchanged.
 
 Queue edits update only the selected unsent delivery. In channels, each recipient's queued
 delivery is independent; already posted channel history or deliveries to other agents are

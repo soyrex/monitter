@@ -193,19 +193,18 @@
 
   const bridge = getBridge();
   let motionReady = $state(false);
-  let browserChromeColour = $state(typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? '#0F0F0F' : '#F0F0F0');
   onMount(() => { motionReady = true; });
   onMount(() => {
     if (embedded) return;
     const colourScheme = window.matchMedia('(prefers-color-scheme: dark)'),
-      update = () => { if (snapshot) browserChromeColour = safariThemeColour(snapshot.settings, $appTheme, $surfaceTint); };
+      update = () => { if (snapshot) syncBrowserChrome(snapshot.settings, $appTheme, $surfaceTint); };
     colourScheme.addEventListener('change', update);
     return () => colourScheme.removeEventListener('change', update);
   });
   $effect(() => {
     if (!embedded) {
       document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
-      if (snapshot) browserChromeColour = safariThemeColour(snapshot.settings, $appTheme, $surfaceTint);
+      if (snapshot) syncBrowserChrome(snapshot.settings, $appTheme, $surfaceTint);
     }
   });
   $effect(() => {
@@ -1431,11 +1430,27 @@
     }
     return [target, target, target];
   }
-  function safariThemeColour(settings: Snapshot['settings'], selectedTheme: AppThemeSelection, tint: number) {
-    const dark = settings.theme === 'dark' || (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches),
-      palette = appThemePreset(dark ? selectedTheme.dark : selectedTheme.light)[dark ? 'dark' : 'light'],
-      accent = selectedTheme.accent ?? palette.accent;
-    return mixThemeColour(palette.sidebar, accent, (tint / 100) * (dark ? 1 : 0.5));
+  function browserThemeColours(selectedTheme: AppThemeSelection, tint: number) {
+    const light = appThemePreset(selectedTheme.light).light,
+      dark = appThemePreset(selectedTheme.dark).dark;
+    return {
+      light: mixThemeColour(light.sidebar, selectedTheme.accent ?? light.accent, (tint / 100) * 0.5),
+      dark: mixThemeColour(dark.sidebar, selectedTheme.accent ?? dark.accent, tint / 100),
+    };
+  }
+  function syncBrowserChrome(settings: Snapshot['settings'], selectedTheme: AppThemeSelection, tint: number) {
+    const colours = browserThemeColours(selectedTheme, tint),
+      dark = settings.theme === 'dark' || (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches),
+      colour = dark ? colours.dark : colours.light,
+      root = document.documentElement,
+      meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+    root.style.backgroundColor = colour;
+    document.body.style.backgroundColor = colour;
+    meta?.setAttribute('content', colour);
+    try {
+      window.localStorage.setItem('monitter.appearance.browser-colours.v1', JSON.stringify(colours));
+      window.localStorage.setItem('monitter.appearance.mode.v1', settings.theme);
+    } catch { /* Live colour still applies when client storage is unavailable. */ }
   }
   function applyAppearance(settings: Snapshot["settings"], selectedTheme: AppThemeSelection = $appTheme) {
     const root = document.documentElement,
@@ -1448,7 +1463,7 @@
     root.dataset.appThemeLight = selectedTheme.light;
     root.dataset.appThemeDark = selectedTheme.dark;
     root.dataset.theme = settings.theme;
-    browserChromeColour = safariThemeColour(settings, selectedTheme, $surfaceTint);
+    syncBrowserChrome(settings, selectedTheme, $surfaceTint);
     root.dataset.density = ['tight', 'normal', 'spacious'].includes(settings.interfaceDensity ?? '')
       ? settings.interfaceDensity!
       : 'normal';
@@ -2944,7 +2959,6 @@
   }
 </script>
 
-<svelte:head><meta name="theme-color" content={browserChromeColour} /></svelte:head>
 <svelte:window onkeydown={handleShortcuts} onkeyup={event=>tabIndexModifier=macPlatform?event.metaKey:event.ctrlKey} onblur={()=>{tabIndexModifier=false;cancelPaneFocusChord()}} onpointerdown={dismissMonitterMenu} />
 
 {#if vimCommandOpen}

@@ -4,6 +4,19 @@
     <meta charset="utf-8" />
     <link rel="icon" type="image/png" href="%sveltekit.assets%/monitter-app-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta id="monitter-theme-color" name="theme-color" content="#EAEEF0" />
+    <script>
+      (() => {
+        try {
+          const mode = localStorage.getItem('monitter.appearance.mode.v1') || 'system';
+          const dark = mode === 'dark' || (mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+          const saved = JSON.parse(localStorage.getItem('monitter.appearance.browser-colours.v1') || '{}');
+          const colour = dark ? (saved.dark || '#0E171A') : (saved.light || '#EAEEF0');
+          document.documentElement.style.backgroundColor = colour;
+          document.querySelector('#monitter-theme-color')?.setAttribute('content', colour);
+        } catch { /* The app applies the live theme after startup. */ }
+      })();
+    </script>
     <title>Monitter</title>
     %sveltekit.head%
   </head>
