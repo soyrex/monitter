@@ -19,6 +19,7 @@
   import { sidebarReorder } from "$lib/sidebar-reorder";
   import { mobileViewport } from '$lib/mobile-viewport';
   import SidebarResize from "./SidebarResize.svelte";
+  import SidebarClock from "./SidebarClock.svelte";
   import PaneNotice from "./PaneNotice.svelte";
   import SettingsPane from "./SettingsPane.svelte";
   import AcpAgentPicker from "./AcpAgentPicker.svelte";
@@ -308,6 +309,7 @@
   let slashOpen = $state(false), slashIndex = $state(0);
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
+  let clockExpanded = $state(true);
   let mobileSidebar = $state(false);
   const desktopInterfaceScale = interfaceScaleStore('desktop');
   const mobileInterfaceScale = interfaceScaleStore('mobile');
@@ -3610,7 +3612,7 @@
 {/snippet}
 
 <main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
-  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
+  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:clock-expanded={clockExpanded && !sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
@@ -3734,6 +3736,7 @@
       <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}{@render sidebarWorkspacePanels(railAgent.id)}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
+    {#if !sidebarCompressed}<SidebarClock bind:expanded={clockExpanded}/>{/if}
     <footer class="sidebar-footer" aria-label="Workspace controls">
       <button class="icon" aria-label="Preferences" title="Preferences" onclick={()=>routeSettings()}><Settings2 size={16}/></button>
       <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
@@ -4653,8 +4656,11 @@
     padding-bottom: var(--density-tabbar-inset);
   }
   .sidebar-footer { position:absolute; bottom:0; left:0; right:0; z-index:3; display:flex; justify-content:space-around; align-items:center; height:var(--density-sidebar-footer-height); padding:4px 10px; box-sizing:border-box; border-top:1px solid var(--line); background:var(--sidebar); }
-  .sidebar .side-scroll { padding-bottom:calc(var(--density-sidebar-footer-height) + 12px); }
+  .sidebar { --sidebar-clock-height:32px; }
+  .sidebar.clock-expanded { --sidebar-clock-height:109px; }
+  .sidebar .side-scroll { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + 12px); }
   .sidebar .agent-rail { padding-bottom:192px; }
+  .mobile-navigation { --sidebar-footer-safe-area:env(safe-area-inset-bottom,0px); }
   .mobile-navigation .sidebar-footer > .icon { width:44px; height:44px; }
   .sidebar-collapsed .sidebar-footer { flex-direction:column; height:180px; padding:4px; }
   .brand.scrolled { box-shadow:inset 0 -1px var(--line); }
