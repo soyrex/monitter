@@ -94,6 +94,13 @@
     if (viewport) observer.observe(viewport);
     if (content) observer.observe(content);
     if (heading) observer.observe(heading);
+    const liveTextObserver = new MutationObserver(() => {
+      // Elapsed timers and streamed text can update an existing text node
+      // without adding an element. Correct the followed position in the same
+      // microtask so that update cannot flash a small bottom gap for one frame.
+      if (followingLatest) followLayout();
+    });
+    if (content) liveTextObserver.observe(content, { characterData: true, subtree: true });
     const interval = window.setInterval(() => {
       // ResizeObserver catches known layout changes; this lightweight check
       // closes gaps from late browser layout/paint while reader intent remains
@@ -102,6 +109,7 @@
     }, followInterval);
     return () => {
       observer.disconnect();
+      liveTextObserver.disconnect();
       window.clearInterval(interval);
       if (followFrame !== undefined) cancelAnimationFrame(followFrame);
     };

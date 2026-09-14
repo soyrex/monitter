@@ -57,13 +57,13 @@
 
 <div class="activity reasoning-pending" aria-label={starting ? 'Getting ready' : label}>
   {#if avatar}{@render avatar()}{:else}<Brain size={14}/>{/if}
-  <span use:motionView={{key:starting ? 'Getting ready' : label,y:0,duration:100}}><AnimatedTitle text={starting ? 'Getting ready' : label} active={running && !starting} activeTooltip="In progress"/></span>
+  <span class="reasoning-label" use:motionView={{key:starting ? 'Getting ready' : label,y:0,duration:100}}><AnimatedTitle text={starting ? 'Getting ready' : label} active={running && !starting} activeTooltip="In progress"/></span>
   {#if running || starting}<time aria-label="Elapsed time" datetime={`PT${elapsedSeconds}S`}>{elapsed}</time>{/if}
 </div>
 
 <style>
-  .reasoning-pending { display:flex; align-items:center; gap:8px; margin:4px 0 10px; padding:6px 0; color:var(--muted); font-size:calc(12px * var(--interface-font-ratio, 1)); }
-  .reasoning-pending > span { min-width:0; }
-  time { flex:none; margin-left:auto; color:var(--muted); font:calc(10px * var(--interface-font-ratio, 1)) var(--mono); font-variant-numeric:tabular-nums; }
+  .reasoning-pending { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:8px; width:100%; margin:4px 0 10px; padding:6px 0; color:var(--muted); font-size:calc(12px * var(--interface-font-ratio, 1)); }
+  .reasoning-label { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  time { min-width:7ch; justify-self:end; color:var(--muted); text-align:right; font:calc(10px * var(--interface-font-ratio, 1)) var(--mono); font-variant-numeric:tabular-nums; }
   @media (max-width:640px) { .reasoning-pending { margin:2px 0 7px; padding:5px 0; } }
 </style>

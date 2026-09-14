@@ -1,12 +1,15 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import MessagePane from '../../src/lib/components/MessagePane.svelte';
+  import ThinkingStatus from '../../src/lib/components/ThinkingStatus.svelte';
 
   type Entry = { id: number; text: string; tall: boolean };
   const paragraph = 'A deliberately long Monitter conversation entry stays inside the message viewport while its layout settles. ';
   let resetKey = $state('initial');
   let entries = $state<Entry[]>(Array.from({ length: 18 }, (_, id) => ({ id, text: `Initial message ${id}. ${paragraph.repeat(10)}`, tall: false })));
   let thinking = $state(false);
+  let thinkingStartedAt = $state<number>();
+  let timerProbe = $state(0);
   let nextId = 18;
 
   function append(label: string, tall = false) {
@@ -39,8 +42,9 @@
       send: () => { append('Sent message'); resetKey = `send:${nextId}`; },
       growThenScrollBeforeObserver,
       shrinkThenGrow,
-      beginThinking: () => { thinking = true; },
+      beginThinking: () => { thinkingStartedAt = Date.now() - 59_200; thinking = true; },
       endThinking: () => { thinking = false; },
+      tickTimer: () => { timerProbe += 1; },
     };
     return () => { delete (window as Window & { __PANE_QA__?: unknown }).__PANE_QA__; };
   });
@@ -52,8 +56,9 @@
       <article class:tall={entry.tall}>{entry.text}</article>
     {/each}
     {#if thinking}
-      <div class="reasoning-pending"><span class="animated-title" aria-busy="true">Thinking</span></div>
+      <ThinkingStatus running startedAt={thinkingStartedAt}/>
     {/if}
+    <span class="timer-probe" aria-hidden="true">{timerProbe}</span>
   </MessagePane>
 </main>
 
@@ -62,4 +67,5 @@
   main { height: 100%; display: flex; background: #fff; --paper: #fff; --panel: #fff; --ink: #171717; --line: #ddd; --accent: #066; --accent-ink: #044; --soft: #eef8f8; }
   article { margin: 0 0 16px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
   article.tall { min-height: 360px; }
+  .timer-probe { display:none; }
 </style>

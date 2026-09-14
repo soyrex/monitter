@@ -51,10 +51,12 @@ const assertions = [];
 try {
   for (const profile of [
     { name: 'desktop WebKit', viewport: { width: 1120, height: 680 }, isMobile: false },
+    { name: 'narrow pane WebKit', viewport: { width: 260, height: 680 }, isMobile: false },
     { name: 'mobile WebKit', viewport: { width: 390, height: 844 }, isMobile: true },
   ]) {
     const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.isMobile, hasTouch: profile.isMobile });
     const page = await context.newPage();
+    await page.addInitScript(() => { Math.random = () => 0.5; });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${address.port}/`);
@@ -95,8 +97,39 @@ try {
     expect(held.total - held.height - held.top).toBeGreaterThanOrEqual(manualGap - 2);
     await page.getByRole('button', { name: 'Jump to latest message' }).click();
     await atBottom();
+    await invoke('beginThinking');
+    await atBottom();
+    const timerRowHeight = await page.locator('.reasoning-pending').evaluate(node => node.getBoundingClientRect().height);
+    const initialTimerText = await page.getByLabel('Elapsed time').textContent();
+    const timerTick = await page.evaluate(() => new Promise(resolve => {
+      const viewport = document.querySelector('.messages');
+      const row = document.querySelector('.reasoning-pending');
+      const started = performance.now();
+      let maximumGap = 0;
+      let minimumTop = viewport.scrollTop;
+      const sample = () => {
+        maximumGap = Math.max(maximumGap, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop);
+        minimumTop = Math.min(minimumTop, viewport.scrollTop);
+        if (performance.now() - started < 1_300) requestAnimationFrame(sample);
+        else resolve({ maximumGap, minimumTop, rowHeight: row.getBoundingClientRect().height, timerText: row.querySelector('time')?.textContent, top: viewport.scrollTop });
+      };
+      requestAnimationFrame(sample);
+    }));
+    expect(timerTick.maximumGap).toBeLessThanOrEqual(2);
+    expect(timerTick.minimumTop).toBeGreaterThanOrEqual(timerTick.top - 2);
+    expect(Math.abs(timerTick.rowHeight - timerRowHeight)).toBeLessThanOrEqual(0.5);
+    expect(timerTick.timerText).not.toBe(initialTimerText);
+    await invoke('endThinking');
+    await atBottom();
+    await page.waitForTimeout(50);
+    await setBottomGap(10);
+    await invoke('tickTimer');
+    const afterTextTick = await metrics();
+    expect(afterTextTick.total - afterTextTick.height - afterTextTick.top).toBeLessThanOrEqual(2);
     await scrollUp();
     const readerBefore = await metrics();
+    await invoke('tickTimer');
+    expect((await metrics()).top).toBeLessThanOrEqual(readerBefore.top + 2);
     await grow('append');
     expect((await metrics()).top).toBeLessThanOrEqual(readerBefore.top + 2);
     await expect(page.getByRole('button', { name: 'Jump to latest message' })).toBeVisible();
@@ -124,7 +157,7 @@ try {
       expect(clearance.padding).toBeGreaterThanOrEqual(clearance.fade + 8);
     }
     expect(errors).toEqual([]);
-    assertions.push(`${profile.name}: strict 50px intent threshold, thinking-aware jump sparkle, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance`);
+    assertions.push(`${profile.name}: strict 50px intent threshold, stable elapsed timer, immediate live-text bottom correction, thinking-aware jump sparkle, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance`);
     await context.close();
   }
   console.log(`${messagePaneRef ? `${messagePaneRef}: ` : 'working tree: '}${assertions.join('\n')}`);
