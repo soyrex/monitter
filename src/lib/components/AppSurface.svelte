@@ -140,7 +140,7 @@
   import {readBrowserFile,thumbnail,nativeBlob} from '$lib/attachment-files';
   import { floating } from "$lib/floating";
   import { loadWorkspaceSet, remapTerminalIds, saveWorkspaceSet, taskBelongsToWorkspace, workspaceForTask, type PersistedWorkspace, type PersistedWorkspaceSet, type WorkspaceKey } from '$lib/workspace-persistence';
-  import { createSnapshotIndexes, type SnapshotIndexes } from '$lib/snapshot-indexes';
+  import { activeTasksForWorkspace, activityTasksForWorkspace, createSnapshotIndexes, type SnapshotIndexes } from '$lib/snapshot-indexes';
   import { createWorkspaceSaveScheduler } from '$lib/workspace-save-scheduler';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
@@ -344,7 +344,7 @@
   let timelinePages = $state<Record<string, { events: RunEvent[]; nextBefore: number | null; loading: boolean; error: string; loadedOlder: boolean }>>({});
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
   let gitPane = $state<GitPane>();
-  const railAgent = $derived(snapshot?.agents.find(agent => agent.id === railAgentId) ?? null);
+  const railAgent = $derived(railAgentId ? indexes?.agentById.get(railAgentId) ?? null : null);
   const sidebarViews = [{ id: 'standard', label: 'Standard', icon: Bot }, { id: 'activity', label: 'Activity', icon: Activity }, { id: 'projects', label: 'Projects', icon: Folder }] as const;
   const projectIcons = [
     { id: 'folder', label: 'Folder', icon: Folder }, { id: 'briefcase', label: 'Briefcase', icon: Briefcase }, { id: 'code', label: 'Code', icon: Code },
@@ -422,8 +422,8 @@
     try{localStorage.setItem('monitter.sidebar-order.v1',JSON.stringify(sidebarOrder));}catch{error='Could not save sidebar order.';}
   }
 
-  const projects = $derived(snapshot?.projects ?? []);
-  const focusedProject = $derived(projects.find(project => project.id === focusedProjectId) ?? null);
+  const projects = $derived(indexes?.snapshot.projects ?? []);
+  const focusedProject = $derived(focusedProjectId ? indexes?.projectById.get(focusedProjectId) ?? null : null);
   $effect(() => {
     if (embedded || !sidebarViewClientReady || sidebarViewInitialized || !snapshot) return;
     // Import the former shared preference once for a smooth migration, then
@@ -437,25 +437,23 @@
     seedViewerInterfaceScale('desktop', snapshot.settings.interfaceScale ?? 125);
     seedViewerInterfaceScale('mobile', snapshot.settings.interfaceScale ?? 125);
   });
-  const activeTasks = $derived(snapshot?.tasks.filter(task => !task.archived) ?? []);
-  const scopedTasks = $derived(activeTasks.filter(task => taskBelongsToWorkspace(task, activeWorkspaceKey)));
-  const activityTasks = $derived(activeTasks.filter(task=>!task.channelId).sort((a,b) =>
-    Number(b.status === 'running') - Number(a.status === 'running') || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id)));
-  const scopedActivityTasks = $derived(scopedTasks.filter(task=>!task.channelId).sort((a,b) =>
-    Number(b.status === 'running') - Number(a.status === 'running') || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id)));
+  const activeTasks = $derived(indexes?.activeTasks ?? []);
+  const scopedTasks = $derived(activeTasksForWorkspace(indexes, activeWorkspaceKey));
+  const activityTasks = $derived(indexes?.activityTasks ?? []);
+  const scopedActivityTasks = $derived(activityTasksForWorkspace(indexes, activeWorkspaceKey));
   const workspaceLabel = $derived(activeWorkspaceKey === 'all' ? 'All activity' : activeWorkspaceKey.startsWith('agent:')
-    ? snapshot?.agents.find(agent => agent.id === activeWorkspaceKey.slice(6))?.name ?? 'Deleted agent'
-    : activeWorkspaceKey.slice(8) === 'unassigned' ? 'No project' : projects.find(project => project.id === activeWorkspaceKey.slice(8))?.name ?? 'Deleted project');
+    ? indexes?.agentById.get(activeWorkspaceKey.slice(6))?.name ?? 'Deleted agent'
+    : activeWorkspaceKey.slice(8) === 'unassigned' ? 'No project' : indexes?.projectById.get(activeWorkspaceKey.slice(8))?.name ?? 'Deleted project');
   function suggestedTaskCwd(agentId: string, projectId: string) {
-    const agent = snapshot?.agents.find(item => item.id === agentId);
-    const project = projects.find(item => item.id === projectId);
-    return project?.workspaces.find(workspace => workspace.hostId === agent?.hostId)?.cwd || agent?.cwd || snapshot?.hosts.find(host => host.id === agent?.hostId)?.defaultCwd || '';
+    const agent = indexes?.agentById.get(agentId);
+    const project = indexes?.projectById.get(projectId);
+    return project?.workspaces.find(workspace => workspace.hostId === agent?.hostId)?.cwd || agent?.cwd || indexes?.hostById.get(agent?.hostId ?? '')?.defaultCwd || '';
   }
-  const taskFormAgent = $derived(snapshot?.agents.find(agent => agent.id === taskAgentId));
-  const taskFormProject = $derived(projects.find(project => project.id === taskProjectId));
-  const inheritedTaskCwd = $derived(taskFormAgent?.cwd || snapshot?.hosts.find(host => host.id === taskFormAgent?.hostId)?.defaultCwd || '');
+  const taskFormAgent = $derived(indexes?.agentById.get(taskAgentId));
+  const taskFormProject = $derived(indexes?.projectById.get(taskProjectId));
+  const inheritedTaskCwd = $derived(taskFormAgent?.cwd || indexes?.hostById.get(taskFormAgent?.hostId ?? '')?.defaultCwd || '');
   const taskFormCwd = $derived(taskFormProject?.workspaces.find(workspace => workspace.hostId === taskFormAgent?.hostId)?.cwd || taskCwd || inheritedTaskCwd);
-  const focusedAgent = $derived(snapshot?.agents.find(agent=>agent.id===focusedAgentId) ?? null);
+  const focusedAgent = $derived(focusedAgentId ? indexes?.agentById.get(focusedAgentId) ?? null : null);
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let snapshotIssued = 0,
     snapshotApplied = 0;
@@ -476,11 +474,11 @@
     selectedTaskId ? indexes?.taskById.get(selectedTaskId) ?? null : null,
   );
   const selectedAgent = $derived(
-    snapshot?.agents.find((a) => a.id === selectedTask?.agentId) ?? null,
+    selectedTask ? indexes?.agentById.get(selectedTask.agentId) ?? null : null,
   );
   const selectedHost = $derived(
-    snapshot?.hosts.find((h) => h.id === (pane==='terminal' ? selectedTerminal?.hostId : selectedTask?.hostId)) ??
-      snapshot?.hosts.find((h) => h.kind === "local") ??
+    indexes?.hostById.get(pane==='terminal' ? selectedTerminal?.hostId ?? '' : selectedTask?.hostId ?? '') ??
+      indexes?.localHost ??
       null,
   );
   const messages = $derived(
@@ -1395,14 +1393,8 @@
     !!(activeChannel && (composerPending[`channel:${activeChannel.id}`]
       || (activeChannelTasks.length && !activeChannelTasks.some(taskIsStepping)))),
   );
-  const localHost = $derived(
-    snapshot?.hosts.find((h) => h.kind === "local") ?? null,
-  );
-  const defaultAgent = $derived(
-    snapshot?.agents.find((a) => a.provider === "codex") ??
-      snapshot?.agents[0] ??
-      null,
-  );
+  const localHost = $derived(indexes?.localHost ?? null);
+  const defaultAgent = $derived(indexes?.defaultAgent ?? null);
   const text = (reason: unknown) =>
     reason instanceof Error ? reason.message : String(reason);
   const avatarSrc = (agent: Agent | null | undefined) => {
