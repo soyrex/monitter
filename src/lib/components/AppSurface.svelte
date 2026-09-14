@@ -879,7 +879,7 @@
       ...fallback, ...saved,
       overviewOpen: saved.overviewOpen !== false,
       settingsOpen: saved.settingsOpen === true,
-      settingsCategory: ['profile','appearance','typography','behaviour','conversation','approvals','agents','directory','lan','remote'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
+      settingsCategory: ['profile','extensions','appearance','typography','behaviour','conversation','approvals','agents','directory','lan','remote'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openEmptyIds: Array.isArray(saved.openEmptyIds) ? saved.openEmptyIds : fallback.openEmptyIds,
       openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,

@@ -17,6 +17,7 @@
     "build:mac": "node scripts/build-macos.mjs",
     "install:mac": "node scripts/install-macos.mjs",
     "test:ui": "node scripts/ui-smoke.mjs",
+    "test:extensions:ui": "node scripts/extensions-settings-ui-test.mjs",
     "test:workspaces": "node scripts/workspace-persistence-test.mjs",
     "test:workspaces:ui": "node scripts/ui-scoped-workspaces-smoke.mjs",
     "test:overview:ui": "node scripts/ui-global-overview-workspace-smoke.mjs",

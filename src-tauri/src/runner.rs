@@ -750,11 +750,11 @@ fn build_command_with_collaboration(
     task: &Task,
     collaboration: Option<(&SessionGrant, &str)>,
 ) -> Result<Command, String> {
-    build_command_with_options(host, task, collaboration, false)
+    build_command_with_options(host, task, collaboration, false, None)
 }
 
 fn build_title_command(host: &Host, task: &Task) -> Result<Command, String> {
-    build_command_with_options(host, task, None, true)
+    build_command_with_options(host, task, None, true, None)
 }
 
 fn build_command_with_options(
@@ -762,6 +762,7 @@ fn build_command_with_options(
     task: &Task,
     collaboration: Option<(&SessionGrant, &str)>,
     title_mode: bool,
+    claude_mcp_config_path: Option<&std::path::Path>,
 ) -> Result<Command, String> {
     if !valid_sandbox_for_provider(&task.provider, &task.sandbox) {
         return Err("Task has an invalid provider sandbox setting.".into());
@@ -785,7 +786,12 @@ fn build_command_with_options(
         "codex" => codex_args(task, collaboration.map(|(_, helper)| helper), title_mode),
         "claude" => {
             let mut args = adapters::claude::args(task);
-            if let Some((_, helper)) = collaboration {
+            if let Some(path) = claude_mcp_config_path {
+                args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned()]);
+                if collaboration.is_some() {
+                    args.extend(["--allowedTools".into(), claude_tool_names()]);
+                }
+            } else if let Some((_, helper)) = collaboration {
                 // --mcp-config layers this config over normal Claude settings.
                 // --strict-mcp-config is intentionally absent so user servers remain.
                 args.extend([
@@ -1428,6 +1434,7 @@ pub struct RunControl {
     // prevents two UI sends from racing into the same resident transport.
     acp_turn_reserved: Mutex<bool>,
     acp_prompt_after_config: Mutex<Option<String>>,
+    mcp_fingerprint: Mutex<Option<String>>,
     acp_session_result: Mutex<Option<Value>>,
     app_server_instance_id: String,
     acp_transport: AtomicBool,
@@ -1451,6 +1458,7 @@ impl RunControl {
             acp_config_requests: Mutex::new(HashSet::new()),
             acp_turn_reserved: Mutex::new(false),
             acp_prompt_after_config: Mutex::new(None),
+            mcp_fingerprint: Mutex::new(None),
             acp_session_result: Mutex::new(None),
             app_server_instance_id: crate::model::id(),
             acp_transport: AtomicBool::new(false),
@@ -1459,6 +1467,19 @@ impl RunControl {
             remote_helper_cleanups: Mutex::new(Vec::new()),
             remote_supervised,
         })
+    }
+
+    pub(crate) fn set_mcp_fingerprint(&self, fingerprint: Option<String>) {
+        if let Ok(mut value) = self.mcp_fingerprint.lock() {
+            *value = fingerprint;
+        }
+    }
+
+    pub(crate) fn mcp_fingerprint(&self) -> Option<String> {
+        self.mcp_fingerprint
+            .lock()
+            .ok()
+            .and_then(|value| value.clone())
     }
 
     pub fn cancel(&self) {
@@ -2413,6 +2434,21 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             crate::acp_runtime::start(service, task_id, prompt, control);
             return;
         }
+        let mut extensions = match service.extension_config().map(|config| {
+            crate::extensions_runtime::RuntimeExtensions::for_agent(&config, &task.agent_id)
+        }) {
+            Ok(extensions) => extensions,
+            Err(error) => {
+                service.finish(&task_id, "error", Some(error));
+                return;
+            }
+        };
+        if let Err(error) = extensions.validate_for(&task.provider, &host.kind) {
+            service.finish(&task_id, "error", Some(error));
+            return;
+        }
+        control.set_mcp_fingerprint(extensions.mcp_fingerprint());
+        let prompt = extensions.prompt(&prompt);
         if task.provider == "claude" && host.kind != "local" {
             service.finish(
                 &task_id,
@@ -2499,7 +2535,43 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             .as_ref()
             .zip(helper_for_command)
             .map(|(grant, helper)| (grant, helper));
-        let mut command = match build_command_with_collaboration(&host, &task, grant_for_command) {
+        let mut claude_config_value = extensions.claude_config();
+        if task.provider == "claude" {
+            if let Some((_, helper)) = grant_for_command {
+                if let (Some(target), Some(builtin)) = (
+                    claude_config_value
+                        .pointer_mut("/mcpServers")
+                        .and_then(Value::as_object_mut),
+                    serde_json::from_str::<Value>(&claude_mcp_config(helper))
+                        .ok()
+                        .and_then(|value| value.pointer("/mcpServers/monitter").cloned()),
+                ) {
+                    target.insert("monitter".into(), builtin);
+                }
+            }
+        }
+        let claude_config = if task.provider == "claude"
+            && claude_config_value["mcpServers"]
+                .as_object()
+                .is_some_and(|servers| !servers.is_empty())
+        {
+            match crate::extensions_runtime::write_private_claude_config(&claude_config_value) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    service.finish(&task_id, "error", Some(error));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let mut command = match build_command_with_options(
+            &host,
+            &task,
+            grant_for_command,
+            false,
+            claude_config.as_ref().map(|file| file.path()),
+        ) {
             Ok(command) => command,
             Err(error) => {
                 if let Some(mut remote) = remote_collaboration.take() {

@@ -347,6 +347,21 @@ fn run(
         );
         return;
     };
+    let mut extensions = match service.extension_config().map(|config| {
+        crate::extensions_runtime::RuntimeExtensions::for_agent(&config, &task.agent_id)
+    }) {
+        Ok(extensions) => extensions,
+        Err(error) => {
+            fail(&service, &task_id, &control, error);
+            return;
+        }
+    };
+    if let Err(error) = extensions.validate_for("acp", &host.kind) {
+        fail(&service, &task_id, &control, error);
+        return;
+    }
+    control.set_mcp_fingerprint(extensions.mcp_fingerprint());
+    let initial_prompt = initial_prompt.map(|prompt| extensions.prompt(&prompt));
     let grant = match if initial_prompt.is_some() {
         service.collaboration_grant(&task_id)
     } else {
@@ -393,8 +408,19 @@ fn run(
         }
         grant
     });
-    let mcp_servers =
+    let mut mcp_servers =
         crate::acp_collaboration::mcp_servers(helper_for_session, session_grant.as_ref());
+    let managed_mcp = match extensions.acp_servers() {
+        Ok(Value::Array(servers)) => servers,
+        Ok(_) => Vec::new(),
+        Err(error) => {
+            fail(&service, &task_id, &control, error);
+            return;
+        }
+    };
+    if let Some(target) = mcp_servers.as_array_mut() {
+        target.extend(managed_mcp);
+    }
     let mut command = match crate::acp_transport::command(&host, launch, &task.cwd) {
         Ok(command) => command,
         Err(error) => {
@@ -731,6 +757,15 @@ fn run(
                         return;
                     }
                 };
+                if extensions.has_http()
+                    && value
+                        .pointer("/result/agentCapabilities/mcpCapabilities/http")
+                        .and_then(Value::as_bool)
+                        != Some(true)
+                {
+                    fail(&service, &task_id, &control, "This ACP agent does not advertise HTTP MCP support; Monitter did not ignore the assigned server.");
+                    return;
+                }
                 let (method, params) = if let Some(native) = task.native_session_id.as_deref() {
                     match capabilities.recovery_method() {
                         Ok(method) => (

@@ -123,6 +123,22 @@ export interface Settings {
   /** Legacy migration seed; active sidebar selection is client-local UI state. */
   sidebarView: SidebarView; busyMessageMode?: 'queue' | 'steer';
 }
+/** Native-owner configuration, deliberately not part of any workspace snapshot. */
+export interface McpServerConfig {
+  id: string; name: string; enabled: boolean; agentIds: string[];
+  transport: 'stdio' | 'http'; command: string; args: string[];
+  env: Record<string, string>; url: string; headers: Record<string, string>;
+}
+/** Portable markdown instructions, not an executable plugin bundle. */
+export interface ManagedSkill {
+  id: string; name: string; description: string; enabled: boolean;
+  agentIds: string[]; content: string;
+}
+export interface ExtensionConfig {
+  /** Opaque edit revision; stale saves are rejected rather than overwriting newer edits. */
+  revision?: string;
+  mcpServers: McpServerConfig[]; skills: ManagedSkill[];
+}
 export interface Snapshot {
   hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;

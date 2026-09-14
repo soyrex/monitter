@@ -79,6 +79,70 @@ Event `monitter:changed` payload `{ taskId?: string }` tells UI to reload snapsh
 The backend is authoritative; listen before initial snapshot. Errors reject with a readable string.
 Frontend may show a labelled browser design preview when Tauri isn't available, but never simulate an agent reply.
 
+## MCP, plugins and managed skills
+
+Settings → MCP & Plugins manages optional MCP servers and portable Markdown skill
+instructions. `get_extension_config {}` and `save_extension_config {config}` return
+`ExtensionConfig` and are native-desktop-only commands. They are deliberately absent
+from the LAN invoke allowlist and encrypted controller/visitor command surfaces.
+Configuration is not a `Snapshot` or `Settings` field. It is stored separately in a
+private, atomically replaced `extensions.json` file; environment values and HTTP
+headers are not an encrypted credential vault and must not enter workspace exports,
+diagnostics, browser storage, command previews, or shared snapshots.
+Reads include an opaque revision. Saves from an older settings pane are rejected
+instead of overwriting newer edits; the UI retains the unsaved draft.
+
+Each MCP server has an ID, display name, enabled flag, exact agent IDs, and either a
+stdio command/argument/environment configuration or HTTP URL/headers. Each managed
+skill has an ID, name, description, enabled flag, exact agent IDs and Markdown content.
+An empty agent selection grants nothing. Saving configuration never starts a server,
+installs a package, calls a model, changes native CLI authentication, or approves a tool.
+Changed MCP entries revoke remembered approvals for affected agents so a replacement
+server cannot inherit the previous server's tool grants.
+Remembered rules also include the MCP configuration digest captured by the actual
+resident run, so an old process cannot create a grant for a replacement configuration.
+
+Managed skills are portable instructions delivered to the assigned harness, not native
+plugin bundles. Importing a Markdown file does not install accompanying scripts or
+assets. Native plugins remain harness-specific and are explicitly labelled unsupported
+in this manager. MCP changes apply to a subsequent harness launch; an existing resident
+session is not silently restarted, and no message is replayed to apply configuration.
+Unsupported harness/transport combinations must fail visibly rather than silently
+running without an assigned MCP server. Monitter's built-in collaboration server remains
+separate and keeps its existing exact tool scope.
+
+Current managed MCP support is local Codex app-server (stdio/HTTP), local Claude
+(stdio/HTTP), and local ACP (stdio; HTTP only when advertised at initialization).
+SSH and the legacy OpenCode/Hermes adapters reject assigned managed MCP servers.
+Use OpenCode through ACP for this feature. Skill text is added to execution context
+without changing the stored user message; this does not erase instructions already
+present in a native session's history. Codex receives required startup and prompted
+tool approval for managed servers, never the built-in collaboration allowlist.
+
+### Follow-up: managed MCP over SSH (not implemented)
+
+- Forward per-agent configuration through the encrypted SSH session to the remote
+  harness using invocation/session-scoped configuration. Preserve remote CLI auth
+  and existing configuration; do not overwrite global files.
+- HTTP servers must be reachable from the remote host. A URL pointing at localhost
+  refers to that host, not the desktop Mac; do not silently reinterpret it.
+- Stdio servers require executable and dependency checks on the remote host, with
+  remote path resolution rather than copying local absolute paths. Do not install
+  missing dependencies automatically.
+- Mac-only HTTP endpoints need an explicitly configured, owned reverse tunnel bound
+  to remote loopback, with bounded startup and cleanup. A Mac-local stdio server
+  additionally needs a protocol bridge; a TCP tunnel alone cannot expose it.
+- Require explicit host-scoped consent before forwarding credentials. Keep secrets
+  off command arguments and logs; use the encrypted channel and private temporary
+  configuration when necessary, cleaning it up after the session.
+- Respect each harness's MCP capabilities and existing approval scopes. Surface
+  executable, authentication, reachability and tunnel failures; never silently omit
+  assigned servers or replay a turn to recover configuration.
+- Verify direct remote HTTP, remote stdio, optional reverse forwarding, cleanup and
+  secret redaction with SSH integration tests before enabling support.
+- Portable Markdown skills can travel in execution context without remote
+  installation. Bundled scripts/assets would require a separate transfer design.
+
 ## Busy messages
 
 Chat sends render a frontend-local outgoing message immediately and clear the captured composer
