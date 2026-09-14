@@ -19,9 +19,10 @@ No fake conversations, progress, token counts, host connections or model replies
   detail. Original diagnostics remain stored locally. The UI refreshes these pages only while
   the timeline is visible; this traffic is independent of ordinary chat refreshes.
 - `get_process_metrics {}` -> `{ cpuTimeMs: number, residentMemoryBytes: number, sampledAt: number }`.
-  Read-only native/LAN sample of the Monitter host process. CPU time is cumulative so clients can
-  calculate interval usage without shared sampling state; resident memory is current physical
-  memory. Unsupported platforms fail visibly instead of returning fabricated values.
+  Read-only native/LAN sample of the Monitter process tree, including live CLI/ACP harnesses and
+  their descendants. CPU time is cumulative, including reaped child CPU, so clients can calculate
+  interval usage without shared sampling state; resident memory is the current sum for live
+  processes. Unsupported platforms fail visibly instead of returning fabricated values.
 - `get_task_event_detail { taskId: string, eventId: string, offset?: number, limit?: number }` ->
   `{ chunk: string, nextOffset: number | null, totalBytes: number }`. Full tool detail remains in
   the local journal and is read only after its activity row is expanded. Chunks default to 32 KiB

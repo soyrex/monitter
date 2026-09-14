@@ -96,7 +96,7 @@
         <line class="second-hand" x1="30" y1="34" x2="30" y2="9" transform={`rotate(${secondAngle} 30 30)`} />
         <circle class="clock-pin" cx="30" cy="30" r="2" />
       </svg>
-      <div class="process-metrics" aria-label="Monitter process usage" title={metricsError || 'Current Monitter host process usage'}>
+      <div class="process-metrics" aria-label="Monitter and harness process usage" title={metricsError || 'Current Monitter, CLI and ACP harness process usage'}>
         {#if metricsError}
           <span class="metrics-error">METRICS<br />UNAVAILABLE</span>
         {:else}
