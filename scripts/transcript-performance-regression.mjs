@@ -16,6 +16,10 @@ assert.match(messagePane, /visibilitychange/);
 assert.match(virtualList, /generics="T"/);
 assert.match(virtualList, /estimateHeight/);
 assert.match(virtualList, /stickyKey/);
+assert.match(virtualList, /stickyBeforeWindow/);
+assert.match(virtualList, /stickyGap/);
+assert.doesNotMatch(virtualList, /start\s*=\s*Math\.min\(start,\s*stickyIndex\)/,
+  'a pinned request must not expand the virtual window across every later row');
 assert.match(virtualList, /role="feed"/);
 assert.match(virtualList, /ResizeObserver/);
 assert.doesNotMatch(terminalRuntime, /setInterval\s*\(/, 'terminal runtime must not keep a global interval');

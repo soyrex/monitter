@@ -25,7 +25,10 @@
   const heightFor = (item: T, index: number) => heights.get(getKey(item, index)) ?? estimateHeight;
   const offsetFor = (end: number) => items.slice(0, end).reduce((total, item, index) => total + heightFor(item, index), 0);
   const totalHeight = $derived(offsetFor(items.length));
-  const topSpacer = $derived(offsetFor(range.start));
+  const stickyIndex = $derived(stickyKey ? items.findIndex((item, index) => getKey(item, index) === stickyKey) : -1);
+  const stickyBeforeWindow = $derived(stickyIndex >= 0 && stickyIndex < range.start);
+  const topSpacer = $derived(offsetFor(stickyBeforeWindow ? stickyIndex : range.start));
+  const stickyGap = $derived(stickyBeforeWindow ? Math.max(0, offsetFor(range.start) - offsetFor(stickyIndex + 1)) : 0);
   const bottomSpacer = $derived(Math.max(0, totalHeight - offsetFor(range.end)));
   const rendered = $derived(items.slice(range.start, range.end));
 
@@ -43,11 +46,6 @@
     while (end < items.length && cursor < visibleBottom) cursor += heightFor(items[end], end++);
     start = Math.max(0, start - overscan);
     end = Math.min(items.length, end + overscan);
-    // Preserve one real sticky row: no duplicate content or lost expansion state.
-    if (stickyKey) {
-      const stickyIndex = items.findIndex((item, index) => getKey(item, index) === stickyKey);
-      if (stickyIndex >= 0) { start = Math.min(start, stickyIndex); end = Math.max(end, stickyIndex + 1); }
-    }
     range = { start, end };
   }
   function scheduleRange() {
@@ -109,6 +107,13 @@
 
 <div class="transcript-virtual-list" bind:this={root} role="feed" aria-busy={!active} aria-label="Conversation transcript">
   <div aria-hidden="true" style:height={`${topSpacer}px`}></div>
+  {#if stickyBeforeWindow}
+    {@const stickyItem = items[stickyIndex]}
+    <div class="transcript-row" use:measured={{ key: getKey(stickyItem, stickyIndex), index: stickyIndex }}>
+      {@render children(stickyItem, stickyIndex)}
+    </div>
+    <div aria-hidden="true" style:height={`${stickyGap}px`}></div>
+  {/if}
   {#each rendered as item, relativeIndex (getKey(item, range.start + relativeIndex))}
     {@const index = range.start + relativeIndex}
     <div class="transcript-row" use:measured={{ key: getKey(item, index), index }}>

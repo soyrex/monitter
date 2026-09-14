@@ -3498,15 +3498,15 @@
               stickyKey={latestUserRequest?.id ?? null}
               active={embedded ? active : activePaneId === 'main'}>
               {#snippet children(item, _index)}
-              {#if item.type === "activity"}{@const collaboration=item.value.kind==='collaboration'?collaborationFor(item.value.detail):null}{#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<RunActivity event={item.value} />{/if}
+              {#if item.type === "activity"}{@const collaboration=item.value.kind==='collaboration'?collaborationFor(item.value.detail):null}{#if collaboration}<SubagentActivity {collaboration} agent={snapshot?.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<RunActivity event={item.value} />{/if}
               {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length}>
                 {#snippet avatar()}{@render messageAvatar(selectedAgent)}{/snippet}
               </RunActivity>
-              {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
+              {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot?.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
               {:else if item.type === "approval"}{@const approvalText=approvalEventText(item.value)}<button class={`approval-inline ${item.value.status}`} onclick={() => openApprovalHistory(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{date(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
               {:else}{@const message = item.value}{#if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>{:else if message.collaborationId && collaborationFor(message.collaborationId)}{:else}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
-                class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
+                class:tinted={message.role === "user" && snapshot?.settings.tintUserMessages}
                   class:sticky-user-request={message.role === "user" && message.id === latestUserRequest?.id}
                   class:system={message.role === "system"}
                   class:final-answer={message.role === "assistant" && message.phase === "final_answer"}
