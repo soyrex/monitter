@@ -61,12 +61,31 @@ try {
     await expect.poll(() => page.evaluate(() => Boolean(window.__PANE_QA__))).toBe(true);
     const metrics = () => page.locator('.messages').evaluate(node => ({ top: node.scrollTop, height: node.clientHeight, total: node.scrollHeight }));
     const atBottom = () => expect.poll(async () => { const m = await metrics(); return m.total - m.height - m.top; }).toBeLessThanOrEqual(2);
+    const setBottomGap = gap => page.locator('.messages').evaluate((node, value) => {
+      node.scrollTop = node.scrollHeight - node.clientHeight - value;
+      node.dispatchEvent(new Event('scroll'));
+    }, gap);
     const scrollUp = async () => page.locator('.messages').evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
     const invoke = name => page.evaluate(name => window.__PANE_QA__[name](), name);
     const grow = async name => { const before = await metrics(); await invoke(name); await expect.poll(async () => (await metrics()).total).toBeGreaterThan(before.total + 8); };
 
     await atBottom();
     await grow('growExisting');
+    await atBottom();
+    const jumpButton = page.locator('.jump-latest');
+    await setBottomGap(49);
+    await expect(jumpButton).toHaveAttribute('aria-hidden', 'true');
+    await page.waitForTimeout(1_100);
+    await atBottom();
+    await setBottomGap(50);
+    await expect(page.getByRole('button', { name: 'Jump to latest message' })).toBeVisible();
+    await expect(jumpButton).toHaveCSS('opacity', '1');
+    const manual = await metrics();
+    const manualGap = manual.total - manual.height - manual.top;
+    await page.waitForTimeout(1_100);
+    const held = await metrics();
+    expect(held.total - held.height - held.top).toBeGreaterThanOrEqual(manualGap - 2);
+    await page.getByRole('button', { name: 'Jump to latest message' }).click();
     await atBottom();
     await scrollUp();
     const readerBefore = await metrics();
@@ -97,7 +116,7 @@ try {
       expect(clearance.padding).toBeGreaterThanOrEqual(clearance.fade + 8);
     }
     expect(errors).toEqual([]);
-    assertions.push(`${profile.name}: streaming existing reply, scroll-before-RO late layout, shrink/grow, reader preservation, resetKey send, resize, final clearance`);
+    assertions.push(`${profile.name}: strict 50px intent threshold, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance`);
     await context.close();
   }
   console.log(`${messagePaneRef ? `${messagePaneRef}: ` : 'working tree: '}${assertions.join('\n')}`);

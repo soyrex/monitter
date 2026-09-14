@@ -12,10 +12,19 @@
   let lastViewportHeight = 0;
   let lastScrollHeight = 0;
   let followFrame: number | undefined;
-  const bottomThreshold = 48;
+  const bottomThreshold = 50;
+  const followInterval = 1_000;
 
-  function atLatest() {
-    return !viewport || viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= bottomThreshold;
+  function distanceFromLatest() {
+    return viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop) : 0;
+  }
+
+  function nearLatest() {
+    return distanceFromLatest() < bottomThreshold;
+  }
+
+  function atAbsoluteLatest() {
+    return distanceFromLatest() <= 1;
   }
 
   function rememberMetrics() {
@@ -55,11 +64,12 @@
     // instead of measuring the new, larger bottom gap as a reader scrolling up.
     if (viewport && (viewport.clientHeight !== lastViewportHeight || viewport.scrollHeight !== lastScrollHeight)) {
       if (followingLatest) followLayout();
-      else showJump = !atLatest();
+      else if (atAbsoluteLatest()) { followingLatest = true; showJump = false; }
+      else showJump = true;
       rememberMetrics();
       return;
     }
-    followingLatest = atLatest();
+    followingLatest = nearLatest();
     showJump = !followingLatest;
     rememberMetrics();
   }
@@ -77,14 +87,22 @@
       // Covers streamed content, expanded tools, images/fonts and pane resizing.
       // Readers who scrolled up keep their place as new content arrives.
       if (followingLatest) followLayout();
-      else showJump = !atLatest();
+      else if (atAbsoluteLatest()) { followingLatest = true; showJump = false; }
+      else showJump = true;
       rememberMetrics();
     });
     if (viewport) observer.observe(viewport);
     if (content) observer.observe(content);
     if (heading) observer.observe(heading);
+    const interval = window.setInterval(() => {
+      // ResizeObserver catches known layout changes; this lightweight check
+      // closes gaps from late browser layout/paint while reader intent remains
+      // inside the 50px follow zone.
+      if (followingLatest && !showJump && !atAbsoluteLatest()) pinToLatest();
+    }, followInterval);
     return () => {
       observer.disconnect();
+      window.clearInterval(interval);
       if (followFrame !== undefined) cancelAnimationFrame(followFrame);
     };
   });
@@ -96,12 +114,10 @@
     {#if header}<div class="message-header" bind:this={heading}>{@render header()}</div>{/if}
     <div class="message-content" use:messageArrival bind:this={content}>{@render children()}</div>
   </div>
-  {#if showJump}
-    <button class="jump-latest" aria-label="Jump to latest message" title="Jump to latest message" onclick={() => {
+  <button class="jump-latest" class:visible={showJump} aria-label="Jump to latest message" title="Jump to latest message" aria-hidden={!showJump} tabindex={showJump ? 0 : -1} disabled={!showJump} onclick={() => {
       jumpToLatest();
       viewport?.focus({ preventScroll: true });
     }}><ArrowDown size={18} /></button>
-  {/if}
 </div>
 
 <style>
@@ -112,7 +128,8 @@
   /* Paint behind the translucent header so content fades before its top edge. */
   .message-header::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, var(--paper) 0%, var(--paper) 20%, transparent 100%); }
   .message-content { display: flow-root; width: min(var(--chat-content-max-width, 900px), calc(100% - 2 * var(--chat-side-padding, clamp(25px, 4vw, 50px)))); margin-inline: auto; padding: 25px 0 calc(var(--scroll-fade) + 8px); }
-  .jump-latest { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; z-index: 2; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); background: var(--panel); box-shadow: 0 3px 12px #0002; cursor: pointer; }
+  .jump-latest { position:absolute; left:50%; bottom:14px; z-index:2; display:grid; place-items:center; width:36px; height:36px; border:1px solid var(--line); border-radius:50%; color:var(--ink); background:var(--panel); box-shadow:0 3px 12px #0002; opacity:0; transform:translate(-50%,8px); visibility:hidden; pointer-events:none; cursor:pointer; transition:opacity .18s ease,transform .18s ease,visibility .18s step-end; }
+  .jump-latest.visible { opacity:1; transform:translate(-50%,0); visibility:visible; pointer-events:auto; transition:opacity .18s ease,transform .18s ease; }
   .jump-latest:hover { color: var(--accent-ink); border-color: var(--accent); background: var(--soft); }
   .jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   @media (max-width: 640px) { .message-content { padding-top: 14px; padding-bottom: calc(var(--scroll-fade) + 8px); } .jump-latest { bottom: 10px; } }
@@ -121,5 +138,6 @@
     :global(.message.sticky-user-request) { position:sticky; z-index:4; top:9px; isolation:isolate; box-shadow:0 8px 24px #0002,0 2px 7px #00000012; }
     :global(.message.sticky-user-request)::before { content:""; position:absolute; z-index:-1; top:-9px; right:0; bottom:-20px; left:0; pointer-events:none; background:linear-gradient(to bottom,var(--paper) 0,var(--paper) calc(100% - 20px),transparent 100%); }
   }
+  @media (prefers-reduced-motion:reduce) { .jump-latest { transition:none; } }
 
 </style>
