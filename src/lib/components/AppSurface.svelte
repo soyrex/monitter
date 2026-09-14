@@ -3033,7 +3033,7 @@
         {#if detail}<span class="chat-meta">{snapshot?.agents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
       </span>
     </button>
-    <small>{task.status === 'running' ? 'live' : relative(task.updatedAt)}</small>
+    <small><AnimatedTitle text={task.status === 'running' ? 'live' : relative(task.updatedAt)} active={task.status === 'running'} activeTooltip="Live run" /></small>
     <div class="chat-actions">
       <button aria-label={`Archive chat ${task.title}`} title="Archive chat" disabled={busy || task.status === 'running'} onclick={()=>archiveTask(task)}><Archive size={12}/></button>
     </div>
@@ -4544,6 +4544,9 @@
     background:var(--paper);
   }
   .mobile-navigation > .sidebar { border-right:0; transform:translateX(0); background:var(--sidebar); }
+  .mobile-navigation .brand { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); padding-inline:8px; gap:0; }
+  .mobile-navigation .brand-logo-button { grid-column:2; justify-self:center; }
+  .mobile-navigation .sidebar-views { grid-column:3; justify-self:end; margin-left:0; }
   .mobile-navigation > .pane-grid { flex-direction:column; transform:translateX(100%); visibility:hidden; }
   .mobile-navigation.mobile-main > .sidebar { transform:translateX(-100%); visibility:hidden; }
   .mobile-navigation.mobile-main > .pane-grid { transform:translateX(0); visibility:visible; transition-delay:0s; }
