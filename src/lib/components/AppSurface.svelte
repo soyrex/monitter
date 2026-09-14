@@ -3327,7 +3327,7 @@
           {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}<TranscriptVirtualList
               items={activeChannel.messages}
               getKey={(message) => message.id}
-              active={embedded ? active : activePaneId === 'main'}>
+              active={true}>
               {#snippet children(message, _index)}<article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot?.settings.tintUserMessages}

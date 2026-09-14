@@ -31,6 +31,11 @@ assert.doesNotMatch(virtualList, /start\s*=\s*Math\.min\(start,\s*stickyIndex\)/
   'a pinned request must not expand the virtual window across every later row');
 assert.match(virtualList, /role="feed"/);
 assert.match(virtualList, /ResizeObserver/);
+assert.match(appSurface, /items=\{activeChannel\.messages\}[\s\S]{0,180}active=\{true\}/,
+  'visible channel panes must render transcript rows even when another split has focus');
+const taskTranscript = await readFile(`${root}/src/lib/components/TaskTranscript.svelte`, 'utf8');
+assert.match(taskTranscript, /<TranscriptVirtualList[\s\S]{0,260}active=\{true\}/,
+  'visible task panes must render transcript rows even when another split has focus');
 assert.doesNotMatch(terminalRuntime, /setInterval\s*\(/, 'terminal runtime must not keep a global interval');
 assert.match(terminalRuntime, /runtimeCanPoll/);
 assert.match(terminalRuntime, /documentVisibilityChanged/);
