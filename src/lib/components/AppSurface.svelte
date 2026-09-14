@@ -118,6 +118,7 @@
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import ApprovalDock from "$lib/components/ApprovalDock.svelte";
   import MessagePane from "$lib/components/MessagePane.svelte";
+  import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
   import ExpandableUserRequest from "$lib/components/ExpandableUserRequest.svelte";
   import GitPane from "$lib/components/GitPane.svelte";
   import RunSummary from "$lib/components/RunSummary.svelte";
@@ -139,10 +140,12 @@
   import {readBrowserFile,thumbnail,nativeBlob} from '$lib/attachment-files';
   import { floating } from "$lib/floating";
   import { loadWorkspaceSet, remapTerminalIds, saveWorkspaceSet, taskBelongsToWorkspace, workspaceForTask, type PersistedWorkspace, type PersistedWorkspaceSet, type WorkspaceKey } from '$lib/workspace-persistence';
+  import { createSnapshotIndexes, type SnapshotIndexes } from '$lib/snapshot-indexes';
+  import { createWorkspaceSaveScheduler } from '$lib/workspace-save-scheduler';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, workspaceKey = 'all', onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
-    { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; workspaceKey?: WorkspaceKey;
+  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, workspaceKey = 'all', onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
+    { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; snapshotIndexes?: SnapshotIndexes | null; workspaceKey?: WorkspaceKey;
       onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void;
       parentExpandedPaneId?:string|null; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: 'single' | 'columns' | 'grid') => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
@@ -240,6 +243,11 @@
     selectedTaskId = $state<string | null>(null),
     selectedChannelId = $state<string | null>(null),
     pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "settings">(untrack(()=>embedded?"empty":"overview"));
+  // Embedded panes share this projection from the root surface. Only a root
+  // snapshot update rebuilds the indexes, rather than every pane re-filtering
+  // messages/events/approvals from the full snapshot independently.
+  const localSnapshotIndexes = $derived.by(() => snapshot ? createSnapshotIndexes(snapshot) : null);
+  const indexes = $derived(snapshotIndexes ?? localSnapshotIndexes);
   let openTerminalIds=$state<string[]>([]), selectedTerminalId=$state<string|null>(null), terminalBusy=$state(false);
   let openEmptyIds=$state<string[]>([]), selectedEmptyId=$state<string|null>(null);
   const selectedTerminal=$derived(selectedTerminalId ? $terminalSessions[selectedTerminalId] ?? null : null);
@@ -461,11 +469,11 @@
   const openDrafts = $derived(openDraftIds.flatMap(id => taskDrafts[id] ? [taskDrafts[id]] : []));
   const currentTaskDraft = $derived(currentDraftId ? taskDrafts[currentDraftId] ?? null : null);
   const openTasks = $derived(openTaskIds.flatMap(id => {
-    const task = snapshot?.tasks.find(task => task.id === id);
+    const task = indexes?.taskById.get(id);
     return task && !task.archived ? [task] : [];
   }));
   const selectedTask = $derived(
-    snapshot?.tasks.find((t) => t.id === selectedTaskId) ?? null,
+    selectedTaskId ? indexes?.taskById.get(selectedTaskId) ?? null : null,
   );
   const selectedAgent = $derived(
     snapshot?.agents.find((a) => a.id === selectedTask?.agentId) ?? null,
@@ -477,14 +485,12 @@
   );
   const messages = $derived(
     selectedTask
-      ? (snapshot?.messages.filter((m) => m.taskId === selectedTask.id) ?? [])
+      ? (indexes?.messagesByTask.get(selectedTask.id) ?? [])
       : [],
   );
   const events = $derived(
     selectedTask
-      ? (snapshot?.events
-          .filter((e) => e.taskId === selectedTask.id)
-          .sort((a, b) => a.createdAt - b.createdAt) ?? [])
+      ? (indexes?.eventsByTask.get(selectedTask.id) ?? [])
       : [],
   );
   let goal = $state<Goal | null>(null);
@@ -547,7 +553,7 @@
   }
   const timelineVisible = $derived(showDetail && pane === 'task' && detailTab === 'timeline' && Boolean(selectedTask));
   $effect(() => { const taskId = selectedTask?.id; if (timelineVisible && taskId && !timelinePages[taskId]) void loadTimeline(taskId); });
-  const compactTimelineKey = $derived(timelineVisible && selectedTask ? `${selectedTask.id}:${(snapshot?.events ?? []).filter(event => event.taskId === selectedTask.id).map(event => event.id).join(',')}` : '');
+  const compactTimelineKey = $derived(timelineVisible && selectedTask ? `${selectedTask.id}:${(indexes?.eventsByTask.get(selectedTask.id) ?? []).map(event => event.id).join(',')}` : '');
   $effect(() => {
     const taskId = selectedTask?.id;
     if (!compactTimelineKey || !taskId || !untrack(() => timelinePages[taskId])) return;
@@ -561,7 +567,7 @@
     return () => clearInterval(timer);
   });
   const selectedApprovalRequests = $derived(
-    selectedTask ? (snapshot?.approvalRequests ?? []).filter(request => request.taskId === selectedTask.id) : [],
+    selectedTask ? (indexes?.approvalsByTask.get(selectedTask.id) ?? []) : [],
   );
   const pendingApprovalRequests = $derived(selectedApprovalRequests
     .filter(request => request.status === 'pending')
@@ -604,7 +610,7 @@
   }
   let resolvingApprovalId = $state<string | null>(null);
   const globalPendingApprovals = $derived((snapshot?.approvalRequests ?? []).filter(request => request.status === 'pending')
-    .map(request => ({ request, task: snapshot?.tasks.find(task => task.id === request.taskId) ?? null }))
+    .map(request => ({ request, task: indexes?.taskById.get(request.taskId) ?? null }))
     .filter((item): item is { request: ApprovalRequest; task: Task } => !!item.task)
     .sort((left, right) => left.request.createdAt - right.request.createdAt));
   const channelPendingApprovals = $derived(globalPendingApprovals
@@ -620,12 +626,14 @@
   const openCollaborationTask = (item: CollaborationRecord) => { const id=item.fromTaskId===selectedTask?.id?item.toTaskId:item.fromTaskId; const task=snapshot?.tasks.find(candidate=>candidate.id===id); if(task)openTask(task); };
   function taskIsStepping(task: Task) {
     if (task.status !== 'running') return false;
-    const boundary = (snapshot?.messages.filter(message => message.taskId === task.id && message.role === 'user').at(-1)?.createdAt ?? task.updatedAt);
-    return (snapshot?.messages.some(message => message.taskId === task.id && message.role === 'assistant' && message.createdAt >= boundary) ?? false)
-      || (snapshot?.events.some(event => event.taskId === task.id && event.createdAt >= boundary && (
+    const taskMessages = indexes?.messagesByTask.get(task.id) ?? [];
+    const taskEvents = indexes?.eventsByTask.get(task.id) ?? [];
+    const boundary = (taskMessages.filter(message => message.role === 'user').at(-1)?.createdAt ?? task.updatedAt);
+    return taskMessages.some(message => message.role === 'assistant' && message.createdAt >= boundary)
+      || taskEvents.some(event => event.createdAt >= boundary && (
         ['tool', 'reasoning', 'computer', 'output'].includes(event.kind)
         || (event.kind === 'status' && /^turn[.\s_-]started$/i.test(event.title))
-      )) ?? false);
+      ));
   }
   const selectedTaskStarting = $derived(!!(selectedTask && (composerPending[`task:${selectedTask.id}`] || (selectedTask.status === 'running' && !taskIsStepping(selectedTask)))));
   const selectedTaskStepping = $derived(!!(selectedTask && taskIsStepping(selectedTask)));
@@ -918,6 +926,9 @@
     if (!failure) workspacePersistenceError = '';
     return !failure;
   }
+  // Ordinary edits wait briefly before the expensive deep capture/storage
+  // write. Explicit topology changes and lifecycle exits still flush now.
+  const workspaceSave = createWorkspaceSaveScheduler(persistWorkspace);
   function isWorkspaceLayout(value: PaneLayout) {
     const ids = paneIds(value);
     return ids.includes('main') && ids.length <= 4 && new Set(ids).size === ids.length;
@@ -1002,24 +1013,21 @@
     }
     activePaneId = paneIds(layout).includes(saved.activePaneId) ? saved.activePaneId : 'main';
   }
-  async function restoreWorkspaceTerminals(set: PersistedWorkspaceSet) {
+  async function restoreWorkspaceTerminals(workspace: PersistedWorkspace) {
+    // A terminal is an owned process, not merely a tab. Restore only the
+    // selected workspace at launch; inactive workspaces wait until the user
+    // switches to them instead of eagerly reopening every remembered shell.
     const wanted = new Map<string, { id: string; hostId: string; cwd: string }>();
-    for (const workspace of Object.values(set.workspaces)) for (const terminal of workspace.terminals) wanted.set(terminal.id, terminal);
+    for (const terminal of workspace.terminals) wanted.set(terminal.id, terminal);
     const replacements: Record<string, string> = {};
     const live = await bridge.listTerminals();
     await Promise.all([...wanted.values()].map(async terminal => {
       if (!snapshot?.hosts.some(host => host.id === terminal.hostId) || !terminal.cwd.trim()) { unavailableTerminals.add(terminal.id); return; }
       const existing = live.find(session => session.id === terminal.id);
-      if (existing) { registerTerminal(existing); replacements[terminal.id] = existing.id; return; }
-      try { const fresh = await bridge.openTerminal({ hostId: terminal.hostId, cwd: terminal.cwd }, 80, 24); registerTerminal(fresh); replacements[terminal.id] = fresh.id; }
+      if (existing) { registerTerminal(existing); unavailableTerminals.delete(terminal.id); replacements[terminal.id] = existing.id; return; }
+      try { const fresh = await bridge.openTerminal({ hostId: terminal.hostId, cwd: terminal.cwd }, 80, 24); registerTerminal(fresh); unavailableTerminals.delete(terminal.id); replacements[terminal.id] = fresh.id; }
       catch (reason) { unavailableTerminals.add(terminal.id); error = `Could not restore terminal in ${terminal.cwd}: ${text(reason)}. Its saved location has been preserved.`; }
     }));
-    for (const workspace of Object.values(set.workspaces)) {
-      const preserve = Object.fromEntries(workspace.terminals.map(terminal => [terminal.id, replacements[terminal.id] ?? terminal.id]));
-      workspace.main = remapTerminalIds(workspace.main, preserve);
-      workspace.panes = Object.fromEntries(Object.entries(workspace.panes).map(([id, state]) => [id, remapTerminalIds(state, preserve)]));
-      workspace.terminals = workspace.terminals.map(terminal => ({ ...terminal, id: replacements[terminal.id] ?? terminal.id }));
-    }
     if (unavailableTerminals.size) notice = `${unavailableTerminals.size} saved terminal${unavailableTerminals.size === 1 ? '' : 's'} unavailable. Their locations are preserved for the next restart.`;
     return replacements;
   }
@@ -1035,7 +1043,10 @@
     try {
       activeWorkspaceKey = next;
       const saved = workspaceSet?.workspaces[next];
-      if (saved) await restoreWorkspace(saved);
+      if (saved) {
+        const terminalIds = await restoreWorkspaceTerminals(saved);
+        await restoreWorkspace(saved, terminalIds);
+      }
       else { layout = { id: 'main' }; await tick(); restoreState(emptyWorkspace()); activePaneId = 'main'; }
     } finally { workspaceTransition = false; persistWorkspace(); }
     return activeWorkspaceKey === next;
@@ -1059,10 +1070,11 @@
     else routeTask(task);
   }
   $effect(() => {
-    // Stringifying tracks pane-local edits, including drafts, without mutating state from captureState.
+    // Stringifying tracks nested pane edits, but capture/storage is coalesced
+    // below so every composer keystroke does not clone the entire workspace.
     JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openEmptyIds, selectedEmptyId, openTaskIds, openDraftIds, openChannelIds, tabOrder, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
     workspaceReady;
-    untrack(() => { if (embedded) onWorkspaceChange?.(); else persistWorkspace(); });
+    untrack(() => { if (embedded) onWorkspaceChange?.(); else workspaceSave.schedule(); });
   });
   function layoutPending() { return hasPending() || paneIds(layout).some(id=>paneRefs[id]?.hasPending()); }
   function tabCount(state: Pick<PaneState, 'openTaskIds'|'openDraftIds'|'openChannelIds'|'openTerminalIds'|'openEmptyIds'|'settingsOpen'>) { return paneTabCount(state); }
@@ -1368,16 +1380,15 @@
   }
   const delegated = $derived(
     selectedTask
-      ? (snapshot?.tasks.filter((t) => t.parentTaskId === selectedTask.id) ??
-          [])
+      ? (indexes?.tasksByParent.get(selectedTask.id) ?? [])
       : [],
   );
   const activeChannel = $derived(
-    snapshot?.channels.find((c) => c.id === selectedChannelId) ?? null,
+    selectedChannelId ? indexes?.channelById.get(selectedChannelId) ?? null : null,
   );
   const activeChannelTasks = $derived(
     activeChannel
-      ? snapshot?.tasks.filter(task => task.channelId === activeChannel.id && task.status === 'running') ?? []
+      ? indexes?.runningTasksByChannel.get(activeChannel.id) ?? []
       : [],
   );
   const activeChannelStarting = $derived(
@@ -1714,13 +1725,13 @@
     let mounted = true;
     let dragGeneration = 0;
     const clearNativeDrop = () => document.querySelectorAll('.composer.drop-files').forEach(node=>node.classList.remove('drop-files'));
-    const persistOnPageHide = () => persistWorkspace();
+    const persistOnPageHide = () => workspaceSave.flush();
     window.addEventListener('pagehide', persistOnPageHide);
     void (async () => {
       try {
         if (isTauri()) {
           const stopBeforeQuit = await listen('monitter-before-quit', async () => {
-            if (workspaceReady && !persistWorkspace()) { error = workspacePersistenceError || 'Could not save workspace state before quitting.'; return; }
+            if (workspaceReady && !workspaceSave.flush()) { error = workspacePersistenceError || 'Could not save workspace state before quitting.'; return; }
             try { await invoke('finish_quit'); } catch (reason) { error = `Could not quit: ${text(reason)}`; }
           });
           if (mounted) unlistenBeforeQuit = stopBeforeQuit; else { stopBeforeQuit(); return; }
@@ -1737,9 +1748,9 @@
           if (workspaceSet) {
             seedSharedComposers(workspaceSet);
             activeWorkspaceKey = workspaceSet.activeWorkspaceKey;
-            const terminalIds = await restoreWorkspaceTerminals(workspaceSet);
-            const remappedIds = Object.fromEntries(Object.values(terminalIds).map(id => [id, id]));
-            await restoreWorkspace(workspaceSet.workspaces[activeWorkspaceKey], remappedIds);
+            const activeWorkspace = workspaceSet.workspaces[activeWorkspaceKey];
+            const terminalIds = await restoreWorkspaceTerminals(activeWorkspace);
+            await restoreWorkspace(activeWorkspace, terminalIds);
           }
         } catch (reason) {
           workspacePersistenceDisabled = true;
@@ -1789,7 +1800,8 @@
       unlistenCloseTab?.();
       unlistenBeforeQuit?.();
       cancelPaneFocusChord();
-      persistWorkspace();
+      workspaceSave.flush();
+      workspaceSave.cancel();
       window.removeEventListener('pagehide', persistOnPageHide);
       clearNativeDrop();
     };
@@ -1968,7 +1980,7 @@
     if (!embedded) void drainEmptyPaneRemovals();
   });
   function handleChildWorkspaceChange() {
-    persistWorkspace();
+    workspaceSave.schedule();
     void drainEmptyPaneRemovals();
   }
   function openOverview() {
@@ -3020,7 +3032,9 @@
   const channelMentionAgents = $derived(snapshot?.agents.filter(agent=>activeChannel?.agentIds.includes(agent.id)) ?? []);
   const channelMentionIds = $derived(mentionedAgentIds(composer, channelMentionAgents));
   const effectiveRecipients = $derived([...new Set([...recipients, ...channelMentionIds])].filter(id=>activeChannel?.agentIds.includes(id)));
-  const currentQueuedMessages = $derived((snapshot?.queuedMessages??[]).filter(message=>pane==='channel'?message.channelId===selectedChannelId:message.taskId===selectedTaskId));
+  const currentQueuedMessages = $derived(pane === 'channel'
+    ? (selectedChannelId ? indexes?.queuedByChannel.get(selectedChannelId) ?? [] : [])
+    : (selectedTaskId ? indexes?.queuedByTask.get(selectedTaskId) ?? [] : []));
   async function editQueuedMessage(id:string,text:string) { return Boolean(await run(()=>bridge.editQueuedMessage(id,text))); }
   async function removeQueuedMessage(id:string) { await run(()=>bridge.cancelQueuedMessage(id)); }
   async function sendChannel() {
@@ -3124,7 +3138,7 @@
 {/snippet}
 
 {#snippet agentWaiting(agent: Agent | null | undefined, starting = false, startedAt?: number)}
-  <ThinkingStatus {starting} running={!starting} {startedAt}>
+  <ThinkingStatus active={embedded ? active : activePaneId === 'main'} {starting} running={!starting} {startedAt}>
     {#snippet avatar()}{@render messageAvatar(agent)}{/snippet}
   </ThinkingStatus>
 {/snippet}
@@ -3344,7 +3358,7 @@
           </div>
         {/if}
         <section class="conversation">
-        <MessagePane resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
+        <MessagePane active={embedded ? active : activePaneId === 'main'} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
           {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}{#each activeChannel.messages as message}<article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
@@ -3477,8 +3491,13 @@
           </div>{/if}
         <section class="conversation">
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
-          <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`} stickyRequest={!!latestUserRequest}>
-            {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id)}
+          <MessagePane active={embedded ? active : activePaneId === 'main'} resetKey={`task:${selectedTask.id}:${scrollRevision}`} stickyRequest={!!latestUserRequest}>
+            {#if conversationItems.length}<TranscriptVirtualList
+              items={conversationItems}
+              getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
+              stickyKey={latestUserRequest?.id ?? null}
+              active={embedded ? active : activePaneId === 'main'}>
+              {#snippet children(item, _index)}
               {#if item.type === "activity"}{@const collaboration=item.value.kind==='collaboration'?collaborationFor(item.value.detail):null}{#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<RunActivity event={item.value} />{/if}
               {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length}>
                 {#snippet avatar()}{@render messageAvatar(selectedAgent)}{/snippet}
@@ -3504,7 +3523,8 @@
                   </MessageMeta>
                   {#if message.role === 'user' && message.id === latestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)} />{:else}<Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} />{/if}<AttachmentList attachments={message.attachments ?? []}/>
                   {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
-                </article>{/if}{/if}{/each}{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
+                </article>{/if}{/if}{/snippet}
+            </TranscriptVirtualList>{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
                 <Terminal size={24} />
                 <h2>No messages yet</h2>
                 <p>
@@ -3748,7 +3768,7 @@
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
     <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
-        <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} workspaceKey={activeWorkspaceKey}
+        <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} workspaceKey={activeWorkspaceKey}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
           onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={handleChildWorkspaceChange} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}
