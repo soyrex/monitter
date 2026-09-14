@@ -1,7 +1,10 @@
 use crate::{
     model::{CatalogModel, Host, ModelCatalog, ModelCatalogCurrent, ReasoningEffortOption},
     probe_output,
-    runner::{add_ssh_options, remote_path, resolve_local, resolve_local_provider, ssh_target},
+    runner::{
+        add_ssh_options, remote_exec, remote_path, resolve_local, resolve_local_provider,
+        ssh_target,
+    },
 };
 use serde_json::{json, Value};
 use std::{
@@ -40,9 +43,9 @@ pub(crate) fn read_opencode_catalog(host: &Host, cwd: &str) -> Result<ModelCatal
         let mut command = Command::new("ssh");
         add_ssh_options(&mut command, host);
         command.arg(ssh_target(host)?).arg(format!(
-            "cd {} && exec {} models",
+            "cd {} && {}",
             remote_path(cwd),
-            remote_path(cli)
+            remote_exec(cli, ["models"])
         ));
         command
     } else {
@@ -107,9 +110,9 @@ fn app_server_command(host: &Host, cwd: &str) -> Result<Command, String> {
         let mut command = Command::new("ssh");
         add_ssh_options(&mut command, host);
         command.arg(ssh_target(host)?).arg(format!(
-            "cd {} && exec {} app-server",
+            "cd {} && {}",
             remote_path(cwd),
-            remote_path(cli)
+            remote_exec(cli, ["app-server"])
         ));
         command
     } else {
