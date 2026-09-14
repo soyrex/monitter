@@ -54,10 +54,10 @@
       <div class="model-list" role="radiogroup" aria-label="Available models">
         {#each visibleModels as model (model.id)}<button class:chosen={current.model===model.id} role="radio" aria-checked={current.model===model.id} disabled={disabled||saving} onclick={()=>choose(model)}><span><b>{model.name}</b><small>{model.description}</small></span>{#if current.model===model.id}<Check size={14}/>{/if}</button>{/each}
       </div>
-      {#if !catalog.models.length}<p class="explanation">This harness does not provide a model catalog.</p>{/if}
+      {#if !catalog.models.length}<p class="explanation">This harness does not provide a model catalog.{#if target.taskId && current.model} Clear the saved choice below to recover with its default model.{/if}</p>{/if}
       {#if efforts.length}<div class="effort"><label for="effort-{id}">Reasoning effort <b>{effort}</b></label><input id="effort-{id}" aria-label="Reasoning effort" type="range" min="0" max={Math.max(0,efforts.length-1)} step="1" value={effortIndex} aria-valuetext={effort} disabled={disabled||saving||efforts.length<2} onchange={event=>save({...current,reasoningEffort:efforts[Number(event.currentTarget.value)].id})}/><small>{efforts[effortIndex]?.description}</small></div>{/if}
       {#if selected?.supportsFast}<label class="fast-row"><span><b>Fast mode</b><small>{selected.fastDescription || 'Faster responses with increased usage.'}</small></span><input type="checkbox" role="switch" aria-label="Fast mode" checked={current.fastMode===true} disabled={disabled||saving} onchange={event=>save({...current,fastMode:event.currentTarget.checked})}/></label>{/if}
-      {#if catalog.models.length && target.taskId}<button class="reset" disabled={disabled||saving} onclick={()=>save({model:'',reasoningEffort:null,fastMode:null})}>Use harness defaults</button>{/if}
+      {#if target.taskId}<button class="reset" disabled={disabled||saving||!current.model} onclick={()=>save({model:'',reasoningEffort:null,fastMode:null})}>Use harness defaults</button>{/if}
     {/if}
   </div>{/if}
 </div>
