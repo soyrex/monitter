@@ -1149,6 +1149,13 @@ fn handle_notification(
                 params.get("itemId").and_then(Value::as_str),
                 params.get("delta").and_then(Value::as_str),
             ) {
+                let phase = turn_items.lock().ok().and_then(|items| {
+                    items
+                        .get(item)
+                        .and_then(|started| started.get("phase"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
                 let stable = format!("{turn_id}:{item}");
                 if !message_text.contains_key(&stable) && message_text.len() >= 256 {
                     service.complete_app_server_turn(
@@ -1187,6 +1194,7 @@ fn handle_notification(
                         turn_id,
                         &stable,
                         &buffered.text,
+                        phase.as_deref(),
                         false,
                     ) {
                         service.complete_app_server_turn(
@@ -1219,7 +1227,15 @@ fn handle_notification(
                             },
                         );
                         if let Err(error) = service
-                            .app_server_message(task_id, control, turn_id, &stable, text, true)
+                            .app_server_message(
+                                task_id,
+                                control,
+                                turn_id,
+                                &stable,
+                                text,
+                                item.get("phase").and_then(Value::as_str),
+                                true,
+                            )
                         {
                             service.complete_app_server_turn(
                                 task_id,

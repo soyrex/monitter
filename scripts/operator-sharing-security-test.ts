@@ -31,7 +31,8 @@ const source: Snapshot & { futureOwnerSecret: string } = {
     responsibilities: ['private responsibility'], skills: ['private skill'], collaborationEnabled: true }],
   tasks: [task(selectedId), task(hiddenId), task('archived', { archived: true }), task('channel', { channelId: 'channel-1' })],
   messages: [
-    { id: 'visible', taskId: selectedId, role: 'user', text: 'hello', createdAt: 1,
+    { id: 'visible', taskId: selectedId, role: 'assistant', text: 'hello', createdAt: 1,
+      phase: 'final_answer',
       attachments: [{ id: 'attachment', name: 'secret.txt', mimeType: 'text/plain', size: 10, path: '/private/secret.txt' }] },
     { id: 'profile', taskId: selectedId, role: 'system', text: 'secret system profile', createdAt: 1 },
     { id: 'hidden', taskId: hiddenId, role: 'user', text: 'hidden chat', createdAt: 1 },
@@ -65,6 +66,7 @@ const visitor = sharedSnapshot(source, grant());
 assert.deepEqual(visitor.tasks.map(item => item.id), [selectedId]);
 assert.deepEqual(visitor.messages.map(item => item.id), ['visible']);
 assert.deepEqual(visitor.messages[0].attachments, []);
+assert.equal(visitor.messages[0].phase, 'final_answer');
 assert.deepEqual(visitor.hosts, []);
 assert.deepEqual(visitor.events, []);
 assert.deepEqual(visitor.channels, []);

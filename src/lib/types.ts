@@ -42,6 +42,7 @@ export interface Task {
 }
 export interface Message {
   streamStatus?: 'streaming' | 'complete' | 'interrupted';
+  phase?: 'commentary' | 'final_answer';
   id: string; taskId: string; role: 'user' | 'assistant' | 'system';
   text: string; createdAt: number;
   senderAgentId?: string | null; collaborationId?: string | null;

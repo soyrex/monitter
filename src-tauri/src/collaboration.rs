@@ -435,6 +435,7 @@ impl Service {
             {
                 snapshot.messages.push(Message {
                     stream_status: None,
+                    phase: None,
                     id: id(),
                     task_id: item.to_task_id.clone(),
                     role: "user".into(),
@@ -511,6 +512,7 @@ impl Service {
                 .unwrap_or_else(|| "No assistant result was produced.".into());
             snapshot.messages.push(Message {
                 stream_status: None,
+                phase: None,
                 id: id(),
                 task_id: item.from_task_id.clone(),
                 role: "system".into(),
@@ -601,7 +603,7 @@ impl Service {
                 snapshot.collaborations[index].result = Some(DELIVERED_TO_ACTIVE_TURN.into());
                 snapshot.collaborations[index].updated_at = now();
                 if !snapshot.messages.iter().any(|message| message.collaboration_id.as_deref() == Some(item.id.as_str())) {
-                    snapshot.messages.push(Message { stream_status: None, id:id(), task_id:caller_task.into(), role:"user".into(), text:item.text.clone(), created_at:now(), sender_agent_id:Some(item.from_agent_id.clone()), collaboration_id:Some(item.id.clone()), attachments:vec![] });
+                    snapshot.messages.push(Message { stream_status: None, phase: None, id:id(), task_id:caller_task.into(), role:"user".into(), text:item.text.clone(), created_at:now(), sender_agent_id:Some(item.from_agent_id.clone()), collaboration_id:Some(item.id.clone()), attachments:vec![] });
                 }
             }
             Ok(snapshot.collaborations.iter().filter(|item| {
@@ -733,6 +735,7 @@ fn fail_queued_delivery(snapshot: &mut Snapshot, index: usize, error: &str) {
     snapshot.collaborations[index].updated_at = time;
     snapshot.messages.push(Message {
         stream_status: None,
+        phase: None,
         id: id(),
         task_id: item.from_task_id.clone(),
         role: "system".into(),
@@ -1309,6 +1312,7 @@ mod tests {
         ];
         snapshot.messages.push(Message {
             stream_status: None,
+            phase: None,
             id: "old".into(),
             task_id: "target".into(),
             role: "assistant".into(),
@@ -1320,6 +1324,7 @@ mod tests {
         });
         snapshot.messages.push(Message {
             stream_status: None,
+            phase: None,
             id: "marker".into(),
             task_id: "target".into(),
             role: "user".into(),
@@ -1331,6 +1336,7 @@ mod tests {
         });
         snapshot.messages.push(Message {
             stream_status: None,
+            phase: None,
             id: "new".into(),
             task_id: "target".into(),
             role: "assistant".into(),

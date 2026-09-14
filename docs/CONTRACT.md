@@ -338,6 +338,9 @@ Local Codex replies use item text deltas and authoritative completed items. The 
 message is updated rather than appending a message per token; `Message.streamStatus` is optionally
 `streaming`, `complete`, or `interrupted`. Legacy messages omit this field. Partial text survives
 restart as interrupted. Only completed replies mirror into channels or trigger peer routing.
+`Message.phase` optionally preserves Codex `commentary` or `final_answer`. Final-answer messages use
+a subtle green, left-tailed chat bubble in desktop, LAN, shared and paired-mobile task transcripts;
+commentary, legacy records and other harnesses keep the ordinary assistant presentation.
 Codex `userMessage` and `agentMessage` lifecycle envelopes are transcript transport metadata, not
 tool activity: new envelopes are not persisted as RunEvents, and legacy envelope events are hidden
 from Timeline while their ordinary user or assistant messages remain visible in chat.

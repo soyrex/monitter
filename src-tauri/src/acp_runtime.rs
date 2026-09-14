@@ -574,7 +574,7 @@ fn run(
             for (item, text) in &messages {
                 if dirty_messages.contains(item) {
                     if let Err(error) =
-                        service.app_server_message(&task_id, &control, &turn, item, text, false)
+                        service.app_server_message(&task_id, &control, &turn, item, text, None, false)
                     {
                         fail(&service, &task_id, &control, error);
                         return;
@@ -978,7 +978,7 @@ fn run(
                 turn_images = 0;
                 for (item, text) in &messages {
                     if let Err(error) =
-                        service.app_server_message(&task_id, &control, &turn, item, text, true)
+                        service.app_server_message(&task_id, &control, &turn, item, text, None, true)
                     {
                         fail(&service, &task_id, &control, error);
                         return;
@@ -1112,7 +1112,7 @@ fn run(
                     if !turn.is_empty() {
                         if is_new || content_type == "image" {
                             if let Err(error) = service
-                                .app_server_message(&task_id, &control, &turn, item, text, false)
+                                .app_server_message(&task_id, &control, &turn, item, text, None, false)
                             {
                                 fail(&service, &task_id, &control, error);
                                 return;

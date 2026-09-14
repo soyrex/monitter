@@ -76,6 +76,7 @@ function safeTask(task: Task): Task {
 function safeMessage(message: Message): Message {
   return { id: message.id, taskId: message.taskId, role: message.role,
     text: message.text, createdAt: message.createdAt, streamStatus: message.streamStatus,
+    phase: message.phase,
     senderAgentId: message.senderAgentId, attachments: [] };
 }
 

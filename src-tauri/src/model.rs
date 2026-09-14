@@ -114,6 +114,9 @@ pub struct Message {
     /// Only live app-server replies use this field; older/provider messages remain unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_status: Option<String>,
+    /// Codex distinguishes interim commentary from the turn's final answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     pub id: String,
     pub task_id: String,
     pub role: String,

@@ -228,11 +228,11 @@ mod tests {
         stale.set_app_server_thread("thread-1".into());
         stale.set_app_server_turn("turn-1".into());
         assert!(service
-            .app_server_message(&task.id, &stale, "turn-1", "item-1", "live", false)
+            .app_server_message(&task.id, &stale, "turn-1", "item-1", "live", None, false)
             .is_ok());
         stale.cancel();
         assert!(service
-            .app_server_message(&task.id, &stale, "turn-1", "item-1", "stale", true)
+            .app_server_message(&task.id, &stale, "turn-1", "item-1", "stale", None, true)
             .is_err());
         let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
     }
@@ -386,15 +386,13 @@ mod tests {
         control.set_app_server_thread("thread-2".into());
         control.set_app_server_turn("turn-2".into());
         service
-            .app_server_message(&task.id, &control, "turn-2", "turn-2:item-2", "one", false)
-            .unwrap();
-        service
             .app_server_message(
                 &task.id,
                 &control,
                 "turn-2",
                 "turn-2:item-2",
-                "one two",
+                "one",
+                Some("final_answer"),
                 false,
             )
             .unwrap();
@@ -405,6 +403,18 @@ mod tests {
                 "turn-2",
                 "turn-2:item-2",
                 "one two",
+                Some("final_answer"),
+                false,
+            )
+            .unwrap();
+        service
+            .app_server_message(
+                &task.id,
+                &control,
+                "turn-2",
+                "turn-2:item-2",
+                "one two",
+                Some("final_answer"),
                 true,
             )
             .unwrap();
@@ -418,6 +428,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "one two");
         assert_eq!(messages[0].stream_status.as_deref(), Some("complete"));
+        assert_eq!(messages[0].phase.as_deref(), Some("final_answer"));
         let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
     }
 
@@ -511,6 +522,7 @@ mod tests {
                 "turn-image",
                 "turn-image:item",
                 "image reply",
+                None,
                 true,
             )
             .unwrap();

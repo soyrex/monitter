@@ -3444,8 +3444,10 @@
                   class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                   class:system={message.role === "system"}
+                  class:final-answer={message.role === "assistant" && message.phase === "final_answer"}
                   class:optimistic-message={!!optimistic}
                   class="message"
+                  data-message-phase={message.phase}
                   data-live-entry={message.streamStatus==='streaming'}
                   data-delivery-status={optimistic?.status}
                 >
@@ -5002,6 +5004,13 @@
     padding: 12px 14px;
     border-radius: 10px 10px 3px 10px;
     background: var(--soft);
+  }
+  .message.final-answer {
+    width: fit-content;
+    padding: 12px 14px;
+    border: 1px solid color-mix(in srgb, #4f9d69 18%, var(--line));
+    border-radius: 10px 10px 10px 3px;
+    background: color-mix(in srgb, #4f9d69 7%, var(--panel));
   }
   .message.system {
     padding-left: 12px;

@@ -2011,6 +2011,7 @@ impl Service {
             if let Some(text) = assistant.filter(|text| !text.trim().is_empty()) {
                 state.messages.push(Message {
                     stream_status: None,
+                    phase: None,
                     sender_agent_id: None,
                     collaboration_id: None,
                     id: id(),
@@ -2337,7 +2338,7 @@ impl Service {
                 }
                 return Ok(None);
             }
-            state.messages.push(Message { stream_status: None,
+            state.messages.push(Message { stream_status: None, phase: None,
                 sender_agent_id: None,
                 collaboration_id: None,
                 id: id(),
@@ -2623,6 +2624,7 @@ impl Service {
             let instructions = initial_task_instructions(snapshot, &task.id);
             snapshot.messages.push(Message {
                 stream_status: None,
+                phase: None,
                 sender_agent_id: queued.sender_agent_id.clone(),
                 collaboration_id: None,
                 id: id(),
@@ -2732,6 +2734,7 @@ impl Service {
             // without fabricating assistant content.
             state.messages.push(Message {
                 stream_status: None,
+                phase: None,
                 id: id(),
                 task_id: task_id.into(),
                 role: "system".into(),
@@ -3544,6 +3547,7 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     if !instructions.trim().is_empty() {
         state.messages.push(Message {
             stream_status: None,
+            phase: None,
             sender_agent_id: None,
             collaboration_id: None,
             id: id(),
@@ -4937,7 +4941,7 @@ fn send_channel_message_accepted(
                 task.status = "running".into();
                 let instructions = agent_instructions(&agent, &state.settings.user_name);
                 if !instructions.trim().is_empty() {
-                    state.messages.push(Message { stream_status: None,
+                    state.messages.push(Message { stream_status: None, phase: None,
                         sender_agent_id: None,
                         collaboration_id: None,
                         id: id(),
@@ -4962,7 +4966,7 @@ fn send_channel_message_accepted(
                 matching_attachments(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             matched_attachment_ids.extend(matched);
             let instructions = initial_task_instructions(state, &task_id);
-            state.messages.push(Message { stream_status: None,
+            state.messages.push(Message { stream_status: None, phase: None,
                 sender_agent_id: None,
                 collaboration_id: None,
                 id: id(),
@@ -5796,6 +5800,7 @@ mod tests {
                 a_task.status = "running".into();
                 snapshot.messages.push(Message {
                     stream_status: None,
+                    phase: None,
                     id: id(),
                     task_id: a.id.clone(),
                     role: "user".into(),
@@ -5807,6 +5812,7 @@ mod tests {
                 });
                 snapshot.messages.push(Message {
                     stream_status: None,
+                    phase: None,
                     id: id(),
                     task_id: a.id.clone(),
                     role: "assistant".into(),
@@ -5839,6 +5845,7 @@ mod tests {
             .mutate(None, |snapshot| {
                 snapshot.messages.push(Message {
                     stream_status: None,
+                    phase: None,
                     id: id(),
                     task_id: b.id.clone(),
                     role: "user".into(),
@@ -5850,6 +5857,7 @@ mod tests {
                 });
                 snapshot.messages.push(Message {
                     stream_status: None,
+                    phase: None,
                     id: id(),
                     task_id: b.id.clone(),
                     role: "assistant".into(),
@@ -7349,6 +7357,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 task.native_session_id = Some("native-session".into());
                 snapshot.messages.push(Message {
                     stream_status: None,
+                    phase: None,
                     sender_agent_id: None,
                     collaboration_id: None,
                     id: id(),

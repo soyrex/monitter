@@ -27,11 +27,15 @@ try {
       const qa=window.__MONITTER_QA__, s=qa.snapshot();
       s.messages[0].text='Hello from the same streaming message';
       s.messages[0].streamStatus='complete';
+      s.messages[0].phase='final_answer';
       s.approvalRequests[0]={...s.approvalRequests[0],id:'question-one',status:'pending',summary:'Choose a colour',input:{kind:'questions',schema:null,url:null,questions:[{id:'colour',header:'Colour',question:'Which colour?',isSecret:false,options:[{label:'Blue',description:'Use blue'}]}]}};
       qa.setSnapshot(s);
     });
     await expect(page.locator('article.message').filter({hasText:'Hello'})).toHaveCount(1);
     await expect(page.locator('article.message').filter({hasText:'Hello'})).toContainText('same streaming message');
+    const finalAnswer=page.locator('article.message.final-answer').filter({hasText:'Hello'});
+    await expect(finalAnswer).toHaveAttribute('data-message-phase','final_answer');
+    expect(await finalAnswer.evaluate(node=>getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
     await page.getByLabel('Which colour?',{exact:true}).fill('Blue');
     const submit=page.getByRole('button',{name:'Submit response',exact:true});
     if(mobile) await submit.tap(); else await submit.click();

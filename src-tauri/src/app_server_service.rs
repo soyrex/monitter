@@ -110,11 +110,15 @@ impl Service {
         turn_id: &str,
         item_id: &str,
         text: &str,
+        phase: Option<&str>,
         complete: bool,
     ) -> Result<(), String> {
         if text.len() > 2 * 1024 * 1024 || item_id.len() > 512 {
             return Err("Resident transport reply exceeds the supported size.".into());
         }
+        let phase = phase
+            .filter(|value| matches!(*value, "commentary" | "final_answer"))
+            .map(str::to_owned);
         self.app_server_mutate(task_id, control, Some(turn_id), |data, _| {
             // Keep provider identifiers runtime-only. Persist normal local UUIDs,
             // including in messages projected to shared visitors.
@@ -156,6 +160,9 @@ impl Service {
                 .find(|m| m.id == message_id)
             {
                 message.text = text.into();
+                if phase.is_some() {
+                    message.phase.clone_from(&phase);
+                }
                 message.stream_status =
                     Some(if complete { "complete" } else { "streaming" }.into());
                 if complete && !images.is_empty() {
@@ -172,6 +179,7 @@ impl Service {
                     sender_agent_id: None,
                     collaboration_id: None,
                     attachments: images,
+                    phase,
                     stream_status: Some(if complete { "complete" } else { "streaming" }.into()),
                 };
                 data.snapshot.messages.push(message.clone());

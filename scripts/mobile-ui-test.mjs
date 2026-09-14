@@ -69,12 +69,14 @@ try {
     // The test desktop keeps this transcript item exactly as the native
     // cancellation transaction would: system-authored, durable, timestamped.
     window.__mobileSnapshot.messages.push({id:'cancelled-run',taskId:'11111111-1111-4111-8111-111111111111',role:'system',text:'You cancelled this run.',createdAt:1700000000000,attachments:[]});
+    window.__mobileSnapshot.messages.push({id:'final-answer',taskId:'11111111-1111-4111-8111-111111111111',role:'assistant',text:'Finished on mobile.',createdAt:1700000000001,phase:'final_answer',attachments:[]});
   });
   await phone.getByRole('button',{name:'Refresh',exact:true}).click();
   const cancellation=phone.locator('.cancellation-event');
   await expect(cancellation).toContainText('You cancelled this run.');
   await expect(cancellation.locator('svg')).toHaveCount(1);
   expect(await cancellation.locator('time').evaluate(node=>node.getBoundingClientRect().right>=node.parentElement.getBoundingClientRect().right-1)).toBe(true);
+  await expect(phone.locator('article.final-answer').filter({hasText:'Finished on mobile.'})).toBeVisible();
   await phone.getByLabel('Message',{exact:true}).fill('Mobile UI test message');
   await host.evaluate(()=>{window.holdSend=true;window.sendStarted=false;});
   await phone.getByRole('button',{name:'Send message'}).click();
