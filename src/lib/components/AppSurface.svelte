@@ -110,7 +110,7 @@
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import TaskActivity from "$lib/components/TaskActivity.svelte";
   import { activeComputerTools } from "$lib/activity";
-  import { groupConversationActivity, isCancellationMessage, showThinkingFallback } from '$lib/activity-grouping';
+  import { groupConversationActivity, isCancellationMessage, isNativeMessageTransportArtifact, showThinkingFallback } from '$lib/activity-grouping';
   import RunActivity from "$lib/components/RunActivity.svelte";
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
@@ -509,7 +509,11 @@
     (event.kind !== "reasoning" || snapshot?.settings.showReasoningSummaries !== false),
   ));
   const timelinePage = $derived(selectedTask ? timelinePages[selectedTask.id] : undefined);
-  const timelineEvents = $derived([...(timelinePage?.events ?? visibleEvents)].sort((a, b) => b.createdAt - a.createdAt));
+  // Older journals can contain raw conversation start envelopes. Their
+  // completed content already lives in chat, so never present them as tools.
+  const timelineEvents = $derived([...(timelinePage?.events ?? visibleEvents)]
+    .filter(event => !isNativeMessageTransportArtifact(event))
+    .sort((a, b) => b.createdAt - a.createdAt));
   async function loadTimeline(taskId: string, before?: number) {
     const current = timelinePages[taskId];
     if (current?.loading) return;

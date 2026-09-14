@@ -338,6 +338,9 @@ Local Codex replies use item text deltas and authoritative completed items. The 
 message is updated rather than appending a message per token; `Message.streamStatus` is optionally
 `streaming`, `complete`, or `interrupted`. Legacy messages omit this field. Partial text survives
 restart as interrupted. Only completed replies mirror into channels or trigger peer routing.
+Codex `userMessage` and `agentMessage` lifecycle envelopes are transcript transport metadata, not
+tool activity: new envelopes are not persisted as RunEvents, and legacy envelope events are hidden
+from Timeline while their ordinary user or assistant messages remain visible in chat.
 Every mutation is scoped to the owned process and native turn; stale events cannot update a new turn.
 Use real CLI account/config; do not copy auth or change global config. Resolve local CLI paths even
 when launched by Finder with limited PATH (user local bin, Homebrew, standard dirs).

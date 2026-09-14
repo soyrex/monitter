@@ -1365,6 +1365,18 @@ fn finish_request(lifecycle: &Mutex<RequestLifecycle>, rpc_id: &str) -> bool {
 
 fn parse_item(item: &Value, started: bool) -> Parsed {
     let ty = item.get("type").and_then(Value::as_str).unwrap_or("");
+    // Conversation lifecycle envelopes are transport metadata, not tool work.
+    // Their authoritative content is persisted through app_server_message (or
+    // already exists as the user-authored transcript entry), so recording the
+    // empty started envelope only leaves a misleading Timeline row behind.
+    if ty.eq_ignore_ascii_case("userMessage") || ty.eq_ignore_ascii_case("agentMessage") {
+        return Parsed {
+            native_session_id: None,
+            assistant: None,
+            event: None,
+            failed: false,
+        };
+    }
     if ty == "mcpToolCall" {
         let server = item.get("server").and_then(Value::as_str).unwrap_or("");
         let tool = item
@@ -1697,6 +1709,22 @@ mod tests {
             let detail: Value = serde_json::from_str(&event.2).expect("JSON detail");
             assert_eq!(detail["id"], "compact-1");
             assert_eq!(detail["monitterPhase"], phase);
+        }
+    }
+
+    #[test]
+    fn conversation_lifecycle_items_do_not_become_timeline_events() {
+        for item_type in ["userMessage", "agentMessage"] {
+            for started in [true, false] {
+                let parsed = parse_item(
+                    &json!({"type":item_type,"id":"message-1","text":""}),
+                    started,
+                );
+                assert!(
+                    parsed.event.is_none(),
+                    "{item_type} is transcript transport"
+                );
+            }
         }
     }
 
