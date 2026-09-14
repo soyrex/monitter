@@ -124,11 +124,13 @@
   import RunSummary from "$lib/components/RunSummary.svelte";
   import TimelinePane from "$lib/components/TimelinePane.svelte";
   import PaneGrid from '$lib/components/PaneGrid.svelte';
+  import PaneSurface from '$lib/components/PaneSurface.svelte';
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { balancePaneLayout, paneIds } from '$lib/panes';
   import { paneRemovalDecision, paneTabCount, remapPromotedPaneId, remapQueuedPaneRemovals } from '$lib/pane-lifecycle';
   import { insertTab, normalizeTabOrder, type TabKey } from '$lib/tab-order';
+  import { findPaneTabOwner, paneTabMatches, type PaneSurfaceHandle } from '$lib/pane-controller';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
   import ModelPicker from '$lib/components/ModelPicker.svelte';
   import AccessPicker from '$lib/components/AccessPicker.svelte';
@@ -170,7 +172,7 @@
   $effect(()=>{if(!embedded && expandedPaneId && (activePaneId!==expandedPaneId || !paneIds(layout).includes(expandedPaneId)))expandedPaneId=null;});
 
   let pointerTabDrag = $state<{tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null>(null);
-  let paneRefs = $state<Record<string, { focusExistingTab:(tab:TabKey)=>boolean;openAgentSettings:(draft:Agent)=>void;openSettings:(category?:string)=>void;openTerminalTab:(id:string)=>void;newTerminal:()=>Promise<void>;openEmptyTab:()=>void;openTask: (task: Task, allowDuplicate?: boolean) => void; openChannel: (channel: Channel, allowDuplicate?: boolean) => void; openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void; takeTab: (tab: PaneTabTransfer) => TabPayload | null; receiveTab: (payload: TabPayload, before?: TabKey) => void; reorderTab:(tab:PaneTabTransfer,before?:TabKey)=>void; allTabs: () => PaneTabTransfer[]; captureState:()=>PaneState; restoreState:(value:PaneState)=>void; closeActiveTab:()=>void; swapActiveTab:(direction:1|-1)=>void; toggleDetail:()=>void; hasPending:()=>boolean;attachNativeFiles:(paths:string[])=>Promise<void> }>>({});
+  let paneRefs = $state<Record<string, PaneSurfaceHandle<PaneState, TabPayload>>>({});
   let paneSelections = $state<Record<string,string|null>>({});
   let sidebarScrolled = $state(false);
   let workspaceReady = $state(false);
@@ -637,26 +639,17 @@
   const selectedTaskStepping = $derived(!!(selectedTask && taskIsStepping(selectedTask)));
   const startingTaskDraft = $derived(currentTaskDraft && currentDraftId && composerPending[`draft:${currentDraftId}`] ? currentTaskDraft : null);
   function setComposerPending(key: string, pending: boolean) { if (pending) composerPending[key] = true; else delete composerPending[key]; }
-  function watchPane(node: HTMLElement) {
-    let disposed = false;
-    const resize = new ResizeObserver(() => {
-      const width = node.clientWidth;
-      if (disposed || !node.isConnected || width <= 0) return;
-      // Use the pane's phone-width breakpoint, not the wider sidebar layout.
-      compactTabs = width <= 430;
-      const narrow = width < 700;
-      if (narrow && !compactDetail) showDetail = false;
-      compactDetail = narrow;
-    });
-    resize.observe(node);
-    return { destroy: () => { disposed = true; resize.disconnect(); } };
+  function updatePaneMetrics(width: number) {
+    // Use the pane's phone-width breakpoint, not the wider sidebar layout.
+    compactTabs = width <= 430;
+    const narrow = width < 700;
+    if (narrow && !compactDetail) showDetail = false;
+    compactDetail = narrow;
   }
   function focusExistingChat(kind: 'task' | 'channel', id: string, requester: string): boolean {
     if (embedded) return onExistingChat?.(kind, id, requester) ?? false;
-    const candidates = paneIds(layout);
-    const owner = [activePaneId, ...candidates.filter(candidate => candidate !== activePaneId)]
-      .find(candidate => candidates.includes(candidate) && (candidate === 'main' ? allTabs() : paneRefs[candidate]?.allTabs() ?? [])
-        .some(tab => tab.kind === kind && tab.id === id));
+    const owner = findPaneTabOwner(paneIds(layout), activePaneId, allTabs(), paneRefs,
+      tab => paneTabMatches(tab, { kind, id }));
     if (!owner || owner === requester) return false;
     activePaneId = owner;
     const target = owner === 'main' ? { openTask, openChannel } : paneRefs[owner];
@@ -784,8 +777,8 @@
     if (tab.disabled) return;
     const scope = `agent:${agentId}` as WorkspaceKey;
     if (!await switchWorkspace(scope) || activeWorkspaceKey !== scope) return;
-    const owner = paneIds(layout).find(id => (id === 'main' ? allTabs() : paneRefs[id]?.allTabs() ?? [])
-      .some(item => item.kind === tab.kind && item.id === tab.id));
+    const owner = findPaneTabOwner(paneIds(layout), activePaneId, allTabs(), paneRefs,
+      item => paneTabMatches(item, tab));
     if (!owner) { notice = 'That tab is no longer open in this workspace.'; return; }
     if (expandedPaneId && expandedPaneId !== owner) setPaneExpansion(null);
     activePaneId = owner;
@@ -1889,7 +1882,8 @@
   function routeTerminal(id:string) {
     if(embedded){onTerminalSelect?.(id);return;}
     mobileMain = true;
-    const owner=paneIds(layout).find(candidate=>(candidate==='main'?allTabs():paneRefs[candidate]?.allTabs()??[]).some(tab=>tab.kind==='terminal'&&tab.id===id));
+    const owner=findPaneTabOwner(paneIds(layout), activePaneId, allTabs(), paneRefs,
+      tab => paneTabMatches(tab, {kind:'terminal',id}));
     if (!owner) {
       const scope = Object.entries(workspaceSet?.workspaces ?? {}).find(([key, workspace]) => key !== activeWorkspaceKey && workspace.terminals.some(terminal => terminal.id === id))?.[0] as WorkspaceKey | undefined;
       if (scope) { void switchWorkspace(scope).then(changed => { if (changed) routeTerminal(id); }); return; }
@@ -2488,7 +2482,7 @@
     }
   }
   let motionSidebar = $state<HTMLElement>();
-  let motionWorkspace = $state<HTMLElement>();
+  let motionWorkspace = $state<{ element: () => HTMLElement | undefined }>();
   let sidebarMotionDirection = $state(1);
   let lastMotionSidebarView: SidebarView | undefined;
   let lastMotionCollapsed: boolean | undefined;
@@ -2514,7 +2508,7 @@
   $effect.pre(() => {
     const visible = showDetail;
     untrack(() => {
-      if (lastMotionDetail && !visible) outgoingVisual(motionWorkspace?.querySelector<HTMLElement>('.run-detail'), 12, 0, 120);
+      if (lastMotionDetail && !visible) outgoingVisual(motionWorkspace?.element()?.querySelector<HTMLElement>('.run-detail'), 12, 0, 120);
       lastMotionDetail = visible;
     });
   });
@@ -3161,7 +3155,8 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <section bind:this={motionWorkspace} use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
+  <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
+  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep}>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
@@ -3626,6 +3621,7 @@
           </aside>
       </section>{/if}
   </section>
+  </PaneSurface>
 {/snippet}
 
 <main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
