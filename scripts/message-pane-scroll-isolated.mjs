@@ -26,7 +26,7 @@ const result = await build({
   }, svelte()],
   // The arrow is decorative; stubbing it avoids resolving Lucide's large
   // barrel while leaving the real MessagePane and all scroll logic intact.
-  resolve: { alias: { '@lucide/svelte': lucideStubPath } },
+  resolve: { alias: { '$lib': `${process.cwd()}/src/lib`, '@lucide/svelte': lucideStubPath } },
   root: process.cwd(),
   build: { write: false, minify: false, rollupOptions: { input: 'scripts/fixtures/message-pane-scroll-entry.js' } },
 });
@@ -92,12 +92,12 @@ try {
     await atBottom();
     await page.setViewportSize(profile.viewport);
     await atBottom();
-    if (profile.isMobile) {
+    {
       const clearance = await page.locator('.message-content').evaluate(node => ({ padding: Number.parseFloat(getComputedStyle(node).paddingBottom), fade: Number.parseFloat(getComputedStyle(node.closest('.messages')).getPropertyValue('--scroll-fade')) }));
       expect(clearance.padding).toBeGreaterThanOrEqual(clearance.fade + 8);
     }
     expect(errors).toEqual([]);
-    assertions.push(`${profile.name}: streaming existing reply, scroll-before-RO late layout, shrink/grow, reader preservation, resetKey send, resize${profile.isMobile ? ', final clearance' : ''}`);
+    assertions.push(`${profile.name}: streaming existing reply, scroll-before-RO late layout, shrink/grow, reader preservation, resetKey send, resize, final clearance`);
     await context.close();
   }
   console.log(`${messagePaneRef ? `${messagePaneRef}: ` : 'working tree: '}${assertions.join('\n')}`);
