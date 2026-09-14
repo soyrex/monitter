@@ -90,13 +90,16 @@ export interface ApprovalRequest {
   risk: 'low' | 'medium' | 'high' | 'unknown';
   status: 'pending' | 'approved' | 'denied' | 'expired' | 'unsupported';
   createdAt: number; resolvedAt: number | null;
-  decision: 'approve_once' | 'approve_always' | 'deny' | null;
+  decision: ApprovalDecision | null;
   input?: InteractionInput | null;
   response?: unknown;
   /** Missing means an older runtime that cannot create a remembered rule. */
   rememberable?: boolean;
+  /** Runtime-only approval category offered by the live harness session. */
+  sessionScope?: 'file_changes';
   ruleId?: string | null;
 }
+export type ApprovalDecision = 'approve_once' | 'approve_session' | 'approve_always' | 'deny';
 /** An app-owned, exact-scope approval rule. Native harness permissions remain one-shot. */
 export interface ApprovalRule {
   id: string; agentId: string; hostId: string; provider: Provider; cwd: string; tool: string;

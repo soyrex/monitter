@@ -404,6 +404,7 @@ impl Service {
     ) -> Result<ApprovalRequest, String> {
         let task_id = input.task_id.clone();
         let scope = self.approval_scope(&input)?;
+        let session_scope = super::approval_session_scope(&input);
         self.app_server_mutate(&task_id, control, Some(turn_id), |data, _| {
             if let Some(existing) = data
                 .snapshot
@@ -427,6 +428,7 @@ impl Service {
                 resolved_at: None,
                 decision: None,
                 rememberable: scope.is_some() && interaction.is_none(),
+                session_scope,
                 rule_id: None,
                 approval_scope: scope,
                 input: interaction,
@@ -462,6 +464,14 @@ impl Service {
         if let Ok(mut owners) = self.app_server_approvals.lock() {
             owners.retain(|_, owner| {
                 owner
+                    .upgrade()
+                    .is_some_and(|owner| !Arc::ptr_eq(&owner, control))
+            });
+        }
+        if let Ok(mut grants) = self.session_approval_grants.lock() {
+            grants.retain(|grant| {
+                grant
+                    .owner
                     .upgrade()
                     .is_some_and(|owner| !Arc::ptr_eq(&owner, control))
             });

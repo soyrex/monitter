@@ -37,6 +37,7 @@ import type {
   EventDetailChunk,
   SendAccepted,
   ExtensionConfig,
+  ApprovalDecision,
 } from "./types";
 
 export interface MonitterBridge {
@@ -65,7 +66,7 @@ export interface MonitterBridge {
   cancelQueuedMessage(id: string): Promise<Snapshot>;
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
-  resolveApproval(approvalId: string, decision: 'approve_once' | 'approve_always' | 'deny'): Promise<Snapshot>;
+  resolveApproval(approvalId: string, decision: ApprovalDecision): Promise<Snapshot>;
   revokeApprovalRule(ruleId: string): Promise<Snapshot>;
   resolveInput(approvalId: string, response: unknown): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;

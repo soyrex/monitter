@@ -274,6 +274,10 @@ pub struct ApprovalRequest {
     /// intentionally treated as false.
     #[serde(default)]
     pub rememberable: bool,
+    /// A provider-normalized class of actions that can be approved for the
+    /// lifetime of this live harness session. Session grants are runtime-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope: Option<String>,
     #[serde(default)]
     pub rule_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

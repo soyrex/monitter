@@ -2789,6 +2789,11 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                                 ),
                                             },
                                         );
+                                        if let Ok(request) = &request {
+                                            if let Ok(mut owners) = service.app_server_approvals.lock() {
+                                                owners.insert(request.id.clone(), Arc::downgrade(&control));
+                                            }
+                                        }
                                         let allow = match request.and_then(|request| {
                                             let decision = service
                                                 .wait_for_approval(&request.id, || {
@@ -2801,6 +2806,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                             decision
                                         }) {
                                             Ok(ApprovalDecision::ApproveOnce)
+                                            | Ok(ApprovalDecision::ApproveSession)
                                             | Ok(ApprovalDecision::ApproveAlways) => true,
                                             Ok(ApprovalDecision::Deny) | Err(_) => false,
                                         };
@@ -2855,6 +2861,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                                 decision
                                             }) {
                                                 Ok(ApprovalDecision::ApproveOnce)
+                                                | Ok(ApprovalDecision::ApproveSession)
                                                 | Ok(ApprovalDecision::ApproveAlways) => {
                                                     let frame = serde_json::json!({
                                                         "type": "approval_response",

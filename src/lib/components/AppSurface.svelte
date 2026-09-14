@@ -98,6 +98,7 @@
     Attachment,
     AttachmentTarget,
     AttachmentFileData,
+    ApprovalDecision,
     ApprovalRequest,
     ApprovalRule,
     Sandbox,
@@ -624,7 +625,7 @@
   }
   function approvalEventText(request: ApprovalRequest) {
     const subject = approvalSubject(request);
-    if (request.status === 'approved') return request.input ? `Submitted input for ${subject}` : request.ruleId ? `Approved by saved rule: ${subject}` : request.decision === 'approve_always' ? `Always approved ${subject}` : `Approved ${subject}`;
+    if (request.status === 'approved') return request.input ? `Submitted input for ${subject}` : request.ruleId ? `Approved by saved rule: ${subject}` : request.decision === 'approve_session' ? `Approved for this session: ${subject}` : request.decision === 'approve_always' ? `Always approved ${subject}` : `Approved ${subject}`;
     if (request.status === 'denied') return `Denied ${subject}`;
     if (request.status === 'expired') return `Approval expired for ${subject}`;
     return `Approval unavailable for ${subject}`;
@@ -1686,7 +1687,7 @@
       busy = false;
     }
   }
-  async function resolveApproval(request: ApprovalRequest, decision: 'approve_once' | 'approve_always' | 'deny') {
+  async function resolveApproval(request: ApprovalRequest, decision: ApprovalDecision) {
     if (busy || request.status !== 'pending') return;
     resolvingApprovalId = request.id;
     try {

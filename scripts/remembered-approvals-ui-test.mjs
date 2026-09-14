@@ -59,7 +59,7 @@ for (const [engine, viewport] of [[chromium, { width: 1440, height: 1000 }], [we
     });
     await openChat();
     const dock = page.getByRole('region', { name: 'Pending approvals', exact: true });
-    const always = dock.getByRole('button', { name: 'Always approve', exact: true });
+    const always = dock.getByRole('button', { name: 'Always allow exact action', exact: true });
     await expect(always).toBeVisible();
     await activate(always);
     await expect(always).toBeDisabled();
@@ -101,9 +101,19 @@ for (const [engine, viewport] of [[chromium, { width: 1440, height: 1000 }], [we
     await expect(settings.locator('[data-approval-rule-id="other-rule"]')).toBeVisible();
 
     await openChat();
+    await page.evaluate(() => {
+      const qa = window.__MONITTER_QA__, next = qa.snapshot();
+      next.approvalRequests[0] = { ...next.approvalRequests[0], tool: 'Edit', status: 'pending', decision: null, ruleId: null, resolvedAt: null, input: null, sessionScope: 'file_changes' };
+      qa.setSnapshot(next);
+    });
+    const session = dock.getByRole('button', { name: 'Allow all edits this session', exact: true });
+    await expect(session).toBeVisible();
+    await activate(session);
+    await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(c => c.method === 'resolveApproval').at(-1)?.decision)).toBe('approve_session');
+
     for (const request of [
-      { rememberable: false, input: null },
-      { rememberable: true, input: { kind: 'questions', schema: null, url: null, questions: [{ id: 'answer', header: 'Answer', question: 'What should I do?', isSecret: false, options: [] }] } },
+      { rememberable: false, sessionScope: undefined, input: null },
+      { rememberable: true, sessionScope: undefined, input: { kind: 'questions', schema: null, url: null, questions: [{ id: 'answer', header: 'Answer', question: 'What should I do?', isSecret: false, options: [] }] } },
     ]) {
       await page.evaluate(patch => {
         const qa = window.__MONITTER_QA__, next = qa.snapshot();
@@ -111,9 +121,10 @@ for (const [engine, viewport] of [[chromium, { width: 1440, height: 1000 }], [we
         qa.setSnapshot(next);
       }, request);
       await expect(dock).toBeVisible();
-      await expect(dock.getByRole('button', { name: 'Always approve', exact: true })).toHaveCount(0);
+      await expect(dock.getByRole('button', { name: 'Always allow exact action', exact: true })).toHaveCount(0);
+      await expect(dock.getByRole('button', { name: 'Allow all edits this session', exact: true })).toHaveCount(0);
     }
     expect(errors).toEqual([]);
-    console.log(`${engine.name()}: Always approve, single dispatch, scoped sidebar rules, revoke error/retry, Settings revoke and unsupported/input gating passed`);
+    console.log(`${engine.name()}: exact and session approval, single dispatch, scoped sidebar rules, revoke error/retry, Settings revoke and unsupported/input gating passed`);
   } finally { await browser.close(); }
 }

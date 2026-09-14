@@ -1026,13 +1026,13 @@ fn handle_server_request(
         }
         let result = match method {
             "item/commandExecution/requestApproval" | "execCommandApproval" => {
-                json!({"decision": if matches!(decision, ApprovalDecision::ApproveOnce) {"accept"} else {"decline"}})
+                json!({"decision": if matches!(decision, ApprovalDecision::ApproveOnce | ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways) {"accept"} else {"decline"}})
             }
             "item/fileChange/requestApproval" | "applyPatchApproval" => {
-                json!({"decision": if matches!(decision, ApprovalDecision::ApproveOnce) {"accept"} else {"decline"}})
+                json!({"decision": if matches!(decision, ApprovalDecision::ApproveOnce | ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways) {"accept"} else {"decline"}})
             }
             "item/permissions/requestApproval" => {
-                json!({"permissions": if matches!(decision, ApprovalDecision::ApproveOnce) {params.get("permissions").cloned().unwrap_or_else(|| json!({}))} else {json!({})}, "scope":"turn"})
+                json!({"permissions": if matches!(decision, ApprovalDecision::ApproveOnce | ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways) {params.get("permissions").cloned().unwrap_or_else(|| json!({}))} else {json!({})}, "scope":"turn"})
             }
             _ => json!({"decision":"decline"}),
         };

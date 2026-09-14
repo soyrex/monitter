@@ -93,6 +93,14 @@ struct RunRegistry {
     native_sessions: HashMap<String, String>,
 }
 
+#[derive(Clone)]
+struct SessionApprovalGrant {
+    task_id: String,
+    provider: String,
+    scope: String,
+    owner: std::sync::Weak<runner::RunControl>,
+}
+
 /// The durable fields supplied by a harness when a tool needs a human
 /// decision. The service assigns the immutable ID and timestamps.
 #[derive(Debug, Clone)]
@@ -112,6 +120,7 @@ pub(crate) struct CreateApprovalRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalDecision {
     ApproveOnce,
+    ApproveSession,
     ApproveAlways,
     Deny,
 }
@@ -120,15 +129,20 @@ impl ApprovalDecision {
     fn from_stored(value: &str) -> Result<Self, String> {
         match value {
             "approve_once" => Ok(Self::ApproveOnce),
+            "approve_session" => Ok(Self::ApproveSession),
             "approve_always" => Ok(Self::ApproveAlways),
             "deny" => Ok(Self::Deny),
-            _ => Err("Approval decision must be approve_once, approve_always or deny.".into()),
+            _ => Err(
+                "Approval decision must be approve_once, approve_session, approve_always or deny."
+                    .into(),
+            ),
         }
     }
 
     fn stored(self) -> &'static str {
         match self {
             Self::ApproveOnce => "approve_once",
+            Self::ApproveSession => "approve_session",
             Self::ApproveAlways => "approve_always",
             Self::Deny => "deny",
         }
@@ -217,6 +231,24 @@ fn bounded_rule_detail(detail: &str) -> String {
     }
 }
 
+fn approval_session_scope(input: &CreateApprovalRequest) -> Option<String> {
+    let file_change = match input.provider.as_str() {
+        "codex" => input.tool == "File change",
+        "claude" => matches!(
+            input.tool.as_str(),
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+        ),
+        "acp" => input
+            .raw_input
+            .as_ref()
+            .and_then(|value| value.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("edit"),
+        _ => false,
+    };
+    file_change.then(|| "file_changes".into())
+}
+
 pub(crate) struct Service {
     app: Option<AppHandle>,
     store: store::Store,
@@ -244,6 +276,7 @@ pub(crate) struct Service {
     // without claiming a tool can be resumed after that interruption.
     approval_waiters: Mutex<HashMap<String, Vec<mpsc::Sender<ApprovalSignal>>>>,
     app_server_approvals: Mutex<HashMap<String, std::sync::Weak<runner::RunControl>>>,
+    session_approval_grants: Mutex<Vec<SessionApprovalGrant>>,
     input_waiters: Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, String>>>>,
 }
 
@@ -325,6 +358,7 @@ impl Service {
             revision_epoch: uuid::Uuid::new_v4().to_string(),
             approval_waiters: Mutex::new(HashMap::new()),
             app_server_approvals: Mutex::new(HashMap::new()),
+            session_approval_grants: Mutex::new(Vec::new()),
             input_waiters: Mutex::new(HashMap::new()),
         });
         Ok(service)
@@ -934,6 +968,7 @@ impl Service {
             return Err("Approval risk must be low, medium, high, or unknown.".into());
         }
         let scope = self.approval_scope(&input)?;
+        let session_scope = approval_session_scope(&input);
         self.mutate(Some(input.task_id.clone()), |snapshot| {
             let task = snapshot
                 .tasks
@@ -957,6 +992,7 @@ impl Service {
                 resolved_at: None,
                 decision: None,
                 rememberable: scope.is_some(),
+                session_scope,
                 rule_id: None,
                 approval_scope: scope.clone(),
                 input: None,
@@ -1059,7 +1095,9 @@ impl Service {
         if !keep_waiting() {
             return Err("Approval request was interrupted before a decision.".into());
         }
-        let _ = self.apply_matching_approval_rule(approval_id)?;
+        if !self.apply_matching_session_approval(approval_id)? {
+            let _ = self.apply_matching_approval_rule(approval_id)?;
+        }
         let (sender, receiver) = mpsc::channel();
         // Hold the waiter registry while observing durable state. Resolution
         // persists first and only then takes this same lock to notify, which
@@ -1087,7 +1125,10 @@ impl Service {
                     .map(ApprovalDecision::from_stored)
                     .map(|result| {
                         result.map(|decision| {
-                            if decision == ApprovalDecision::ApproveAlways {
+                            if matches!(
+                                decision,
+                                ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways
+                            ) {
                                 ApprovalDecision::ApproveOnce
                             } else {
                                 decision
@@ -1176,6 +1217,87 @@ impl Service {
         Ok(matched)
     }
 
+    fn live_session_approval_owner(
+        &self,
+        request: &ApprovalRequest,
+        snapshot: &Snapshot,
+    ) -> Result<Arc<runner::RunControl>, String> {
+        if request.session_scope.is_none() {
+            return Err("This request does not support a session approval scope.".into());
+        }
+        let runs = self
+            .runs
+            .lock()
+            .map_err(|_| "Run registry unavailable".to_string())?;
+        let owners = self
+            .app_server_approvals
+            .lock()
+            .map_err(|_| "Approval ownership unavailable".to_string())?;
+        let owner = owners
+            .get(&request.id)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or("This request no longer has a live session approval channel.")?;
+        if !owner.is_resident()
+            || !runs
+                .tasks
+                .get(&request.task_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &owner))
+            || !snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == request.task_id && task.status == "running")
+        {
+            return Err("This session approval request has expired.".into());
+        }
+        Ok(owner)
+    }
+
+    fn apply_matching_session_approval(&self, approval_id: &str) -> Result<bool, String> {
+        let matched = self.mutate(None, |snapshot| {
+            let index = snapshot
+                .approval_requests
+                .iter()
+                .position(|request| request.id == approval_id)
+                .ok_or("Approval request was not found.")?;
+            let request = snapshot.approval_requests[index].clone();
+            if request.status != "pending" || request.input.is_some() {
+                return Ok(false);
+            }
+            let Some(scope) = request.session_scope.as_deref() else {
+                return Ok(false);
+            };
+            let owner = match self.live_session_approval_owner(&request, snapshot) {
+                Ok(owner) => owner,
+                Err(_) => return Ok(false),
+            };
+            let grants = self
+                .session_approval_grants
+                .lock()
+                .map_err(|_| "Session approval grants unavailable".to_string())?;
+            let matched = grants.iter().any(|grant| {
+                grant.task_id == request.task_id
+                    && grant.provider == request.provider
+                    && grant.scope == scope
+                    && grant
+                        .owner
+                        .upgrade()
+                        .is_some_and(|granted_owner| Arc::ptr_eq(&granted_owner, &owner))
+            });
+            if !matched {
+                return Ok(false);
+            }
+            let request = &mut snapshot.approval_requests[index];
+            request.status = "approved".into();
+            request.resolved_at = Some(now());
+            request.decision = Some("approve_session".into());
+            Ok(true)
+        })?;
+        if matched {
+            self.notify_approval_waiters(approval_id, Ok(ApprovalDecision::ApproveOnce));
+        }
+        Ok(matched)
+    }
+
     fn notify_approval_waiters(&self, approval_id: &str, signal: ApprovalSignal) {
         let waiters = self
             .approval_waiters
@@ -1192,6 +1314,7 @@ impl Service {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<Snapshot, String> {
+        let mut session_grant = None;
         let snapshot = self.mutate(None, |snapshot| {
             let candidate = snapshot
                 .approval_requests
@@ -1199,7 +1322,10 @@ impl Service {
                 .find(|request| request.id == approval_id)
                 .ok_or("Approval request was not found.")?;
             self.validate_app_server_approval(candidate, snapshot)?;
-            if decision == ApprovalDecision::ApproveAlways
+            if matches!(
+                decision,
+                ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways
+            )
                 && !snapshot.tasks.iter().any(|task| task.id == candidate.task_id && task.status == "running")
             {
                 return Err("This request no longer has a live response channel.".into());
@@ -1207,7 +1333,9 @@ impl Service {
             if candidate.input.is_some()
                 && matches!(
                     decision,
-                    ApprovalDecision::ApproveOnce | ApprovalDecision::ApproveAlways
+                    ApprovalDecision::ApproveOnce
+                        | ApprovalDecision::ApproveSession
+                        | ApprovalDecision::ApproveAlways
                 )
             {
                 return Err("Provide the requested input before submitting.".into());
@@ -1226,6 +1354,19 @@ impl Service {
                     "This request cannot be remembered because its action scope is incomplete."
                         .into(),
                 );
+            }
+            if decision == ApprovalDecision::ApproveSession {
+                let scope = request
+                    .session_scope
+                    .clone()
+                    .ok_or("This request does not support a session approval scope.")?;
+                let owner = self.live_session_approval_owner(&request, snapshot)?;
+                session_grant = Some(SessionApprovalGrant {
+                    task_id: request.task_id.clone(),
+                    provider: request.provider.clone(),
+                    scope,
+                    owner: Arc::downgrade(&owner),
+                });
             }
             let mut rule_id = None;
             if decision == ApprovalDecision::ApproveAlways {
@@ -1290,6 +1431,7 @@ impl Service {
             let request = &mut snapshot.approval_requests[index];
             request.status = match decision {
                 ApprovalDecision::ApproveOnce => "approved",
+                ApprovalDecision::ApproveSession => "approved",
                 ApprovalDecision::ApproveAlways => "approved",
                 ApprovalDecision::Deny => "denied",
             }
@@ -1299,13 +1441,29 @@ impl Service {
             request.rule_id = rule_id;
             Ok(snapshot.clone())
         })?;
+        if let Some(grant) = session_grant {
+            let mut grants = self
+                .session_approval_grants
+                .lock()
+                .map_err(|_| "Session approval grants unavailable".to_string())?;
+            grants.retain(|existing| {
+                existing.owner.upgrade().is_some()
+                    && !(existing.task_id == grant.task_id
+                        && existing.provider == grant.provider
+                        && existing.scope == grant.scope)
+            });
+            grants.push(grant);
+        }
         // `mutate` has already persisted the decision before a runner can act
         // on it, so an approval never authorizes a tool only in memory.
         // Providers only ever receive a one-shot response.  Remembering is
         // Monitter policy, never a native/provider persistent permission.
         self.notify_approval_waiters(
             approval_id,
-            Ok(if decision == ApprovalDecision::ApproveAlways {
+            Ok(if matches!(
+                decision,
+                ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways
+            ) {
                 ApprovalDecision::ApproveOnce
             } else {
                 decision
@@ -7000,6 +7158,154 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         assert_eq!(restored.decision.as_deref(), Some("approve_once"));
         assert!(restored.resolved_at.is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_file_approval_reuses_only_the_same_live_harness() {
+        let dir = temp_dir("session-file-approval");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let task = service
+            .create_task(task_input(
+                service.snapshot().unwrap().agents[0].id.clone(),
+                "Session approval",
+                None,
+            ))
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let control = service.reserve_run(&task.id).unwrap();
+        control.mark_resident();
+        control.set_app_server_thread("session-thread".into());
+        control.set_app_server_turn("session-turn-1".into());
+        let request = |run_id: &str, tool: &str| CreateApprovalRequest {
+            task_id: task.id.clone(),
+            provider: "codex".into(),
+            run_id: run_id.into(),
+            tool: tool.into(),
+            summary: "Codex requests approval".into(),
+            detail: "{}".into(),
+            risk: "medium".into(),
+            raw_input: Some(serde_json::json!({"item":{"type":"file_change"}})),
+        };
+        let first = service
+            .create_app_server_approval(
+                &control,
+                "session-turn-1",
+                request("file-1", "File change"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.session_scope.as_deref(), Some("file_changes"));
+        service
+            .resolve_approval_request(&first.id, ApprovalDecision::ApproveSession)
+            .unwrap();
+
+        control.set_app_server_turn("session-turn-2".into());
+        let second = service
+            .create_app_server_approval(
+                &control,
+                "session-turn-2",
+                request("file-2", "File change"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            service.wait_for_approval(&second.id, || true).unwrap(),
+            ApprovalDecision::ApproveOnce
+        );
+        let second = service
+            .snapshot()
+            .unwrap()
+            .approval_requests
+            .into_iter()
+            .find(|item| item.id == second.id)
+            .unwrap();
+        assert_eq!(second.decision.as_deref(), Some("approve_session"));
+        assert!(second.rule_id.is_none());
+
+        let command = service
+            .create_app_server_approval(
+                &control,
+                "session-turn-2",
+                request("command-1", "Command execution"),
+                None,
+            )
+            .unwrap();
+        assert!(command.session_scope.is_none());
+        assert!(!service.apply_matching_session_approval(&command.id).unwrap());
+
+        control.cancel();
+        service.release_app_server_run(&task.id, &control);
+        let replacement = service.reserve_run(&task.id).unwrap();
+        replacement.mark_resident();
+        replacement.set_app_server_thread("replacement-thread".into());
+        replacement.set_app_server_turn("replacement-turn".into());
+        let after_restart = service
+            .create_app_server_approval(
+                &replacement,
+                "replacement-turn",
+                request("file-3", "File change"),
+                None,
+            )
+            .unwrap();
+        assert!(!service
+            .apply_matching_session_approval(&after_restart.id)
+            .unwrap());
+        replacement.cancel();
+        service.release_app_server_run(&task.id, &replacement);
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn session_file_scope_is_only_advertised_for_known_edit_requests() {
+        let request = |provider: &str, tool: &str, raw_input: serde_json::Value| {
+            CreateApprovalRequest {
+                task_id: "task".into(),
+                provider: provider.into(),
+                run_id: "run".into(),
+                tool: tool.into(),
+                summary: "Approval".into(),
+                detail: String::new(),
+                risk: "unknown".into(),
+                raw_input: Some(raw_input),
+            }
+        };
+        assert_eq!(
+            approval_session_scope(&request("codex", "File change", serde_json::json!({})))
+                .as_deref(),
+            Some("file_changes")
+        );
+        assert_eq!(
+            approval_session_scope(&request("claude", "Edit", serde_json::json!({}))).as_deref(),
+            Some("file_changes")
+        );
+        assert_eq!(
+            approval_session_scope(&request("acp", "Apply patch", serde_json::json!({"kind":"edit"})))
+                .as_deref(),
+            Some("file_changes")
+        );
+        assert!(approval_session_scope(&request(
+            "codex",
+            "Command execution",
+            serde_json::json!({"command":"touch file"})
+        ))
+        .is_none());
+        assert!(approval_session_scope(&request(
+            "acp",
+            "Untrusted title containing edit",
+            serde_json::json!({"kind":"execute"})
+        ))
+        .is_none());
     }
 
     #[test]

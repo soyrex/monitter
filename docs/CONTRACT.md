@@ -83,7 +83,7 @@ No fake conversations, progress, token counts, host connections or model replies
 - `send_channel_message_fast { channelId: string, text: string, agentIds: string[], attachmentIds?: string[] }`
   -> `{ accepted: true }`, using the same durable channel delivery path.
 - `resume_task { taskId: string }` -> Snapshot (continue the existing native session asynchronously in this chat)
-- `resolve_approval { approvalId: string, decision: 'approve_once' | 'approve_always' | 'deny' }` -> Snapshot
+- `resolve_approval { approvalId: string, decision: 'approve_once' | 'approve_session' | 'approve_always' | 'deny' }` -> Snapshot
 - `revoke_approval_rule { ruleId: string }` -> Snapshot
 
 Event `monitter:changed` payload `{ taskId?: string }` tells UI to reload snapshot (debounce <=150ms).
@@ -426,6 +426,12 @@ records in the right sidebar's Approvals tab, not full cards in the chat. A stop
 provider transport resolves a pending request safely without authorizing work. Never render an approval
 denial as a successful `Tool result`, and never render an enabled approval control unless that live
 provider run can receive the decision.
+
+Known file-change requests may additionally offer `approve_session`. This grants all later file-change
+requests from the same chat and exact live harness process, across turns, while leaving shell commands,
+network access and other permission classes prompted separately. The grant is runtime-only: cancellation,
+process loss, archive/stop or app restart removes it. Each automatically accepted edit still creates an
+auditable approval record, and providers receive only the one-time response for that concrete request.
 
 An eligible exact tool action may also offer `approve_always`. This creates an app-owned, durable and
 revocable rule—not a provider permission grant. Rules are scoped to agent, immutable task host

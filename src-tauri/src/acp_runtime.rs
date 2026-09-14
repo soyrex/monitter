@@ -273,7 +273,9 @@ fn handle_permission_request(
                 !control.is_cancelled() && control.matches_app_server_turn(&turn)
             })
         }) {
-            Ok(ApprovalDecision::ApproveOnce) | Ok(ApprovalDecision::ApproveAlways) => {
+            Ok(ApprovalDecision::ApproveOnce)
+            | Ok(ApprovalDecision::ApproveSession)
+            | Ok(ApprovalDecision::ApproveAlways) => {
                 acp_protocol::permission_outcome(&params, true)
                     .unwrap_or_else(|_| acp_protocol::cancelled_permission())
             }
