@@ -10,6 +10,7 @@ import type { TabKey } from '$lib/tab-order';
  */
 export type PaneSurfaceHandle<State, Payload> = {
   focusExistingTab: (tab: TabKey) => boolean;
+  selectRelativeTab: (direction: 1 | -1) => boolean;
   openAgentSettings: (draft: Agent) => void;
   openSettings: (category?: string) => void;
   openTerminalTab: (id: string) => void;

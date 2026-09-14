@@ -2102,22 +2102,14 @@
     void tick().then(() => vimCommandInput?.focus());
   }
   function closeVimCommand() { vimCommandOpen = false; vimCommandError = ''; vimHelpOpen = false; }
-  function selectRelativeTab(direction: 1 | -1) {
+  export function selectRelativeTab(direction: 1 | -1): boolean {
     const tabs = orderedTabs();
-    if (!tabs.length) return;
-    const current = pane === 'task' ? (currentDraftId ? { kind: 'draft' as const, id: currentDraftId } : selectedTaskId ? { kind: 'task' as const, id: selectedTaskId } : null)
-      : pane === 'channel' && selectedChannelId ? { kind: 'channel' as const, id: selectedChannelId }
-      : pane === 'terminal' && selectedTerminalId ? { kind: 'terminal' as const, id: selectedTerminalId }
-      : pane === 'settings' ? { kind: 'settings' as const, id: 'settings' } : null;
-    const index = current ? tabs.findIndex(tab => tab.kind === current.kind && tab.id === current.id) : -1;
-    const next = tabs[(index + direction + tabs.length) % tabs.length];
-    if (next.kind === 'task') { const task = snapshot?.tasks.find(item => item.id === next.id); if (task) openTask(task); }
-    else if (next.kind === 'draft') { const draft = taskDrafts[next.id]; if (draft) openTaskDraft(draft); }
-    else if (next.kind === 'channel') { const channel = snapshot?.channels.find(item => item.id === next.id); if (channel) openChannel(channel); }
-    else if (next.kind === 'terminal') openTerminalTab(next.id);
-    else if (next.kind === 'empty') { selectedEmptyId=next.id; pane='empty'; }
-    else openSettings();
-    focusSelectedTabInput();
+    const current = currentVimTab();
+    if (!current) return false;
+    const index = tabs.findIndex(tab => tab.kind === current.kind && tab.id === current.id);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= tabs.length) return false;
+    return selectVimTab({ kind: 'index', index: target + 1 });
   }
   function currentVimTab(): TabKey | null {
     if (pane === 'task') return currentDraftId ? {kind:'draft',id:currentDraftId} : selectedTaskId ? {kind:'task',id:selectedTaskId} : null;
@@ -2698,10 +2690,10 @@
     + (pane === 'project' && focusedProject ? 1 : 0));
   const useCompactTabPicker = $derived(compactTabs && renderedTabCount > 1);
   $effect(() => { if (!useCompactTabPicker) tabPickerOpen = false; });
-  function focusAdjacentPane(direction: 'left' | 'right' | 'up' | 'down') {
-    if (embedded) return false;
+  function adjacentPaneElement(direction: 'left' | 'right' | 'up' | 'down') {
+    if (embedded) return null;
     const current = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"]`);
-    if (!current) return false;
+    if (!current) return null;
     const origin = current.getBoundingClientRect(), horizontal = direction === 'left' || direction === 'right';
     const originCenter = horizontal ? origin.top + origin.height / 2 : origin.left + origin.width / 2;
     const candidates = [...document.querySelectorAll<HTMLElement>('.pane-leaf[data-pane-id]')]
@@ -2715,13 +2707,19 @@
         const offsetB = Math.abs((horizontal ? b.rect.top + b.rect.height / 2 : b.rect.left + b.rect.width / 2) - originCenter);
         return distanceA - distanceB || offsetA - offsetB;
       });
-    const next = candidates[0]?.node;
-    if (!next) return false;
+    return candidates[0]?.node ?? null;
+  }
+  function focusPaneElement(next: HTMLElement) {
     activePaneId = next.dataset.paneId!;
     const target = next.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')
       ?? next.querySelector<HTMLElement>('textarea[aria-label="Task message"], textarea[aria-label="Channel message"]')
       ?? next.querySelector<HTMLElement>('.messages') ?? next;
     target.focus({ preventScroll: true });
+  }
+  function focusAdjacentPane(direction: 'left' | 'right' | 'up' | 'down') {
+    const next = adjacentPaneElement(direction);
+    if (!next) return false;
+    focusPaneElement(next);
     return true;
   }
   $effect(() => {
@@ -2759,6 +2757,19 @@
     if (activePaneId === 'main') swapActiveTab(direction);
     else paneRefs[activePaneId]?.swapActiveTab(direction);
   }
+  function selectAdjacentTab(direction: 1 | -1) {
+    const current = activePaneId === 'main' ? { selectRelativeTab } : paneRefs[activePaneId];
+    if (current?.selectRelativeTab(direction)) return true;
+    const nextPane = adjacentPaneElement(direction < 0 ? 'left' : 'right');
+    const nextPaneId = nextPane?.dataset.paneId;
+    if (!nextPane || !nextPaneId) return false;
+    activePaneId = nextPaneId;
+    const next = nextPaneId === 'main' ? { allTabs, focusExistingTab } : paneRefs[nextPaneId];
+    const tabs = next?.allTabs() ?? [];
+    const boundary = tabs[direction < 0 ? tabs.length - 1 : 0];
+    if (!boundary || !next?.focusExistingTab(boundary)) focusPaneElement(nextPane);
+    return true;
+  }
   function toggleFocusedDetail() {
     if (activePaneId === 'main') toggleDetail();
     else paneRefs[activePaneId]?.toggleDetail();
@@ -2782,6 +2793,11 @@
     if (!embedded && commandModifier && event.altKey && !event.isComposing && (event.key === '=' || event.code === 'Equal') && !document.querySelector('[role="dialog"]')) {
       event.preventDefault();
       balanceWorkspacePanes();
+      return;
+    }
+    if (!embedded && commandModifier && event.altKey && !event.shiftKey && !event.isComposing && (event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !document.querySelector('[role="dialog"]')) {
+      event.preventDefault();
+      selectAdjacentTab(event.key === 'ArrowLeft' ? -1 : 1);
       return;
     }
     if (!embedded && !vimShortcuts && commandModifier && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId) {
