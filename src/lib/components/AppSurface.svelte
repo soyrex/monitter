@@ -146,8 +146,8 @@
   import { createWorkspaceSaveScheduler } from '$lib/workspace-save-scheduler';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, workspaceKey = 'all', onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
-    { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; snapshotIndexes?: SnapshotIndexes | null; workspaceKey?: WorkspaceKey;
+  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, parentMobileSidebar = false, workspaceKey = 'all', onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
+    { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; snapshotIndexes?: SnapshotIndexes | null; parentMobileSidebar?: boolean; workspaceKey?: WorkspaceKey;
       onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void;
       parentExpandedPaneId?:string|null; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: 'single' | 'columns' | 'grid') => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
@@ -203,7 +203,7 @@
 
   const bridge = getBridge();
   let motionReady = $state(false);
-  onMount(() => { motionReady = true; });
+  onMount(() => { if (!embedded) motionReady = true; });
   onMount(() => {
     if (embedded) return;
     const colourScheme = window.matchMedia('(prefers-color-scheme: dark)'),
@@ -330,7 +330,9 @@
   setContext('monitter-back-to-chats', backToChats);
   let mobileMain = $state(false);
   const sidebarCompressed = $derived(sidebarCollapsed && !mobileSidebar);
+  $effect(() => { if (embedded) mobileSidebar = parentMobileSidebar; });
   onMount(() => {
+    if (embedded) return;
     const viewport = window.matchMedia('(max-width: 760px)');
     const update = () => { mobileSidebar = viewport.matches; railAgentId = null; };
     const stopScaleWatch = watchViewerInterfaceScales();
@@ -646,6 +648,11 @@
     if (narrow && !compactDetail) showDetail = false;
     compactDetail = narrow;
   }
+  // Browser-wide motion and viewport listeners belong to the retained root.
+  // Embedded panes inherit the root's responsive mode through props instead of
+  // creating competing global listeners for every split.
+  function rootMotion(node: HTMLElement) { return embedded ? undefined : initMotion(node); }
+  function rootMobileViewport(node: HTMLElement) { return embedded ? undefined : mobileViewport(node); }
   function focusExistingChat(kind: 'task' | 'channel', id: string, requester: string): boolean {
     if (embedded) return onExistingChat?.(kind, id, requester) ?? false;
     const owner = findPaneTabOwner(paneIds(layout), activePaneId, allTabs(), paneRefs,
@@ -3624,7 +3631,7 @@
   </PaneSurface>
 {/snippet}
 
-<main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
+<main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
   {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:clock-expanded={clockExpanded && !sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
@@ -3761,7 +3768,7 @@
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
     <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
-        <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} workspaceKey={activeWorkspaceKey}
+        <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
           onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={handleChildWorkspaceChange} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}

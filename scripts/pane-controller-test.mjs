@@ -15,4 +15,8 @@ assert.equal(findPaneTabOwner(['main', 'left'], 'main', [], panes, item => paneT
 const surface = readFileSync(new URL('../src/lib/components/PaneSurface.svelte', import.meta.url), 'utf8');
 assert.ok(surface.includes('if (!observed || !active) return'), 'inactive panes must release their DOM-local resize observer');
 assert.ok(surface.includes('display:contents'), 'the observer boundary must not change the existing workspace layout or scoped styles');
+const appSurface = readFileSync(new URL('../src/lib/components/AppSurface.svelte', import.meta.url), 'utf8');
+assert.ok(appSurface.includes('if (embedded) return;\n    const viewport = window.matchMedia'), 'only the root may create the global viewport and interface-scale listeners');
+assert.ok(appSurface.includes('parentMobileSidebar={mobileSidebar}'), 'embedded panes inherit responsive state from their retained root');
+assert.ok(appSurface.includes('use:rootMotion use:rootMobileViewport'), 'embedded panes must not install duplicate motion or viewport actions');
 console.log('pane controller ownership routing assertions passed');
