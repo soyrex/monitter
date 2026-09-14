@@ -389,6 +389,8 @@ pub struct Settings {
     pub shortcut_mode: String,
     #[serde(default = "default_show_tab_close_buttons")]
     pub show_tab_close_buttons: bool,
+    #[serde(default)]
+    pub auto_hide_tabs: bool,
     #[serde(default = "default_tab_style")]
     pub tab_style: String,
     #[serde(default = "default_interface_density")]
@@ -678,6 +680,7 @@ pub fn default_snapshot() -> Snapshot {
             busy_message_mode: default_busy_message_mode(),
             shortcut_mode: default_shortcut_mode(),
             show_tab_close_buttons: default_show_tab_close_buttons(),
+            auto_hide_tabs: false,
             tab_style: default_tab_style(),
             interface_density: default_interface_density(),
         },

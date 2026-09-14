@@ -110,6 +110,7 @@ export interface Settings {
   userName?: string;
   shortcutMode?: 'standard' | 'vim';
   showTabCloseButtons?: boolean;
+  autoHideTabs?: boolean;
   tabStyle?: 'classic' | 'modern';
   interfaceDensity?: 'tight' | 'normal' | 'spacious';
   tintUserMessages?: boolean;

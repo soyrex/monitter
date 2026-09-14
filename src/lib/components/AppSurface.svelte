@@ -3090,7 +3090,7 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <section bind:this={motionWorkspace} use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} class="workspace" class:compact-tabs={useCompactTabPicker} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
+  <section bind:this={motionWorkspace} use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
@@ -4541,6 +4541,7 @@
     flex-direction: column;
   }
   .topbar {
+    position:relative;
     display: flex;
     align-items: stretch;
     justify-content: space-between;
@@ -4550,7 +4551,13 @@
     flex-shrink: 0;
     border-bottom: 0;
     background: linear-gradient(var(--line), var(--line)) left bottom / 100% 1px no-repeat, var(--sidebar);
+    transition:transform .18s ease;
   }
+  .workspace.auto-hide-tabs > .topbar { margin-top:calc(-1 * var(--pane-tabbar-height)); transform:translateY(0); }
+  .workspace.auto-hide-tabs > .topbar:hover, .workspace.auto-hide-tabs > .topbar:focus-within { transform:translateY(var(--pane-tabbar-height)); }
+  .workspace.auto-hide-tabs > .topbar::before { content:""; position:absolute; left:0; right:0; bottom:0; height:30px; transform:translateY(30px); }
+  .workspace.auto-hide-tabs > .topbar:hover::before { pointer-events:none; }
+  @media (prefers-reduced-motion:reduce) { .topbar { transition:none; } }
   .workspace-context { display:grid; place-items:center; flex:none; width:var(--density-control-size); padding-bottom:var(--density-tabbar-inset); color:var(--muted); }
   .top-actions {
     display: flex;

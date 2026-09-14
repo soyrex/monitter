@@ -331,6 +331,7 @@
             {/each}
           </div>
           <label class="switch-row"><span><strong>Show tab close buttons</strong><small>Tabs can also be closed with your chosen keyboard shortcuts.</small></span><input type="checkbox" role="switch" aria-label="Show tab close buttons" checked={settings.showTabCloseButtons !== false} onchange={event=>void save({showTabCloseButtons:event.currentTarget.checked})}/></label>
+          <label class="switch-row"><span><strong>Auto hide tabs</strong><small>Reveal a pane's tabs by hovering over its top bar.</small></span><input type="checkbox" role="switch" aria-label="Auto hide tabs" checked={settings.autoHideTabs === true} onchange={event=>void save({autoHideTabs:event.currentTarget.checked})}/></label>
         </section>
         <section class="setting-card" aria-labelledby="panes-heading">
           <div class="card-heading"><h2 id="panes-heading">Pane appearance</h2><p>Keep the active workspace easy to identify.</p></div>
