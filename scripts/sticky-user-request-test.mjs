@@ -47,6 +47,9 @@ try {
   await expect(request).toBeVisible();
   await expect(request).toHaveCount(1);
   await expect(request).toContainText('Please review the complete shipment-tracking workflow');
+  const collapsed = await request.locator('.markdown').evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight, clamp: getComputedStyle(element).webkitLineClamp }));
+  expect(collapsed.clamp).toBe('2');
+  expect(collapsed.scrollHeight).toBeGreaterThan(collapsed.height + 1);
   const stuck = await request.evaluate(element => ({
     background: getComputedStyle(element).backgroundColor,
     top: element.getBoundingClientRect().top,
@@ -59,6 +62,14 @@ try {
   expect(stuck.top).toBeLessThanOrEqual(10);
   expect(stuck.fadeBottom).toBe('-20px');
   expect(stuck.fadeBackground).toContain('linear-gradient');
+  await page.getByRole('button', { name: 'Expand current request', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Collapse current request', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  expect(await request.locator('.markdown').evaluate(element => element.clientHeight)).toBeGreaterThan(collapsed.height);
+  await page.setViewportSize({ width: 980, height: 500 });
+  const shortViewport = await request.evaluate(element => ({ position: getComputedStyle(element).position, clamp: getComputedStyle(element.querySelector('.markdown')).webkitLineClamp }));
+  expect(shortViewport.position).not.toBe('sticky');
+  expect(shortViewport.clamp).toBe('none');
+  await expect(page.getByRole('button', { name: 'Collapse current request', exact: true })).toBeHidden();
   if (process.env.MONITTER_STICKY_SCREENSHOT) { await page.waitForTimeout(250); await page.screenshot({ path: process.env.MONITTER_STICKY_SCREENSHOT }); }
   console.log('The latest user bubble itself sticks in place with an identical background and a 20px page-colour fade.');
 } finally {

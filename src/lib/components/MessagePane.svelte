@@ -108,16 +108,18 @@
   .message-content { font-size: var(--chat-font-size, 13px); font-family: var(--chat-font, "IBM Plex Sans", system-ui, sans-serif); line-height: var(--chat-line-height, 1.65); }
   .message-pane { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
   .messages { --scroll-fade:20px; -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); flex: 1; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-  .has-sticky-request .messages { -webkit-mask-image:linear-gradient(to bottom,#000 0,#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,#000 0,#000 calc(100% - var(--scroll-fade)),transparent 100%); }
   .message-header { position: sticky; top: 0; z-index: 2; max-height: 40%; overflow: auto; scrollbar-width: thin; }
   /* Paint behind the translucent header so content fades before its top edge. */
   .message-header::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, var(--paper) 0%, var(--paper) 20%, transparent 100%); }
   .message-content { display: flow-root; width: min(var(--chat-content-max-width, 900px), calc(100% - 2 * var(--chat-side-padding, clamp(25px, 4vw, 50px)))); margin-inline: auto; padding: 25px 0 calc(var(--scroll-fade) + 8px); }
-  :global(.message.sticky-user-request) { position:sticky; z-index:4; top:9px; isolation:isolate; }
-  :global(.message.sticky-user-request)::before { content:""; position:absolute; z-index:-1; top:-9px; right:0; bottom:-20px; left:0; pointer-events:none; background:linear-gradient(to bottom,var(--paper) 0,var(--paper) calc(100% - 20px),transparent 100%); }
   .jump-latest { position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px; z-index: 2; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); background: var(--panel); box-shadow: 0 3px 12px #0002; cursor: pointer; }
   .jump-latest:hover { color: var(--accent-ink); border-color: var(--accent); background: var(--soft); }
   .jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   @media (max-width: 640px) { .message-content { padding-top: 14px; padding-bottom: calc(var(--scroll-fade) + 8px); } .jump-latest { bottom: 10px; } }
+  @media (min-height:501px) {
+    .has-sticky-request .messages { -webkit-mask-image:linear-gradient(to bottom,#000 0,#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,#000 0,#000 calc(100% - var(--scroll-fade)),transparent 100%); }
+    :global(.message.sticky-user-request) { position:sticky; z-index:4; top:9px; isolation:isolate; box-shadow:0 8px 24px #0002,0 2px 7px #00000012; }
+    :global(.message.sticky-user-request)::before { content:""; position:absolute; z-index:-1; top:-9px; right:0; bottom:-20px; left:0; pointer-events:none; background:linear-gradient(to bottom,var(--paper) 0,var(--paper) calc(100% - 20px),transparent 100%); }
+  }
 
 </style>

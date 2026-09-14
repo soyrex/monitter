@@ -117,6 +117,7 @@
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import ApprovalDock from "$lib/components/ApprovalDock.svelte";
   import MessagePane from "$lib/components/MessagePane.svelte";
+  import ExpandableUserRequest from "$lib/components/ExpandableUserRequest.svelte";
   import GitPane from "$lib/components/GitPane.svelte";
   import RunSummary from "$lib/components/RunSummary.svelte";
   import TimelinePane from "$lib/components/TimelinePane.svelte";
@@ -3460,12 +3461,13 @@
                   data-message-phase={message.phase}
                   data-live-entry={message.streamStatus==='streaming'}
                   data-delivery-status={optimistic?.status}
+                  aria-label={message.role === 'user' && message.id === latestUserRequest?.id ? 'Latest user request' : undefined}
                 >
                   <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
                     {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot?.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}
                     {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                   </MessageMeta>
-                  <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
+                  {#if message.role === 'user' && message.id === latestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)} />{:else}<Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} />{/if}<AttachmentList attachments={message.attachments ?? []}/>
                   {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
                 </article>{/if}{/if}{/each}{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
                 <Terminal size={24} />

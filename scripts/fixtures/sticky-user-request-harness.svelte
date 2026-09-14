@@ -1,5 +1,6 @@
 <script lang="ts">
   import MessagePane from '../../src/lib/components/MessagePane.svelte';
+  import ExpandableUserRequest from '../../src/lib/components/ExpandableUserRequest.svelte';
 
   const request = 'Please review the complete shipment-tracking workflow and explain every state transition, exception, notification, and recovery path. '.repeat(6).trim();
   const response = 'A long assistant response keeps the original request well above the visible reading position. '.repeat(160);
@@ -7,7 +8,7 @@
 
 <main>
   <MessagePane resetKey="sticky-request" stickyRequest>
-    <article class="message user sticky-user-request" aria-label="Latest user request">{request}</article>
+    <article class="message user sticky-user-request" aria-label="Latest user request"><ExpandableUserRequest text={request} /></article>
     <article>{response}</article>
   </MessagePane>
 </main>
