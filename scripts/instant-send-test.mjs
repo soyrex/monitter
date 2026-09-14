@@ -28,13 +28,13 @@ try {
   await page.getByRole('button',{name:'Send task message',exact:true}).click();
   const message=page.locator('article.message').filter({hasText:'Instant outgoing message'});
   await expect(message).toHaveCount(1);
-  await expect(message).toContainText(/sending/i);
+  await expect(message.getByRole('status',{name:'Sending',exact:true})).toBeVisible();
   await expect(composer).toHaveValue('');
   await expect(composer).toBeEnabled();
   await composer.fill('My next draft');
   await page.evaluate(()=>window.__acceptSend());
   await expect(message).toHaveCount(1);
-  await expect(message).toContainText(/sent/i);
+  await expect(message.getByRole('status',{name:'Sent',exact:true})).toBeVisible();
   await expect(composer).toHaveValue('My next draft');
   expect(await page.evaluate(()=>window.__sendCalls)).toBe(1);
 
@@ -42,7 +42,7 @@ try {
   await composer.fill('Failure stays visible');
   await page.getByRole('button',{name:'Send task message',exact:true}).click();
   const failed=page.locator('article.message').filter({hasText:'Failure stays visible'});
-  await expect(failed).toContainText(/sending/i);
+  await expect(failed.getByRole('status',{name:'Sending',exact:true})).toBeVisible();
   await composer.fill('Do not overwrite this draft');
   await page.evaluate(()=>window.__failSend());
   await expect(failed).toContainText(/failed|not confirmed|could not|unable/i);
@@ -73,7 +73,7 @@ try {
   await page.getByRole('button',{name:'Send task message',exact:true}).click();
   const early=page.locator('article.message').filter({hasText:'Accepted before HTTP acknowledgement'});
   await expect(early).toHaveCount(1);
-  await expect(early).toContainText(/sent/i);
+  await expect(early.getByRole('status',{name:'Sent',exact:true})).toBeVisible();
   await page.evaluate(()=>window.__failSend());
   await expect(early).toHaveCount(1);
   await expect(early.getByRole('button',{name:'Retry',exact:true})).toHaveCount(0);
@@ -85,7 +85,7 @@ try {
   });
   await composer.fill('Keep this across reload');
   await page.getByRole('button',{name:'Send task message',exact:true}).click();
-  await expect(page.locator('article.message').filter({hasText:'Keep this across reload'})).toContainText(/sending/i);
+  await expect(page.locator('article.message').filter({hasText:'Keep this across reload'}).getByRole('status',{name:'Sending',exact:true})).toBeVisible();
   await expect.poll(()=>page.evaluate(()=>sessionStorage.getItem('monitter.optimistic-outbox.v1:main') || '')).toContain('Keep this across reload');
   await page.reload();
   await page.locator('[data-task-id="instant-chat"] .task-select').click({timeout:60000});

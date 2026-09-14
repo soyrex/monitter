@@ -293,6 +293,11 @@
         baselineIds: new Set(Array.isArray(message.baselineIds) ? message.baselineIds : []),
         baselineQueuedIds: new Set(Array.isArray(message.baselineQueuedIds) ? message.baselineQueuedIds : []),
       }));
+      // Embedded panes receive their parent snapshot before mounting and do
+      // not perform their own reload. Reconcile a restored outbox immediately
+      // so an already-persisted user message cannot remain beside its stale
+      // optimistic copy after relaunching the desktop app.
+      if (optimisticMessages.length && snapshot) reconcileOptimisticMessages(snapshot);
     } catch { /* Ignore a corrupt recovery record and leave other drafts intact. */ }
     optimisticOutboxRestored = true;
   });
@@ -1541,11 +1546,14 @@
   function applySnapshot(next: Snapshot, ticket: number, fromBridge = true) {
     if (ticket < snapshotApplied) return;
     snapshotApplied = ticket;
+    // Local optimistic state can change while the revisioned bridge keeps the
+    // same cached Snapshot object. Reconciliation must still run on that cache
+    // hit even though replacing the visible snapshot would be redundant.
+    reconcileOptimisticMessages(next);
     // Revision-aware bridge snapshots retain object identity when unchanged.
     // Avoid unnecessary appearance and workspace work on a poll no-op.
     if (fromBridge && next === lastBridgeSnapshot) return;
     if (fromBridge) lastBridgeSnapshot = next;
-    reconcileOptimisticMessages(next);
     snapshot = next;
     if(embedded) onSnapshot?.(next); else { applyAppearance(next.settings,$appTheme); untrack(pruneWorkspaceScope); }
   }
