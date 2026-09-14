@@ -1498,6 +1498,11 @@
     for (const legacy of ['--paper-base','--sidebar-base','--panel-base','--line-base','--soft-base','--code-base','--ink','--muted','--accent','--accent-rgb','--accent-light-ink','--accent-dark-ink','--on-accent']) root.style.removeProperty(legacy);
     const scale = Math.min(200, Math.max(80, settings.interfaceScale ?? 125));
     root.style.setProperty("--interface-scale", String(scale / 100));
+    const browserScale = isTauri() ? 1 : scale / 100;
+    const previousBrowserScale = root.style.getPropertyValue("--browser-interface-scale");
+    root.style.setProperty("--browser-interface-scale", String(browserScale));
+    root.style.setProperty("--browser-interface-scale-inverse", String(1 / browserScale));
+    if (previousBrowserScale !== String(browserScale)) window.dispatchEvent(new Event('monitter:interface-scale'));
     if (isTauri() && appliedScale !== scale) {
       appliedScale = scale;
       void getCurrentWebview().setZoom(scale / 100).catch(reason => {
@@ -3537,7 +3542,7 @@
   </section>
 {/snippet}
 
-<main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
+<main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
   {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
@@ -4169,6 +4174,15 @@
     grid-template-columns: 252px minmax(0, 1fr);
     background: var(--paper);
   }
+  /* Tauri applies the preference as native WebView zoom. Browsers need an
+     equivalent layout zoom: the inverse dimensions keep the scaled shell
+     fitted to the visual viewport while every px/rem measurement scales as a
+     single system. Embedded panes inherit the root shell's scale exactly once. */
+  .app-shell.web-runtime {
+    width: 100%;
+    height: 100%;
+    zoom: var(--browser-interface-scale, 1);
+  }
   .sidebar {
     position: relative;
     display: flex;
@@ -4485,8 +4499,9 @@
   .pane-grid { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
   .app-shell.mobile-navigation:not(.embedded) {
     display:flex; flex-direction:column; position:fixed; left:0;
-    top:var(--mobile-viewport-top,0px); width:100%;
-    height:100dvh; height:var(--mobile-viewport-height,100dvh);
+    top:var(--scaled-mobile-viewport-top,0px);
+    width:100%;
+    height:var(--scaled-mobile-viewport-height,100dvh);
   }
   .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid {
     position:absolute; inset:0; width:100%; box-sizing:border-box;

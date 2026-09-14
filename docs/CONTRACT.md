@@ -246,10 +246,12 @@ contrast ratio. The paired mobile interface uses the same computed foreground.
 Settings tabs display their active section as `Setting: Appearance`, `Setting: Typography`, etc.
 The horizontal tab, compact selector and workspace sidebar use the same section-aware title.
 Missing new fields receive these defaults when older saved workspaces load. Native WebView zoom
-scales the whole interface; window controls keep their native size and reserved header space.
+scales the whole desktop interface; window controls keep their native size and reserved header space.
+The browser applies the same preference as layout zoom with inverse viewport dimensions, so text,
+controls, spacing, tabs, and panes scale together without overflowing the mobile visual viewport.
 Cmd/Ctrl+plus (including Cmd+=) and Cmd/Ctrl+minus adjust the saved setting by five percentage
 points within 80–200%. Rapid shortcuts accumulate while writes are pending; they do not trigger
-an independent browser zoom.
+the browser's own page-zoom command.
 Cmd+Option+= on macOS and Ctrl+Alt+= on Windows/Linux balance every open pane to the same area while
 preserving the current split arrangement. The same action is available as Balance panes in Controls.
 Activity toggles filter both inline blocks and run detail without deleting captured events.
