@@ -34,29 +34,33 @@ try {
   const page = await browser.newPage({ viewport: { width: 980, height: 800 } });
   await page.goto(`http://127.0.0.1:${address.port}/`);
   const viewport = page.locator('.messages');
-  const context = page.getByLabel('Current user request');
+  const request = page.getByLabel('Latest user request');
 
   await viewport.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
-  await expect(context).toBeHidden();
+  await expect(request).toBeVisible();
+  await expect(request).toHaveCount(1);
+  const flowing = await request.evaluate(element => ({
+    background: getComputedStyle(element).backgroundColor,
+    top: element.getBoundingClientRect().top,
+  }));
   await viewport.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
-  await expect(context).toBeVisible();
-  await expect(context).toContainText('Please review the complete shipment-tracking workflow');
-
-  const collapsed = await context.locator('p').evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight, clamp: getComputedStyle(element).webkitLineClamp }));
-  expect(collapsed.clamp).toBe('2');
-  expect(collapsed.scrollHeight).toBeGreaterThan(collapsed.height + 1);
+  await expect(request).toBeVisible();
+  await expect(request).toHaveCount(1);
+  await expect(request).toContainText('Please review the complete shipment-tracking workflow');
+  const stuck = await request.evaluate(element => ({
+    background: getComputedStyle(element).backgroundColor,
+    top: element.getBoundingClientRect().top,
+    fadeBottom: getComputedStyle(element, '::before').bottom,
+    fadeBackground: getComputedStyle(element, '::before').backgroundImage,
+  }));
+  expect(stuck.background).toBe(flowing.background);
+  expect(flowing.top).toBeGreaterThan(stuck.top + 1);
+  expect(stuck.top).toBeGreaterThanOrEqual(8);
+  expect(stuck.top).toBeLessThanOrEqual(10);
+  expect(stuck.fadeBottom).toBe('-20px');
+  expect(stuck.fadeBackground).toContain('linear-gradient');
   if (process.env.MONITTER_STICKY_SCREENSHOT) { await page.waitForTimeout(250); await page.screenshot({ path: process.env.MONITTER_STICKY_SCREENSHOT }); }
-
-  const expand = page.getByRole('button', { name: 'Expand current request', exact: true });
-  await expand.click();
-  await expect(page.getByRole('button', { name: 'Collapse current request', exact: true })).toHaveAttribute('aria-expanded', 'true');
-  expect(await context.locator('p').evaluate(element => element.clientHeight)).toBeGreaterThan(collapsed.height);
-
-  await page.setViewportSize({ width: 980, height: 500 });
-  await expect(context).toBeHidden();
-  await page.setViewportSize({ width: 980, height: 650 });
-  await expect(context).toBeVisible();
-  console.log('Sticky user request hides before its anchor, floats over long output, expands, and respects the 500px viewport threshold.');
+  console.log('The latest user bubble itself sticks in place with an identical background and a 20px page-colour fade.');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

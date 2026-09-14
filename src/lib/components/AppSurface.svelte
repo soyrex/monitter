@@ -3441,7 +3441,7 @@
           </div>{/if}
         <section class="conversation">
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
-          <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`} contextAnchorId={latestUserRequest?.id} contextText={latestUserRequest ? operatorMessageText(latestUserRequest.text) : ''}>
+          <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`} stickyRequest={!!latestUserRequest}>
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}{@const collaboration=item.value.kind==='collaboration'?collaborationFor(item.value.detail):null}{#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<RunActivity event={item.value} />{/if}
               {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length}>
@@ -3452,6 +3452,7 @@
               {:else}{@const message = item.value}{#if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>{:else if message.collaborationId && collaborationFor(message.collaborationId)}{:else}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
+                  class:sticky-user-request={message.role === "user" && message.id === latestUserRequest?.id}
                   class:system={message.role === "system"}
                   class:final-answer={message.role === "assistant" && message.phase === "final_answer"}
                   class:optimistic-message={!!optimistic}
@@ -3459,7 +3460,6 @@
                   data-message-phase={message.phase}
                   data-live-entry={message.streamStatus==='streaming'}
                   data-delivery-status={optimistic?.status}
-                  data-context-message-id={message.role === 'user' ? message.id : undefined}
                 >
                   <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
                     {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot?.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}

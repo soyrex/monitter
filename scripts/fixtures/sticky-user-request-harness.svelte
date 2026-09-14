@@ -6,8 +6,8 @@
 </script>
 
 <main>
-  <MessagePane resetKey="sticky-request" contextAnchorId="sticky-user-message" contextText={request}>
-    <article class="user" data-context-message-id="sticky-user-message">{request}</article>
+  <MessagePane resetKey="sticky-request" stickyRequest>
+    <article class="message user sticky-user-request" aria-label="Latest user request">{request}</article>
     <article>{response}</article>
   </MessagePane>
 </main>
@@ -16,5 +16,5 @@
   :global(html,body,#app) { height:100%; margin:0; overflow:hidden; }
   main { display:flex; height:100%; --paper:#f4f6f7; --panel:#fff; --soft:#e7ebed; --line:#cad1d4; --ink:#182024; --muted:#68747a; --accent:#0ca7dd; --accent-ink:#007cac; --mono:"IBM Plex Mono",monospace; --chat-font:"IBM Plex Sans",sans-serif; --chat-font-size:16px; --chat-line-height:1.55; }
   article { margin:0 0 24px; color:var(--ink); font:16px/1.55 var(--chat-font); }
-  article.user { margin-left:auto; max-width:80%; padding:12px 14px; border-radius:10px 10px 3px 10px; background:var(--soft); }
+  article.user { margin-left:auto; max-width:100%; padding:12px 14px; border-radius:10px 10px 3px 10px; background:var(--soft); }
 </style>
