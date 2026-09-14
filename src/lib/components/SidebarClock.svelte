@@ -103,8 +103,8 @@
     letter-spacing: .09em;
   }
   .widget-toggle time { font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
-  .widget-toggle :global(.widget-chevron) { justify-self: end; transition: transform 150ms ease-out; }
-  .expanded .widget-toggle :global(.widget-chevron) { transform: rotate(180deg); }
+  .widget-toggle :global(.widget-chevron) { justify-self: end; transform: rotate(180deg); transition: transform 150ms ease-out; }
+  .expanded .widget-toggle :global(.widget-chevron) { transform: rotate(0); }
   .widget-body {
     display: flex;
     align-items: center;
