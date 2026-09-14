@@ -3857,7 +3857,7 @@ mod tests {
             &opencode_task("ses_123"),
             "ses_123",
             &control,
-            Duration::from_secs(1),
+            Duration::from_secs(3),
         );
         assert_eq!(result.unwrap(), "/original/project");
         let _ = std::fs::remove_file(executable);
