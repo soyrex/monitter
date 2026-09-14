@@ -1,9 +1,11 @@
 //! End-to-end ACP fixtures. These are temporary local subprocesses only.
 
 use crate::{
+    extensions::{ManagedSkill, McpServerConfig, McpTransport},
     model::{AcpLaunch, CreateTaskInput},
     Service,
 };
+use std::collections::BTreeMap;
 use std::{
     fs,
     ops::Deref,
@@ -45,10 +47,10 @@ const update=(text)=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/u
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
  if(frame.method==='initialize') reply(frame.id,{protocolVersion:1,agentCapabilities:process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}});
- else if(frame.method==='session/new') { if(process.argv[2]==='mcp' && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const env=(servers[0]?.env ?? []).map(item=>item.name).join(','); const endpoint=(servers[0]?.env ?? []).find(item=>item.name==='MONITTER_ENDPOINT')?.value ?? ''; fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.command ?? ''}-${env}-${endpoint}\n`); } reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); }
+ else if(frame.method==='session/new') { if(process.argv[2]==='mcp' && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const env=(servers[0]?.env ?? []).map(item=>item.name).join(','); const endpoint=(servers[0]?.env ?? []).find(item=>item.name==='MONITTER_ENDPOINT')?.value ?? ''; fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.command ?? ''}-${env}-${endpoint}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); reply(frame.id,{stopReason:'end_turn'}); } }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
 });
@@ -228,6 +230,143 @@ fn acp_collaboration_uses_scoped_stdio_server_and_revokes_on_stop() {
             "scoped collaboration grant must be revoked after stop"
         );
     }
+}
+
+#[test]
+fn managed_mcp_and_skill_reach_acp_launch_without_rewriting_user_transcript() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-managed-{}", crate::id()));
+    let fixture = fixture_with_args(
+        "managed",
+        vec!["managed".into(), capture.to_string_lossy().into_owned()],
+    );
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let mut config = fixture.extension_config().unwrap();
+    config.mcp_servers.push(McpServerConfig {
+        id: "11111111-1111-4111-8111-111111111111".into(),
+        name: "Private docs".into(),
+        enabled: true,
+        agent_ids: vec![agent.id.clone()],
+        transport: McpTransport::Stdio,
+        command: "/usr/bin/true".into(),
+        args: vec!["private-argument".into()],
+        env: BTreeMap::from([("PRIVATE_TOKEN".into(), "fixture-secret".into())]),
+        url: String::new(),
+        headers: BTreeMap::new(),
+    });
+    config.skills.push(ManagedSkill {
+        id: "22222222-2222-4222-8222-222222222222".into(),
+        name: "Boundary check".into(),
+        description: String::new(),
+        enabled: true,
+        agent_ids: vec![agent.id.clone()],
+        content: "MANAGED_SKILL_SENTINEL".into(),
+    });
+    fixture.save_extension_config(config).unwrap();
+
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "Managed ACP fixture".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let prompt = fixture
+        .accept_send(task.id.clone(), "original user request".into(), vec![])
+        .unwrap()
+        .unwrap();
+    fixture.launch(task.id.clone(), prompt).unwrap();
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "completed")
+    });
+
+    let captured = fs::read_to_string(&capture).unwrap();
+    let _ = fs::remove_file(&capture);
+    assert!(captured.contains(r#""name":"11111111-1111-4111-8111-111111111111""#), "{captured}");
+    assert!(
+        captured.contains(r#""name":"PRIVATE_TOKEN","value":"fixture-secret""#),
+        "{captured}"
+    );
+    assert!(
+        captured.contains("prompt:Portable skills enabled for this agent:"),
+        "{captured}"
+    );
+    assert!(captured.contains("MANAGED_SKILL_SENTINEL"), "{captured}");
+
+    let stored_user = fixture
+        .snapshot()
+        .unwrap()
+        .messages
+        .into_iter()
+        .filter(|message| message.task_id == task.id && message.role == "user")
+        .map(|message| message.text)
+        .collect::<Vec<_>>();
+    assert_eq!(stored_user, vec!["original user request"]);
+    assert!(!stored_user
+        .iter()
+        .any(|text| text.contains("MANAGED_SKILL_SENTINEL")));
+}
+
+#[test]
+fn managed_http_mcp_is_rejected_before_prompt_without_advertised_capability() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-http-{}", crate::id()));
+    let fixture = fixture_with_args(
+        "managed-http",
+        vec!["managed".into(), capture.to_string_lossy().into_owned()],
+    );
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let mut config = fixture.extension_config().unwrap();
+    config.mcp_servers.push(McpServerConfig {
+        id: "33333333-3333-4333-8333-333333333333".into(),
+        name: "Remote docs".into(),
+        enabled: true,
+        agent_ids: vec![agent.id.clone()],
+        transport: McpTransport::Http,
+        command: String::new(),
+        args: vec![],
+        env: BTreeMap::new(),
+        url: "https://example.test/mcp".into(),
+        headers: BTreeMap::from([("Authorization".into(), "fixture-secret".into())]),
+    });
+    fixture.save_extension_config(config).unwrap();
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "HTTP capability fixture".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let prompt = fixture
+        .accept_send(task.id.clone(), "must not prompt".into(), vec![])
+        .unwrap()
+        .unwrap();
+    fixture.launch(task.id.clone(), prompt).unwrap();
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "error")
+    });
+    assert!(!fs::read_to_string(&capture)
+        .unwrap_or_default()
+        .contains("prompt:"));
+    let _ = fs::remove_file(&capture);
 }
 
 #[test]

@@ -34,6 +34,7 @@ import type {
   UiSnapshotResponse,
   TaskEventsPage,
   SendAccepted,
+  ExtensionConfig,
 } from "./types";
 
 export interface MonitterBridge {
@@ -64,6 +65,8 @@ export interface MonitterBridge {
   revokeApprovalRule(ruleId: string): Promise<Snapshot>;
   resolveInput(approvalId: string, response: unknown): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;
+  getExtensionConfig(): Promise<ExtensionConfig>;
+  saveExtensionConfig(config: ExtensionConfig): Promise<ExtensionConfig>;
   saveChannel(channel: Channel): Promise<Snapshot>;
   setChannelAgentConversation(channelId: string, enabled: boolean, turnLimit: number): Promise<Snapshot>;
   stopChannelAgentConversation(channelId: string): Promise<Snapshot>;
@@ -230,6 +233,8 @@ const nativeBridge: MonitterBridge = {
   revokeApprovalRule: (ruleId) => invoke<Snapshot>("revoke_approval_rule", { ruleId }),
   resolveInput: (approvalId, response) => invoke<Snapshot>("resolve_input", { approvalId, response }),
   saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
+  getExtensionConfig: () => isLanBrowser() ? desktopOnly() : invoke<ExtensionConfig>('get_extension_config'),
+  saveExtensionConfig: (config) => isLanBrowser() ? desktopOnly() : invoke<ExtensionConfig>('save_extension_config', { config }),
   saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
   setChannelAgentConversation: (channelId, enabled, turnLimit) => invoke<Snapshot>("set_channel_agent_conversation", {channelId, enabled, turnLimit}),
   stopChannelAgentConversation: (channelId) => invoke<Snapshot>("stop_channel_agent_conversation", {channelId}),
@@ -316,6 +321,8 @@ const previewBridge: MonitterBridge = {
   revokeApprovalRule: () => desktopOnly(),
   resolveInput: () => desktopOnly(),
   saveSettings: () => desktopOnly(),
+  getExtensionConfig: () => desktopOnly(),
+  saveExtensionConfig: () => desktopOnly(),
   saveChannel: () => desktopOnly(),
   setChannelAgentConversation: () => desktopOnly(),
   stopChannelAgentConversation: () => desktopOnly(),
@@ -387,6 +394,8 @@ export function getBridge(): MonitterBridge {
       resolveInput: (approvalId, response) => test.invoke("resolve_input", { approvalId, response }) as Promise<Snapshot>,
       saveSettings: (settings) =>
         test.invoke("save_settings", { settings }) as Promise<Snapshot>,
+      getExtensionConfig: () => test.invoke('get_extension_config') as Promise<ExtensionConfig>,
+      saveExtensionConfig: (config) => test.invoke('save_extension_config', { config }) as Promise<ExtensionConfig>,
       saveChannel: (channel) =>
         test.invoke("save_channel", { channel }) as Promise<Snapshot>,
       setChannelAgentConversation: (channelId, enabled, turnLimit) => test.invoke("set_channel_agent_conversation", {channelId,enabled,turnLimit}) as Promise<Snapshot>,

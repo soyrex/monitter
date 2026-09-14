@@ -142,6 +142,21 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         service.complete_app_server_turn(&task_id, &control, None, "error", Some("Codex app-server interactive sessions currently require a local desktop host. Monitter will not fall back to an uncertain exec resume turn on an SSH host.".into()));
         return;
     }
+    let mut extensions = match service.extension_config().map(|config| {
+        crate::extensions_runtime::RuntimeExtensions::for_agent(&config, &task.agent_id)
+    }) {
+        Ok(extensions) => extensions,
+        Err(error) => {
+            service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
+            return;
+        }
+    };
+    if let Err(error) = extensions.validate_for("codex", &host.kind) {
+        service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
+        return;
+    }
+    control.set_mcp_fingerprint(extensions.mcp_fingerprint());
+    let prompt = extensions.prompt(&prompt);
     let executable = match resolve_local(&host.codex_path) {
         Ok(value) => value,
         Err(error) => {
@@ -407,7 +422,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     .and_then(|_| {
                         send(
                             &control,
-                            thread_request(&task, helper.to_str(), grant.is_some()),
+                            thread_request(&task, helper.to_str(), grant.is_some(), &extensions),
                         )
                     })
                     .is_err()
@@ -1452,7 +1467,12 @@ fn turn_request(thread_id: &str, prompt: &str, task: &Task) -> Value {
     }
     json!({"id":FIRST_TURN_ID,"method":"turn/start","params":params})
 }
-fn thread_request(task: &Task, helper: Option<&str>, has_grant: bool) -> Value {
+fn thread_request(
+    task: &Task,
+    helper: Option<&str>,
+    has_grant: bool,
+    extensions: &crate::extensions_runtime::RuntimeExtensions,
+) -> Value {
     let sandbox = if task.sandbox == "yolo" {
         "danger-full-access"
     } else {
@@ -1475,10 +1495,14 @@ fn thread_request(task: &Task, helper: Option<&str>, has_grant: bool) -> Value {
             params["serviceTier"] = Value::String(if fast { "priority" } else { "default" }.into());
         }
     }
+    let mut config = extensions.codex_config();
     if has_grant {
         if let Some(helper) = helper {
-            params["config"] = json!({"mcp_servers.monitter.command":"python3","mcp_servers.monitter.args":[helper],"mcp_servers.monitter.env_vars":["MONITTER_ENDPOINT","MONITTER_TOKEN"],"mcp_servers.monitter.required":true,"mcp_servers.monitter.enabled_tools":["list_agents","delegate_task","send_message","get_task_result","wait_for_task","list_messages","cancel_delegation"]});
+            config.extend(json!({"mcp_servers.monitter.command":"python3","mcp_servers.monitter.args":[helper],"mcp_servers.monitter.env_vars":["MONITTER_ENDPOINT","MONITTER_TOKEN"],"mcp_servers.monitter.required":true,"mcp_servers.monitter.enabled_tools":["list_agents","delegate_task","send_message","get_task_result","wait_for_task","list_messages","cancel_delegation"]}).as_object().cloned().unwrap_or_default());
         }
+    }
+    if !config.is_empty() {
+        params["config"] = Value::Object(config);
     }
     if let Some(id) = task
         .native_session_id
@@ -1627,7 +1651,12 @@ mod tests {
             "modelSettings":null, "sandbox":"read-only", "projectId":null
         }))
         .unwrap();
-        let request = thread_request(&task, None, false);
+        let request = thread_request(
+            &task,
+            None,
+            false,
+            &crate::extensions_runtime::RuntimeExtensions::default(),
+        );
         assert_eq!(request["method"], "thread/resume");
         assert_eq!(request["params"]["excludeTurns"], Value::Bool(true));
     }
@@ -1673,7 +1702,9 @@ mod tests {
 
     #[test]
     fn remembered_file_change_requires_content_and_keeps_change_ids() {
-        assert!(remembered_file_change_item(&json!({"id":"envelope","status":"pending"})).is_none());
+        assert!(
+            remembered_file_change_item(&json!({"id":"envelope","status":"pending"})).is_none()
+        );
         let item = remembered_file_change_item(&json!({
             "id":"envelope", "status":"pending", "changes":[{"path":"a.rs","toolArgumentId":"semantic-id"}]
         })).unwrap();

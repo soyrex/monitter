@@ -27,6 +27,8 @@ mod collaboration;
 mod collaboration_runtime;
 mod collaboration_transport;
 mod deletion;
+mod extensions;
+mod extensions_runtime;
 mod git;
 mod goals;
 mod lan;
@@ -217,6 +219,8 @@ fn bounded_rule_detail(detail: &str) -> String {
 pub(crate) struct Service {
     app: Option<AppHandle>,
     store: store::Store,
+    extensions: extensions::ExtensionStore,
+    extension_writes: Mutex<()>,
     data: Mutex<ServiceData>,
     runs: Mutex<RunRegistry>,
     // A real CUA image result is held only until the same run emits its next
@@ -291,9 +295,12 @@ fn task_descendants(snapshot: &Snapshot, roots: &[String]) -> Vec<String> {
 impl Service {
     fn open(app: Option<AppHandle>, dir: PathBuf) -> Result<Arc<Self>, String> {
         let (store, snapshot, task_hosts, attachments) = store::Store::open(dir.clone())?;
+        let extensions = extensions::ExtensionStore::open(&dir)?;
         let service = Arc::new(Self {
             app,
             store,
+            extensions,
+            extension_writes: Mutex::new(()),
             data: Mutex::new(ServiceData {
                 snapshot,
                 task_hosts,
@@ -327,6 +334,61 @@ impl Service {
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())
             .map(|data| data.snapshot.clone())
+    }
+
+    /// This private configuration is intentionally separate from Snapshot so
+    /// LAN/controller/visitor projections cannot accidentally expose MCP
+    /// headers, environment values, or skill text.
+    pub(crate) fn extension_config(&self) -> Result<extensions::ExtensionConfig, String> {
+        let agent_ids = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?
+            .snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        self.extensions.load(&agent_ids)
+    }
+
+    fn save_extension_config(
+        &self,
+        config: extensions::ExtensionConfig,
+    ) -> Result<extensions::ExtensionConfig, String> {
+        let _write_guard = self
+            .extension_writes
+            .lock()
+            .map_err(|_| "Extension configuration lock failed.".to_string())?;
+        let agent_ids = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?
+            .snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        let previous = self.extensions.load(&agent_ids)?;
+        if !extensions::revision_matches(&config, &previous) {
+            return Err("Extension configuration changed in another Settings pane. Refresh it before saving; your draft was not overwritten.".into());
+        }
+        let saved = extensions::normalize_for_save(config, &agent_ids)?;
+        let affected = extensions::changed_mcp_agent_ids(&previous, &saved);
+        // A changed server can present different tools under the same display
+        // name. Remembered grants are scoped to the affected agents and are
+        // removed durably *before* that configuration can be read on a later
+        // launch. A later config-write failure is conservative (grants stay
+        // revoked) rather than permitting a replacement server to inherit one.
+        if !affected.is_empty() {
+            self.mutate(None, |snapshot| {
+                snapshot
+                    .approval_rules
+                    .retain(|rule| !affected.contains(&rule.agent_id));
+                Ok(())
+            })?;
+        }
+        self.extensions.save(saved, &agent_ids)
     }
 
     fn ui_snapshot(&self, revision: Option<&str>) -> Result<lan_sync::UiSnapshot, String> {
@@ -880,6 +942,12 @@ impl Service {
         let Some(raw) = input.raw_input.as_ref() else {
             return Ok(None);
         };
+        // A managed MCP configuration may change tool identity without
+        // changing the provider executable. Bind remembered approval rules to
+        // the runtime's secret-free digest for this actual resident run.
+        let managed_mcp_fingerprint = self
+            .resident_control(&input.task_id)?
+            .and_then(|control| control.mcp_fingerprint());
         let data = self
             .data
             .lock()
@@ -909,6 +977,22 @@ impl Service {
                     .find(|host| host.id == task.host_id)
             })
             .ok_or("Approval host was not found.")?;
+        let launcher_scope = match managed_mcp_fingerprint {
+            Some(fingerprint) => serde_json::json!({
+                "provider": task.provider,
+                "acp": task.acp,
+                "agentAcp": agent.acp,
+                "managedMcp": fingerprint,
+            }),
+            // Preserve existing non-MCP launcher fingerprints and therefore
+            // their scoped grants. Managed MCP is opt-in and gets the extra
+            // identity dimension only while it is actually attached to a run.
+            None => serde_json::json!({
+                "provider": task.provider,
+                "acp": task.acp,
+                "agentAcp": agent.acp,
+            }),
+        };
         Ok(Some(ApprovalScope {
             agent_id: task.agent_id.clone(),
             host_id: task.host_id.clone(),
@@ -919,9 +1003,7 @@ impl Service {
                 &serde_json::to_value(host).map_err(|_| "Could not scope approval host.")?,
             )
             .ok_or("Approval host scope is too large.")?,
-            launcher_fingerprint: approval_fingerprint(
-                &serde_json::json!({"provider":task.provider,"acp":task.acp,"agentAcp":agent.acp}),
-            )
+            launcher_fingerprint: approval_fingerprint(&launcher_scope)
             .ok_or("Approval launcher scope is too large.")?,
             action_fingerprint: match approval_fingerprint(&strip_known_approval_envelope(raw)) {
                 Some(value) => value,
@@ -3582,6 +3664,31 @@ fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
     state.0.snapshot()
 }
 
+/// Native desktop only. This command is deliberately absent from the LAN
+/// dispatcher and Snapshot because MCP environment/header values are private.
+#[tauri::command]
+async fn get_extension_config(
+    state: State<'_, AppState>,
+) -> Result<extensions::ExtensionConfig, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.extension_config())
+        .await
+        .map_err(|_| "Extension configuration worker failed.".to_string())?
+}
+
+/// Native desktop only. Saving configuration does not start, stop, or replay
+/// a run; adapters take the persisted configuration on their next launch.
+#[tauri::command]
+async fn save_extension_config(
+    state: State<'_, AppState>,
+    config: extensions::ExtensionConfig,
+) -> Result<extensions::ExtensionConfig, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_extension_config(config))
+        .await
+        .map_err(|_| "Extension configuration worker failed.".to_string())?
+}
+
 #[tauri::command]
 async fn get_ui_snapshot(
     state: State<'_, AppState>,
@@ -5532,6 +5639,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_extension_config,
+            save_extension_config,
             get_ui_snapshot,
             get_task_events,
             get_lan_server_info,
@@ -6805,6 +6914,46 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         assert_eq!(restored.status, "approved");
         assert_eq!(restored.decision.as_deref(), Some("approve_once"));
         assert!(restored.resolved_at.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn managed_mcp_run_digest_prevents_remembered_approval_reuse_after_config_change() {
+        let dir = temp_dir("managed-mcp-approval-scope");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let task = service
+            .create_task(task_input(
+                service.snapshot().unwrap().agents[0].id.clone(),
+                "Managed MCP",
+                None,
+            ))
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                let task = snapshot.tasks.iter_mut().find(|item| item.id == task.id).unwrap();
+                task.provider = "claude".into();
+                task.status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let control = service.reserve_run(&task.id).unwrap();
+        control.mark_resident();
+        control.set_mcp_fingerprint(Some("old-private-config-digest".into()));
+        let request = |run: &str| CreateApprovalRequest {
+            task_id: task.id.clone(), provider: "claude".into(), run_id: run.into(),
+            tool: "Bash".into(), summary: "Run command".into(), detail: "private".into(),
+            risk: "high".into(), raw_input: Some(serde_json::json!({"command":"printf exact"})),
+        };
+        let old = service.create_approval_request(request("old")).unwrap();
+        service.resolve_approval_request(&old.id, ApprovalDecision::ApproveAlways).unwrap();
+        control.set_mcp_fingerprint(Some("new-private-config-digest".into()));
+        let new = service.create_approval_request(request("new")).unwrap();
+        let snapshot = service.snapshot().unwrap();
+        let new = snapshot.approval_requests.iter().find(|item| item.id == new.id).unwrap();
+        assert!(new.rule_id.is_none());
+        control.cancel();
+        service.release_app_server_run(&task.id, &control);
+        drop(service);
         let _ = std::fs::remove_dir_all(dir);
     }
 
