@@ -129,7 +129,7 @@
         items={conversationItems}
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
         stickyKey={latestUserRequest?.id ?? null}
-        {active}>
+        active={true}>
         {#snippet children(item, _index)}
           {#if item.type === 'activity'}
             {@const collaboration=item.value.kind==='collaboration' ? collaborationFor(item.value.detail) : null}
