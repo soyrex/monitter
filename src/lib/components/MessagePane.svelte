@@ -3,7 +3,7 @@
   import { onMount, type Snippet } from 'svelte';
   import { ArrowDown } from '@lucide/svelte';
 
-  let { resetKey, children, header, stickyRequest = false }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean } = $props();
+  let { resetKey, children, header, stickyRequest = false, active = true }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean } = $props();
   let viewport = $state<HTMLDivElement>();
   let content = $state<HTMLDivElement>();
   let heading = $state<HTMLDivElement>();
@@ -13,7 +13,7 @@
   let lastScrollHeight = 0;
   let followFrame: number | undefined;
   const bottomThreshold = 50;
-  const followInterval = 1_000;
+  let documentVisible = $state(true);
 
   function distanceFromLatest() {
     return viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop) : 0;
@@ -28,7 +28,7 @@
   }
 
   function rememberMetrics() {
-    if (!viewport) return;
+    if (!viewport || !active || !documentVisible) return;
     lastViewportHeight = viewport.clientHeight;
     lastScrollHeight = viewport.scrollHeight;
   }
@@ -46,7 +46,7 @@
     // Svelte children, font/image layout and composer resizing can settle after
     // the first measurement. Coalesce a final correction without smooth-scroll
     // animations that would constantly lag behind streamed replies.
-    if (followFrame !== undefined) return;
+    if (followFrame !== undefined || !active || !documentVisible) return;
     followFrame = requestAnimationFrame(() => {
       followFrame = undefined;
       if (followingLatest) pinToLatest();
@@ -78,10 +78,21 @@
   // has rendered that conversation. Background updates do not change this key.
   $effect(() => {
     resetKey;
-    jumpToLatest();
+    if (active && documentVisible) jumpToLatest();
   });
 
   onMount(() => {
+    const visibilityChanged = () => {
+      documentVisible = document.visibilityState !== 'hidden';
+      if (documentVisible && active) { rememberMetrics(); jumpToLatest(); }
+    };
+    documentVisible = document.visibilityState !== 'hidden';
+    document.addEventListener('visibilitychange', visibilityChanged);
+    return () => document.removeEventListener('visibilitychange', visibilityChanged);
+  });
+
+  $effect(() => {
+    if (!viewport || !active || !documentVisible) return;
     rememberMetrics();
     const observer = new ResizeObserver(() => {
       // Covers streamed content, expanded tools, images/fonts and pane resizing.
@@ -101,17 +112,11 @@
       if (followingLatest) followLayout();
     });
     if (content) liveTextObserver.observe(content, { characterData: true, subtree: true });
-    const interval = window.setInterval(() => {
-      // ResizeObserver catches known layout changes; this lightweight check
-      // closes gaps from late browser layout/paint while reader intent remains
-      // inside the 50px follow zone.
-      if (followingLatest && !showJump && !atAbsoluteLatest()) pinToLatest();
-    }, followInterval);
     return () => {
       observer.disconnect();
       liveTextObserver.disconnect();
-      window.clearInterval(interval);
       if (followFrame !== undefined) cancelAnimationFrame(followFrame);
+      followFrame = undefined;
     };
   });
 </script>

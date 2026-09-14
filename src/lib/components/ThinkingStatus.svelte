@@ -1,11 +1,12 @@
 <script lang="ts">
   import { motionView } from '$lib/motion';
   import { untrack, type Snippet } from 'svelte';
+  import { observeActivityClock } from '$lib/activity-clock';
   import { Brain } from '@lucide/svelte';
   import AnimatedTitle from './AnimatedTitle.svelte';
 
-  let { avatar, running = false, starting = false, startedAt }: {
-    avatar?: Snippet; running?: boolean; starting?: boolean; startedAt?: number;
+  let { avatar, running = false, starting = false, startedAt, active = true }: {
+    avatar?: Snippet; running?: boolean; starting?: boolean; startedAt?: number; active?: boolean;
   } = $props();
   const labels = [
     'Thinking', 'Pondering', 'Reasoning', 'Stewing', 'Considering',
@@ -15,6 +16,7 @@
   let label = $state(labels[0]);
   let elapsedSeconds = $state(0);
   let activeOrigin = 0;
+  let labelBucket = -1;
   const validOrigin = (value: number | undefined, current: number) =>
     typeof value === 'number' && Number.isFinite(value) && value >= 946_684_800_000 && value <= current
       ? value
@@ -31,27 +33,35 @@
     label = labels[(labels.indexOf(label) + offset) % labels.length];
   }
   $effect(() => {
-    if (!running || starting) return;
-    untrack(nextLabel);
-    const timer = window.setInterval(nextLabel, 5_000);
-    return () => window.clearInterval(timer);
-  });
-  $effect(() => {
-    const active = running || starting;
+    const statusActive = running || starting;
     const requestedOrigin = startedAt;
-    if (!active) {
+    if (!statusActive) {
       activeOrigin = 0;
       elapsedSeconds = 0;
+      labelBucket = -1;
       return;
     }
     const current = Date.now();
-    if (!activeOrigin || (requestedOrigin !== undefined && validOrigin(requestedOrigin, current) !== activeOrigin)) {
-      activeOrigin = validOrigin(requestedOrigin, current);
+    const nextOrigin = validOrigin(requestedOrigin, current);
+    if (!activeOrigin || nextOrigin !== activeOrigin) {
+      activeOrigin = nextOrigin;
+      // A newly active run should visibly begin as "Thinking". Do not rotate
+      // the label until it has actually crossed the first five-second bucket.
+      label = labels[0];
+      labelBucket = 0;
     }
-    const update = () => { elapsedSeconds = Math.max(0, Math.floor((Date.now() - activeOrigin) / 1_000)); };
-    update();
-    const timer = window.setInterval(update, 1_000);
-    return () => window.clearInterval(timer);
+    const update = (now: number) => {
+      elapsedSeconds = Math.max(0, Math.floor((now - activeOrigin) / 1_000));
+      const nextBucket = Math.floor((now - activeOrigin) / 5_000);
+      if (running && !starting && nextBucket > labelBucket) {
+        labelBucket = nextBucket;
+        untrack(nextLabel);
+      }
+    };
+    update(Date.now());
+    // Recalculate from startedAt when a pane returns; elapsed time never pauses.
+    if (!active) return;
+    return observeActivityClock(update);
   });
 </script>
 
