@@ -5,7 +5,7 @@
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
   import { floating } from '$lib/floating';
-  import { isCancellationMessage, showThinkingFallback, type ConversationActivityItem } from '$lib/activity-grouping';
+  import { isBlankReasoning, isCancellationMessage, showThinkingFallback, type ConversationActivityItem } from '$lib/activity-grouping';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
@@ -102,6 +102,12 @@
   const latestUserRequest = $derived(conversationItems
     .flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : [])
     .at(-1));
+  const thinking = $derived.by(() => {
+    if (task.status !== 'running' || pendingApprovals.length) return false;
+    const latest = conversationItems.at(-1);
+    return showThinkingFallback(conversationItems, true) ||
+      (latest?.type === 'reasoning-group' && latest.values.every(isBlankReasoning));
+  });
   const collaborationFor = (id: string) => collaborations.find(item => item.id === id);
 </script>
 
@@ -124,7 +130,7 @@
 {/if}
 <section class="conversation">
     <TaskActivity {goal} {goalNote} tools={computerTools} onstop={onStop} disabled={busy} />
-    <MessagePane {active} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!latestUserRequest}>
+    <MessagePane {active} {thinking} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!latestUserRequest}>
       {#if conversationItems.length}<TranscriptVirtualList
         items={conversationItems}
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
