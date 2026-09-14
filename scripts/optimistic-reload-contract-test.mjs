@@ -5,6 +5,12 @@ const source = readFileSync('src/lib/components/AppSurface.svelte', 'utf8');
 
 assert.match(
   source,
+  /if \(!embedded \|\| !parentSnapshot\) return;[\s\S]*?snapshot = next;[\s\S]*?untrack\(\(\) => reconcileOptimisticMessages\(next\)\)/,
+  'an embedded pane must reconcile its local optimistic outbox when the root supplies a newer snapshot',
+);
+
+assert.match(
+  source,
   /if \(optimisticMessages\.length && snapshot\) reconcileOptimisticMessages\(snapshot\)/,
   'a restored embedded-pane outbox must reconcile against its already-present parent snapshot',
 );

@@ -201,7 +201,15 @@
   let settingsOpen = $state(false), settingsCategory = $state('appearance');
   let openChannelIds = $state<string[]>([]);
   let channelRecipients = $state<Record<string,string[]>>({});
-  $effect(()=>{ if(embedded && parentSnapshot) snapshot=parentSnapshot; });
+  $effect(()=>{
+    if (!embedded || !parentSnapshot) return;
+    const next = parentSnapshot;
+    snapshot = next;
+    // Split panes no longer own bridge listeners. Reconcile their local
+    // optimistic outbox whenever the root supplies a newer shared snapshot,
+    // otherwise the persisted message appears beside its stale sending copy.
+    untrack(() => reconcileOptimisticMessages(next));
+  });
   $effect(()=>{ if(embedded) activeWorkspaceKey=workspaceKey; });
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
