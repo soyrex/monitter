@@ -42,13 +42,18 @@
       return;
     }
     const current = Date.now();
-    if (!activeOrigin || (requestedOrigin !== undefined && validOrigin(requestedOrigin, current) !== activeOrigin)) {
-      activeOrigin = validOrigin(requestedOrigin, current);
+    const nextOrigin = validOrigin(requestedOrigin, current);
+    if (!activeOrigin || nextOrigin !== activeOrigin) {
+      activeOrigin = nextOrigin;
+      // A newly active run should visibly begin as "Thinking". Do not rotate
+      // the label until it has actually crossed the first five-second bucket.
+      label = labels[0];
+      labelBucket = 0;
     }
     const update = (now: number) => {
       elapsedSeconds = Math.max(0, Math.floor((now - activeOrigin) / 1_000));
       const nextBucket = Math.floor((now - activeOrigin) / 5_000);
-      if (running && !starting && nextBucket !== labelBucket) {
+      if (running && !starting && nextBucket > labelBucket) {
         labelBucket = nextBucket;
         untrack(nextLabel);
       }

@@ -19,13 +19,52 @@
   let documentVisible = $state(true);
   let range = $state({ start: 0, end: 0 });
   const heights = new Map<string, number>();
+  type Metrics = { keys: string[]; indexByKey: Map<string, number>; values: number[]; tree: number[] };
+  let metrics: Metrics = { keys: [], indexByKey: new Map(), values: [], tree: [0] };
+  // Fenwick-tree writes are intentionally imperative; this revision makes the
+  // spacer derived values react once for each ResizeObserver batch.
+  let metricsRevision = $state(0);
   let resizeObserver: ResizeObserver | undefined;
   let frame: number | undefined;
 
   const heightFor = (item: T, index: number) => heights.get(getKey(item, index)) ?? estimateHeight;
-  const offsetFor = (end: number) => items.slice(0, end).reduce((total, item, index) => total + heightFor(item, index), 0);
-  const totalHeight = $derived(offsetFor(items.length));
-  const stickyIndex = $derived(stickyKey ? items.findIndex((item, index) => getKey(item, index) === stickyKey) : -1);
+  function add(metric: Metrics, index: number, delta: number) {
+    for (let node = index + 1; node < metric.tree.length; node += node & -node) metric.tree[node] += delta;
+  }
+  function offsetFor(end: number) {
+    metricsRevision;
+    let total = 0;
+    for (let node = Math.max(0, Math.min(end, metrics.values.length)); node > 0; node -= node & -node) total += metrics.tree[node];
+    return total;
+  }
+  function indexAtOffset(offset: number) {
+    metricsRevision;
+    const count = metrics.values.length;
+    if (!count || offset <= 0) return 0;
+    let index = 0, sum = 0, step = 1;
+    while (step << 1 <= count) step <<= 1;
+    for (; step; step >>= 1) {
+      const next = index + step;
+      if (next <= count && sum + metrics.tree[next] <= offset) { index = next; sum += metrics.tree[next]; }
+    }
+    return Math.min(count - 1, index);
+  }
+  function rebuildMetrics() {
+    const keys = items.map(getKey);
+    const liveKeys = new Set(keys);
+    for (const key of heights.keys()) if (!liveKeys.has(key)) heights.delete(key);
+    const next: Metrics = { keys, indexByKey: new Map(), values: [], tree: Array(keys.length + 1).fill(0) };
+    for (let index = 0; index < keys.length; index += 1) {
+      next.indexByKey.set(keys[index], index);
+      const value = heightFor(items[index], index);
+      next.values.push(value);
+      add(next, index, value);
+    }
+    metrics = next;
+    metricsRevision += 1;
+  }
+  const totalHeight = $derived(offsetFor(metrics.values.length));
+  const stickyIndex = $derived(stickyKey ? metrics.indexByKey.get(stickyKey) ?? -1 : -1);
   const stickyBeforeWindow = $derived(stickyIndex >= 0 && stickyIndex < range.start);
   const topSpacer = $derived(offsetFor(stickyBeforeWindow ? stickyIndex : range.start));
   const stickyGap = $derived(stickyBeforeWindow ? Math.max(0, offsetFor(range.start) - offsetFor(stickyIndex + 1)) : 0);
@@ -37,13 +76,8 @@
     if (!root || !scrollParent || !active || !documentVisible) return;
     const visibleTop = Math.max(0, scrollParent.scrollTop - root.offsetTop);
     const visibleBottom = visibleTop + scrollParent.clientHeight;
-    let start = 0, cursor = 0;
-    while (start < items.length && cursor + heightFor(items[start], start) < visibleTop) {
-      cursor += heightFor(items[start], start);
-      start += 1;
-    }
-    let end = start;
-    while (end < items.length && cursor < visibleBottom) cursor += heightFor(items[end], end++);
+    let start = indexAtOffset(visibleTop);
+    let end = Math.min(items.length, indexAtOffset(visibleBottom) + 1);
     start = Math.max(0, start - overscan);
     end = Math.min(items.length, end + overscan);
     range = { start, end };
@@ -60,22 +94,27 @@
   function receiveMeasurements(entries: ResizeObserverEntry[]) {
     let changedAboveViewport = 0;
     for (const entry of entries) {
-      const element = entry.target as HTMLElement, key = element.dataset.transcriptKey, index = Number(element.dataset.transcriptIndex);
-      if (!key || !Number.isInteger(index)) continue;
+      const element = entry.target as HTMLElement, key = element.dataset.transcriptKey;
+      if (!key) continue;
+      const index = metrics.indexByKey.get(key);
+      if (index === undefined) continue;
       const next = Math.max(1, Math.ceil(entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height));
       const previous = heights.get(key) ?? estimateHeight;
       if (next === previous) continue;
       heights.set(key, next);
+      metrics.values[index] = next;
+      add(metrics, index, next - previous);
       if (index < range.start) changedAboveViewport += next - previous;
     }
+    metricsRevision += 1;
     if (changedAboveViewport && scrollParent) scrollParent.scrollTop += changedAboveViewport;
     scheduleRange();
   }
 
   $effect(() => {
-    const keys = new Set(items.map(getKey));
-    for (const key of heights.keys()) if (!keys.has(key)) heights.delete(key);
-    items; stickyKey; estimateHeight; scheduleRange();
+    items; estimateHeight;
+    rebuildMetrics();
+    scheduleRange();
   });
   $effect(() => {
     // An inactive split has no reader. Unmount its rich rows (including any

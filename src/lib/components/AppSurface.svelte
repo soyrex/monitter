@@ -3359,7 +3359,11 @@
         {/if}
         <section class="conversation">
         <MessagePane active={embedded ? active : activePaneId === 'main'} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
-          {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}{#each activeChannel.messages as message}<article
+          {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}<TranscriptVirtualList
+              items={activeChannel.messages}
+              getKey={(message) => message.id}
+              active={embedded ? active : activePaneId === 'main'}>
+              {#snippet children(message, _index)}<article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                 class="message"
@@ -3370,7 +3374,8 @@
                   {#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
                 <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
-              </article>{/each}
+              </article>{/snippet}
+            </TranscriptVirtualList>
               {#each optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel.id) as message (message.id)}
                 <article class="message user optimistic-message" data-delivery-status={message.status}>
                   <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
