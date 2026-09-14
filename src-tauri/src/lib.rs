@@ -2709,11 +2709,17 @@ impl Service {
                 .iter()
                 .position(|task| task.id == task_id)
                 .ok_or_else(|| "Task was not found.".to_string())?;
-            if state.tasks[ix].status != "running" && !resident {
+            // A repeated Stop after the task is already interrupted, idle, or
+            // completed must not append another transcript event. An errored
+            // task can still have an owned resident process to stop.
+            if state.tasks[ix].status != "running"
+                && !(state.tasks[ix].status == "error" && resident)
+            {
                 return Err("Task is not running.".into());
             }
+            let cancelled_at = now();
             state.tasks[ix].status = "interrupted".into();
-            state.tasks[ix].updated_at = now();
+            state.tasks[ix].updated_at = cancelled_at;
             for message in state
                 .messages
                 .iter_mut()
@@ -2721,13 +2727,29 @@ impl Service {
             {
                 message.stream_status = Some("interrupted".into());
             }
+            // Unlike activity, messages are never compacted out of the chat
+            // transcript. This system record preserves the user's Stop action
+            // without fabricating assistant content.
+            state.messages.push(Message {
+                stream_status: None,
+                id: id(),
+                task_id: task_id.into(),
+                role: "system".into(),
+                text: "You cancelled this run.".into(),
+                created_at: cancelled_at,
+                sender_agent_id: None,
+                collaboration_id: None,
+                attachments: vec![],
+            });
             state.events.push(RunEvent {
                 id: id(),
                 task_id: task_id.into(),
                 kind: "status".into(),
-                title: "Cancellation requested".into(),
+                // This is a durable user decision, not fabricated agent text.
+                // It remains available in the diagnostic timeline.
+                title: "You cancelled this run.".into(),
                 detail: String::new(),
-                created_at: now(),
+                created_at: cancelled_at,
             });
             for message in &mut state.queued_messages {
                 if message.task_id == task_id && message.status == "queued" {
@@ -7174,9 +7196,46 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             })
             .unwrap();
         service.cancel(&task.id).unwrap();
-        let request = service
-            .snapshot()
-            .unwrap()
+        let after_cancel = service.snapshot().unwrap();
+        let cancellation = after_cancel
+            .messages
+            .iter()
+            .find(|message| {
+                message.task_id == task.id
+                    && message.role == "system"
+                    && message.text == "You cancelled this run."
+            })
+            .expect("cancellation is retained in the durable chat transcript");
+        assert!(cancellation.sender_agent_id.is_none());
+        assert!(cancellation.collaboration_id.is_none());
+        assert!(cancellation.attachments.is_empty());
+        let cancellation_event = after_cancel
+            .events
+            .iter()
+            .find(|event| {
+                event.task_id == task.id
+                    && event.kind == "status"
+                    && event.title == "You cancelled this run."
+            })
+            .expect("cancellation remains in run diagnostics");
+        assert_eq!(cancellation.created_at, cancellation_event.created_at);
+        assert!(
+            service.cancel(&task.id).is_err(),
+            "repeated Stop is not another transcript entry"
+        );
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.task_id == task.id && message.text == "You cancelled this run."
+                })
+                .count(),
+            1
+        );
+        let request = after_cancel
             .approval_requests
             .into_iter()
             .find(|item| item.id == approval.id)
@@ -7184,6 +7243,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         assert_eq!(request.status, "expired");
         assert!(request.resolved_at.is_some());
         assert_eq!(request.decision, None);
+        drop(service);
+        let reopened = Service::open(None, dir.clone()).unwrap();
+        assert!(reopened.snapshot().unwrap().messages.iter().any(|message| {
+            message.task_id == task.id
+                && message.role == "system"
+                && message.text == "You cancelled this run."
+        }));
+        drop(reopened);
         let _ = std::fs::remove_dir_all(dir);
     }
 

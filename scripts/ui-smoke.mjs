@@ -64,6 +64,16 @@ try {
   await page.screenshot({ path: 'verification/ui-running-light.png' });
   await page.getByRole('button', { name: 'Stop current task', exact: true }).click();
   await expect(page.getByLabel('Task message', { exact: true })).toBeEnabled();
+  const cancellation = page.locator('.cancellation-event').last();
+  await expect(cancellation).toHaveText('You cancelled this run.');
+  await expect(cancellation.locator('svg')).toHaveCount(1);
+  expect(await cancellation.locator('time').evaluate(node => node.getBoundingClientRect().right >= node.parentElement.getBoundingClientRect().right - 1)).toBe(true);
+  expect(await page.evaluate(() => {
+    const snapshot = window.__MONITTER_QA__.snapshot();
+    const message = snapshot.messages.find(item => item.role === 'system' && item.text === 'You cancelled this run.');
+    const event = snapshot.events.find(item => item.kind === 'status' && item.title === 'You cancelled this run.');
+    return Boolean(message && event && message.createdAt === event.createdAt);
+  })).toBe(true);
   results.push('send / running state / stop');
 
   await openNewTask();

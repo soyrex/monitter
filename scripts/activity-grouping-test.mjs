@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { contextCompactionPhase, groupConversationActivity, isNativeMessageTransportArtifact, isShellActivity, reasoningSummary, showThinkingFallback } from '../src/lib/activity-grouping.ts';
+import { CANCELLATION_EVENT_TITLE, contextCompactionPhase, groupConversationActivity, isCancellationEvent, isCancellationMessage, isNativeMessageTransportArtifact, isShellActivity, reasoningSummary, showThinkingFallback } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
@@ -16,6 +16,12 @@ assert.equal(isNativeMessageTransportArtifact(nativeTransport('user-echo', 1, 'u
 assert.equal(isNativeMessageTransportArtifact(nativeTransport('agent-echo', 1, 'agentMessage')), true);
 assert.equal(isNativeMessageTransportArtifact(event('named-agent-message', 1, 'agentMessage', '{"type":"command_execution","command":"agentMessage"}')), false, 'A real tool is never hidden by its display title');
 assert.equal(isNativeMessageTransportArtifact(event('unstructured', 1, 'userMessage', 'plain text')), false, 'Legacy/unstructured events remain visible rather than being guessed away');
+const cancellation = { id: 'cancelled', taskId: 'task', kind: 'status', title: CANCELLATION_EVENT_TITLE, detail: '', createdAt: 5 };
+assert.equal(isCancellationEvent(cancellation), true);
+assert.equal(isCancellationEvent({ ...cancellation, title: 'Cancellation requested' }), false);
+assert.equal(isCancellationMessage({ id: 'cancelled-message', taskId: 'task', role: 'system', text: CANCELLATION_EVENT_TITLE, createdAt: 5, attachments: [] }), true);
+assert.equal(isCancellationMessage({ id: 'agent-message', taskId: 'task', role: 'assistant', text: CANCELLATION_EVENT_TITLE, createdAt: 5, attachments: [] }), false);
+assert.deepEqual(groupConversationActivity([{ id: 'cancelled-message', taskId: 'task', role: 'system', text: CANCELLATION_EVENT_TITLE, createdAt: 5, attachments: [] }], []).map(item => item.type), ['message'], 'The durable cancellation transcript record remains an inline conversation item');
 console.log('native message transport artifacts are absorbed by ordinary chat bubbles');
 
 // Screenshot-style empty and real web searches remain two raw entries together.

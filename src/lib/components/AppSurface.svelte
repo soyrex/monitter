@@ -37,6 +37,7 @@
     Activity,
     Clock,
     Check,
+    CircleStop,
     ArrowUp,
     ArrowLeft,
     Search,
@@ -108,7 +109,7 @@
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import TaskActivity from "$lib/components/TaskActivity.svelte";
   import { activeComputerTools } from "$lib/activity";
-  import { groupConversationActivity, showThinkingFallback } from '$lib/activity-grouping';
+  import { groupConversationActivity, isCancellationMessage, showThinkingFallback } from '$lib/activity-grouping';
   import RunActivity from "$lib/components/RunActivity.svelte";
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
@@ -3419,7 +3420,7 @@
               </RunActivity>
               {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
               {:else if item.type === "approval"}{@const approvalText=approvalEventText(item.value)}<button class={`approval-inline ${item.value.status}`} onclick={() => openApprovalHistory(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{date(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
-              {:else}{@const message = item.value}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
+              {:else}{@const message = item.value}{#if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>{:else}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                   class:system={message.role === "system"}
@@ -3434,7 +3435,7 @@
                   </MessageMeta>
                   <Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} /><AttachmentList attachments={message.attachments ?? []}/>
                   {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
-                </article>{/if}{/each}{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
+                </article>{/if}{/if}{/each}{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
                 <Terminal size={24} />
                 <h2>No messages yet</h2>
                 <p>
@@ -4973,6 +4974,10 @@
     border-left: 2px solid var(--line);
     color: var(--muted);
   }
+  .cancellation-event { display:flex; align-items:center; gap:8px; min-height:30px; margin:2px 0 9px; padding:4px 2px; color:var(--muted); }
+  .cancellation-event :global(.message-meta) { flex:1; min-width:0; margin:0; }
+  .cancellation-event :global(.message-meta time) { margin-left:auto; }
+  .cancellation-event :global(svg) { flex:none; color:#b56a54; }
   .optimistic-message { border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
   .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
   .delivery-status[data-delivery-status="sending"] { color: var(--accent); }

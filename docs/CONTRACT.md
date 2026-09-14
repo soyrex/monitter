@@ -253,6 +253,11 @@ an independent browser zoom.
 Cmd+Option+= on macOS and Ctrl+Alt+= on Windows/Linux balance every open pane to the same area while
 preserving the current split arrangement. The same action is available as Balance panes in Controls.
 Activity toggles filter both inline blocks and run detail without deleting captured events.
+Cancelling a running task writes a durable system transcript record, `You cancelled this run.`,
+and a matching diagnostic status event. The transcript record appears inline in the owning
+desktop/LAN and paired-mobile chat with a stop icon and right-aligned timestamp; it is not an
+agent reply. Other status diagnostics remain in Run detail, and visitor sharing continues to
+exclude activity events.
 Only reasoning summaries emitted by the harness can be rendered; missing reasoning is not fabricated.
 Consecutive reasoning events for the same chat render inside one expandable reasoning bubble. Messages,
 tool activity, approvals, and task boundaries split that group; stored events remain unchanged.

@@ -23,6 +23,7 @@ try {
     const {createDesktopSession}=await import('/src/lib/controller/remote-client.ts');
     const taskId='11111111-1111-4111-8111-111111111111';
     const snapshot={hosts:[],agents:[{id:'a',name:'UI test agent',provider:'codex'}],tasks:[{id:taskId,agentId:'a',title:'Controller test',status:'idle',archived:false,updatedAt:1}],messages:[],events:[],channels:[],projects:[],collaborations:[],queuedMessages:[],settings:{}};
+    window.__mobileSnapshot=snapshot;
     snapshot.tasks.push({...snapshot.tasks[0],id:'22222222-2222-4222-8222-222222222222',title:'Other test chat'});
     window.testSends=0;
     window.desktop=await createDesktopSession(relayUrl,{
@@ -64,6 +65,16 @@ try {
   await phone.getByRole('button',{name:'Back to chats'}).click();
   await phone.getByRole('button',{name:'Controller test'}).click();
   await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Keep this draft');
+  await host.evaluate(()=>{
+    // The test desktop keeps this transcript item exactly as the native
+    // cancellation transaction would: system-authored, durable, timestamped.
+    window.__mobileSnapshot.messages.push({id:'cancelled-run',taskId:'11111111-1111-4111-8111-111111111111',role:'system',text:'You cancelled this run.',createdAt:1700000000000,attachments:[]});
+  });
+  await phone.getByRole('button',{name:'Refresh',exact:true}).click();
+  const cancellation=phone.locator('.cancellation-event');
+  await expect(cancellation).toHaveText('You cancelled this run.');
+  await expect(cancellation.locator('svg')).toHaveCount(1);
+  expect(await cancellation.locator('time').evaluate(node=>node.getBoundingClientRect().right>=node.parentElement.getBoundingClientRect().right-1)).toBe(true);
   await phone.getByLabel('Message',{exact:true}).fill('Mobile UI test message');
   await host.evaluate(()=>{window.holdSend=true;window.sendStarted=false;});
   await phone.getByRole('button',{name:'Send message'}).click();

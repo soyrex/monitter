@@ -1,5 +1,19 @@
 import type { ApprovalRequest, Message, RunEvent } from '$lib/types';
 
+/** Durable, user-authored Stop record emitted by the native cancellation path. */
+export const CANCELLATION_EVENT_TITLE = 'You cancelled this run.';
+
+/** Only this concise status record belongs in the ordinary chat transcript. */
+export function isCancellationEvent(event: RunEvent): boolean {
+  return event.kind === 'status' && event.title === CANCELLATION_EVENT_TITLE;
+}
+
+/** The transcript companion to the diagnostic cancellation event. */
+export function isCancellationMessage(message: Pick<Message, 'role' | 'text' | 'senderAgentId' | 'attachments'>): boolean {
+  return message.role === 'system' && message.text === CANCELLATION_EVENT_TITLE &&
+    !message.senderAgentId && !message.attachments?.length;
+}
+
 /** Extract displayable summary text, never provider IDs or encrypted metadata. */
 export function reasoningSummary(detail: string): string {
   const trimmed = detail.trim();
