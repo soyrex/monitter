@@ -111,6 +111,7 @@
   import { activeComputerTools } from "$lib/activity";
   import { groupConversationActivity, isCancellationMessage, showThinkingFallback } from '$lib/activity-grouping';
   import RunActivity from "$lib/components/RunActivity.svelte";
+  import SubagentActivity from "$lib/components/SubagentActivity.svelte";
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import ApprovalDock from "$lib/components/ApprovalDock.svelte";
@@ -144,7 +145,7 @@
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
   type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
-  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
+  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let pendingEmptyPaneIds = $state<string[]>([]);
   let tabOrder = $state<TabKey[]>([]);
@@ -317,7 +318,7 @@
   let railAgentId = $state<string | null>(null);
   let railAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
-  let detailTab = $state<'run' | 'git' | 'timeline' | 'approvals'>('run');
+  let detailTab = $state<'run' | 'git' | 'timeline' | 'approvals' | 'subagents'>('run');
   let timelinePages = $state<Record<string, { events: RunEvent[]; nextBefore: number | null; loading: boolean; error: string; loadedOlder: boolean }>>({});
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
   let gitPane = $state<GitPane>();
@@ -555,7 +556,7 @@
       id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
       createdAt: message.createdAt, attachments: message.attachments,
     }))],
-    visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning"),
+    visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning" || event.kind === "collaboration"),
     snapshot?.settings.compressToolCalls === true,
     resolvedApprovalRequests,
   ));
@@ -588,6 +589,11 @@
   function approvalCount(scope: WorkspaceKey) { return globalPendingApprovals.filter(item => taskBelongsToWorkspace(item.task, scope)).length; }
   const collaborations = $derived(((snapshot as (Snapshot & { collaborations?: CollaborationRecord[] }) | null)?.collaborations ?? []));
   const taskCollaborations = $derived(selectedTask ? collaborations.filter(item => item.fromTaskId === selectedTask.id || item.toTaskId === selectedTask.id) : []);
+  const taskSubagents = $derived(taskCollaborations.filter(item => item.kind === 'delegation' && item.fromTaskId === selectedTask?.id).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,30));
+  const runningSubagentCount = $derived(taskSubagents.filter(item => item.status === 'running' || item.status === 'queued').length);
+  const collaborationFor = (id: string) => collaborations.find(item => item.id === id);
+  const collaborationWasSteering = (item: CollaborationRecord) => item.kind === 'message' && snapshot?.tasks.find(task => task.id === item.toTaskId)?.status === 'running';
+  const openCollaborationTask = (item: CollaborationRecord) => { const id=item.fromTaskId===selectedTask?.id?item.toTaskId:item.fromTaskId; const task=snapshot?.tasks.find(candidate=>candidate.id===id); if(task)openTask(task); };
   function taskIsStepping(task: Task) {
     if (task.status !== 'running') return false;
     const boundary = (snapshot?.messages.filter(message => message.taskId === task.id && message.role === 'user').at(-1)?.createdAt ?? task.updatedAt);
@@ -893,7 +899,7 @@
       attachmentContexts: saved.attachmentContexts && typeof saved.attachmentContexts === 'object' ? saved.attachmentContexts : fallback.attachmentContexts,
       channelRecipients: saved.channelRecipients && typeof saved.channelRecipients === 'object' ? saved.channelRecipients : fallback.channelRecipients,
       pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
-      detailTab: ['run', 'git', 'timeline', 'approvals'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
+      detailTab: ['run', 'git', 'timeline', 'approvals', 'subagents'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
     };
     const taskIds = new Set(snapshot?.tasks.filter(task => !task.archived && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
     const channelIds = new Set(snapshot?.channels.map(channel => channel.id) ?? []);
@@ -3391,6 +3397,7 @@
           <div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Run detail</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>Approvals</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>Subagents <span>{taskSubagents.length}</span></button></div>
           {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
           {#if showClose}<button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>{/if}
         </div>{/snippet}
@@ -3414,13 +3421,13 @@
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
           <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`}>
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id)}
-              {#if item.type === "activity"}<RunActivity event={item.value} />
+              {#if item.type === "activity"}{@const collaboration=item.value.kind==='collaboration'?collaborationFor(item.value.detail):null}{#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<RunActivity event={item.value} />{/if}
               {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length}>
                 {#snippet avatar()}{@render messageAvatar(selectedAgent)}{/snippet}
               </RunActivity>
               {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
               {:else if item.type === "approval"}{@const approvalText=approvalEventText(item.value)}<button class={`approval-inline ${item.value.status}`} onclick={() => openApprovalHistory(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{date(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
-              {:else}{@const message = item.value}{#if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>{:else}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
+              {:else}{@const message = item.value}{#if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>{:else if message.collaborationId && collaborationFor(message.collaborationId)}{:else}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
                   class:user={message.role === "user"}
                 class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
                   class:system={message.role === "system"}
@@ -3482,7 +3489,11 @@
               {#if selectedApprovalRules.length}<section class="saved-approvals-sidebar" aria-label="Saved approvals for this chat"><h3>Saved rules</h3><p>Revoking affects future requests only; work already approved keeps running.</p><SavedApprovalRules rules={selectedApprovalRules} agents={snapshot.agents} hosts={snapshot.hosts} agentId={selectedTask.agentId} hostId={selectedTask.hostId} cwd={selectedTask.cwd} onrevoke={revokeApprovalRule} revokingId={revokingApprovalRuleId} compact={compactDetail}/></section>{/if}
               {#each resolvedApprovalRequests as request (request.id)}<div id={`approval-history-${paneId}-${request.id}`} tabindex="-1"><ApprovalRequestCard {request}/></div>{:else}<p class="detail-empty">No resolved approvals for this chat.</p>{/each}
             </section>
-            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || (detailTab==='git' && gitState.repository===true)}>
+            <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll subagent-panel" class:hidden={detailTab!=='subagents'} aria-label="Subagents">
+              <header><h3>SUBAGENTS</h3><span>{runningSubagentCount} running · {taskSubagents.length} recent</span></header>
+              {#each taskSubagents as collaboration (collaboration.id)}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<p class="detail-empty">No subagents have run from this chat.</p>{/each}
+            </section>
+            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || detailTab==='subagents' || (detailTab==='git' && gitState.repository===true)}>
               <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
               <dl>
                 <div>
