@@ -166,7 +166,7 @@
   $effect(()=>{if(!embedded && expandedPaneId && (activePaneId!==expandedPaneId || !paneIds(layout).includes(expandedPaneId)))expandedPaneId=null;});
 
   let pointerTabDrag = $state<{tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null>(null);
-  let paneRefs = $state<Record<string, { focusExistingTab:(tab:TabKey)=>boolean;openAgentSettings:(draft:Agent)=>void;openSettings:(category?:string)=>void;openTerminalTab:(id:string)=>void;newTerminal:()=>Promise<void>;openEmptyTab:()=>void;openTask: (task: Task) => void; openChannel: (channel: Channel) => void; openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void; takeTab: (tab: PaneTabTransfer) => TabPayload | null; receiveTab: (payload: TabPayload, before?: TabKey) => void; reorderTab:(tab:PaneTabTransfer,before?:TabKey)=>void; allTabs: () => PaneTabTransfer[]; captureState:()=>PaneState; restoreState:(value:PaneState)=>void; closeActiveTab:()=>void; swapActiveTab:(direction:1|-1)=>void; toggleDetail:()=>void; hasPending:()=>boolean;attachNativeFiles:(paths:string[])=>Promise<void> }>>({});
+  let paneRefs = $state<Record<string, { focusExistingTab:(tab:TabKey)=>boolean;openAgentSettings:(draft:Agent)=>void;openSettings:(category?:string)=>void;openTerminalTab:(id:string)=>void;newTerminal:()=>Promise<void>;openEmptyTab:()=>void;openTask: (task: Task, allowDuplicate?: boolean) => void; openChannel: (channel: Channel, allowDuplicate?: boolean) => void; openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void; takeTab: (tab: PaneTabTransfer) => TabPayload | null; receiveTab: (payload: TabPayload, before?: TabKey) => void; reorderTab:(tab:PaneTabTransfer,before?:TabKey)=>void; allTabs: () => PaneTabTransfer[]; captureState:()=>PaneState; restoreState:(value:PaneState)=>void; closeActiveTab:()=>void; swapActiveTab:(direction:1|-1)=>void; toggleDetail:()=>void; hasPending:()=>boolean;attachNativeFiles:(paths:string[])=>Promise<void> }>>({});
   let paneSelections = $state<Record<string,string|null>>({});
   let sidebarScrolled = $state(false);
   let workspaceReady = $state(false);
@@ -662,17 +662,36 @@
     void tick().then(() => document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(owner)}"]`)?.focus({ preventScroll: true }));
     return true;
   }
-  function routeTask(task: Task) {
+  function routeTask(task: Task, newSplit = false) {
     mobileMain = true;
+    if (newSplit && !embedded) { void openSidebarChatInNewSplit('task', task.id); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openTask(task); else openTask(task);
   }
-  function routeChannel(channel: Channel) {
+  function routeSidebarTask(task: Task, newSplit: boolean) {
+    const target: WorkspaceKey = sidebarView === 'standard' ? `agent:${task.agentId}` : sidebarView === 'projects' ? `project:${task.projectId ?? 'unassigned'}` : activeWorkspaceKey;
+    if (target !== activeWorkspaceKey) void switchWorkspace(target).then(changed => { if (changed) routeTask(task, newSplit); });
+    else routeTask(task, newSplit);
+  }
+  function sidebarTaskContextMenu(event: MouseEvent, task: Task) {
+    // macOS reports Control-click as a context-menu gesture rather than a
+    // normal click. Treat only that modified gesture as the requested split.
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    routeSidebarTask(task, true);
+  }
+  function routeChannel(channel: Channel, newSplit = false) {
     mobileMain = true;
     if (embedded) { workspaceNavigation.channel(channel); return; }
-    if (activeWorkspaceKey !== 'all') { void switchWorkspace('all').then(changed => { if (changed) routeChannel(channel); }); return; }
+    if (activeWorkspaceKey !== 'all') { void switchWorkspace('all').then(changed => { if (changed) routeChannel(channel, newSplit); }); return; }
+    if (newSplit) { void openSidebarChatInNewSplit('channel', channel.id); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openChannel(channel); else openChannel(channel);
+  }
+  function sidebarChannelContextMenu(event: MouseEvent, channel: Channel) {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    routeChannel(channel, true);
   }
   function routeDraft(agentId: string) {
     mobileMain = true;
@@ -1160,6 +1179,23 @@
       for (const pane of paneIds(layout)) if (saved[pane]) paneRefs[pane]?.restoreState(saved[pane]);
       activePaneId = fresh;
     } finally { workspaceTransition = false; persistWorkspace(); }
+  }
+  async function openSidebarChatInNewSplit(kind: 'task' | 'channel', id: string) {
+    if (embedded) return;
+    const source = activePaneId, previousCount = paneIds(layout).length;
+    await splitPaneForVim(source, 'horizontal');
+    if (paneIds(layout).length === previousCount || activePaneId === source) return;
+    const destination = activePaneId;
+    await tick();
+    const receiver = destination === 'main' ? { openTask, openChannel } : paneRefs[destination];
+    if (!receiver) { error = 'The new split pane could not be opened.'; return; }
+    if (kind === 'task') {
+      const task = snapshot?.tasks.find(item => item.id === id);
+      if (task) receiver.openTask(task, true);
+    } else {
+      const channel = snapshot?.channels.find(item => item.id === id);
+      if (channel) receiver.openChannel(channel, true);
+    }
   }
   async function dropTab(targetId: string, edge: DropEdge, tab: PaneTabTransfer, before?: TabKey) {
     if(embedded) { onTabDrop?.(targetId,edge,tab,before); return; }
@@ -1943,9 +1979,9 @@
     focusedProjectId = null;
     pane = overviewOpen ? "overview" : "empty";
   }
-  export function openTask(task: Task) {
+  export function openTask(task: Task, allowDuplicate = false) {
     if (!taskBelongsToWorkspace(task, activeWorkspaceKey)) { workspaceNavigation.task(task); return; }
-    if (focusExistingChat('task', task.id, paneId)) return;
+    if (!allowDuplicate && focusExistingChat('task', task.id, paneId)) return;
     saveCurrentDraft();
     if (!openTaskIds.includes(task.id)) openTaskIds = [...openTaskIds, task.id];
     rememberTab({kind:'task',id:task.id});
@@ -1969,9 +2005,9 @@
     }
     if (collapse) collapseTablessPane();
   }
-  export function openChannel(channel: Channel) {
+  export function openChannel(channel: Channel, allowDuplicate = false) {
     if (activeWorkspaceKey !== 'all') { workspaceNavigation.channel(channel); return; }
-    if (focusExistingChat('channel', channel.id, paneId)) return;
+    if (!allowDuplicate && focusExistingChat('channel', channel.id, paneId)) return;
     if(!openChannelIds.includes(channel.id)) openChannelIds=[...openChannelIds,channel.id];
     rememberTab({kind:'channel',id:channel.id});
     saveCurrentDraft();
@@ -3024,10 +3060,7 @@
   {@const sortGroup=sidebarView==='activity'?'':sidebarView==='projects'?`project-chats:${task.projectId??'unassigned'}`:`agent-chats:${task.agentId}`}
   {@const agent = snapshot?.agents.find(item=>item.id===task.agentId)}
   <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:recent class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
-    <button class="task-select" onclick={() => {
-      const target: WorkspaceKey = sidebarView === 'standard' ? `agent:${task.agentId}` : sidebarView === 'projects' ? `project:${task.projectId ?? 'unassigned'}` : activeWorkspaceKey;
-      if (target !== activeWorkspaceKey) void switchWorkspace(target).then(changed => { if (changed) routeTask(task); }); else routeTask(task);
-    }} title={task.title}>
+    <button class="task-select" onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)} title={task.title}>
       {#if detail}<span class="avatar small" title={agent?.name ?? 'Agent'} aria-label={agent?.name ?? 'Agent'}>{@render avatarVisual(agent, 12)}</span>{/if}
       <span class={`dot ${task.status}`}></span><span class="chat-copy"><span>{task.title}</span>
         {#if detail}<span class="chat-meta">{snapshot?.agents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
@@ -3680,7 +3713,8 @@
       {#each sidebarSorted(snapshot?.channels ?? [],'channels') as channel}<button use:sidebarReorder={{group:'channels',id:channel.id,move:moveSidebar}}
           class:current={channel.id === selectedChannelId}
           class="channel-row"
-          onclick={() => routeChannel(channel)}
+          onclick={(event) => routeChannel(channel, event.metaKey || event.ctrlKey)}
+          oncontextmenu={(event) => sidebarChannelContextMenu(event, channel)}
           ><Radio size={14} /><span>{channel.name}</span><small
             >{channel.agentIds.length}</small
           ></button

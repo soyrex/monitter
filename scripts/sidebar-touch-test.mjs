@@ -19,7 +19,7 @@ try {
   if (!box) throw new Error('Touch chat has no tappable bounds.');
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
   await expect(page.locator('.tab-picker-trigger')).toHaveText('Touch chat');
-  await expect(page.locator('h1').first()).toContainText('Touch chat');
+  await expect(page.getByRole('textbox', { name: 'Task message', exact: true })).toBeVisible();
   await expect(page.locator('.pane-grid').first()).toBeVisible();
   expect(errors).toEqual([]);
   console.log('WebKit touchscreen single-tap selects a sidebar chat.');
