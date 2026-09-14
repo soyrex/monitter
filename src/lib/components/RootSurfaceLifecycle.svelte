@@ -9,5 +9,5 @@
    * local state changes through their PaneSurface handle instead.
    */
   let { start }: { start: () => void | (() => void) } = $props();
-  onMount(start);
+  onMount(() => start());
 </script>

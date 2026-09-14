@@ -39,7 +39,6 @@
     Activity,
     Clock,
     Check,
-    CircleStop,
     ArrowUp,
     ArrowLeft,
     Search,
@@ -109,29 +108,28 @@
   import Modal from "$lib/components/Modal.svelte";
   import Markdown from "$lib/components/Markdown.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
-  import TaskActivity from "$lib/components/TaskActivity.svelte";
   import { activeComputerTools } from "$lib/activity";
-  import { groupConversationActivity, isCancellationMessage, isNativeMessageTransportArtifact, showThinkingFallback } from '$lib/activity-grouping';
-  import RunActivity from "$lib/components/RunActivity.svelte";
+  import { groupConversationActivity, isNativeMessageTransportArtifact } from '$lib/activity-grouping';
   import SubagentActivity from "$lib/components/SubagentActivity.svelte";
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import ApprovalDock from "$lib/components/ApprovalDock.svelte";
   import MessagePane from "$lib/components/MessagePane.svelte";
   import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
-  import ExpandableUserRequest from "$lib/components/ExpandableUserRequest.svelte";
   import GitPane from "$lib/components/GitPane.svelte";
   import RunSummary from "$lib/components/RunSummary.svelte";
   import TimelinePane from "$lib/components/TimelinePane.svelte";
   import PaneGrid from '$lib/components/PaneGrid.svelte';
   import PaneSurface from '$lib/components/PaneSurface.svelte';
   import RootSurfaceLifecycle from '$lib/components/RootSurfaceLifecycle.svelte';
+  import TaskTranscript from '$lib/components/TaskTranscript.svelte';
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { balancePaneLayout, paneIds } from '$lib/panes';
   import { paneRemovalDecision, paneTabCount, remapPromotedPaneId, remapQueuedPaneRemovals } from '$lib/pane-lifecycle';
   import { normalizeTabOrder, type TabKey } from '$lib/tab-order';
   import { createPaneLocalState } from '$lib/pane-local-state.svelte';
+  import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { findPaneTabOwner, paneTabMatches, type PaneSurfaceHandle } from '$lib/pane-controller';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
   import ModelPicker from '$lib/components/ModelPicker.svelte';
@@ -266,20 +264,6 @@
     composer = $state(""),
     composerPending = $state<Record<string, boolean>>({}),
     taskTitle = $state("");
-  type OptimisticMessage = {
-    id: string;
-    kind: 'task' | 'channel' | 'draft';
-    targetId: string;
-    text: string;
-    displayText: string;
-    attachments: Attachment[];
-    createdAt: number;
-    status: 'sending' | 'sent' | 'not-confirmed';
-    error?: string;
-    baselineIds: Set<string>;
-    baselineQueuedIds: Set<string>;
-    recipientIds?: string[];
-  };
   // send_message starts a native run asynchronously, so its returned snapshot
   // may predate the persisted user message. Keep this UI-only record until a
   // later snapshot proves the message exists (or exposes its queued record).
@@ -596,7 +580,6 @@
     snapshot?.settings.compressToolCalls === true,
     resolvedApprovalRequests,
   ));
-  const latestUserRequest = $derived(conversationItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
   function approvalSubject(request: ApprovalRequest) {
     const summary = (request.summary || request.tool).trim().replace(/^allow\s+/i, '').replace(/[?。]\s*$/, '');
     return summary || request.tool;
@@ -628,7 +611,6 @@
   const taskCollaborations = $derived(selectedTask ? collaborations.filter(item => item.fromTaskId === selectedTask.id || item.toTaskId === selectedTask.id) : []);
   const taskSubagents = $derived(taskCollaborations.filter(item => item.kind === 'delegation' && item.fromTaskId === selectedTask?.id).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,30));
   const runningSubagentCount = $derived(taskSubagents.filter(item => item.status === 'running' || item.status === 'queued').length);
-  const collaborationFor = (id: string) => collaborations.find(item => item.id === id);
   const collaborationWasSteering = (item: CollaborationRecord) => item.kind === 'message' && snapshot?.tasks.find(task => task.id === item.toTaskId)?.status === 'running';
   const openCollaborationTask = (item: CollaborationRecord) => { const id=item.fromTaskId===selectedTask?.id?item.toTaskId:item.fromTaskId; const task=snapshot?.tasks.find(candidate=>candidate.id===id); if(task)openTask(task); };
   function taskIsStepping(task: Task) {
@@ -3348,7 +3330,7 @@
               active={embedded ? active : activePaneId === 'main'}>
               {#snippet children(message, _index)}<article
                 class:user={message.role === "user"}
-                class:tinted={message.role === "user" && snapshot.settings.tintUserMessages}
+                class:tinted={message.role === "user" && snapshot?.settings.tintUserMessages}
                 class="message"
                   data-live-entry={message.role==='assistant'}
               >
@@ -3461,70 +3443,8 @@
           {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
           {#if showClose}<button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>{/if}
         </div>{/snippet}
-        {#if !mobileSidebar}<div class="conversation-head task-heading pane-task-header">
-          <div class="task-heading-identity">
-            <span class="avatar task-header-avatar" aria-label={selectedAgent?.name ?? 'Agent'}>{@render avatarVisual(selectedAgent, 18)}</span>
-            <h1 class="task-title"><AnimatedTitle text={selectedTask.title} active={$autonaming[`task:${selectedTask.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={()=>{renameTitle=selectedTask.title;taskProjectId=selectedTask.projectId??'';modal='taskSettings'}}><Pencil size={14}/></button></h1>
-          </div>
-            <div class="task-actions">
-              <div class="task-overflow">
-                <button bind:this={taskMenuAnchor} class="icon" aria-label="Chat actions" aria-haspopup="menu" aria-expanded={taskMenu} onclick={()=>taskMenu=!taskMenu}><MoreHorizontal size={17}/></button>
-                {#if taskMenu && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Chat actions">
-                  {#if !isLanBrowser()}<button role="menuitem" onclick={shareSelectedChat}><Share2 size={15}/>Share this chat</button>{/if}
-                </div>{/if}
-              </div>
-              {@render paneExpandControl()}
-              {@render rightSidebarControl()}
-            </div>
-          </div>{/if}
-        <section class="conversation">
-          <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
-          <MessagePane active={embedded ? active : activePaneId === 'main'} resetKey={`task:${selectedTask.id}:${scrollRevision}`} stickyRequest={!!latestUserRequest}>
-            {#if conversationItems.length}<TranscriptVirtualList
-              items={conversationItems}
-              getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
-              stickyKey={latestUserRequest?.id ?? null}
-              active={embedded ? active : activePaneId === 'main'}>
-              {#snippet children(item, _index)}
-              {#if item.type === "activity"}{@const collaboration=item.value.kind==='collaboration'?collaborationFor(item.value.detail):null}{#if collaboration}<SubagentActivity {collaboration} agent={snapshot?.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<RunActivity event={item.value} />{/if}
-              {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length}>
-                {#snippet avatar()}{@render messageAvatar(selectedAgent)}{/snippet}
-              </RunActivity>
-              {:else if item.type === "tool-group"}<RunActivity events={item.values} compressed={snapshot?.settings.compressToolCalls === true} running={selectedTask.status === "running"} />
-              {:else if item.type === "approval"}{@const approvalText=approvalEventText(item.value)}<button class={`approval-inline ${item.value.status}`} onclick={() => openApprovalHistory(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{date(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
-              {:else}{@const message = item.value}{#if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>{:else if message.collaborationId && collaborationFor(message.collaborationId)}{:else}{@const optimistic = taskOptimisticMessages.find(item => item.id === message.id)}{@const confirmed = confirmedDeliveryIds[message.id]}{@const operator = message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}<article
-                  class:user={message.role === "user"}
-                class:tinted={message.role === "user" && snapshot?.settings.tintUserMessages}
-                  class:sticky-user-request={message.role === "user" && message.id === latestUserRequest?.id}
-                  class:system={message.role === "system"}
-                  class:final-answer={message.role === "assistant" && message.phase === "final_answer"}
-                  class:optimistic-message={!!optimistic}
-                  class="message"
-                  data-message-phase={message.phase}
-                  data-live-entry={message.streamStatus==='streaming'}
-                  data-delivery-status={optimistic?.status}
-                  aria-label={message.role === 'user' && message.id === latestUserRequest?.id ? 'Latest user request' : undefined}
-                >
-                  <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
-                    {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot?.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}
-                    {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
-                  </MessageMeta>
-                  {#if message.role === 'user' && message.id === latestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)} />{:else}<Markdown text={message.role === 'user' ? operatorMessageText(message.text) : message.text} />{/if}<AttachmentList attachments={message.attachments ?? []}/>
-                  {#if message.streamStatus === 'streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus === 'interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
-                </article>{/if}{/if}{/snippet}
-            </TranscriptVirtualList>{:else if !pendingApprovalRequests.length}<div class="blank-conversation">
-                <Terminal size={24} />
-                <h2>No messages yet</h2>
-                <p>
-                  Describe what you want this agent to do. Its actual output
-                  will appear here.
-                </p>
-              </div>{/if}
-            {#if showThinkingFallback(conversationItems, selectedTask.status === 'running' || selectedTaskStarting, pendingApprovalRequests.length > 0)}
-              {@render agentWaiting(selectedAgent, selectedTask.status !== 'running', latestUserRequest?.createdAt)}
-            {/if}
-          </MessagePane>
-          <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
+        {#snippet taskComposer()}
+          <QueuedMessages messages={currentQueuedMessages} agents={snapshot?.agents ?? []} tasks={snapshot?.tasks ?? []} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
           <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
           <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
@@ -3541,11 +3461,48 @@
               <div class="composer-right">
                 <ModelPicker target={{taskId:selectedTask.id}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||selectedTask.status==='running'} onchange={changeModel}/>
 {#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}
-                <button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
+                <button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
               </div>
             </div>
           </div>
-        </section>
+        {/snippet}
+        <TaskTranscript
+          active={embedded ? active : activePaneId === 'main'}
+          task={selectedTask}
+          agent={selectedAgent}
+          {snapshot}
+          {conversationItems}
+          optimisticMessages={taskOptimisticMessages}
+          {confirmedDeliveryIds}
+          pendingApprovals={pendingApprovalRequests}
+          {selectedTaskStarting}
+          {goal}
+          {goalNote}
+          computerTools={computerTools}
+          {scrollRevision}
+          {busy}
+          canShare={!isLanBrowser()}
+          showHeader={!mobileSidebar}
+          {avatarVisual}
+          {messageAvatar}
+          {deliveryStatus}
+          paneExpand={paneExpandControl}
+          rightSidebar={rightSidebarControl}
+          composer={taskComposer}
+          {senderName}
+          {operatorMessageText}
+          {approvalEventText}
+          {collaborations}
+          {collaborationWasSteering}
+          menuOpen={taskMenu}
+          onMenuChange={(open) => taskMenu = open}
+          formatTime={date}
+          onOpenCollaboration={openCollaborationTask}
+          onOpenApproval={openApprovalHistory}
+          onStop={() => { void run(() => bridge.cancelTask(selectedTask.id), "Stopping task…"); }}
+          onEditTask={() => { renameTitle = selectedTask.title; taskProjectId = selectedTask.projectId ?? ''; modal = 'taskSettings'; }}
+          onShare={shareSelectedChat}
+        />
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
           <SidebarResize side="right"/>
@@ -4909,7 +4866,6 @@
   .task-layout > .conversation { grid-column: 1; grid-row: 2; }
   .task-layout > .run-detail { grid-column: 2; grid-row: 2; }
   .pane-task-header > .task-actions { margin-left:auto; }
-  .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
   .compact-detail > .pane-task-header { position:relative; z-index:13; }
   .conversation {
     --chat-content-max-width: 900px;
@@ -5056,12 +5012,6 @@
     max-width: 100%;
     margin: 0 0 24px;
   }
-  .approval-inline { display:flex; align-items:baseline; width:100%; min-height:30px; gap:8px; margin:0 0 4px; padding:4px 2px; border:0; color:var(--muted); background:transparent; text-align:left; font:calc(11px * var(--interface-font-ratio, 1)) var(--interface-font,"IBM Plex Sans",sans-serif); }
-  .approval-inline > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .approval-inline:hover, .approval-inline:focus-visible { color:var(--ink); text-decoration:underline; text-decoration-color:var(--accent); text-underline-offset:3px; }
-  .approval-inline time { margin-left:auto; flex:none; color:var(--muted); font:calc(9px * var(--interface-font-ratio, 1)) var(--mono); }
-  .approval-inline.denied { color:#a54c44; }
-  @media (hover:none), (pointer:coarse) { .approval-inline { min-height:44px; padding-block:8px; } }
   .message.user.tinted { background:color-mix(in srgb, var(--accent) 16%, var(--panel)); }
   .message.user {
     margin-left: auto;
@@ -5713,8 +5663,6 @@
   .pane-task-header > .task-actions { flex:none; flex-wrap:nowrap; }
   .pane-task-header > h1 { font-size:calc(13.2px * var(--interface-font-ratio, 1)); }
   .pane-task-header > .task-header-avatar { flex:none; width:var(--density-header-avatar-size); height:var(--density-header-avatar-size); }
-  .task-heading-identity > h1 { margin:0; font-size:calc(13.2px * var(--interface-font-ratio, 1)); }
-  .task-heading-identity > .task-header-avatar { flex:none; width:var(--density-header-avatar-size); height:var(--density-header-avatar-size); }
   .tabs.hide-tab-close .close-tab { display:none; }
   .tabs { counter-reset: tab-index; }
   .tabs > .tab-picker-list > .tab-entry { counter-increment: tab-index; }
@@ -5723,10 +5671,6 @@
   .tabs.show-tab-index > .tab-picker-list > .tab-entry .tab-shortcut { position:absolute; inset:-3px; display:grid; place-items:center; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--accent-ink); font:11px var(--mono); }
   .tabs.show-tab-index > .tab-picker-list > .tab-entry .tab-shortcut::after { content:counter(tab-index); }
   .task-title { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
-  .task-title-edit { flex: none; opacity: 0; color: var(--muted); transition: opacity .12s ease, color .12s ease; }
-  .task-title:focus-within .task-title-edit { opacity: 1; }
-  @media (hover:hover) and (pointer:fine) { .task-heading:hover .task-title-edit { opacity:1; } }
-  .task-title-edit:hover { color: var(--ink); }
   .task-overflow { position: relative; }
   .task-menu { display: grid; min-width: 155px; }
   .task-menu button { display: flex; gap: 7px; align-items: center; padding: 7px; text-align: left; }
@@ -5736,7 +5680,7 @@
   .identity-avatar { width: 32px; height: 32px; }.identity-avatar-button { position:relative; padding:0; border:0; cursor:pointer; overflow:hidden; }.avatar-edit-overlay { position:absolute; inset:0; display:grid; place-items:center; border-radius:inherit; color:#fff; background:rgba(0,0,0,.75); opacity:0; transition:opacity .15s ease; pointer-events:none; }
   @media (hover:hover) and (pointer:fine) { .identity-avatar-button:hover .avatar-edit-overlay { opacity:1; } }
   @media (hover:none), (pointer:coarse) {
-    .chat-actions, .close-tab, .task-title-edit { opacity:1; pointer-events:auto; }
+    .chat-actions, .close-tab { opacity:1; pointer-events:auto; }
     .tab-status, :global(.compact-tabs) .tab-picker-list > .tab-entry > .tab-status { opacity:0; }
     :global(.compact-tabs) .tab-picker-list > .tab-entry > .close-tab { opacity:1; pointer-events:auto; }
     .avatar-toggle-overlay, .avatar-edit-overlay { display:none; }

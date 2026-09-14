@@ -25,8 +25,14 @@ assert.match(appSurface, /createPaneLocalState\(\)/, 'AppSurface delegates pane-
 assert.doesNotMatch(appSurface, /const tabSelectionHistory/, 'the root surface must not retain per-pane selection history');
 assert.match(appSurface, /<RootSurfaceLifecycle start=\{startRootLifecycle\}/, 'only the root mounts bridge and workspace lifecycle listeners');
 const rootLifecycle = readFileSync(new URL('../src/lib/components/RootSurfaceLifecycle.svelte', import.meta.url), 'utf8');
-assert.match(rootLifecycle, /onMount\(start\)/, 'root lifecycle ownership is isolated from embedded pane mounts');
+assert.match(rootLifecycle, /onMount\(\(\)\s*=>\s*start\(\)\)/, 'root lifecycle ownership is isolated from embedded pane mounts');
 assert.ok(appSurface.includes('if (embedded) return;\n    const viewport = window.matchMedia'), 'only the root may create the global viewport and interface-scale listeners');
 assert.ok(appSurface.includes('parentMobileSidebar={mobileSidebar}'), 'embedded panes inherit responsive state from their retained root');
 assert.ok(appSurface.includes('use:rootMotion use:rootMobileViewport'), 'embedded panes must not install duplicate motion or viewport actions');
+assert.match(appSurface, /<TaskTranscript/, 'task conversation rendering must be compiled separately from the root surface');
+const transcript = readFileSync(new URL('../src/lib/components/TaskTranscript.svelte', import.meta.url), 'utf8');
+assert.match(transcript, /<TranscriptVirtualList/, 'the transcript component retains virtualized conversation rendering');
+assert.match(transcript, /<AnimatedTitle/, 'task headers keep animated title behavior after extraction');
+assert.match(transcript, /<style>[\s\S]*\.conversation-head[\s\S]*\.message\.user/s, 'extracted transcript owns the scoped header and message styles it renders');
+assert.match(transcript, /menuOpen[\s\S]*onMenuChange/, 'the child delegates menu state to the root keyboard-dismissal owner');
 console.log('pane controller ownership routing assertions passed');
