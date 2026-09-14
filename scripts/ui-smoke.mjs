@@ -61,9 +61,17 @@ try {
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks.length)).toBe(1);
   await expect(page.getByRole('button', { name: 'Stop current task', exact: true })).toBeVisible();
   await expect(page.getByLabel('Task message', { exact: true })).toBeDisabled();
+  const liveSidebarRow = page.locator('.task-row').filter({ hasText: 'Review local workspace' }).first();
+  await expect(liveSidebarRow.locator('small')).toContainText('live');
+  await expect(liveSidebarRow.getByRole('button', { name: 'Archive chat Review local workspace', exact: true })).toHaveCount(0);
+  expect(await liveSidebarRow.evaluate(row => {
+    const live = row.querySelector('small');
+    return Boolean(live && row.lastElementChild === live && row.getBoundingClientRect().right - live.getBoundingClientRect().right <= 10);
+  })).toBe(true);
   await page.screenshot({ path: 'verification/ui-running-light.png' });
   await page.getByRole('button', { name: 'Stop current task', exact: true }).click();
   await expect(page.getByLabel('Task message', { exact: true })).toBeEnabled();
+  await expect(liveSidebarRow.getByRole('button', { name: 'Archive chat Review local workspace', exact: true })).toHaveCount(1);
   const cancellation = page.locator('.cancellation-event').last();
   await expect(cancellation).toHaveText('You cancelled this run.');
   await expect(cancellation.locator('svg')).toHaveCount(1);

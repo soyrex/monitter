@@ -3123,10 +3123,13 @@
         {#if detail}<span class="chat-meta">{snapshot?.agents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
       </span>
     </button>
-    <small><AnimatedTitle text={task.status === 'running' ? 'live' : relative(task.updatedAt)} active={task.status === 'running'} activeTooltip="Live run" /></small>
-    <div class="chat-actions">
-      <button aria-label={`Archive chat ${task.title}`} title="Archive chat" disabled={busy || task.status === 'running'} onclick={()=>archiveTask(task)}><Archive size={12}/></button>
-    </div>
+    {#if task.status === 'running'}
+      <small><AnimatedTitle text="live" active={true} activeTooltip="Live run" /></small>
+    {:else}
+      <div class="chat-actions">
+        <button aria-label={`Archive chat ${task.title}`} title="Archive chat" disabled={busy} onclick={()=>archiveTask(task)}><Archive size={12}/></button>
+      </div>
+    {/if}
   </div>
 {/snippet}
 
