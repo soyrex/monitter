@@ -226,8 +226,11 @@ mode are cached in `monitter.appearance.browser-colours.v1` and `monitter.appear
 page load can set the document colour before Safari captures its surrounding chrome. This covers both
 older Safari theme-colour behavior and Safari 26's document-background colour extension.
 
-Settings include `accent`, `theme`, `interfaceScale` (integer percent, 80–200, default 125),
+Settings include `accent`, `theme`, legacy `interfaceScale` (integer percent, 80–200, default 125),
 `showToolActivity` and `showReasoningSummaries` (default true), and `sendWithEnter` (default false).
+The legacy shared scale seeds client-local `desktop` and `mobile` viewer preferences once. Current
+values live at `monitter.interface-scale.v1:desktop` and `monitter.interface-scale.v1:mobile`; they
+follow the viewer type across connection changes and are never written back through shared settings.
 The legacy shared `sidebarView` field remains readable for one-time migration only; current sidebar
 selection is client presentation state and is never written back through shared settings.
 `interfaceDensity` is `tight`, `normal`, or `spacious`, defaulting to `normal`. It changes
@@ -246,10 +249,13 @@ contrast ratio. The paired mobile interface uses the same computed foreground.
 Settings tabs display their active section as `Setting: Appearance`, `Setting: Typography`, etc.
 The horizontal tab, compact selector and workspace sidebar use the same section-aware title.
 Missing new fields receive these defaults when older saved workspaces load. Native WebView zoom
-scales the whole interface; window controls keep their native size and reserved header space.
-Cmd/Ctrl+plus (including Cmd+=) and Cmd/Ctrl+minus adjust the saved setting by five percentage
-points within 80–200%. Rapid shortcuts accumulate while writes are pending; they do not trigger
-an independent browser zoom.
+scales the active desktop or mobile viewer interface; window controls keep their native size and
+reserved header space. Browsers apply the active viewer preference as layout zoom with inverse
+viewport dimensions, so text, controls, spacing, tabs, and panes scale together without overflow.
+Crossing the 760px mobile-layout breakpoint switches buckets without overwriting either value; the
+dedicated paired-phone route always uses the mobile bucket. Cmd/Ctrl+plus (including Cmd+=) and
+Cmd/Ctrl+minus adjust the active viewer by five percentage points within 80–200%. They do not trigger
+the browser's own page-zoom command.
 Cmd+Option+= on macOS and Ctrl+Alt+= on Windows/Linux balance every open pane to the same area while
 preserving the current split arrangement. The same action is available as Balance panes in Controls.
 Activity toggles filter both inline blocks and run detail without deleting captured events.

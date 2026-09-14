@@ -30,6 +30,9 @@
     agentDirectory,
     headerActions,
     onsave,
+    interfaceScale,
+    interfaceScaleViewer,
+    onscale,
     category = $bindable<string>("appearance"),
     visible = true,
     active = true,
@@ -44,6 +47,9 @@
     agentDirectory?: import("svelte").Snippet;
     agentEditor?: import("svelte").Snippet;
     onsave: (patch: Partial<Settings>) => Promise<void>;
+    interfaceScale?: number;
+    interfaceScaleViewer?: 'desktop' | 'mobile';
+    onscale?: (scale: number) => void | Promise<void>;
     category?: string;
     visible?: boolean;
     active?: boolean;
@@ -72,6 +78,7 @@
   const activeCategory = $derived(categories.some((item) => item.id === category) ? category as Category : "appearance");
   const densities = ['tight', 'normal', 'spacious'] as const;
   const density = $derived(settings.interfaceDensity ?? 'normal');
+  const displayedInterfaceScale = $derived(interfaceScale ?? settings.interfaceScale ?? 125);
   const selectedTerminalTheme = $derived(terminalThemes.find(option=>option.id === $terminalTheme) ?? terminalThemes[0]);
   const selectedLightTheme = $derived(appThemePreset($appTheme.light));
   const selectedDarkTheme = $derived(appThemePreset($appTheme.dark));
@@ -102,6 +109,15 @@
     } finally {
       pending -= 1;
     }
+  }
+
+  async function saveInterfaceScale(value: number) {
+    if (!onscale) { await save({ interfaceScale: value }); return; }
+    pending += 1;
+    saveError = '';
+    try { await onscale(value); savedAt = Date.now(); }
+    catch (reason) { saveError = reason instanceof Error ? reason.message : String(reason); }
+    finally { pending -= 1; }
   }
 
   function saveNumber(event: Event, key: FontSizeKey, fallback: number) {
@@ -310,9 +326,10 @@
         </section>
 
         <section class="setting-card" aria-labelledby="scale-heading">
-          <div class="card-heading inline-heading"><div><h2 id="scale-heading">Interface scale</h2><p>Resize text and controls together.</p></div><strong>{settings.interfaceScale ?? 125}%</strong></div>
-          <input class="range" type="range" use:rangeFill={settings.interfaceScale ?? 125} aria-label="Interface scale" min="80" max="200" step="5" value={settings.interfaceScale ?? 125} onchange={(event) => void save({ interfaceScale: Number(event.currentTarget.value) })} />
-          <div class="range-footer"><span>80%</span><button type="button" onclick={() => void save({ interfaceScale: 125 })}>Reset to default · 125%</button><span>200%</span></div>
+          <div class="card-heading inline-heading"><div><h2 id="scale-heading">Interface scale</h2><p>Resize text and controls for this {interfaceScale === undefined ? 'connection' : 'viewer type'}.</p></div><strong>{displayedInterfaceScale}%</strong></div>
+          <input class="range" type="range" use:rangeFill={displayedInterfaceScale} aria-label="Interface scale" min="80" max="200" step="5" value={displayedInterfaceScale} onchange={(event) => void saveInterfaceScale(Number(event.currentTarget.value))} />
+          <div class="range-footer"><span>80%</span><button type="button" onclick={() => void saveInterfaceScale(125)}>Reset to default · 125%</button><span>200%</span></div>
+          {#if interfaceScale !== undefined}<p class="hint">Saved on this device/browser for {interfaceScaleViewer ?? 'desktop'} viewers, independent of the connected workspace.</p>{/if}
         </section>
 
         <section class="setting-card" aria-labelledby="density-heading">

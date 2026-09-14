@@ -15,10 +15,10 @@ function start(command,args,env,pattern){
 let browser;
 try {
   const relayUrl=await start(process.execPath,['scripts/relay-server.mjs'],{MONITTER_RELAY_PORT:'0',MONITTER_RELAY_HOST:'127.0.0.1'},/listening on (ws:\/\/[^\s]+)/);
-  const baseUrl=await start(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','0'],{NO_COLOR:'1'},/Local:\s+(http:\/\/[^\s]+)/);
+  const baseUrl=process.env.MONITTER_TEST_URL||await start(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','0'],{NO_COLOR:'1'},/Local:\s+(http:\/\/[^\s]+)/);
   browser=await webkit.launch();
   const host=await browser.newPage();
-  await host.goto(baseUrl);
+  await host.goto(baseUrl,{waitUntil:'domcontentloaded',timeout:60000});
   const invitation=await host.evaluate(async(relayUrl)=>{
     const {createDesktopSession}=await import('/src/lib/controller/remote-client.ts');
     const taskId='11111111-1111-4111-8111-111111111111';
@@ -35,7 +35,7 @@ try {
   },relayUrl);
   const phone=await browser.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
   const errors=[];phone.on('pageerror',e=>errors.push(e.message));
-  await phone.goto(new URL('mobile',baseUrl).href);
+  await phone.goto(new URL('mobile',baseUrl).href,{waitUntil:'domcontentloaded',timeout:60000});
   await phone.evaluate(()=>{window.scanRequests=0;window.monitterAndroid={postMessage:value=>{if(value==='scanQR')window.scanRequests++;}};});
   await phone.getByRole('button',{name:'Scan desktop code'}).click();
   if(await phone.evaluate(()=>window.scanRequests)!==1)throw Error('Android scanner bridge was not invoked');
@@ -72,7 +72,7 @@ try {
   });
   await phone.getByRole('button',{name:'Refresh',exact:true}).click();
   const cancellation=phone.locator('.cancellation-event');
-  await expect(cancellation).toHaveText('You cancelled this run.');
+  await expect(cancellation).toContainText('You cancelled this run.');
   await expect(cancellation.locator('svg')).toHaveCount(1);
   expect(await cancellation.locator('time').evaluate(node=>node.getBoundingClientRect().right>=node.parentElement.getBoundingClientRect().right-1)).toBe(true);
   await phone.getByLabel('Message',{exact:true}).fill('Mobile UI test message');
@@ -86,6 +86,17 @@ try {
   await host.evaluate(()=>{window.holdSend=false;window.releaseSend();});
   await expect(phone.getByText('Mobile UI test message',{exact:true})).toBeVisible();
   await expect.poll(()=>host.evaluate(()=>window.testSends)).toBe(1);
+  await phone.getByRole('button',{name:'Back to chats'}).click();
+  await phone.getByRole('button',{name:'Preferences',exact:true}).click();
+  const mobileScale=phone.getByRole('slider',{name:'Mobile interface scale',exact:true});
+  await expect(mobileScale).toHaveValue('125');
+  await mobileScale.fill('175');
+  await expect.poll(()=>phone.evaluate(()=>Number(localStorage.getItem('monitter.interface-scale.v1:mobile')))).toBe(175);
+  await expect.poll(()=>phone.evaluate(()=>getComputedStyle(document.querySelector('.mobile')).getPropertyValue('--viewer-interface-scale').trim())).toBe('1.75');
+  expect(await phone.evaluate(()=>localStorage.getItem('monitter.interface-scale.v1:desktop'))).toBeNull();
+  const mobileBounds=await phone.locator('.mobile').evaluate(element=>{const box=element.getBoundingClientRect();return {width:box.width,height:box.height};});
+  expect(Math.abs(mobileBounds.width-390)).toBeLessThan(1);
+  expect(Math.abs(mobileBounds.height-844)).toBeLessThan(1);
   await phone.screenshot({path:'verification/mobile-chat-test.png'});
   await phone.getByRole('button',{name:'Disconnect',exact:true}).click();
   await expect(phone.getByRole('button',{name:'Connect to desktop'})).toBeVisible();

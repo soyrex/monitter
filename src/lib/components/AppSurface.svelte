@@ -10,6 +10,7 @@
   import { tabStripFade } from '$lib/tab-strip-fade';
   import { collectWorkspaceSidebarTabs, settingsTabTitle, terminalTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
   import { loadSidebarViewPreference, saveSidebarViewPreference, type SidebarViewClient } from '$lib/sidebar-view-preference';
+  import { interfaceScaleStore, seedViewerInterfaceScale, setViewerInterfaceScale, watchViewerInterfaceScales, type ViewerType } from '$lib/interface-scale';
   import "../../app.css";
   import AnimatedTitle from "./AnimatedTitle.svelte";
   import MessageMeta from "./MessageMeta.svelte";
@@ -296,11 +297,15 @@
   });
   $effect(() => { optimisticMessages; if (optimisticOutboxRestored) persistOptimisticOutbox(); });
   const canSend=$derived(Boolean(composer.trim() || currentAttachments.length) && !filesBusy);
-  let scaleQueued = $state<number | null>(null), scaleInFlight = $state<number | null>(null), scaleSaving = false;
+  let scaleQueued = $state<number | null>(null);
   let slashOpen = $state(false), slashIndex = $state(0);
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
   let mobileSidebar = $state(false);
+  const desktopInterfaceScale = interfaceScaleStore('desktop');
+  const mobileInterfaceScale = interfaceScaleStore('mobile');
+  const interfaceScaleViewer = $derived<ViewerType>(mobileSidebar ? 'mobile' : 'desktop');
+  const activeInterfaceScale = $derived(mobileSidebar ? $mobileInterfaceScale : $desktopInterfaceScale);
   const backToChats = getContext<() => void>('monitter-back-to-chats')
     ?? (() => { mobileMain = false; railAgentId = null; });
   setContext('monitter-back-to-chats', backToChats);
@@ -309,9 +314,10 @@
   onMount(() => {
     const viewport = window.matchMedia('(max-width: 760px)');
     const update = () => { mobileSidebar = viewport.matches; railAgentId = null; };
+    const stopScaleWatch = watchViewerInterfaceScales();
     update();
     viewport.addEventListener('change', update);
-    return () => viewport.removeEventListener('change', update);
+    return () => { viewport.removeEventListener('change', update); stopScaleWatch(); };
   });
   let collapsedAgents = $state<Record<string, boolean>>({});
   let railAgentId = $state<string | null>(null);
@@ -408,6 +414,11 @@
     sidebarViewState.view = snapshot.settings.sidebarView ?? 'standard';
     saveSidebarViewPreference(sidebarViewClient, sidebarView);
     sidebarViewInitialized = true;
+  });
+  $effect(() => {
+    if (!snapshot) return;
+    seedViewerInterfaceScale('desktop', snapshot.settings.interfaceScale ?? 125);
+    seedViewerInterfaceScale('mobile', snapshot.settings.interfaceScale ?? 125);
   });
   const activeTasks = $derived(snapshot?.tasks.filter(task => !task.archived) ?? []);
   const scopedTasks = $derived(activeTasks.filter(task => taskBelongsToWorkspace(task, activeWorkspaceKey)));
@@ -1459,7 +1470,7 @@
       window.localStorage.setItem('monitter.appearance.mode.v1', settings.theme);
     } catch { /* Live colour still applies when client storage is unavailable. */ }
   }
-  function applyAppearance(settings: Snapshot["settings"], selectedTheme: AppThemeSelection = $appTheme) {
+  function applyAppearance(settings: Snapshot["settings"], selectedTheme: AppThemeSelection = $appTheme, scale = activeInterfaceScale) {
     const root = document.documentElement,
       light = appThemePreset(selectedTheme.light).light,
       dark = appThemePreset(selectedTheme.dark).dark,
@@ -1497,8 +1508,12 @@
     root.style.setProperty('--app-light-on-accent', contrastForeground(lightAccent));
     root.style.setProperty('--app-dark-on-accent', contrastForeground(darkAccent));
     for (const legacy of ['--paper-base','--sidebar-base','--panel-base','--line-base','--soft-base','--code-base','--ink','--muted','--accent','--accent-rgb','--accent-light-ink','--accent-dark-ink','--on-accent']) root.style.removeProperty(legacy);
-    const scale = Math.min(200, Math.max(80, settings.interfaceScale ?? 125));
     root.style.setProperty("--interface-scale", String(scale / 100));
+    const browserScale = isTauri() ? 1 : scale / 100;
+    const previousBrowserScale = root.style.getPropertyValue("--browser-interface-scale");
+    root.style.setProperty("--browser-interface-scale", String(browserScale));
+    root.style.setProperty("--browser-interface-scale-inverse", String(1 / browserScale));
+    if (previousBrowserScale !== String(browserScale)) window.dispatchEvent(new Event('monitter:interface-scale'));
     if (isTauri() && appliedScale !== scale) {
       appliedScale = scale;
       void getCurrentWebview().setZoom(scale / 100).catch(reason => {
@@ -1509,7 +1524,8 @@
   }
   $effect(() => {
     const selectedTheme = $appTheme;
-    if (!embedded && snapshot) applyAppearance(snapshot.settings,selectedTheme);
+    const scale = activeInterfaceScale;
+    if (!embedded && snapshot) applyAppearance(snapshot.settings,selectedTheme,scale);
   });
   function applySnapshot(next: Snapshot, ticket: number, fromBridge = true) {
     if (ticket < snapshotApplied) return;
@@ -2596,22 +2612,15 @@
     if (isSendKey(event)) { event.preventDefault(); if (pane === "channel") void sendChannel(); else void send(); }
   }
   function queueScale(delta: number) {
-    const base = scaleQueued ?? scaleInFlight ?? snapshot?.settings.interfaceScale ?? 125;
+    const base = scaleQueued ?? activeInterfaceScale;
     scaleQueued = Math.max(80, Math.min(200, base + delta));
-    void flushScale();
+    flushScale();
   }
-  async function flushScale() {
-    if (scaleSaving) return;
-    scaleSaving = true;
-    try {
-      while (scaleQueued !== null) {
-        const target = scaleQueued; scaleQueued = null; scaleInFlight = target;
-        const settings = snapshot?.settings; if (!settings) break;
-        const result = await saveSettingsPatch({interfaceScale: target});
-        if (isSnapshot(result)) applySnapshot(result, ++snapshotIssued);
-      }
-    } catch (reason) { error = text(reason); }
-    finally { scaleInFlight = null; scaleSaving = false; }
+  function flushScale() {
+    if (scaleQueued === null) return;
+    const target = scaleQueued;
+    scaleQueued = null;
+    setViewerInterfaceScale(interfaceScaleViewer, target);
   }
   function dismissMonitterMenu(event: PointerEvent) {
     if (!(event.target instanceof Element) || !event.target.closest('.task-overflow')) taskMenu = false;
@@ -2801,7 +2810,7 @@
     }
 
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && !event.isComposing && (event.key==='0' || event.code==='Numpad0')) {
-      event.preventDefault();scaleQueued=125;void flushScale();return;
+      event.preventDefault();scaleQueued=125;flushScale();return;
     }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.isComposing && (event.key === "+" || event.key === "=" || event.code === "NumpadAdd" || event.key === "-" || event.code === "NumpadSubtract")) {
       event.preventDefault();
@@ -2851,8 +2860,8 @@
     {id:"dim-panes",label:"Dim inactive panes",checked:snapshot?.settings.dimInactivePanes ?? true,group:"Toggles"},
     {id:"enter",label:"Enter to send",checked:snapshot?.settings.sendWithEnter ?? false,group:"Toggles"},
     {id:"detail",label:"Show run detail",checked:showDetail,group:"Toggles"},
-    {id:"scale-up",label:"Increase interface scale",detail:`${snapshot?.settings.interfaceScale ?? 125}% → up to 200%`,group:"Appearance",disabled:(snapshot?.settings.interfaceScale ?? 125)>=200},
-    {id:"scale-down",label:"Decrease interface scale",group:"Appearance",disabled:(snapshot?.settings.interfaceScale ?? 125)<=80},
+    {id:"scale-up",label:"Increase interface scale",detail:`${activeInterfaceScale}% → up to 200%`,group:"Appearance",disabled:activeInterfaceScale>=200},
+    {id:"scale-down",label:"Decrease interface scale",group:"Appearance",disabled:activeInterfaceScale<=80},
     {id:"scale-reset",label:"Reset interface scale to 125%",group:"Appearance"},
     ...["light","dark","system"].map(theme=>({id:`theme:${theme}`,label:`${theme[0].toUpperCase()+theme.slice(1)} theme`,checked:snapshot?.settings.theme===theme,group:"Appearance"})),
     ...(selectedTask ? [{id:"archive",label:"Archive current chat",group:"Current chat",disabled:selectedTask.status==="running"},
@@ -2896,7 +2905,7 @@
     else if (id === "dim-panes") await run(()=>saveSettingsPatch({dimInactivePanes:!(settings.dimInactivePanes ?? true)}));
     else if (id === "enter") await run(()=>saveSettingsPatch({sendWithEnter:!settings.sendWithEnter}));
     else if (id === "detail") showDetail = !showDetail;
-    else if (id.startsWith("scale-")) { if (id === "scale-reset") { scaleQueued = 125; void flushScale(); } else queueScale(id === "scale-up" ? 5 : -5); }
+    else if (id.startsWith("scale-")) { if (id === "scale-reset") { scaleQueued = 125; flushScale(); } else queueScale(id === "scale-up" ? 5 : -5); }
     else if (id.startsWith("theme:")) await run(()=>saveSettingsPatch({theme:id.slice(6) as "light"|"dark"|"system"}));
     else {
       palette = null;
@@ -3150,7 +3159,7 @@
         use hosts, agents, and tasks.
       </div>{/if}
     {#if settingsOpen && snapshot}<div class="settings-surface" class:settings-hidden={pane!=='settings'}>
-      <SettingsPane settings={snapshot.settings} approvalRules={approvalRules} agents={snapshot.agents} hosts={snapshot.hosts} revokingRuleId={revokingApprovalRuleId} onrevokeRule={revokeApprovalRule} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
+      <SettingsPane settings={snapshot.settings} interfaceScale={activeInterfaceScale} {interfaceScaleViewer} onscale={value=>{ setViewerInterfaceScale(interfaceScaleViewer,value); }} approvalRules={approvalRules} agents={snapshot.agents} hosts={snapshot.hosts} revokingRuleId={revokingApprovalRuleId} onrevokeRule={revokeApprovalRule} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
     </div>{/if}
     {#if !snapshot}<div class="loading">
         <LoaderCircle size={22} /><span>Loading your workspace…</span
@@ -3538,7 +3547,7 @@
   </section>
 {/snippet}
 
-<main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
+<main use:initMotion use:mobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
   {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
@@ -4170,6 +4179,15 @@
     grid-template-columns: 252px minmax(0, 1fr);
     background: var(--paper);
   }
+  /* Tauri applies the preference as native WebView zoom. Browsers need an
+     equivalent layout zoom: the inverse dimensions keep the scaled shell
+     fitted to the visual viewport while every px/rem measurement scales as a
+     single system. Embedded panes inherit the root shell's scale exactly once. */
+  .app-shell.web-runtime {
+    width: 100%;
+    height: 100%;
+    zoom: var(--browser-interface-scale, 1);
+  }
   .sidebar {
     position: relative;
     display: flex;
@@ -4486,8 +4504,9 @@
   .pane-grid { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
   .app-shell.mobile-navigation:not(.embedded) {
     display:flex; flex-direction:column; position:fixed; left:0;
-    top:var(--mobile-viewport-top,0px); width:100%;
-    height:100dvh; height:var(--mobile-viewport-height,100dvh);
+    top:var(--scaled-mobile-viewport-top,0px);
+    width:100%;
+    height:var(--scaled-mobile-viewport-height,100dvh);
   }
   .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid {
     position:absolute; inset:0; width:100%; box-sizing:border-box;

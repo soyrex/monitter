@@ -15,7 +15,7 @@ try {
     await page.goto(url);
     await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 30000 });
   };
-  const scale = () => page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.interfaceScale);
+  const scale = () => page.evaluate(() => Number(localStorage.getItem('monitter.interface-scale.v1:desktop')));
   const callCount = method => page.evaluate(method => window.__MONITTER_QA__.calls.filter(call => call.method === method).length, method);
   const newDraft = async title => {
     await page.keyboard.press('Meta+p');
@@ -40,18 +40,11 @@ try {
   await expect.poll(scale).toBe(130);
   passed.push('Cmd+=, Cmd+plus and Cmd+minus use saved 5% scale steps and prevent browser zoom');
 
-  await page.evaluate(() => {
-    const bridge = window.__MONITTER_BRIDGE__, original = bridge.saveSettings;
-    let release;
-    const pending = new Promise(resolve => release = resolve);
-    window.__MONITTER_QA__.releaseScale = release;
-    bridge.saveSettings = async (...args) => { bridge.saveSettings = original; await pending; return original(...args); };
-    for (let i = 0; i < 3; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: '=', metaKey: true, bubbles: true, cancelable: true }));
-  });
-  expect(await scale()).toBe(130);
-  await page.evaluate(() => window.__MONITTER_QA__.releaseScale());
+  const settingsSavesBeforeScale = await callCount('saveSettings');
+  await page.evaluate(() => { for (let i = 0; i < 3; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: '=', metaKey: true, bubbles: true, cancelable: true })); });
   await expect.poll(scale).toBe(145);
-  passed.push('rapid shortcuts preserve every increment while a settings save is pending');
+  expect(await callCount('saveSettings')).toBe(settingsSavesBeforeScale);
+  passed.push('rapid shortcuts preserve every increment without writing connection settings');
 
   for (const [key, expected] of [['=', 200], ['-', 80]]) {
     await page.evaluate(key => {

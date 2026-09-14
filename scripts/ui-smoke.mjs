@@ -292,14 +292,15 @@ try {
   await expect(dialog.getByLabel('Interface scale', { exact: true })).toHaveValue('125');
   await dialog.getByLabel('Interface scale', { exact: true }).fill('200');
   await dialog.getByLabel('Interface scale', { exact: true }).dispatchEvent('change');
-  await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.interfaceScale)).toBe(200);
+  await expect.poll(() => page.evaluate(() => Number(localStorage.getItem('monitter.interface-scale.v1:desktop')))).toBe(200);
+  expect(await page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.interfaceScale)).toBe(125);
   await dialog.getByRole('button', {name: 'Reset to default · 125%', exact:true}).click();
-  await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().settings.interfaceScale)).toBe(125);
+  await expect.poll(() => page.evaluate(() => Number(localStorage.getItem('monitter.interface-scale.v1:desktop')))).toBe(125);
   await expect.poll(() => page.evaluate(() => document.documentElement.style.getPropertyValue('--interface-scale'))).toBe('1.25');
   await dialog.getByLabel('Interface scale', { exact: true }).fill('100');
   await dialog.getByLabel('Interface scale', { exact: true }).dispatchEvent('change');
   await dialog.getByRole('button', { name: 'Close', exact: true }).click();
-  results.push('interface scale preference saved (native zoom verified separately)');
+  results.push('desktop viewer scale is saved locally without changing shared connection settings (native zoom verified separately)');
   await openAppMenu(settingsButton);
   await settingsButton.click();
   dialog = page.getByRole('dialog');
