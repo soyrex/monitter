@@ -76,7 +76,7 @@
 </script>
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 {#if primary && emptyReasoning}
-  <ThinkingStatus {running} {avatar}/>
+  <ThinkingStatus {running} {avatar} startedAt={primary.createdAt}/>
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning summary</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if primary && latest}

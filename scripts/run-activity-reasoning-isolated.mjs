@@ -59,11 +59,18 @@ try {
   await page.evaluate(() => window.__REASONING_QA__.activate());
   await expect(pending.locator('.animated-title')).toHaveAttribute('aria-busy', 'true');
   await expect(pending.locator('.animated-title')).toHaveAttribute('title', 'In progress');
+  const timer = pending.getByLabel('Elapsed time');
+  await expect(timer).toBeVisible();
+  await expect(timer).toHaveText(/^3m \d+s$/);
+  const initialElapsed = await timer.textContent();
+  expect(await timer.evaluate(node => node.getBoundingClientRect().right >= node.parentElement.getBoundingClientRect().right - 1)).toBe(true);
   const activeLabel = await pending.textContent();
   await page.waitForTimeout(5_200);
   const rotatedLabel = await pending.textContent();
   expect(rotatedLabel).not.toBe(activeLabel);
+  expect(await timer.textContent()).not.toBe(initialElapsed);
   await page.evaluate(() => window.__REASONING_QA__.deactivate());
+  await expect(timer).toHaveCount(0);
   const stoppedLabel = await pending.textContent();
   await page.waitForTimeout(5_200);
   await expect(pending).toHaveText(stoppedLabel || 'Thinking');

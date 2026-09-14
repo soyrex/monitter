@@ -3088,8 +3088,8 @@
   {/each}
 {/snippet}
 
-{#snippet agentWaiting(agent: Agent | null | undefined, starting = false)}
-  <ThinkingStatus {starting} running={!starting}>
+{#snippet agentWaiting(agent: Agent | null | undefined, starting = false, startedAt?: number)}
+  <ThinkingStatus {starting} running={!starting} {startedAt}>
     {#snippet avatar()}{@render messageAvatar(agent)}{/snippet}
   </ThinkingStatus>
 {/snippet}
@@ -3478,7 +3478,7 @@
                 </p>
               </div>{/if}
             {#if showThinkingFallback(conversationItems, selectedTask.status === 'running' || selectedTaskStarting, pendingApprovalRequests.length > 0)}
-              {@render agentWaiting(selectedAgent, selectedTask.status !== 'running')}
+              {@render agentWaiting(selectedAgent, selectedTask.status !== 'running', latestUserRequest?.createdAt)}
             {/if}
           </MessagePane>
           <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>

@@ -13,8 +13,9 @@
   let compactionEvents = $state<RunEvent[]>([
     { id: 'compact-start', taskId: 'task-1', kind: 'tool', title: 'ContextCompaction', detail: '{"type":"ContextCompaction","id":"compact-1","monitterPhase":"started"}', createdAt: 1 },
   ]);
+  const reasoningStartedAt = Date.now() - 201_000;
   const event = $derived<RunEvent>({
-    id: 'reasoning-1', taskId: 'task-1', kind: 'reasoning', title: 'Reasoning', detail, createdAt: 1,
+    id: 'reasoning-1', taskId: 'task-1', kind: 'reasoning', title: 'Reasoning', detail, createdAt: reasoningStartedAt,
   });
   const conversation = $derived(groupConversationActivity(messages, includeEvent ? [event] : []));
 
@@ -23,8 +24,8 @@
       activate: () => { running = true; },
       deactivate: () => { running = false; },
       summary: () => { detail = '{"type":"reasoning","summary":[{"type":"summary_text","text":"I checked the source and found the relevant path."}]}'; },
-      emptyReply: () => { messages = [{ id: 'reply', taskId: 'task-1', role: 'assistant', text: '', createdAt: 2, streamStatus: 'streaming' }]; },
-      reply: () => { messages = [{ id: 'reply', taskId: 'task-1', role: 'assistant', text: 'Here is the reply.', createdAt: 2, streamStatus: 'streaming' }]; },
+      emptyReply: () => { messages = [{ id: 'reply', taskId: 'task-1', role: 'assistant', text: '', createdAt: Date.now(), streamStatus: 'streaming' }]; },
+      reply: () => { messages = [{ id: 'reply', taskId: 'task-1', role: 'assistant', text: 'Here is the reply.', createdAt: Date.now(), streamStatus: 'streaming' }]; },
       resetReply: () => { messages = []; },
       beginWaiting: () => { messages = []; includeEvent = false; running = true; detail = ''; },
       reportReasoning: () => { includeEvent = true; },
