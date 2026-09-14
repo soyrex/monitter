@@ -19,18 +19,16 @@
     children: Snippet;
   } = $props();
   let node = $state<HTMLDivElement>();
-  let observed = $state<HTMLElement>();
-  export function element() { return observed; }
+  export function element() { return node; }
 
   $effect(() => {
-    observed = node?.firstElementChild instanceof HTMLElement ? node.firstElementChild : undefined;
-    if (!observed || !active) return;
+    if (!node || !active) return;
     const resize = new ResizeObserver(() => {
-      if (!observed?.isConnected || observed.clientWidth <= 0) return;
-      onmetrics(observed.clientWidth);
+      if (!node?.isConnected || node.clientWidth <= 0) return;
+      onmetrics(node.clientWidth);
     });
-    resize.observe(observed);
-    onmetrics(observed.clientWidth);
+    resize.observe(node);
+    onmetrics(node.clientWidth);
     return () => resize.disconnect();
   });
 </script>
@@ -39,4 +37,10 @@
   {@render children()}
 </div>
 
-<style>.pane-surface{display:contents}</style>
+<style>
+  /* This is a real pane boundary: it owns sizing and is the stable motion
+     target for both the main pane and retained split panes. Flattening this
+     node would discard that boundary and reintroduce parent-wide observation. */
+  .pane-surface { display:flex; flex:1 1 auto; min-width:0; min-height:0; overflow:hidden; }
+  .pane-surface > :global(.workspace) { flex:1 1 auto; min-width:0; min-height:0; }
+</style>

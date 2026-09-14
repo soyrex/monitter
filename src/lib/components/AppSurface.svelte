@@ -125,11 +125,13 @@
   import TimelinePane from "$lib/components/TimelinePane.svelte";
   import PaneGrid from '$lib/components/PaneGrid.svelte';
   import PaneSurface from '$lib/components/PaneSurface.svelte';
+  import RootSurfaceLifecycle from '$lib/components/RootSurfaceLifecycle.svelte';
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { balancePaneLayout, paneIds } from '$lib/panes';
   import { paneRemovalDecision, paneTabCount, remapPromotedPaneId, remapQueuedPaneRemovals } from '$lib/pane-lifecycle';
-  import { insertTab, normalizeTabOrder, type TabKey } from '$lib/tab-order';
+  import { normalizeTabOrder, type TabKey } from '$lib/tab-order';
+  import { createPaneLocalState } from '$lib/pane-local-state.svelte';
   import { findPaneTabOwner, paneTabMatches, type PaneSurfaceHandle } from '$lib/pane-controller';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
   import ModelPicker from '$lib/components/ModelPicker.svelte';
@@ -156,7 +158,10 @@
   type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let pendingEmptyPaneIds = $state<string[]>([]);
-  let tabOrder = $state<TabKey[]>([]);
+  // Each AppSurface instance owns exactly one pane-local controller. The root
+  // coordinates the layout tree; it no longer owns tab ordering or selection
+  // history for every embedded pane.
+  const paneLocal = createPaneLocalState();
   let expandedPaneId=$state<string|null>(null), focusStep=$state<0|1|2>(0), focusTarget=$state('');
   const workspaceExpansion=$derived(embedded?parentExpandedPaneId:expandedPaneId);
   const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
@@ -733,23 +738,16 @@
       ...(settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
     ];
   }
-  function orderedTabs(): TabKey[] { return normalizeTabOrder(tabOrder, availableTabs()); }
+  function orderedTabs(): TabKey[] { return paneLocal.ordered(availableTabs()); }
   // Selection history belongs to this pane and workspace, not to tab order.
-  const tabSelectionHistory = new Map<string, TabKey[]>();
   $effect(() => {
     const tab = currentVimTab(), scope = activeWorkspaceKey;
-    if (!tab) return;
-    untrack(() => {
-      const history = tabSelectionHistory.get(scope) ?? [];
-      tabSelectionHistory.set(scope, [...history.filter(item => item.kind !== tab.kind || item.id !== tab.id), tab]);
-    });
+    if (tab) untrack(() => paneLocal.recordSelection(scope, tab));
   });
   function rememberTab(tab: TabKey, before?: TabKey) {
-    const current=orderedTabs();
-    if (!before && current.some(item=>item.kind===tab.kind && item.id===tab.id)) { tabOrder=current; return; }
-    tabOrder = insertTab(current, tab, before);
+    paneLocal.remember(tab, availableTabs(), before);
   }
-  function forgetTab(tab: TabKey) { tabOrder = tabOrder.filter(current=>current.kind!==tab.kind || current.id!==tab.id); }
+  function forgetTab(tab: TabKey) { paneLocal.forget(tab); }
   export function allTabs(): PaneTabTransfer[] {
     return orderedTabs().map(tab=>({sourcePaneId:paneId,...tab}));
   }
@@ -812,15 +810,11 @@
     }
     return ids;
   });
-  export function reorderTab(tab: PaneTabTransfer, before?: TabKey) { tabOrder=insertTab(orderedTabs(),tab,before); }
+  export function reorderTab(tab: PaneTabTransfer, before?: TabKey) { paneLocal.reorder(tab, availableTabs(), before); }
   export function swapActiveTab(direction: 1 | -1) {
     const current = currentVimTab(), tabs = orderedTabs();
     if (!current || tabs.length < 2) return;
-    const index = tabs.findIndex(tab => tab.kind === current.kind && tab.id === current.id);
-    const target = index + direction;
-    if (index < 0 || target < 0 || target >= tabs.length) return;
-    [tabs[index], tabs[target]] = [tabs[target], tabs[index]];
-    tabOrder = tabs;
+    paneLocal.swap(current, availableTabs(), direction);
   }
   export function toggleDetail() { showDetail = !showDetail; }
   export function hasPending() { return terminalBusy || Object.values(composerPending).some(Boolean) || Object.values(pendingUploads).some(Boolean); }
@@ -838,8 +832,8 @@
   export function restoreState(value:PaneState) {
     value = applySharedComposers(value as unknown as Record<string, unknown>) as unknown as PaneState;
     agentDraft=value.settingsEditor?.draft??null;agentEdits=value.settingsEditor?.edits??{};
-    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,openTaskIds,openDraftIds,openChannelIds,tabOrder,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
-    tabOrder = normalizeTabOrder(Array.isArray(tabOrder) ? tabOrder : [], availableTabs());
+    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
+    paneLocal.restore(Array.isArray(value.tabOrder) ? value.tabOrder : [], availableTabs());
     composer=drafts[currentDraftKey() ?? ''] ?? '';
     recipients=selectedChannelId?channelRecipients[selectedChannelId]??[]:[];
     const draft=currentDraftId?taskDrafts[currentDraftId]:null;
@@ -1070,7 +1064,7 @@
   $effect(() => {
     // Stringifying tracks nested pane edits, but capture/storage is coalesced
     // below so every composer keystroke does not clone the entire workspace.
-    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openEmptyIds, selectedEmptyId, openTaskIds, openDraftIds, openChannelIds, tabOrder, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
+    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openEmptyIds, selectedEmptyId, openTaskIds, openDraftIds, openChannelIds, tabOrder:paneLocal.order, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
     workspaceReady;
     untrack(() => { if (embedded) onWorkspaceChange?.(); else workspaceSave.schedule(); });
   });
@@ -1087,11 +1081,10 @@
   export function takeTab(tab: PaneTabTransfer): TabPayload | null {
     const active = currentVimTab();
     const wasActive = active?.kind === tab.kind && active.id === tab.id;
-    const history = [...(tabSelectionHistory.get(activeWorkspaceKey) ?? [])];
     const payload = takeTabPayload(tab);
     if (payload && wasActive) {
       const remaining = orderedTabs();
-      const previous = history.reverse().find(item => remaining.some(candidate => candidate.kind === item.kind && candidate.id === item.id));
+      const previous = paneLocal.mostRecentRemaining(activeWorkspaceKey, remaining);
       const next = previous ?? remaining.at(-1);
       if (next) focusExistingTab(next);
     }
@@ -1701,15 +1694,11 @@
     if (refreshTimer) return;
     refreshTimer = setTimeout(() => { refreshTimer = undefined; void reload(); }, 125);
   }
-  onMount(() => {
-    if(!embedded) {
-      const storedView = loadSidebarViewPreference(sidebarViewClient);
-      if (storedView) { sidebarViewState.view = storedView; sidebarViewInitialized = true; saveSidebarViewPreference(sidebarViewClient, storedView); }
-      sidebarViewClientReady = true;
-      try{const saved=JSON.parse(localStorage.getItem('monitter.sidebar-order.v1')??'{}');if(saved && typeof saved==='object' && !Array.isArray(saved))sidebarOrder=Object.fromEntries(Object.entries(saved).filter(([,ids])=>Array.isArray(ids)&&ids.every(id=>typeof id==='string')) as [string,string[]][]);}catch{/* Use original order if storage is unavailable. */}
-    }
-
-    if (embedded) return;
+  function startRootLifecycle() {
+    const storedView = loadSidebarViewPreference(sidebarViewClient);
+    if (storedView) { sidebarViewState.view = storedView; sidebarViewInitialized = true; saveSidebarViewPreference(sidebarViewClient, storedView); }
+    sidebarViewClientReady = true;
+    try{const saved=JSON.parse(localStorage.getItem('monitter.sidebar-order.v1')??'{}');if(saved && typeof saved==='object' && !Array.isArray(saved))sidebarOrder=Object.fromEntries(Object.entries(saved).filter(([,ids])=>Array.isArray(ids)&&ids.every(id=>typeof id==='string')) as [string,string[]][]);}catch{/* Use original order if storage is unavailable. */}
     let unlisten: (() => void) | undefined;
     let unlistenDrop: (() => void) | undefined;
     let unlistenCloseTab: UnlistenFn | undefined;
@@ -1797,7 +1786,7 @@
       window.removeEventListener('pagehide', persistOnPageHide);
       clearNativeDrop();
     };
-  });
+  }
   function slashFloating(node: HTMLElement) {
     const anchor = node.closest<HTMLElement>('.composer');
     if (!anchor) return;
@@ -1861,7 +1850,7 @@
     if(!ids.some(id=>!sessions[id]))return;
     untrack(()=>{
       openTerminalIds=ids.filter(id=>sessions[id]);
-      tabOrder=orderedTabs();
+      paneLocal.restore(orderedTabs(), availableTabs());
       if(pane!=='terminal'||!selectedTerminalId||sessions[selectedTerminalId]) { collapseTablessPane(); return; }
       const terminal=openTerminalIds.at(-1);
       const task=snapshot?.tasks.find(task=>task.id===openTaskIds.at(-1));
@@ -2395,7 +2384,7 @@
       delete drafts[`draft:${draftId}`];
       openDraftIds = openDraftIds.filter(id => id !== draftId);
       if (wasOpen && !openTaskIds.includes(taskId)) openTaskIds = [...openTaskIds, taskId];
-      tabOrder = tabOrder.map(tab=>tab.kind==='draft' && tab.id===draftId?{kind:'task' as const,id:taskId!}:tab);
+      paneLocal.order = paneLocal.order.map(tab=>tab.kind==='draft' && tab.id===draftId?{kind:'task' as const,id:taskId!}:tab);
       if (currentDraftId === draftId) {
         currentDraftId = null;
         const created = snapshot?.tasks.find(task => task.id === taskId);
@@ -3632,7 +3621,7 @@
 {/snippet}
 
 <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell">
-  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:clock-expanded={clockExpanded && !sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
+  {#if !embedded}<RootSurfaceLifecycle start={startRootLifecycle}/><aside bind:this={motionSidebar} class="sidebar" class:clock-expanded={clockExpanded && !sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
