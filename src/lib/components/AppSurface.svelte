@@ -3702,7 +3702,7 @@
       <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}{@render sidebarWorkspacePanels(railAgent.id)}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
-    {#if !sidebarCompressed}<SidebarClock bind:expanded={clockExpanded}/>{/if}
+    <SidebarClock compact={sidebarCompressed} bind:expanded={clockExpanded}/>
     <footer class="sidebar-footer" aria-label="Workspace controls">
       <button class="icon" aria-label="Preferences" title="Preferences" onclick={()=>routeSettings()}><Settings2 size={16}/></button>
       <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
@@ -4629,6 +4629,7 @@
   .mobile-navigation { --sidebar-footer-safe-area:env(safe-area-inset-bottom,0px); }
   .mobile-navigation .sidebar-footer > .icon { width:44px; height:44px; }
   .sidebar-collapsed .sidebar-footer { flex-direction:column; height:180px; padding:4px; }
+  .sidebar-collapsed .sidebar .agent-rail { padding-bottom:329px; }
   .brand.scrolled { box-shadow:inset 0 -1px var(--line); }
   .new-task,
   .primary {
