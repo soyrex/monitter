@@ -21,6 +21,8 @@ assert.match(virtualList, /stickyBeforeWindow/);
 assert.match(virtualList, /stickyGap/);
 assert.match(virtualList, /indexAtOffset/);
 assert.match(virtualList, /for \(let node = index \+ 1; node < metric\.tree\.length/);
+assert.match(virtualList, /metricsRevision\s*=\s*untrack\(\(\)\s*=>\s*metricsRevision\)\s*\+\s*1/,
+  'metric rebuilds must not subscribe their own effect to the revision they increment');
 assert.doesNotMatch(virtualList, /items\.slice\(0, end\)\.reduce/,
   'scroll offsets must not rescan the transcript from zero');
 assert.doesNotMatch(virtualList, /while \(start < items\.length/,
