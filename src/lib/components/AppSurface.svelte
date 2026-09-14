@@ -575,6 +575,7 @@
     snapshot?.settings.compressToolCalls === true,
     resolvedApprovalRequests,
   ));
+  const latestUserRequest = $derived(conversationItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
   function approvalSubject(request: ApprovalRequest) {
     const summary = (request.summary || request.tool).trim().replace(/^allow\s+/i, '').replace(/[?。]\s*$/, '');
     return summary || request.tool;
@@ -3432,7 +3433,7 @@
           </div>{/if}
         <section class="conversation">
           <TaskActivity {goal} {goalNote} tools={computerTools} onstop={() => selectedTask && run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")} disabled={busy} />
-          <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`}>
+          <MessagePane resetKey={`task:${selectedTask.id}:${scrollRevision}`} contextAnchorId={latestUserRequest?.id} contextText={latestUserRequest ? operatorMessageText(latestUserRequest.text) : ''}>
             {#if conversationItems.length}{#each conversationItems as item (item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id)}
               {#if item.type === "activity"}{@const collaboration=item.value.kind==='collaboration'?collaborationFor(item.value.detail):null}{#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<RunActivity event={item.value} />{/if}
               {:else if item.type === "reasoning-group"}<RunActivity events={item.values} running={selectedTask.status === "running" && item === conversationItems.at(-1) && !pendingApprovalRequests.length}>
@@ -3450,6 +3451,7 @@
                   data-message-phase={message.phase}
                   data-live-entry={message.streamStatus==='streaming'}
                   data-delivery-status={optimistic?.status}
+                  data-context-message-id={message.role === 'user' ? message.id : undefined}
                 >
                   <MessageMeta name={senderName(message) ?? (message.role === "user" ? "You" : message.role === "assistant" ? (selectedAgent?.name ?? "Agent") : "System")} createdAt={message.createdAt}>
                     {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot?.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? selectedAgent : null)}{/if}{/snippet}
