@@ -3,7 +3,7 @@
   import { onMount, type Snippet } from 'svelte';
   import { ArrowDown } from '@lucide/svelte';
 
-  let { resetKey, children, header, stickyRequest = false, active = true }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean } = $props();
+  let { resetKey, children, header, stickyRequest = false, active = true, thinking = false }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean; thinking?: boolean } = $props();
   let viewport = $state<HTMLDivElement>();
   let content = $state<HTMLDivElement>();
   let heading = $state<HTMLDivElement>();
@@ -127,7 +127,7 @@
     {#if header}<div class="message-header" bind:this={heading}>{@render header()}</div>{/if}
     <div class="message-content" use:messageArrival bind:this={content}>{@render children()}</div>
   </div>
-  <button class="jump-latest" class:visible={showJump} aria-label="Jump to latest message" title="Jump to latest message" aria-hidden={!showJump} tabindex={showJump ? 0 : -1} disabled={!showJump} onclick={() => {
+  <button class="jump-latest" class:visible={showJump} class:thinking aria-label="Jump to latest message" title="Jump to latest message" aria-hidden={!showJump} tabindex={showJump ? 0 : -1} disabled={!showJump} onclick={() => {
       jumpToLatest();
       viewport?.focus({ preventScroll: true });
     }}><ArrowDown size={18} /></button>
@@ -143,11 +143,11 @@
   .message-content { display: flow-root; width: min(var(--chat-content-max-width, 900px), calc(100% - 2 * var(--chat-side-padding, clamp(25px, 4vw, 50px)))); margin-inline: auto; padding: 25px 0 calc(var(--scroll-fade) + 8px); }
   .jump-latest { position:absolute; left:50%; bottom:14px; z-index:2; display:grid; place-items:center; width:36px; height:36px; border:1px solid var(--line); border-radius:50%; color:var(--ink); background:var(--panel); box-shadow:0 0 30px black; opacity:0; transform:translate(-50%,8px); visibility:hidden; pointer-events:none; cursor:pointer; transition:opacity .18s ease,transform .18s ease,visibility .18s step-end; }
   .jump-latest.visible { opacity:1; transform:translate(-50%,0); visibility:visible; pointer-events:auto; transition:opacity .18s ease,transform .18s ease; }
-  .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible { color:var(--accent-ink); border-color:var(--accent); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 20%,transparent),0 0 14px color-mix(in srgb,var(--accent) 28%,transparent),0 3px 12px #0002; animation:jump-attention-glow 1.6s ease-in-out infinite; }
-  .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible::before,
-  .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible::after { content:"✦"; position:absolute; pointer-events:none; line-height:1; color:var(--accent-ink); text-shadow:0 0 8px var(--accent); animation:jump-attention-twinkle 1.3s ease-in-out infinite; }
-  .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible::before { top:-5px; right:-1px; font-size:8px; }
-  .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible::after { bottom:-4px; left:1px; font-size:6px; animation-delay:.65s; }
+  .jump-latest.thinking.visible { color:var(--accent-ink); border-color:var(--accent); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 20%,transparent),0 0 14px color-mix(in srgb,var(--accent) 28%,transparent),0 3px 12px #0002; animation:jump-attention-glow 1.6s ease-in-out infinite; }
+  .jump-latest.thinking.visible::before,
+  .jump-latest.thinking.visible::after { content:"✦"; position:absolute; pointer-events:none; line-height:1; color:var(--accent-ink); text-shadow:0 0 8px var(--accent); animation:jump-attention-twinkle 1.3s ease-in-out infinite; }
+  .jump-latest.thinking.visible::before { top:-5px; right:-1px; font-size:8px; }
+  .jump-latest.thinking.visible::after { bottom:-4px; left:1px; font-size:6px; animation-delay:.65s; }
   .jump-latest:hover { color: var(--accent-ink); border-color: var(--accent); background: var(--soft); }
   .jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   @keyframes jump-attention-glow { 50% { box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 26%,transparent),0 0 20px color-mix(in srgb,var(--accent) 40%,transparent),0 3px 12px #0002; } }
@@ -160,9 +160,9 @@
   }
   @media (prefers-reduced-motion:reduce) {
     .jump-latest { transition:none; }
-    .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible { animation:none; }
-    .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible::before,
-    .message-pane:has(:global(.reasoning-pending .animated-title[aria-busy="true"])) .jump-latest.visible::after { animation:none; opacity:.5; }
+    .jump-latest.thinking.visible { animation:none; }
+    .jump-latest.thinking.visible::before,
+    .jump-latest.thinking.visible::after { animation:none; opacity:.5; }
   }
 
 </style>
