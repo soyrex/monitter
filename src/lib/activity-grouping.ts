@@ -44,8 +44,9 @@ export type ConversationActivityItem =
 
 /** One waiting indicator per conversation, never alongside a reply or approval. */
 export function showThinkingFallback(items: ConversationActivityItem[], working: boolean, awaitingApproval = false): boolean {
-  if (!working || awaitingApproval || items.some(item => item.type === 'reasoning-group')) return false;
+  if (!working || awaitingApproval) return false;
   const latest = items.at(-1);
+  if (latest?.type === 'reasoning-group') return false;
   return !(latest?.type === 'message' && latest.value.role === 'assistant');
 }
 
@@ -137,7 +138,7 @@ export function groupConversationActivity(
 
   const grouped: ConversationActivityItem[] = [];
   for (const item of ordered) {
-    if (item.type === 'activity' && isBlankReasoning(item.value)) {
+    if (item.type === 'activity' && item.value.kind === 'reasoning') {
       const previous = grouped.at(-1);
       if (previous?.type === 'reasoning-group' && previous.values[0].taskId === item.value.taskId) {
         previous.values.push(item.value);
@@ -176,6 +177,6 @@ export function groupConversationActivity(
     if (!message.text.trim() && !message.attachments?.length) continue;
     latestMessageAt.set(message.taskId, Math.max(latestMessageAt.get(message.taskId) ?? -Infinity, message.createdAt));
   }
-  return grouped.filter(item => item.type !== 'reasoning-group' ||
+  return grouped.filter(item => item.type !== 'reasoning-group' || item.values.some(value => !isBlankReasoning(value)) ||
     (latestMessageAt.get(item.values[0].taskId) ?? -Infinity) < item.values.at(-1)!.createdAt);
 }

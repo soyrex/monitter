@@ -139,6 +139,27 @@ Base sizes `interfaceFontSize`, `chatFontSize`, and `terminalFontSize` are integ
 
 Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions.
 
+Terminal colour themes are client-local and stored in `monitter.appearance.terminal-theme.v1` so native,
+browser, and remote views can differ without a backend rebuild. The choices are Monitter, Catppuccin
+Mocha, Dracula, Gruvbox Dark, Molokai, Nord, One Dark, Solarized Dark, Wombat, and XTerm. Changing
+the choice applies the full foreground, background, cursor, selection, and 16-colour ANSI palette to
+all mounted terminals immediately; new terminals inherit it.
+
+The whole-app palette pair is client-local in `monitter.appearance.app-theme-pair.v2`. Light and dark
+appearance each have an independent rich selector with ten paired families: Monitter, Catppuccin,
+Dracula, Gruvbox, Nord, One, Solarized, Tokyo Night, Wombat, and XTerm. System appearance swaps the
+selected light/dark palettes through CSS, including their surfaces, text, line, code, and accent colours,
+without a reload. The System/Light/Dark appearance mode sits above the palette selectors. The collapsed
+Advanced theme controls let one optional accent, tint intensity, and border opacity apply to both; clearing the accent override
+restores each palette's own accent. A legacy single-preset selection is migrated once when no paired
+selection exists. Density, motion, scale, tabs, pane controls, and terminal themes remain independent.
+No backend rebuild is required.
+
+The browser `theme-color` meta value follows the effective sidebar colour, including the active light
+or dark palette, shared accent override, and surface tint. System mode updates it when the operating
+system colour scheme changes. This lets supporting mobile Safari versions tint their status-bar and
+overscroll chrome to the app instead of retaining a fixed page colour.
+
 Settings include `accent`, `theme`, `interfaceScale` (integer percent, 80–200, default 125),
 `showToolActivity` and `showReasoningSummaries` (default true), and `sendWithEnter` (default false).
 The legacy shared `sidebarView` field remains readable for one-time migration only; current sidebar
@@ -167,6 +188,8 @@ Cmd+Option+= on macOS and Ctrl+Alt+= on Windows/Linux balance every open pane to
 preserving the current split arrangement. The same action is available as Balance panes in Controls.
 Activity toggles filter both inline blocks and run detail without deleting captured events.
 Only reasoning summaries emitted by the harness can be rendered; missing reasoning is not fabricated.
+Consecutive reasoning events for the same chat render inside one expandable reasoning bubble. Messages,
+tool activity, approvals, and task boundaries split that group; stored events remain unchanged.
 Enter-to-send applies to tasks and channels. Shift+Enter always inserts a newline; IME composition
 never submits a message. With Enter-to-send off, Cmd/Ctrl+Enter submits instead.
 
@@ -518,8 +541,11 @@ The selected workspace remains visible independently of the selected chat. There
 selecting an agent or project changes context, while choosing Activity returns to All. The active agent
 avatar sits in the desktop chat header, while the project icon remains in the tab bar; the overview
 is not a draggable tab. Clicking the sidebar wordmark or compact mark returns to the independently
-persisted All workspace and opens its whole-app overview without altering agent/project workspace state. Agent/project sidebar
-badges and the global approval entry surface pending approvals even in hidden workspaces. Opening an
+persisted All workspace and opens its whole-app overview without altering agent/project workspace state.
+That overview occupies the workspace without a desktop tab bar or duplicate terminal shortcut; mobile
+retains only its Back to chats navigation. Agent/project sidebar
+metadata shows a compact local-disk or remote-cloud host indicator beside the harness/model line.
+Badges and the global approval entry surface pending approvals even in hidden workspaces. Opening an
 approval navigates to the shared owning chat. The left sidebar is always global: its Standard,
 Activity, Projects and collapsed-rail chat lists show chats from every workspace. Selecting one routes
 the right-hand area to its owning agent or project workspace before opening the chat. Global search can

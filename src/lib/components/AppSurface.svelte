@@ -4,6 +4,7 @@
   import { responsiveBrand } from '$lib/responsive-brand';
   import { surfaceTint } from '$lib/surface-tint';
   import { borderOpacity } from '$lib/border-opacity';
+  import { appTheme, appThemePreset, mixThemeColour, type AppThemeSelection } from '$lib/app-theme';
   import { initMotion, motionView } from '$lib/motion';
   import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
@@ -192,9 +193,20 @@
 
   const bridge = getBridge();
   let motionReady = $state(false);
+  let browserChromeColour = $state(typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? '#0F0F0F' : '#F0F0F0');
   onMount(() => { motionReady = true; });
+  onMount(() => {
+    if (embedded) return;
+    const colourScheme = window.matchMedia('(prefers-color-scheme: dark)'),
+      update = () => { if (snapshot) browserChromeColour = safariThemeColour(snapshot.settings, $appTheme, $surfaceTint); };
+    colourScheme.addEventListener('change', update);
+    return () => colourScheme.removeEventListener('change', update);
+  });
   $effect(() => {
-    if (!embedded) document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
+    if (!embedded) {
+      document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
+      if (snapshot) browserChromeColour = safariThemeColour(snapshot.settings, $appTheme, $surfaceTint);
+    }
   });
   $effect(() => {
     if (!embedded) document.documentElement.style.setProperty('--border-opacity', `${$borderOpacity}%`);
@@ -1419,10 +1431,24 @@
     }
     return [target, target, target];
   }
-  function applyAppearance(settings: Snapshot["settings"]) {
+  function safariThemeColour(settings: Snapshot['settings'], selectedTheme: AppThemeSelection, tint: number) {
+    const dark = settings.theme === 'dark' || (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches),
+      palette = appThemePreset(dark ? selectedTheme.dark : selectedTheme.light)[dark ? 'dark' : 'light'],
+      accent = selectedTheme.accent ?? palette.accent;
+    return mixThemeColour(palette.sidebar, accent, (tint / 100) * (dark ? 1 : 0.5));
+  }
+  function applyAppearance(settings: Snapshot["settings"], selectedTheme: AppThemeSelection = $appTheme) {
     const root = document.documentElement,
-      colour = rgb(settings.accent);
+      light = appThemePreset(selectedTheme.light).light,
+      dark = appThemePreset(selectedTheme.dark).dark,
+      lightAccent = selectedTheme.accent ?? light.accent,
+      darkAccent = selectedTheme.accent ?? dark.accent,
+      lightColour = rgb(lightAccent),
+      darkColour = rgb(darkAccent);
+    root.dataset.appThemeLight = selectedTheme.light;
+    root.dataset.appThemeDark = selectedTheme.dark;
     root.dataset.theme = settings.theme;
+    browserChromeColour = safariThemeColour(settings, selectedTheme, $surfaceTint);
     root.dataset.density = ['tight', 'normal', 'spacious'].includes(settings.interfaceDensity ?? '')
       ? settings.interfaceDensity!
       : 'normal';
@@ -1436,20 +1462,19 @@
     root.style.setProperty('--interface-font', fontStack(settings.interfaceFont, '"IBM Plex Sans", system-ui, sans-serif'));
     root.style.setProperty('--chat-font', fontStack(settings.chatFont, '"IBM Plex Sans", system-ui, sans-serif'));
     root.style.setProperty('--terminal-font', fontStack(settings.terminalFont, '"IBM Plex Mono", Menlo, monospace'));
-    root.style.setProperty("--accent", settings.accent);
-    root.style.setProperty("--accent-rgb", colour.join(", "));
-    root.style.setProperty(
-      "--accent-light-ink",
-      `rgb(${readable(colour, rgb("#fbf8f2"), 0).join(", ")})`,
-    );
-    root.style.setProperty(
-      "--accent-dark-ink",
-      `rgb(${readable(colour, rgb("#191918"), 255).join(", ")})`,
-    );
-    root.style.setProperty(
-      "--on-accent",
-      contrastForeground(settings.accent),
-    );
+    for (const [mode,palette,accent] of [['light',light,lightAccent],['dark',dark,darkAccent]] as const) {
+      for (const key of ['paper','sidebar','panel','line','soft','code','ink','muted'] as const) {
+        root.style.setProperty(`--app-${mode}-${key}`, palette[key]);
+      }
+      root.style.setProperty(`--app-${mode}-accent`, accent);
+    }
+    root.style.setProperty('--app-light-accent-rgb', lightColour.join(', '));
+    root.style.setProperty('--app-dark-accent-rgb', darkColour.join(', '));
+    root.style.setProperty('--app-light-accent-ink', `rgb(${readable(lightColour, rgb(light.paper), 0).join(', ')})`);
+    root.style.setProperty('--app-dark-accent-ink', `rgb(${readable(darkColour, rgb(dark.paper), 255).join(', ')})`);
+    root.style.setProperty('--app-light-on-accent', contrastForeground(lightAccent));
+    root.style.setProperty('--app-dark-on-accent', contrastForeground(darkAccent));
+    for (const legacy of ['--paper-base','--sidebar-base','--panel-base','--line-base','--soft-base','--code-base','--ink','--muted','--accent','--accent-rgb','--accent-light-ink','--accent-dark-ink','--on-accent']) root.style.removeProperty(legacy);
     const scale = Math.min(200, Math.max(80, settings.interfaceScale ?? 125));
     root.style.setProperty("--interface-scale", String(scale / 100));
     if (isTauri() && appliedScale !== scale) {
@@ -1460,6 +1485,10 @@
       });
     }
   }
+  $effect(() => {
+    const selectedTheme = $appTheme;
+    if (!embedded && snapshot) applyAppearance(snapshot.settings,selectedTheme);
+  });
   function applySnapshot(next: Snapshot, ticket: number, fromBridge = true) {
     if (ticket < snapshotApplied) return;
     snapshotApplied = ticket;
@@ -1469,7 +1498,7 @@
     if (fromBridge) lastBridgeSnapshot = next;
     reconcileOptimisticMessages(next);
     snapshot = next;
-    if(embedded) onSnapshot?.(next); else { applyAppearance(next.settings); untrack(pruneWorkspaceScope); }
+    if(embedded) onSnapshot?.(next); else { applyAppearance(next.settings,$appTheme); untrack(pruneWorkspaceScope); }
   }
   function sameAttachments(left: Attachment[], right: string[]) {
     return left.length === right.length && left.every(item => right.includes(item.id));
@@ -2598,6 +2627,7 @@
     if (pane === 'project') return focusedProject?.name || 'Project';
     return 'Workspace';
   });
+  const globalOverview = $derived(!embedded && activeWorkspaceKey === 'all' && pane === 'overview');
   const renderedTabCount = $derived(orderedTabs().length
     + (pane === 'agent' && focusedAgent ? 1 : 0)
     + (pane === 'project' && focusedProject ? 1 : 0));
@@ -2914,7 +2944,7 @@
   }
 </script>
 
-<svelte:head><meta name="theme-color" content="#e9e3d8" /></svelte:head>
+<svelte:head><meta name="theme-color" content={browserChromeColour} /></svelte:head>
 <svelte:window onkeydown={handleShortcuts} onkeyup={event=>tabIndexModifier=macPlatform?event.metaKey:event.ctrlKey} onblur={()=>{tabIndexModifier=false;cancelPaneFocusChord()}} onpointerdown={dismissMonitterMenu} />
 
 {#if vimCommandOpen}
@@ -3041,12 +3071,13 @@
 
 {#snippet workspaceView()}
   <section bind:this={motionWorkspace} use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} class="workspace" class:compact-tabs={useCompactTabPicker} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} use:watchPane>
-    <header class="topbar" data-tauri-drag-region>
+    {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
       {:else}
         {#if activeWorkspaceKey.startsWith('project:')}{@render workspaceContext()}{/if}
       {/if}
+      {#if !globalOverview}
       <nav class="tabs tab-picker" use:tabStripFade data-tauri-drag-region class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
         <button class="tab-picker-trigger" type="button" aria-expanded={tabPickerOpen} aria-controls={`open-tabs-${paneId}`} onclick={()=>tabPickerOpen=!tabPickerOpen}><span>{currentTabLabel}</span><ChevronDown size={15}/></button>
         <div class="tab-picker-list" id={`open-tabs-${paneId}`} aria-label="Open tabs">
@@ -3089,7 +3120,8 @@
 
 
       </div>
-    </header>
+      {/if}
+    </header>{/if}
     {#if error}<PaneNotice message={error} blocking ondismiss={()=>error=''}/>{/if}
     {#if notice}<PaneNotice message={notice} ondismiss={()=>notice=''}/>{/if}
     {#if !bridge.available}<div class="preview-banner">
@@ -3502,6 +3534,7 @@
             sidebarSorted(activeTasks.filter(
               (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId,
             ),`agent-chats:${agent.id}`)}
+          {@const agentHost = snapshot.hosts.find(host=>host.id===agent.hostId)}
           <section class="agent-group" class:has-chats={(agentTasks.length > 0 || (sidebarWorkspaceTabs[agent.id]?.length ?? 0) > 0) && !collapsedAgents[agent.id]}>
             <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
               <button class="avatar agent-avatar-toggle" aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={event=>toggleSidebarGroup('agent',agent.id,event.currentTarget)}>
@@ -3514,9 +3547,7 @@
                 aria-controls={`agent-chats-${agent.id}`}
                 onclick={() => { collapsedAgents[agent.id]=false; void switchWorkspace(`agent:${agent.id}`); }}
                 ><b>{agent.name}{#if approvalCount(`agent:${agent.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`agent:${agent.id}`)} pending approvals`}>{approvalCount(`agent:${agent.id}`)}</span>{/if}</b><small
-                  >{agent.provider}{agent.model
-                    ? ` · ${agent.model}`
-                    : ""}</small
+                  ><span class="agent-runtime">{agent.provider}{agent.model ? ` · ${agent.model}` : ""}</span><span class="agent-location" data-host-kind={agentHost?.kind ?? 'local'} role="img" aria-label={agentHost?.kind === 'ssh' ? `Remote host: ${agentHost.name}` : `Local host: ${agentHost?.name ?? 'This Mac'}`} title={agentHost?.kind === 'ssh' ? `Remote · ${agentHost.name}` : `Local · ${agentHost?.name ?? 'This Mac'}`}>{#if agentHost?.kind === 'ssh'}<Cloud size={10} aria-hidden="true"/>{:else}<HardDrive size={10} aria-hidden="true"/>{/if}</span></small
                 ></button
               ><button
                 class="quiet agent-new-chat"
@@ -3972,12 +4003,12 @@
   :global(:root) {
     --terminal-background: #090b0d;
     --terminal-foreground: #e5e7eb;
-    --paper-base: #f7f7f7;
-    --sidebar-base: color-mix(in srgb, #f0f0f0 90%, white);
-    --panel-base: #ffffff;
-    --line-base: #d8d8d8;
-    --soft-base: #eeeeee;
-    --code-base: #e8e8e8;
+    --paper-base: var(--app-light-paper, #f7f7f7);
+    --sidebar-base: var(--app-light-sidebar, #f0f0f0);
+    --panel-base: var(--app-light-panel, #ffffff);
+    --line-base: var(--app-light-line, #d8d8d8);
+    --soft-base: var(--app-light-soft, #eeeeee);
+    --code-base: var(--app-light-code, #e8e8e8);
     --surface-tint-factor: 0.5;
     --effective-surface-tint: calc(var(--surface-tint, 5%) * var(--surface-tint-factor));
     --paper: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--paper-base));
@@ -3987,13 +4018,12 @@
     --line: color-mix(in srgb, var(--line-colour) var(--border-opacity, 100%), transparent);
     --soft: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--soft-base));
     --code: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--code-base));
-    --ink: #252525;
-    --muted: #747474;
-    --accent: #3f9d6a;
-    --accent-light-ink: #28764d;
-    --accent-dark-ink: #72d69d;
-    --accent-ink: var(--accent-light-ink);
-    --on-accent: #000;
+    --ink: var(--app-light-ink, #252525);
+    --muted: var(--app-light-muted, #747474);
+    --accent: var(--app-light-accent, #00a8f0);
+    --accent-rgb: var(--app-light-accent-rgb, 0, 168, 240);
+    --accent-ink: var(--app-light-accent-ink, #28764d);
+    --on-accent: var(--app-light-on-accent, #000);
     --density-tabbar-height: 46px;
     --density-native-tabbar-height: 60px;
     --density-tabbar-inset: 6px;
@@ -4051,15 +4081,18 @@
   }
   :global(:root[data-theme="dark"]) {
     --surface-tint-factor: 1;
-    --paper-base: #151515;
-    --sidebar-base: color-mix(in srgb, #121212 85%, black);
-    --panel-base: #202020;
-    --line-base: #3d3d3d;
-    --soft-base: #272727;
-    --code-base: #292929;
-    --ink: #eeeeee;
-    --muted: #a4a4a4;
-    --accent-ink: var(--accent-dark-ink);
+    --paper-base: var(--app-dark-paper, #151515);
+    --sidebar-base: var(--app-dark-sidebar, #0f0f0f);
+    --panel-base: var(--app-dark-panel, #202020);
+    --line-base: var(--app-dark-line, #3d3d3d);
+    --soft-base: var(--app-dark-soft, #272727);
+    --code-base: var(--app-dark-code, #292929);
+    --ink: var(--app-dark-ink, #eeeeee);
+    --muted: var(--app-dark-muted, #a4a4a4);
+    --accent: var(--app-dark-accent, #00a8f0);
+    --accent-rgb: var(--app-dark-accent-rgb, 0, 168, 240);
+    --accent-ink: var(--app-dark-accent-ink, #72d69d);
+    --on-accent: var(--app-dark-on-accent, #000);
     background: var(--paper);
   }
   :global(html),
@@ -4298,12 +4331,17 @@
     font-weight: 600;
   }
   .agent-name small {
+    display:flex;
+    align-items:center;
+    gap:5px;
     overflow: hidden;
     color: var(--muted);
     text-overflow: ellipsis;
     white-space: nowrap;
     font: calc(9.5px * var(--interface-font-ratio, 1)) var(--mono);
   }
+  .agent-runtime { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .agent-location { display:inline-flex; flex:none; align-items:center; }
   .quiet {
     display: grid;
     place-items: center;
@@ -5464,15 +5502,18 @@
   @media (prefers-color-scheme: dark) {
     :global(:root[data-theme="system"]) {
       --surface-tint-factor: 1;
-      --paper-base: #151515;
-      --sidebar-base: color-mix(in srgb, #121212 85%, black);
-      --panel-base: #202020;
-      --line-base: #3d3d3d;
-      --soft-base: #272727;
-      --code-base: #292929;
-      --ink: #eeeeee;
-      --muted: #a4a4a4;
-      --accent-ink: var(--accent-dark-ink);
+      --paper-base: var(--app-dark-paper, #151515);
+      --sidebar-base: var(--app-dark-sidebar, #0f0f0f);
+      --panel-base: var(--app-dark-panel, #202020);
+      --line-base: var(--app-dark-line, #3d3d3d);
+      --soft-base: var(--app-dark-soft, #272727);
+      --code-base: var(--app-dark-code, #292929);
+      --ink: var(--app-dark-ink, #eeeeee);
+      --muted: var(--app-dark-muted, #a4a4a4);
+      --accent: var(--app-dark-accent, #00a8f0);
+      --accent-rgb: var(--app-dark-accent-rgb, 0, 168, 240);
+      --accent-ink: var(--app-dark-accent-ink, #72d69d);
+      --on-accent: var(--app-dark-on-accent, #000);
       background: var(--paper);
     }
   }

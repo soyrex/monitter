@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { getBridge } from '$lib/bridge';
+import { terminalPalette, terminalTheme, type TerminalThemeId } from '$lib/terminal-theme';
 import type { TerminalRead, TerminalSession } from '$lib/types';
 import '@xterm/xterm/css/xterm.css';
 
@@ -11,6 +12,14 @@ export const terminalSessions = writable<Record<string, TerminalSession>>({});
 export const terminalErrors = writable<Record<string, string>>({});
 let titleRefresh: ReturnType<typeof setInterval> | undefined;
 let titleRefreshing = false;
+let selectedTerminalTheme: TerminalThemeId = 'monitter';
+
+terminalTheme.subscribe(value => {
+  selectedTerminalTheme = value;
+  for (const runtime of runtimes.values()) {
+    if (runtime.terminal) runtime.terminal.options.theme = theme();
+  }
+});
 
 function publish() {
   const sessions: Record<string, TerminalSession> = {}, errors: Record<string, string> = {};
@@ -119,7 +128,17 @@ async function ensureTerminal(runtime: Runtime, host: HTMLElement, generation: n
 function terminalFontSize() { return Math.max(8, Math.min(32, Number(getComputedStyle(document.documentElement).getPropertyValue('--terminal-font-size')) || 14)); }
 function terminalFont() { return getComputedStyle(document.documentElement).getPropertyValue('--terminal-font').trim() || '"IBM Plex Mono", Menlo, monospace'; }
 function terminalLineHeight() { return Math.max(1, Math.min(2.5, Number(getComputedStyle(document.documentElement).getPropertyValue('--terminal-line-height')) || 1)); }
-function theme() { const css = getComputedStyle(document.documentElement); return { background: css.getPropertyValue('--terminal-background').trim() || '#090b0d', foreground: css.getPropertyValue('--terminal-foreground').trim() || '#e5e7eb', cursor: css.getPropertyValue('--accent').trim() || '#77b58b', selectionBackground: '#2b3940' }; }
+function theme() {
+  const selected = terminalPalette(selectedTerminalTheme);
+  if (selectedTerminalTheme !== 'monitter') return selected;
+  const css = getComputedStyle(document.documentElement);
+  return {
+    ...selected,
+    background: css.getPropertyValue('--terminal-background').trim() || selected.background,
+    foreground: css.getPropertyValue('--terminal-foreground').trim() || selected.foreground,
+    cursor: css.getPropertyValue('--accent').trim() || selected.cursor,
+  };
+}
 function queueWrite(runtime: Runtime, data: string) {
   runtime.writeChain = runtime.writeChain.then(async () => {
     if (runtime.closing || runtime.session.status !== 'running') return;
