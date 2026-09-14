@@ -199,6 +199,73 @@ pub struct RunEvent {
     pub detail: String,
     pub created_at: i64,
 }
+
+/// Normalized, durable observation from one provider turn. `classification` is
+/// either `delta` (add it once) or `cumulative` (newest snapshot wins).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunUsageSample {
+    pub sample_id: String,
+    pub run_id: String,
+    pub task_id: String,
+    pub provider: String,
+    pub configured_model: Option<String>,
+    pub started_at: i64,
+    pub observed_at: i64,
+    pub final_sample: bool,
+    pub classification: String,
+    #[serde(default)]
+    pub provider_turn_id: Option<String>,
+    pub tokens: UsageTokens,
+    pub cost_usd: Option<f64>,
+    pub duration_ms: Option<i64>,
+    pub api_duration_ms: Option<i64>,
+    pub provider_turns: Option<i64>,
+    pub context: Option<UsageContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTokens {
+    pub input: Option<i64>, pub output: Option<i64>, pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>, pub reasoning: Option<i64>, pub total: Option<i64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageContext { pub used: i64, pub size: i64 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunUsageSummary {
+    pub run_id: String, pub task_id: String, pub provider: String, pub configured_model: Option<String>,
+    pub started_at: i64, pub finished_at: Option<i64>, #[serde(rename = "final")] pub final_: bool, pub tokens: UsageTokens,
+    pub cost_usd: Option<f64>, pub duration_ms: Option<i64>, pub api_duration_ms: Option<i64>,
+    pub provider_turns: Option<i64>, pub context: Option<UsageContext>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunUsageAggregate {
+    pub provider: String, pub runs: i64, pub final_runs: i64, pub tokens: RequiredUsageTokens,
+    pub cost_usd: Option<f64>, pub duration_ms: Option<i64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RequiredUsageTokens { pub input: i64, pub output: i64, pub cache_read: i64, pub cache_write: i64, pub reasoning: i64, pub total: i64 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowanceWindow {
+    pub key: String, pub label: String, pub metric: String, pub used_percent: Option<f64>, pub used: Option<f64>, pub limit: Option<f64>, pub unit: String, pub resets_at: Option<i64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowanceBalance { pub key: String, pub label: String, pub unit: String, pub remaining: Option<f64>, pub limit: Option<f64>, pub resets_at: Option<i64> }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUsageSource {
+    pub provider: String, pub host_id: String, pub source: String, pub state: String, pub plan_type: Option<String>, pub fetched_at: Option<i64>, pub stale_after: Option<i64>, pub last_attempt_at: i64, pub windows: Vec<AllowanceWindow>, pub balances: Vec<AllowanceBalance>, pub error: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageOverview { pub generated_at: i64, pub captured_since: Option<i64>, pub subscriptions: Vec<SubscriptionUsageSource>, pub provider_totals: Vec<RunUsageAggregate>, pub recent_runs: Vec<RunUsageSummary> }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMessage {

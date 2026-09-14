@@ -40,6 +40,7 @@ mod process_metrics;
 mod runner;
 mod store;
 mod terminal;
+mod usage_quota;
 
 use model::*;
 use runner::Parsed;
@@ -267,6 +268,7 @@ pub(crate) struct Service {
     native_escape_shield: std::sync::atomic::AtomicBool,
     runtime_dir: PathBuf,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
+    quota_cache: Mutex<Option<(Instant, Vec<SubscriptionUsageSource>)>>,
     terminals: Mutex<HashMap<String, Arc<terminal::Session>>>,
     lan: Mutex<Option<lan::Server>>,
     lan_error: Mutex<Option<String>>,
@@ -352,6 +354,7 @@ impl Service {
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
+            quota_cache: Mutex::new(None),
             terminals: Mutex::new(HashMap::new()),
             lan: Mutex::new(None),
             lan_error: Mutex::new(None),
@@ -580,6 +583,9 @@ impl Service {
                         .map_err(|_| "Invalid limit.")?,
                 )?,
             ),
+            "get_usage_overview" => value(self.usage_overview(
+                args.get("policy").and_then(serde_json::Value::as_str),
+            )?),
             "save_host" => {
                 let mut host: Host = arg(&args, "host")?;
                 self.mutate(None, |s| {
@@ -1841,6 +1847,7 @@ impl Service {
             }
         }
         let control = runner::RunControl::new(host.kind == "ssh");
+        control.begin_run()?;
         runs.tasks.insert(task_id.into(), control.clone());
         if let Some(native) = task.native_session_id.as_deref() {
             runs.native_sessions
@@ -1900,10 +1907,13 @@ impl Service {
         }
         let (task, _) = self.task_and_host(task_id)?;
         if task.provider == "codex" {
+            control.begin_run()?;
             control.send_user_turn_with_task(prompt, Some(&task))?;
         } else if task.provider == "acp" {
+            control.begin_run()?;
             acp_runtime::send_turn(&control, prompt, &task)?;
         } else {
+            control.begin_run()?;
             control.send_user_turn(prompt)?;
         }
         Ok(true)
@@ -2136,6 +2146,11 @@ impl Service {
             event,
             failed: _,
         } = parsed;
+        if let Some((kind, _, detail)) = event.as_ref() {
+            if kind == "usage" {
+                self.capture_usage(task_id, detail)?;
+            }
+        }
         if let Some(native) = native_session_id.as_deref() {
             let (task, host) = self.task_and_host(task_id)?;
             self.claim_native_session(task_id, &task, &host, native)?;
@@ -2234,6 +2249,97 @@ impl Service {
         })
     }
 
+    /// Ingest normalized usage separately from diagnostic activity. Malformed
+    /// payloads remain visible but never fail an otherwise valid agent turn.
+    fn capture_usage(&self, task_id: &str, detail: &str) -> Result<(), String> {
+        let value: serde_json::Value = match serde_json::from_str(detail) {
+            Ok(value) => value,
+            Err(_) => {
+                self.record(task_id, "error", "Usage capture warning", "The provider reported usage in an unsupported format; the run continued.".into());
+                return Ok(());
+            }
+        };
+        let (task, control) = {
+            let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
+            let task = data.snapshot.tasks.iter().find(|task| task.id == task_id).cloned().ok_or("Task was not found.")?;
+            let control = self.runs.lock().map_err(|_| "Monitter run registry lock failed.".to_string())?.tasks.get(task_id).cloned();
+            (task, control)
+        };
+        let classification = if task.provider == "opencode" { "delta" } else { "cumulative" };
+        let provider_turn_id = value.get("providerTurnId").and_then(serde_json::Value::as_str).map(str::to_owned);
+        let Some(normalized) = runner::normalize_usage(&value, classification, provider_turn_id.clone()) else {
+            self.record(task_id, "error", "Usage capture warning", "The provider usage payload did not contain supported numeric fields; the run continued.".into());
+            return Ok(());
+        };
+        let (run_id, started_at) = match control {
+            Some(control) => (control.current_run_id()?, control.run_started_at()?),
+            None => return Ok(()), // Never infer old runs from timestamps/events.
+        };
+        let stable = format!("{run_id}:{}:{}:{}", normalized.classification, normalized.provider_turn_id.clone().unwrap_or_default(), detail);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher}; stable.hash(&mut hasher);
+        self.store.stage_usage(RunUsageSample {
+            sample_id: format!("{run_id}:{:x}", hasher.finish()), run_id, task_id: task_id.into(), provider: task.provider.clone(),
+            configured_model: (!task.model.trim().is_empty()).then_some(task.model), started_at, observed_at: now(),
+            final_sample: matches!(task.provider.as_str(), "claude" | "hermes" | "codex"),
+            classification: normalized.classification, provider_turn_id: normalized.provider_turn_id, tokens: normalized.tokens,
+            cost_usd: normalized.cost_usd, duration_ms: normalized.duration_ms, api_duration_ms: normalized.api_duration_ms,
+            provider_turns: normalized.provider_turns, context: normalized.context,
+        })
+    }
+
+    fn usage_overview(&self, policy: Option<&str>) -> Result<UsageOverview, String> {
+        let policy = policy.unwrap_or("if-stale");
+        if !matches!(policy, "cache-only" | "if-stale" | "refresh") {
+            return Err("Usage refresh policy is invalid.".into());
+        }
+        let mut overview = self.store.usage_overview()?;
+        let local_host = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?
+            .snapshot
+            .hosts
+            .iter()
+            .find(|host| host.kind == "local")
+            .cloned();
+        let mut cache = self
+            .quota_cache
+            .lock()
+            .map_err(|_| "Monitter quota cache lock failed.".to_string())?;
+        let stale = cache
+            .as_ref()
+            .is_none_or(|(fetched, _)| fetched.elapsed() >= Duration::from_secs(60));
+        if policy == "refresh" || (policy == "if-stale" && stale) {
+            if let Some(host) = local_host.as_ref() {
+                let sources = ["codex", "claude", "minimax", "opencode-go"]
+                    .into_iter()
+                    .map(|provider| usage_quota::refresh_provider_quota(host, provider))
+                    .collect();
+                *cache = Some((Instant::now(), sources));
+            }
+        }
+        overview.subscriptions = cache
+            .as_ref()
+            .map(|(_, sources)| sources.clone())
+            .unwrap_or_default();
+        Ok(overview)
+    }
+
+    fn mark_usage_final(&self, task_id: &str) {
+        let result = (|| -> Result<(), String> {
+            let (task, control) = {
+                let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
+                let task = data.snapshot.tasks.iter().find(|task| task.id == task_id).cloned().ok_or("Task was not found.")?;
+                let control = self.runs.lock().map_err(|_| "Monitter run registry lock failed.".to_string())?.tasks.get(task_id).cloned().ok_or("Run no longer active.")?;
+                (task, control)
+            };
+            let run_id = control.current_run_id()?;
+            self.store.stage_usage(RunUsageSample { sample_id: format!("{run_id}:final"), run_id, task_id: task_id.into(), provider: task.provider, configured_model: (!task.model.trim().is_empty()).then_some(task.model), started_at: control.run_started_at()?, observed_at: now(), final_sample: true, classification: "cumulative".into(), provider_turn_id: None, tokens: UsageTokens::default(), cost_usd: None, duration_ms: None, api_duration_ms: None, provider_turns: None, context: None })
+        })();
+        if let Err(error) = result { self.record(task_id, "error", "Usage capture warning", error); }
+    }
+
     pub(crate) fn restore_opencode_task_directory(
         &self,
         task_id: &str,
@@ -2270,6 +2376,7 @@ impl Service {
     }
 
     pub(crate) fn finish(self: &Arc<Self>, task_id: &str, status: &str, error: Option<String>) {
+        self.mark_usage_final(task_id);
         if let Ok(mut pending) = self.pending_codex_images.lock() {
             pending.remove(task_id);
         }
@@ -2356,6 +2463,7 @@ impl Service {
     /// writer lock here: doing so would turn the following message into a
     /// separate `--resume` invocation.
     pub(crate) fn complete_resident_turn(self: &Arc<Self>, task_id: &str) {
+        self.mark_usage_final(task_id);
         let should_route = self
             .mutate_data(Some(task_id.into()), |data| {
                 let state = &mut data.snapshot;
@@ -2599,10 +2707,13 @@ impl Service {
             tauri::async_runtime::spawn_blocking(move || {
                 let result = service.task_and_host(&task_id).and_then(|(task, _)| {
                     if task.provider == "codex" {
+                        control.begin_run()?;
                         control.send_user_turn_with_task(&prompt, Some(&task))
                     } else if task.provider == "acp" {
+                        control.begin_run()?;
                         acp_runtime::send_turn(&control, &prompt, &task)
                     } else {
+                        control.begin_run()?;
                         control.send_user_turn(&prompt)
                     }
                 });
@@ -3935,6 +4046,17 @@ async fn get_task_events(
 }
 
 #[tauri::command]
+async fn get_usage_overview(
+    state: State<'_, AppState>,
+    policy: Option<String>,
+) -> Result<UsageOverview, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.usage_overview(policy.as_deref()))
+        .await
+        .map_err(|error| format!("Usage overview worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn get_task_event_detail(
     state: State<'_, AppState>,
     task_id: String,
@@ -4780,6 +4902,7 @@ fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, Strin
             .messages
             .retain(|message| message.task_id != id);
         data.snapshot.events.retain(|event| event.task_id != id);
+        state.0.store.remove_task_usage(&id)?;
         data.snapshot
             .queued_messages
             .retain(|message| message.task_id != id);
@@ -5881,6 +6004,7 @@ pub fn run() {
             save_extension_config,
             get_ui_snapshot,
             get_task_events,
+            get_usage_overview,
             get_task_event_detail,
             get_lan_server_info,
             resolve_approval,

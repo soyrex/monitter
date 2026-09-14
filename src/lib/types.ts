@@ -1,4 +1,37 @@
 export type Provider = 'codex' | 'claude' | 'opencode' | 'hermes' | 'acp';
+export type UsageProvider = Provider | 'minimax' | 'opencode-go';
+export type UsageRefreshPolicy = 'cache-only' | 'if-stale' | 'refresh';
+export interface AllowanceWindow {
+  key: string; label: string; metric: 'requests' | 'tokens' | 'spend' | 'combined' | 'unknown';
+  usedPercent: number | null; used: number | null; limit: number | null;
+  unit: 'requests' | 'tokens' | 'usd' | 'credits' | 'unknown'; resetsAt: number | null;
+}
+export interface AllowanceBalance {
+  key: string; label: string; unit: 'usd' | 'credits' | 'unknown';
+  remaining: number | null; limit: number | null; resetsAt: number | null;
+}
+export interface SubscriptionUsageSource {
+  provider: UsageProvider; hostId: string; source: string;
+  state: 'available' | 'unsupported' | 'not-applicable' | 'not-authenticated' | 'error';
+  planType: string | null; fetchedAt: number | null; staleAfter: number | null;
+  lastAttemptAt: number; windows: AllowanceWindow[]; balances: AllowanceBalance[]; error: string | null;
+}
+export interface RunUsageSummary {
+  runId: string; taskId: string; provider: Provider; configuredModel: string | null;
+  startedAt: number; finishedAt: number | null; final: boolean;
+  tokens: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null; reasoning: number | null; total: number | null };
+  costUsd: number | null; durationMs: number | null; apiDurationMs: number | null; providerTurns: number | null;
+  context: { used: number; size: number } | null;
+}
+export interface RunUsageAggregate {
+  provider: Provider; runs: number; finalRuns: number;
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number; total: number };
+  costUsd: number | null; durationMs: number | null;
+}
+export interface UsageOverview {
+  generatedAt: number; capturedSince: number | null; subscriptions: SubscriptionUsageSource[];
+  providerTotals: RunUsageAggregate[]; recentRuns: RunUsageSummary[];
+}
 /** Explicit stdio launcher, never a shell command. Copied into each new task. */
 export interface AcpLaunch { command: string; args: string[]; }
 /** Finding an executable does not prove protocol support or authentication. */

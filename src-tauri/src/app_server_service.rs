@@ -246,6 +246,9 @@ impl Service {
         turn_id: Option<&str>,
         parsed: Parsed,
     ) -> Result<(), String> {
+        if let Some((kind, _, detail)) = parsed.event.as_ref() {
+            if kind == "usage" { self.capture_usage(task_id, detail)?; }
+        }
         self.app_server_mutate(task_id, control, turn_id, |data, runs| {
             let task = data
                 .snapshot
@@ -310,6 +313,7 @@ impl Service {
         status: &str,
         error: Option<String>,
     ) -> bool {
+        self.mark_usage_final(task_id);
         let result =
             self.app_server_mutate(task_id, control, turn_id, |data, _| {
                 let task = data

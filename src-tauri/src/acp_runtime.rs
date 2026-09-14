@@ -1063,6 +1063,21 @@ fn run(
                 continue;
             }
             let kind = notification_kind(&value);
+            if kind == "usage_update" {
+                let usage = &params["update"];
+                let used = usage.get("used").and_then(Value::as_i64);
+                let size = usage.get("size").and_then(Value::as_i64);
+                if used.is_none() || size.is_none() {
+                    service.record(&task_id, "error", "Usage capture warning", "ACP usage_update omitted numeric used or size; the run continued.".into());
+                } else {
+                    let detail = json!({"providerTurnId": turn, "used": used, "size": size, "cost": usage.get("cost")}).to_string();
+                    if let Err(error) = service.app_server_event(&task_id, &control, (!turn.is_empty()).then_some(turn.as_str()), Parsed {
+                        native_session_id: None, assistant: None,
+                        event: Some(("usage".into(), "Usage updated".into(), detail)), failed: false,
+                    }) { service.record(&task_id, "error", "Usage capture warning", error); }
+                }
+                continue;
+            }
             if matches!(kind, "agent_message_chunk" | "agent_message") {
                 let content = &value["params"]["update"]["content"];
                 let content_type = content["type"].as_str().unwrap_or("text");

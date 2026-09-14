@@ -125,13 +125,16 @@ pub fn parse_event(value: &Value) -> Vec<Parsed> {
             if let Some(cost) = part.get("cost") {
                 usage.insert("cost".into(), cost.clone());
             }
-            vec![event(
+            let parsed = event(
                 session_id,
                 "usage",
                 "Usage updated",
                 Value::Object(usage).to_string(),
                 false,
-            )]
+            );
+            // `step-finish` is a completed step, so its reported accounting is
+            // a delta, not a session snapshot.
+            vec![parsed]
         }
         "error" => {
             let error = value.get("error").unwrap_or(value);

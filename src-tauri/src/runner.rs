@@ -1,7 +1,7 @@
 use crate::{
     adapters,
     collaboration_transport::SessionGrant,
-    model::{valid_sandbox_for_provider, Host, Task},
+    model::{valid_sandbox_for_provider, Host, Task, UsageContext, UsageTokens},
     ApprovalDecision, CreateApprovalRequest, Service,
 };
 use serde_json::Value;
@@ -1178,6 +1178,43 @@ pub struct Parsed {
     pub failed: bool,
 }
 
+#[derive(Clone, Default)]
+pub struct NormalizedUsage {
+    pub classification: String,
+    pub provider_turn_id: Option<String>,
+    pub tokens: UsageTokens,
+    pub cost_usd: Option<f64>,
+    pub duration_ms: Option<i64>,
+    pub api_duration_ms: Option<i64>,
+    pub provider_turns: Option<i64>,
+    pub context: Option<UsageContext>,
+}
+
+fn integer(value: Option<&Value>) -> Option<i64> { value.and_then(Value::as_i64).filter(|v| *v >= 0) }
+fn number(value: Option<&Value>) -> Option<f64> { value.and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) }
+/// The small adapter boundary used by every harness. It deliberately accepts
+/// only documented numeric fields and leaves unknown provider payload intact
+/// only in the diagnostic RunEvent.
+pub fn normalize_usage(value: &Value, classification: &str, provider_turn_id: Option<String>) -> Option<NormalizedUsage> {
+    let usage = value.get("usage").unwrap_or(value);
+    let tokens = usage.get("tokens").unwrap_or(usage);
+    let result = NormalizedUsage {
+        classification: classification.into(), provider_turn_id,
+        tokens: UsageTokens {
+            input: integer(tokens.get("input_tokens").or_else(|| tokens.get("input"))),
+            output: integer(tokens.get("output_tokens").or_else(|| tokens.get("output"))),
+            cache_read: integer(tokens.get("cache_read_input_tokens").or_else(|| tokens.get("cacheRead"))),
+            cache_write: integer(tokens.get("cache_creation_input_tokens").or_else(|| tokens.get("cacheWrite"))),
+            reasoning: integer(tokens.get("reasoning_tokens").or_else(|| tokens.get("reasoning"))),
+            total: integer(tokens.get("total_tokens").or_else(|| tokens.get("total"))),
+        },
+        cost_usd: number(usage.get("total_cost_usd").or_else(|| usage.get("cost")).or_else(|| usage.get("cost_usd"))),
+        duration_ms: integer(usage.get("duration_ms")), api_duration_ms: integer(usage.get("duration_api_ms")), provider_turns: integer(usage.get("num_turns")),
+        context: match (integer(usage.get("used")), integer(usage.get("size"))) { (Some(used), Some(size)) => Some(UsageContext { used, size }), _ => None },
+    };
+    (result.tokens.input.is_some() || result.tokens.output.is_some() || result.tokens.cache_read.is_some() || result.tokens.cache_write.is_some() || result.tokens.reasoning.is_some() || result.tokens.total.is_some() || result.cost_usd.is_some() || result.duration_ms.is_some() || result.api_duration_ms.is_some() || result.provider_turns.is_some() || result.context.is_some()).then_some(result)
+}
+
 /// Hermes' gateway exposes a request ID that must be echoed on its dedicated
 /// control pipe. Other adapters have their own transport work; do not infer a
 /// response protocol from a generic tool event.
@@ -1469,6 +1506,10 @@ pub struct RunControl {
     // the registry while its task is completed so a later message can use the
     // same native context rather than creating a --resume subprocess.
     resident: AtomicBool,
+    /// Monitter-owned identity for the current provider turn. It is minted on
+    /// every send, including later turns on resident transports.
+    run_id: Mutex<String>,
+    run_started_at: Mutex<i64>,
     child: Mutex<Option<Child>>,
     control_stdin: Mutex<Option<ChildStdin>>,
     // Codex app-server is a resident JSON-RPC transport.  Keep its thread and
@@ -1499,6 +1540,8 @@ impl RunControl {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
             resident: AtomicBool::new(false),
+            run_id: Mutex::new(crate::model::id()),
+            run_started_at: Mutex::new(crate::model::now()),
             child: Mutex::new(None),
             control_stdin: Mutex::new(None),
             app_server_thread: Mutex::new(None),
@@ -1601,6 +1644,14 @@ impl RunControl {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
+    pub(crate) fn begin_run(&self) -> Result<(String, i64), String> {
+        let started_at = crate::model::now();
+        *self.run_id.lock().map_err(|_| "Monitter run identity lock failed.".to_string())? = crate::model::id();
+        *self.run_started_at.lock().map_err(|_| "Monitter run identity lock failed.".to_string())? = started_at;
+        Ok((self.current_run_id()?, started_at))
+    }
+    pub(crate) fn current_run_id(&self) -> Result<String, String> { self.run_id.lock().map(|id| id.clone()).map_err(|_| "Monitter run identity lock failed.".to_string()) }
+    pub(crate) fn run_started_at(&self) -> Result<i64, String> { self.run_started_at.lock().map(|at| *at).map_err(|_| "Monitter run identity lock failed.".to_string()) }
 
     /// Sends a provider control frame only while this run still owns an
     /// intentionally persistent stdin channel. This is never used to inject
@@ -2769,8 +2820,10 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     match line {
-                        Ok(line) => match serde_json::from_str(&line) {
+                        Ok(line) => match serde_json::from_str::<Value>(&line) {
                             Ok(value) => {
+                                let complete_claude_turn = provider == "claude"
+                                    && value.get("type").and_then(Value::as_str) == Some("result");
                                 if provider == "claude" {
                                     if let Some((request_id, tool, input, summary, detail, risk)) =
                                         claude_approval(&value)
@@ -2827,9 +2880,6 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                                 );
                                             }
                                         }
-                                    }
-                                    if value.get("type").and_then(Value::as_str) == Some("result") {
-                                        service.complete_resident_turn(&task);
                                     }
                                 }
                                 for parsed in parse_events(&provider, &value) {
@@ -2921,6 +2971,10 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                         );
                                     }
                                 }
+                                // Attribute the final result usage to this
+                                // current run before making the resident
+                                // transport eligible for its next prompt.
+                                if complete_claude_turn { service.complete_resident_turn(&task); }
                             }
                             Err(error) => {
                                 failed_event.store(true, Ordering::SeqCst);

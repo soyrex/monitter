@@ -38,12 +38,15 @@ import type {
   SendAccepted,
   ExtensionConfig,
   ApprovalDecision,
+  UsageOverview,
+  UsageRefreshPolicy,
 } from "./types";
 
 export interface MonitterBridge {
   available: boolean;
   getSnapshot(): Promise<Snapshot>;
   getTaskEvents(taskId: string, before?: number, limit?: number): Promise<TaskEventsPage>;
+  getUsageOverview(policy?: UsageRefreshPolicy): Promise<UsageOverview>;
   getProcessMetrics(): Promise<ProcessMetricsSample>;
   getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
   saveHost(host: Host): Promise<Snapshot>;
@@ -214,6 +217,7 @@ const nativeBridge: MonitterBridge = {
     (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
   getSnapshot: () => getCachedSnapshot(),
   getTaskEvents: (taskId, before, limit) => invoke<TaskEventsPage>('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
+  getUsageOverview: (policy) => invoke<UsageOverview>('get_usage_overview', policy === undefined ? {} : { policy }),
   getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
   getTaskEventDetail: (taskId, eventId, offset, limit) => invoke<EventDetailChunk>('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
@@ -293,6 +297,7 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125, interfaceDensity: 'normal',
     showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard', busyMessageMode: 'queue' },
 });
+const emptyUsageOverview = (): UsageOverview => ({ generatedAt: Date.now(), capturedSince: null, subscriptions: [], providerTotals: [], recentRuns: [] });
 
 async function desktopOnly<T>(): Promise<T> {
   throw new Error(
@@ -304,6 +309,7 @@ const previewBridge: MonitterBridge = {
   available: false,
   getSnapshot: async () => emptyPreviewSnapshot(),
   getTaskEvents: async () => ({ events: [], nextBefore: null }),
+  getUsageOverview: async () => emptyUsageOverview(),
   getProcessMetrics: () => desktopOnly(),
   getTaskEventDetail: () => desktopOnly(),
   saveHost: () => desktopOnly(),
@@ -367,6 +373,7 @@ export function getBridge(): MonitterBridge {
       available: true,
       getSnapshot: () => test.invoke("get_snapshot") as Promise<Snapshot>,
       getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,
+      getUsageOverview: (policy) => test.invoke('get_usage_overview', policy === undefined ? {} : { policy }) as Promise<UsageOverview>,
       getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
       saveHost: (host) =>

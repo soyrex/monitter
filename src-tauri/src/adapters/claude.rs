@@ -201,6 +201,9 @@ pub fn parse_event(value: &Value) -> Vec<Parsed> {
                     usage.insert(key.into(), item.clone());
                 }
             }
+            // Stream-json places token accounting under `usage`; retain only
+            // fields actually present rather than manufacturing a total.
+            if let Some(item) = value.get("usage") { usage.insert("usage".into(), item.clone()); }
             let mut events = vec![event(
                 session_id.clone(),
                 "usage",
@@ -342,11 +345,14 @@ mod tests {
 
         let result = parse_event(&serde_json::json!({
             "type": "result", "session_id": "abc123", "is_error": false,
-            "result": "Done.", "total_cost_usd": 0.01, "num_turns": 1
+            "result": "Done.", "total_cost_usd": 0.01, "num_turns": 1,
+            "usage": {"input_tokens": 12, "output_tokens": 3, "cache_read_input_tokens": 2, "cache_creation_input_tokens": 1}
         }));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event.as_ref().unwrap().0, "usage");
         assert!(result[0].assistant.is_none());
+        let usage: Value = serde_json::from_str(&result[0].event.as_ref().unwrap().2).unwrap();
+        assert_eq!(usage["usage"]["cache_read_input_tokens"], 2);
 
         let tool_result = parse_event(&serde_json::json!({
             "type": "user", "session_id": "abc123", "message": { "content": [

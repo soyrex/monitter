@@ -103,6 +103,8 @@
     ApprovalRule,
     Sandbox,
     RunEvent,
+    UsageOverview,
+    UsageRefreshPolicy,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
   import { contrastForeground } from '$lib/accent-contrast';
@@ -115,6 +117,8 @@
   import SubagentActivity from "$lib/components/SubagentActivity.svelte";
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
+  import UsageRings from '$lib/components/UsageRings.svelte';
+  import { usageRingMap } from '$lib/usage-ring-data';
   import ApprovalDock from "$lib/components/ApprovalDock.svelte";
   import MessagePane from "$lib/components/MessagePane.svelte";
   import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
@@ -215,6 +219,21 @@
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
   const bridge = getBridge();
+  let usageOverview = $state<UsageOverview | null>(null);
+  let usageLoading = $state(true);
+  let usageError = $state('');
+  const sidebarUsage = $derived(usageRingMap(usageOverview, usageLoading, usageError));
+  async function refreshUsage(policy: UsageRefreshPolicy = 'if-stale') {
+    if (!usageOverview) usageLoading = true;
+    try {
+      usageOverview = await bridge.getUsageOverview(policy);
+      usageError = '';
+    } catch (reason) {
+      usageError = text(reason);
+    } finally {
+      usageLoading = false;
+    }
+  }
   let motionReady = $state(false);
   onMount(() => { if (!embedded) motionReady = true; });
   onMount(() => {
@@ -1729,6 +1748,8 @@
     const clearNativeDrop = () => document.querySelectorAll('.composer.drop-files').forEach(node=>node.classList.remove('drop-files'));
     const persistOnPageHide = () => workspaceSave.flush();
     window.addEventListener('pagehide', persistOnPageHide);
+    void refreshUsage('if-stale');
+    const usageTimer = setInterval(() => { void refreshUsage('if-stale'); }, 65_000);
     void (async () => {
       try {
         if (isTauri()) {
@@ -1797,6 +1818,7 @@
     return () => {
       mounted = false;
       clearTimeout(refreshTimer);
+      clearInterval(usageTimer);
       unlisten?.();
       unlistenDrop?.();
       unlistenCloseTab?.();
@@ -3746,6 +3768,7 @@
             >{channel.agentIds.length}</small
           ></button
         >{/each}
+      <div class="sidebar-usage"><UsageRings usage={sidebarUsage}/></div>
     </nav>
     {:else}<nav use:motionView={{key:"rail",initial:motionReady,x:-4,y:0,duration:160}} class="agent-rail" aria-label="Agents" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
       {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
@@ -3755,6 +3778,7 @@
       </button>{/each}
       <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !snapshot?.agents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
       <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
+      <div class="sidebar-usage compact"><UsageRings usage={sidebarUsage} compact/></div>
     </nav>{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
@@ -4354,6 +4378,8 @@
     overscroll-behavior: contain;
     padding: var(--density-sidebar-scroll-y) 8px;
   }
+  .sidebar-usage { min-width:0; margin:14px 2px 6px; padding-top:10px; border-top:1px solid var(--line); }
+  .sidebar-usage.compact { width:100%; margin:8px 0 0; padding-top:8px; }
   .sidebar-views { display: flex; flex: none; gap: 2px; margin-left: auto; }
   .view-toggle { display: grid; place-items: center; width: var(--density-control-size); height: var(--density-control-size); padding: 0; border-radius: 6px; color: var(--muted); }
   .mobile-navigation .view-toggle { width:44px; height:44px; }

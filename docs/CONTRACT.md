@@ -29,6 +29,15 @@ No fake conversations, progress, token counts, host connections or model replies
   `{ chunk: string, nextOffset: number | null, totalBytes: number }`. Full tool detail remains in
   the local journal and is read only after its activity row is expanded. Chunks default to 32 KiB
   and are capped at 64 KiB. Task and event IDs must match; offsets are UTF-8 byte boundaries.
+- `get_usage_overview { policy?: "cache-only" | "if-stale" | "refresh" }` -> `UsageOverview`.
+  Owner desktop/LAN only. It combines the durable, locally observed per-run usage ledger with
+  cached subscription allowance sources. A refresh may perform bounded, read-only local CLI
+  probes, never sends a model prompt, changes authentication, or exposes account identifiers.
+  Codex uses app-server account rate limits; MiniMax uses `mmx quota show --output json
+  --non-interactive`; OpenCode Go asks the local Codex Router credential broker to query its
+  provider usage endpoint without exposing the API key to Monitter; Claude remains explicitly
+  unsupported until a structured allowance is observed through its supported session transport.
+  All allowance timestamps are Unix milliseconds.
 - `save_host { host: Host }` -> Snapshot (empty id creates)
 - `delete_host { id: string }` -> Snapshot (reject referenced/default local host)
 - `probe_host { host: Host }` -> ProbeResult (unsaved settings allowed; versions keyed provider)
