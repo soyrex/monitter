@@ -1044,8 +1044,7 @@ fn opencode_export_directory_with_timeout(
         let _ = diagnostics;
         return Err("Could not inspect OpenCode session.".into());
     }
-    let value: Value = serde_json::from_slice(&output)
-        .map_err(|_| "OpenCode session metadata was invalid.".to_string())?;
+    let value = parse_opencode_export_metadata(&output)?;
     let info = value
         .get("info")
         .ok_or("OpenCode session metadata was invalid.")?;
@@ -1062,6 +1061,24 @@ fn opencode_export_directory_with_timeout(
         })
         .ok_or("OpenCode session metadata did not contain an absolute folder.")?;
     Ok(directory.into())
+}
+
+/// OpenCode 1.18 writes a human-readable export banner before the JSON document.
+/// Keep accepting the older JSON-only output, but only strip this known banner so
+/// diagnostics or malformed output cannot be mistaken for session metadata.
+fn parse_opencode_export_metadata(output: &[u8]) -> Result<Value, String> {
+    if let Ok(value) = serde_json::from_slice(output) {
+        return Ok(value);
+    }
+    let output = std::str::from_utf8(output)
+        .map_err(|_| "OpenCode session metadata was invalid.".to_string())?;
+    let Some((banner, json)) = output.split_once('\n') else {
+        return Err("OpenCode session metadata was invalid.".into());
+    };
+    if !banner.trim().starts_with("Exporting session:") {
+        return Err("OpenCode session metadata was invalid.".into());
+    }
+    serde_json::from_str(json).map_err(|_| "OpenCode session metadata was invalid.".to_string())
 }
 
 pub fn build_probe_command(host: &Host, provider: &str) -> Result<Command, String> {
@@ -3815,6 +3832,23 @@ mod tests {
     #[test]
     fn opencode_export_restores_only_matching_absolute_session_directory() {
         let executable = fake_opencode("printf '%s\\n' '{\"info\":{\"id\":\"ses_123\",\"directory\":\"/original/project\"},\"messages\":[]}'");
+        let mut local = host("local");
+        local.opencode_path = executable.display().to_string();
+        let control = RunControl::new(false);
+        let result = opencode_export_directory_with_timeout(
+            &local,
+            &opencode_task("ses_123"),
+            "ses_123",
+            &control,
+            Duration::from_secs(1),
+        );
+        assert_eq!(result.unwrap(), "/original/project");
+        let _ = std::fs::remove_file(executable);
+    }
+
+    #[test]
+    fn opencode_export_accepts_the_cli_banner_before_metadata() {
+        let executable = fake_opencode("printf '%s\\n%s\\n' 'Exporting session: ses_123' '{\"info\":{\"id\":\"ses_123\",\"directory\":\"/original/project\"},\"messages\":[]}'");
         let mut local = host("local");
         local.opencode_path = executable.display().to_string();
         let control = RunControl::new(false);
