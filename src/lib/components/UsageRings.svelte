@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { ChevronDown } from '@lucide/svelte';
+  import { onMount } from 'svelte';
+
   /**
    * A display-only projection of provider allowance data. The owner is
    * responsible for fetching/mapping provider payloads; this component never
@@ -42,12 +45,26 @@
     { id: 'opencode-go', label: 'OpenCode Go', mark: 'Go' },
   ];
   const radius = 15.5;
+  const storageKey = 'monitter.sidebar-usage-expanded.v1';
 
   let {
     usage = {},
     compact = false,
+    expanded = $bindable(true),
     class: className = '',
-  }: { usage?: UsageRingMap; compact?: boolean; class?: string } = $props();
+  }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; class?: string } = $props();
+
+  onMount(() => {
+    try {
+      const stored = localStorage.getItem(storageKey);
+      if (stored === 'true' || stored === 'false') expanded = stored === 'true';
+    } catch { /* Keep the expanded default when local storage is unavailable. */ }
+  });
+
+  function toggle() {
+    expanded = !expanded;
+    try { localStorage.setItem(storageKey, String(expanded)); } catch { /* The live state still works. */ }
+  }
 
   function percent(value: number | null | undefined): number | null {
     return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null;
@@ -96,59 +113,77 @@
   }
 </script>
 
-<section class:compact class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
-  {#each providers as provider (provider.id)}
-    {@const data = usage[provider.id]}
-    {@const active = data?.active}
-    {@const weekly = data?.weekly}
-    {@const hasValue = showValue(data)}
-    {@const status = data?.status ?? 'unavailable'}
-    <article
-      class="usage-provider"
-      class:loading={status === 'loading'}
-      class:unavailable={status === 'unavailable' || status === 'error' || !hasValue}
-      class:stale={status === 'stale'}
-      class:error={status === 'error'}
-      aria-label={providerTitle(provider, data)}
-      title={providerTitle(provider, data)}
-    >
-      <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`}>
-        <circle class="ring-track" cx="20" cy="20" r={radius} />
-        <circle
-          class="ring-active"
-          cx="20" cy="20" r={radius}
-          pathLength="100"
-          stroke-dasharray="100"
-          stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
-        />
-        {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
-          <circle
-            class="ring-weekly"
-            cx="20" cy="20" r="11.5"
-            pathLength="100"
-            stroke-dasharray="100"
-            stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
-          />
-        {/if}
-        <text class="ring-value" x="20" y="21" text-anchor="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
-      </svg>
-      <div class="usage-copy">
-        <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
-        {#if hasValue}
-          <div class="usage-detail"><span>{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used`}</span><span class="usage-reset" title={resetText(active)}>{resetText(active)}</span></div>
-          {#if weekly}
-            <div class="usage-weekly" title={resetText(weekly)}><span>{weekly.label} {weekly.unlimited ? '∞' : percentText(weekly.usedPercent)}</span><span>{weekly.unlimited ? 'Unlimited' : resetText(weekly)}</span></div>
-          {/if}
-        {:else}
-          <div class="usage-detail usage-message">{data?.message?.trim() || 'Usage data is not available.'}</div>
-        {/if}
-      </div>
-    </article>
-  {/each}
+<section class:compact class:expanded class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
+  {#if !compact}
+    <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" onclick={toggle}>
+      <span>MODEL USAGE</span>
+      <small>{providers.length} PROVIDERS</small>
+      <ChevronDown class="usage-chevron" size={13} aria-hidden="true" />
+    </button>
+  {/if}
+  {#if expanded || compact}
+    <div class="usage-body" id="sidebar-usage-body">
+      {#each providers as provider (provider.id)}
+        {@const data = usage[provider.id]}
+        {@const active = data?.active}
+        {@const weekly = data?.weekly}
+        {@const hasValue = showValue(data)}
+        {@const status = data?.status ?? 'unavailable'}
+        <article
+          class="usage-provider"
+          class:loading={status === 'loading'}
+          class:unavailable={status === 'unavailable' || status === 'error' || !hasValue}
+          class:stale={status === 'stale'}
+          class:error={status === 'error'}
+          aria-label={providerTitle(provider, data)}
+          title={providerTitle(provider, data)}
+        >
+          <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`}>
+            <circle class="ring-track" cx="20" cy="20" r={radius} />
+            <circle
+              class="ring-active"
+              cx="20" cy="20" r={radius}
+              pathLength="100"
+              stroke-dasharray="100"
+              stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
+            />
+            {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
+              <circle
+                class="ring-weekly"
+                cx="20" cy="20" r="11.5"
+                pathLength="100"
+                stroke-dasharray="100"
+                stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
+              />
+            {/if}
+            <text class="ring-value" x="20" y="21" text-anchor="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
+          </svg>
+          <div class="usage-copy">
+            <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
+            {#if hasValue}
+              <div class="usage-detail"><span>{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used`}</span><span class="usage-reset" title={resetText(active)}>{resetText(active)}</span></div>
+              {#if weekly}
+                <div class="usage-weekly" title={resetText(weekly)}><span>{weekly.label} {weekly.unlimited ? '∞' : percentText(weekly.usedPercent)}</span><span>{weekly.unlimited ? 'Unlimited' : resetText(weekly)}</span></div>
+              {/if}
+            {:else}
+              <div class="usage-detail usage-message">{data?.message?.trim() || 'Usage data is not available.'}</div>
+            {/if}
+          </div>
+        </article>
+      {/each}
+    </div>
+  {/if}
 </section>
 
 <style>
-  .usage-rings { display:grid; gap:4px; min-width:0; max-width:100%; color:var(--ink); font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .usage-rings { min-width:0; max-width:100%; overflow:hidden; color:var(--ink); border:1px solid var(--line); border-radius:8px; background:color-mix(in srgb,var(--panel) 34%,transparent); font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .usage-toggle { display:grid; grid-template-columns:minmax(0,1fr) auto 16px; align-items:center; width:100%; height:31px; padding:0 7px 0 10px; color:var(--muted); text-align:left; }
+  .usage-toggle:hover { color:var(--ink); background:var(--soft); }
+  .usage-toggle > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.09em; }
+  .usage-toggle small { font:calc(8px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.04em; }
+  .usage-toggle :global(.usage-chevron) { justify-self:end; transform:rotate(180deg); transition:transform 150ms ease-out; }
+  .expanded .usage-toggle :global(.usage-chevron) { transform:rotate(0); }
+  .usage-body { display:grid; gap:4px; padding:4px; border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
   .usage-provider { display:grid; grid-template-columns:40px minmax(0,1fr); align-items:center; gap:8px; min-width:0; padding:5px 6px; border:1px solid transparent; border-radius:8px; }
   .usage-provider:hover { background:color-mix(in srgb,var(--accent) 5%,transparent); border-color:color-mix(in srgb,var(--accent) 12%,transparent); }
   .usage-ring { display:block; width:40px; height:40px; overflow:visible; transform:rotate(-90deg); }
@@ -174,10 +209,11 @@
   .stale .usage-status { color:color-mix(in srgb,var(--accent) 68%,var(--muted)); }
   .error .ring-active { stroke:#c35b5b; }
   .error .usage-status { color:#c35b5b; }
-  .compact { justify-items:center; gap:5px; }
+  .compact { border:0; border-radius:0; background:transparent; }
+  .compact .usage-body { justify-items:center; gap:5px; padding:0; border:0; }
   .compact .usage-provider { grid-template-columns:40px; padding:4px; }
   .compact .usage-copy { display:none; }
   .compact .usage-provider:hover { border-color:color-mix(in srgb,var(--accent) 22%,transparent); }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }
-  @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly { animation:none; transition:none; } }
+  @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly,.usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }
 </style>

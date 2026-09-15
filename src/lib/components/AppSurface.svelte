@@ -338,6 +338,7 @@
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
   let clockExpanded = $state(true);
+  let usageExpanded = $state(true);
   let mobileSidebar = $state(false);
   const desktopInterfaceScale = interfaceScaleStore('desktop');
   const mobileInterfaceScale = interfaceScaleStore('mobile');
@@ -3669,7 +3670,7 @@
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
 <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
-  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:clock-expanded={clockExpanded && !sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
+  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
@@ -3778,7 +3779,6 @@
             >{channel.agentIds.length}</small
           ></button
         >{/each}
-      <div class="sidebar-usage"><UsageRings usage={sidebarUsage}/></div>
     </nav>
     {:else}<nav use:motionView={{key:"rail",initial:motionReady,x:-4,y:0,duration:160}} class="agent-rail" aria-label="Agents" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
       {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
@@ -3788,13 +3788,13 @@
       </button>{/each}
       <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !snapshot?.agents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
       <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
-      <div class="sidebar-usage compact"><UsageRings usage={sidebarUsage} compact/></div>
     </nav>{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
       <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}{@render sidebarWorkspacePanels(railAgent.id)}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
+    <div class="sidebar-usage" class:compact={sidebarCompressed}><UsageRings usage={sidebarUsage} compact={sidebarCompressed} bind:expanded={usageExpanded}/></div>
     <SidebarClock compact={sidebarCompressed} bind:expanded={clockExpanded}/>
     <footer class="sidebar-footer" aria-label="Workspace controls">
       <button class="icon" aria-label="Preferences" title="Preferences" onclick={()=>routeSettings()}><Settings2 size={16}/></button>
@@ -4388,8 +4388,19 @@
     overscroll-behavior: contain;
     padding: var(--density-sidebar-scroll-y) 8px;
   }
-  .sidebar-usage { min-width:0; margin:14px 2px 6px; padding-top:10px; border-top:1px solid var(--line); }
-  .sidebar-usage.compact { width:100%; margin:8px 0 0; padding-top:8px; }
+  .sidebar-usage {
+    position:absolute;
+    right:0;
+    bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-footer-safe-area, 0px));
+    left:0;
+    z-index:4;
+    min-width:0;
+    background:color-mix(in srgb,var(--sidebar) 94%,transparent);
+    backdrop-filter:blur(12px);
+    -webkit-backdrop-filter:blur(12px);
+  }
+  .sidebar-usage :global(.usage-rings) { border-right:0; border-left:0; border-radius:0; background:transparent; }
+  .sidebar-usage.compact { display:grid; place-items:center; width:100%; border-top:1px solid var(--line); }
   .sidebar-views { display: flex; flex: none; gap: 2px; margin-left: auto; }
   .view-toggle { display: grid; place-items: center; width: var(--density-control-size); height: var(--density-control-size); padding: 0; border-radius: 6px; color: var(--muted); }
   .mobile-navigation .view-toggle { width:44px; height:44px; }
@@ -4717,14 +4728,15 @@
     padding-bottom: var(--density-tabbar-inset);
   }
   .sidebar-footer { position:absolute; bottom:0; left:0; right:0; z-index:3; display:flex; justify-content:space-around; align-items:center; height:var(--density-sidebar-footer-height); padding:4px 10px; box-sizing:border-box; border-top:1px solid var(--line); background:var(--sidebar); }
-  .sidebar { --sidebar-clock-height:32px; }
+  .sidebar { --sidebar-clock-height:32px; --sidebar-usage-height:33px; }
   .sidebar.clock-expanded { --sidebar-clock-height:109px; }
-  .sidebar .side-scroll { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + 12px); }
-  .sidebar .agent-rail { padding-bottom:192px; }
+  .sidebar.usage-expanded { --sidebar-usage-height:254px; }
+  .sidebar.sidebar-compressed { --sidebar-clock-height:138px; --sidebar-usage-height:216px; }
+  .sidebar .side-scroll { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-usage-height) + 12px); }
+  .sidebar .agent-rail { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-usage-height) + 12px); }
   .mobile-navigation { --sidebar-footer-safe-area:env(safe-area-inset-bottom,0px); }
   .mobile-navigation .sidebar-footer > .icon { width:44px; height:44px; }
   .sidebar-collapsed .sidebar-footer { flex-direction:column; height:180px; padding:4px; }
-  .sidebar-collapsed .sidebar .agent-rail { padding-bottom:329px; }
   .brand.scrolled { box-shadow:inset 0 -1px var(--line); }
   .new-task,
   .primary {
