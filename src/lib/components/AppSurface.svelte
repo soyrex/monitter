@@ -119,6 +119,8 @@
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import UsageRings from '$lib/components/UsageRings.svelte';
   import { usageRingMap } from '$lib/usage-ring-data';
+  import ContextUsageBar from '$lib/components/ContextUsageBar.svelte';
+  import { composerContextUsage } from '$lib/context-usage-data';
   import ApprovalDock from "$lib/components/ApprovalDock.svelte";
   import MessagePane from "$lib/components/MessagePane.svelte";
   import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
@@ -224,20 +226,29 @@
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
   const bridge = getBridge();
-  let usageOverview = $state<UsageOverview | null>(null);
-  let usageLoading = $state(true);
-  let usageError = $state('');
-  const sidebarUsage = $derived(usageRingMap(usageOverview, usageLoading, usageError));
+  type SharedUsageState = { overview: UsageOverview | null; loading: boolean; error: string };
+  const localUsageState = $state<SharedUsageState>({ overview: null, loading: true, error: '' });
+  const usageState = getContext<SharedUsageState>('monitter-usage-overview') ?? localUsageState;
+  setContext('monitter-usage-overview', usageState);
+  const sidebarUsage = $derived(usageRingMap(usageState.overview, usageState.loading, usageState.error));
   async function refreshUsage(policy: UsageRefreshPolicy = 'if-stale') {
-    if (!usageOverview) usageLoading = true;
+    if (!usageState.overview) usageState.loading = true;
     try {
-      usageOverview = await bridge.getUsageOverview(policy);
-      usageError = '';
+      usageState.overview = await bridge.getUsageOverview(policy);
+      usageState.error = '';
     } catch (reason) {
-      usageError = text(reason);
+      usageState.error = text(reason);
     } finally {
-      usageLoading = false;
+      usageState.loading = false;
     }
+  }
+  let usageRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleUsageRefresh() {
+    if (embedded || usageRefreshTimer !== undefined) return;
+    usageRefreshTimer = window.setTimeout(() => {
+      usageRefreshTimer = undefined;
+      void refreshUsage('cache-only');
+    }, 500);
   }
   let motionReady = $state(false);
   onMount(() => { if (!embedded) motionReady = true; });
@@ -514,6 +525,7 @@
       ? (indexes?.messagesByTask.get(selectedTask.id) ?? [])
       : [],
   );
+  const selectedTaskContextUsage = $derived(composerContextUsage(usageState.overview, selectedTask, messages));
   const events = $derived(
     selectedTask
       ? (indexes?.eventsByTask.get(selectedTask.id) ?? [])
@@ -1686,6 +1698,7 @@
     const ticket = ++snapshotIssued;
     try {
       applySnapshot(await bridge.getSnapshot(), ticket);
+      scheduleUsageRefresh();
       workspaceConnected = bridge.available;
     } catch (reason) {
       workspaceConnected = false;
@@ -1824,6 +1837,7 @@
     return () => {
       mounted = false;
       clearTimeout(refreshTimer);
+      if (usageRefreshTimer !== undefined) clearTimeout(usageRefreshTimer);
       clearInterval(usageTimer);
       unlisten?.();
       unlistenDrop?.();
@@ -3557,6 +3571,7 @@
                 <button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
               </div>
             </div>
+            <ContextUsageBar usage={selectedTaskContextUsage}/>
           </div>
         {/snippet}
         <TaskTranscript
@@ -5232,6 +5247,7 @@
   .slash-menu span, .slash-menu p { color: var(--muted); font-size: calc(12px * var(--interface-font-ratio, 1)); margin: 0; padding: 9px 11px; }
   .composer {
     container-type: inline-size;
+    position: relative;
     flex-shrink: 0;
     max-height: 40%;
     overflow: auto;

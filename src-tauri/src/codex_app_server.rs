@@ -1075,6 +1075,17 @@ fn handle_server_request(
     });
 }
 
+fn thread_context_usage_detail(params: &Value, fallback_turn_id: &str) -> String {
+    let usage = params.get("tokenUsage");
+    json!({
+        "providerTurnId": params.get("turnId").and_then(Value::as_str).unwrap_or(fallback_turn_id),
+        "usage": {
+            "used": usage.and_then(|value| value.pointer("/last/totalTokens")),
+            "size": usage.and_then(|value| value.get("modelContextWindow")),
+        },
+    }).to_string()
+}
+
 fn handle_notification(
     service: &Arc<Service>,
     task_id: &str,
@@ -1132,7 +1143,7 @@ fn handle_notification(
     }
     if matches!(
         method,
-        "item/agentMessage/delta" | "item/completed" | "turn/completed"
+        "item/agentMessage/delta" | "item/completed" | "turn/completed" | "thread/tokenUsage/updated"
     ) && (thread_id.is_empty() || turn_id.is_empty())
     {
         service.record(
@@ -1323,6 +1334,27 @@ fn handle_notification(
                         return;
                     }
                 }
+            }
+        }
+        "thread/tokenUsage/updated" => {
+            // Codex reports the live context window separately from turn
+            // completion. `last.totalTokens` is the current context used;
+            // `total` is cumulative session accounting and must not become a
+            // context reading. The shared usage ledger rejects the sample
+            // when either reported value is absent or invalid.
+            let detail = thread_context_usage_detail(params, turn_id);
+            if let Err(error) = service.app_server_event(
+                task_id,
+                control,
+                Some(turn_id),
+                Parsed {
+                    native_session_id: None,
+                    assistant: None,
+                    event: Some(("usage".into(), "Context usage updated".into(), detail)),
+                    failed: false,
+                },
+            ) {
+                service.record(task_id, "error", "Usage capture warning", error);
             }
         }
         "turn/completed" => {
@@ -1768,6 +1800,24 @@ mod tests {
             assert_eq!(detail["id"], "compact-1");
             assert_eq!(detail["monitterPhase"], phase);
         }
+    }
+
+    #[test]
+    fn thread_token_usage_uses_last_total_for_current_context() {
+        let detail: Value = serde_json::from_str(&thread_context_usage_detail(
+            &json!({
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "last": { "totalTokens": 12_345 },
+                    "total": { "totalTokens": 98_765 },
+                    "modelContextWindow": 114_688,
+                },
+            }),
+            "fallback-turn",
+        )).unwrap();
+        assert_eq!(detail["providerTurnId"], "turn-1");
+        assert_eq!(detail.pointer("/usage/used"), Some(&json!(12_345)));
+        assert_eq!(detail.pointer("/usage/size"), Some(&json!(114_688)));
     }
 
     #[test]
