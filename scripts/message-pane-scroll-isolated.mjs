@@ -75,6 +75,19 @@ try {
     await grow('growExisting');
     await atBottom();
     const jumpButton = page.locator('.jump-latest');
+    await page.locator('.messages').evaluate(node => {
+      node.dispatchEvent(new WheelEvent('wheel', { deltaY: -8, bubbles: true }));
+      node.scrollTop -= 8;
+      node.dispatchEvent(new Event('scroll'));
+    });
+    await expect(page.getByRole('button', { name: 'Jump to latest message' })).toBeVisible();
+    const firstIntent = await metrics();
+    await invoke('tickTimer');
+    await page.waitForTimeout(50);
+    expect((await metrics()).top).toBeLessThanOrEqual(firstIntent.top + 2);
+    await page.getByRole('button', { name: 'Jump to latest message' }).click();
+    await atBottom();
+    await page.waitForTimeout(50);
     await setBottomGap(49);
     await expect(jumpButton).toHaveAttribute('aria-hidden', 'true');
     await page.waitForTimeout(1_100);
