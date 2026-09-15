@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export const isLanBrowser = () => typeof document !== 'undefined' && (
-  (import.meta.env.DEV && import.meta.env.MODE === 'monitter-web') ||
+  (import.meta.env.DEV && (import.meta.env.MODE === 'monitter-web' || import.meta.env.MODE === 'monitter-app-ui')) ||
   document.documentElement.hasAttribute('data-monitter-lan') || !!document.querySelector('meta[name="monitter-lan"]')
 );
 const storageKey = 'monitter.lan.access';

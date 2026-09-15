@@ -9,6 +9,11 @@ import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 const config = {
   preprocess: vitePreprocess(),
   kit: {
+    // The remote developer bridge is intentionally mounted below a dedicated
+    // path so its narrowly scoped Tauri capability cannot match other pages.
+    paths: {
+      base: process.env.MONITTER_APP_UI === '1' ? '/monitter-app-ui' : '',
+    },
     adapter: adapter({
       fallback: "index.html",
     }),

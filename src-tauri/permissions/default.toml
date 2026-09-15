@@ -1,0 +1,30 @@
+# App commands are explicitly local by default. The only remote grant is in
+# capabilities/hot-ui.json, which permits returning to packaged assets.
+[default]
+permissions = ["allow-local-monitter"]
+
+[[permission]]
+identifier = "allow-local-monitter"
+description = "Allows Monitter's application commands from bundled local content."
+commands.allow = [
+  "get_snapshot", "get_process_metrics", "get_extension_config", "save_extension_config",
+  "get_ui_snapshot", "get_task_events", "get_usage_overview", "get_task_event_detail",
+  "get_lan_server_info", "resolve_approval", "revoke_approval_rule", "resolve_input",
+  "finish_quit", "read_attachment_file", "store_attachment", "save_host", "delete_host",
+  "probe_host", "discover_acp_agents", "verify_acp_agent", "save_agent", "delete_agent",
+  "create_task", "choose_local_folder", "save_project", "delete_project", "set_task_project",
+  "rename_task", "autoname", "delete_task", "preview_task_deletion", "delete_archived_task",
+  "set_task_archived", "clear_task_context", "send_message", "send_message_fast", "resume_task",
+  "cancel_task", "cancel_queued_message", "edit_queued_message", "set_channel_agent_conversation",
+  "stop_channel_agent_conversation", "save_settings", "set_native_escape_shield", "load_dev_ui",
+  "use_packaged_ui", "save_channel", "set_channel_membership", "send_channel_message",
+  "send_channel_message_fast", "get_resume_command", "get_model_catalog", "set_task_model_settings",
+  "set_task_sandbox", "get_task_goal", "get_task_git_status", "wait_for_task_git_marker",
+  "get_task_git_diff", "open_terminal", "list_terminals", "write_terminal", "resize_terminal",
+  "read_terminal", "close_terminal"
+]
+
+[[permission]]
+identifier = "allow-use-packaged-ui"
+description = "Allows an authenticated developer bridge renderer to return to bundled assets."
+commands.allow = ["use_packaged_ui"]

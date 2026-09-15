@@ -23,29 +23,20 @@
   }
 
   onMount(() => {
-    hotUi = isTauri()
+    const native = isTauri();
+    hotUi = native
       && window.location.origin === 'http://127.0.0.1:18420'
       && new URLSearchParams(window.location.search).get('monitter-dev-ui') === '1';
+    // The packaged UI can surface native menu failures. The remote developer
+    // renderer deliberately receives no event capability.
+    if (isLanBrowser()) return;
     let stopped = false;
     let stopErrorListener: UnlistenFn | undefined;
-    let failures = 0;
     void listen<string>('monitter-dev-ui-error', event => { devUiError = event.payload; })
       .then(stop => { if (stopped) stop(); else stopErrorListener = stop; });
-    const timer = hotUi ? window.setInterval(async () => {
-      try {
-        const response = await fetch('/__monitter_dev__', { cache: 'no-store' });
-        const marker = response.ok ? await response.json() : null;
-        if (marker?.app !== 'monitter' || marker?.hotUiProtocol !== 1) throw new Error('Invalid marker');
-        failures = 0;
-      } catch {
-        failures += 1;
-        if (failures >= 3) returnToPackagedUi();
-      }
-    }, 2_000) : undefined;
     return () => {
       stopped = true;
       stopErrorListener?.();
-      if (timer !== undefined) window.clearInterval(timer);
     };
   });
 </script>

@@ -7,6 +7,7 @@
     "build:share": "vite build --config share-web/vite.config.mjs",
     "dev": "vite dev",
     "dev:web": "vite dev --mode monitter-web",
+    "dev:app-ui": "MONITTER_APP_UI=1 vite dev --mode monitter-app-ui",
     "build": "vite build && node scripts/publish-lan-web.mjs",
     "publish:lan": "node scripts/publish-lan-web.mjs",
     "preview": "vite preview",

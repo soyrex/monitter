@@ -4,12 +4,12 @@ import process from "node:process";
 import { webDevPlugin, webDevProxy } from './scripts/vite-web-dev.mjs';
 const host = process.env.TAURI_DEV_HOST;
 
-export const hotUiMarkerPlugin = () => ({
+export const hotUiMarkerPlugin = (markerPath = '/__monitter_dev__') => ({
   name: 'monitter-hot-ui-marker',
   /** @param {import('vite').ViteDevServer} server */
   configureServer(server) {
     server.middlewares.use((request, response, next) => {
-      if (request.url?.split('?', 1)[0] !== '/__monitter_dev__') return next();
+      if (request.url?.split('?', 1)[0] !== markerPath) return next();
       response.statusCode = 200;
       response.setHeader('Content-Type', 'application/json');
       response.setHeader('Cache-Control', 'no-store');
@@ -20,10 +20,10 @@ export const hotUiMarkerPlugin = () => ({
 
 // https://vite.dev/config/
 export default defineConfig(({ command, mode }) => {
-  const webDev = command === 'serve' && mode === 'monitter-web';
-  const loopbackHotUi = command === 'serve' && !webDev && (!host || host === '127.0.0.1' || host === 'localhost');
+  const appUi = command === 'serve' && mode === 'monitter-app-ui';
+  const webDev = command === 'serve' && (mode === 'monitter-web' || appUi);
   return {
-  plugins: [...(webDev ? [webDevPlugin()] : []), ...(loopbackHotUi ? [hotUiMarkerPlugin()] : []), sveltekit()],
+  plugins: [...(webDev ? [webDevPlugin()] : []), ...(appUi ? [hotUiMarkerPlugin('/monitter-app-ui/__monitter_dev__')] : []), sveltekit()],
   // Keep dependency transforms local when isolated worktrees reuse node_modules.
   cacheDir: ".svelte-kit/vite-cache",
 
@@ -33,9 +33,9 @@ export default defineConfig(({ command, mode }) => {
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: webDev ? 18450 : 18420,
+    port: appUi ? 18420 : webDev ? 18450 : 18420,
     strictPort: true,
-    host: webDev ? '0.0.0.0' : host || "127.0.0.1",
+    host: appUi ? '127.0.0.1' : webDev ? '0.0.0.0' : host || "127.0.0.1",
     ...(webDev ? { cors: false, proxy: webDevProxy() } : {}),
     hmr: !webDev && host
       ? {

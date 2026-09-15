@@ -2,11 +2,10 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "remote": {
-    "urls": ["http://127.0.0.1:18420/*"]
-  },
+  "local": true,
   "windows": ["main"],
   "permissions": [
+    "default",
     "core:default",
     "core:window:allow-start-dragging",
     "core:webview:allow-set-webview-zoom",

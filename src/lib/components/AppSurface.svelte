@@ -152,6 +152,11 @@
   import { createWorkspaceSaveScheduler } from '$lib/workspace-save-scheduler';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+  // The in-app developer UI intentionally uses the authenticated browser bridge,
+  // even though it is displayed in a Tauri WebView. Never treat that remote
+  // renderer as bundled content when choosing native-only APIs.
+  const nativeRuntime = !isLanBrowser() && isTauri();
+
   let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, parentMobileSidebar = false, workspaceKey = 'all', onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
     { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; snapshotIndexes?: SnapshotIndexes | null; parentMobileSidebar?: boolean; workspaceKey?: WorkspaceKey;
       onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void;
@@ -256,7 +261,7 @@
   let tabIndexModifier = $state(false);
   const modifierLabel = macPlatform ? '⌘' : 'Ctrl+';
   const nativeMac = $derived(
-    !embedded && typeof navigator !== "undefined" && isTauri() && /Mac/.test(navigator.userAgent));
+    !embedded && typeof navigator !== "undefined" && nativeRuntime && /Mac/.test(navigator.userAgent));
   let nativeFullscreen = $state(false);
   onMount(() => {
     if (!nativeMac) return;
@@ -430,7 +435,7 @@
   const sidebarView = $derived(sidebarViewState.view);
   let sidebarViewClientReady = $state(false);
   let sidebarViewInitialized = $state(false);
-  const sidebarViewClient: SidebarViewClient = untrack(() => isTauri() ? 'desktop' : 'web');
+  const sidebarViewClient: SidebarViewClient = untrack(() => nativeRuntime ? 'desktop' : 'web');
   function sidebarSorted<T extends {id:string}>(items:T[],group:string):T[] {
     const order=sidebarOrder[group]??[];
     if (!order.length) return items;
@@ -1601,12 +1606,12 @@
     root.style.setProperty('--app-dark-on-accent', contrastForeground(darkAccent));
     for (const legacy of ['--paper-base','--sidebar-base','--panel-base','--line-base','--soft-base','--code-base','--ink','--muted','--accent','--accent-rgb','--accent-light-ink','--accent-dark-ink','--on-accent']) root.style.removeProperty(legacy);
     root.style.setProperty("--interface-scale", String(scale / 100));
-    const browserScale = isTauri() ? 1 : scale / 100;
+    const browserScale = nativeRuntime ? 1 : scale / 100;
     const previousBrowserScale = root.style.getPropertyValue("--browser-interface-scale");
     root.style.setProperty("--browser-interface-scale", String(browserScale));
     root.style.setProperty("--browser-interface-scale-inverse", String(1 / browserScale));
     if (previousBrowserScale !== String(browserScale)) window.dispatchEvent(new Event('monitter:interface-scale'));
-    if (isTauri() && appliedScale !== scale) {
+    if (nativeRuntime && appliedScale !== scale) {
       appliedScale = scale;
       void getCurrentWebview().setZoom(scale / 100).catch(reason => {
         appliedScale = 0;
@@ -1753,7 +1758,7 @@
     const usageTimer = setInterval(() => { void refreshUsage('if-stale'); }, 65_000);
     void (async () => {
       try {
-        if (isTauri()) {
+        if (nativeRuntime) {
           const stopBeforeQuit = await listen('monitter-before-quit', async () => {
             if (workspaceReady && !workspaceSave.flush()) { error = workspacePersistenceError || 'Could not save workspace state before quitting.'; return; }
             try { await invoke('finish_quit'); } catch (reason) { error = `Could not quit: ${text(reason)}`; }
@@ -1783,7 +1788,7 @@
         }
         workspaceReady = true;
         if (!workspacePersistenceDisabled) persistWorkspace();
-        if(isTauri()) {
+        if(nativeRuntime) {
           const stopCloseTab = await listen('monitter-close-tab', () => {
             if (mounted) {
               cancelPaneFocusChord();
@@ -2792,7 +2797,7 @@
     return true;
   }
   $effect(() => {
-    if (embedded || !isTauri()) return;
+    if (embedded || !nativeRuntime) return;
     const enabled = vimShortcuts;
     let disposed=false, stop:UnlistenFn|undefined;
     const syncShield=()=>{void invoke('set_native_escape_shield',{enabled:enabled && !(document.activeElement instanceof Element && document.activeElement.closest('.terminal-pane'))}).catch(reason=>{error=`Could not apply keyboard mode: ${text(reason)}`;});};
@@ -3669,7 +3674,7 @@
 {#if !embedded}<RootSurfaceLifecycle start={startRootLifecycle}/>{/if}
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
-<main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
+<main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
   {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>

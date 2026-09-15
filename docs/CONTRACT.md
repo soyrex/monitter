@@ -9,11 +9,12 @@ No fake conversations, progress, token counts, host connections or model replies
 
 - `load_dev_ui {}` -> `()`. Owner desktop only. The native app connects directly to exact IPv4
   loopback port 18420, requires a compatible Monitter marker, and then navigates the existing main
-  WebView to the Vite UI. It does not start a server, launch another backend, accept an arbitrary
-  URL, or expose the command to LAN origins.
-- `use_packaged_ui {}` -> `()`. Owner desktop only. Restores the packaged URL captured when the
-  native app launched. Switching either direction reloads ephemeral frontend state, while the same
-  native service, stored data, active harnesses and task sessions continue running.
+  WebView to its dedicated Vite bridge path. It does not start a server, launch another backend, or
+  accept an arbitrary URL. The remote renderer has no general Tauri IPC.
+- `use_packaged_ui {}` -> `()`. Restores the packaged URL captured when the native app launched.
+  It is the only custom Tauri command allowed from the dedicated developer bridge origin. Switching
+  either direction reloads ephemeral frontend state, while the same native service, stored data,
+  active harnesses and task sessions continue running.
 - `get_snapshot {}` -> Snapshot
 - `get_ui_snapshot { revision?: string }` -> `{ revision: string, snapshot: Snapshot | null }`
   Shared desktop/LAN UI projection. An unchanged launch-scoped revision returns null; changed
@@ -943,9 +944,11 @@ rewritten as if the agent authored new text. User-authored queued messages remai
 ## LAN browser access
 
 The desktop hot-reload interface is separate from LAN browser access. An installed app may load
-`http://127.0.0.1:18420/?monitter-dev-ui=1` only after the native marker probe succeeds. Its Tauri
-capability is restricted to that exact loopback origin and main window; arbitrary hosts, LAN peers,
-and the `dev:web` port do not receive native IPC. The frontend displays a persistent `DEV UI · HMR`
+`http://127.0.0.1:18420/monitter-app-ui/?monitter-dev-ui=1` only after the native marker probe
+succeeds. Its Tauri capability is restricted to returning to the packaged main-window URL; arbitrary
+hosts, LAN peers, the `dev:web` port, and the developer renderer receive no native task, terminal,
+filesystem, approval or settings IPC. The renderer instead uses the existing localhost LAN bridge and
+its access-code checks, just as a browser client does. The frontend displays a persistent `DEV UI · HMR`
 badge and returns to packaged assets after three consecutive marker failures. This mode reuses the
 installed app's native process rather than starting a competing Tauri backend.
 
