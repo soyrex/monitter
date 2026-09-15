@@ -11,13 +11,14 @@ const fixture = readFileSync(`${root}/scripts/fixtures/sidebar-chrome-isolated.h
 
 // Keep this fixture deliberately small, but lift the declarations verbatim from
 // AppSurface so this checks the shipped chrome rules rather than a second style.
-const ruleNames = ['.brand', '.brand strong', '.brand-logo-button', '.icon', '.brand-actions', '.brand-action', '.sidebar-tabs', '.sidebar-tab-entry', '.sidebar-tab', '.mobile-navigation .brand', '.mobile-navigation .brand-action', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
+const ruleNames = ['.sidebar', '.brand', '.brand strong', '.brand-logo-button', '.icon', '.brand-actions', '.brand-action', '.sidebar-tabs', '.sidebar-tab-entry', '.sidebar-tab', '.mobile-navigation .brand', '.mobile-navigation .brand-action', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
 const cssBlocks = ruleNames.flatMap(name => {
   const escaped = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&');
   const re = new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{[^}]*\\}`, 'g');
   return source.match(re) ?? [];
 });
-const css = `${cssBlocks.join('\n')}\n.native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: calc(12px / var(--interface-scale,1)); gap: 4px; }\n.native-mac { --pane-tabbar-height: max(36px, calc(68px / var(--interface-scale, 1))); }\n.mobile-navigation .topbar > .top-actions { padding:0; gap:0; } .mobile-navigation .top-actions > .icon { width:44px; height:44px; }\n.sidebar { width: 320px; display:flex; flex-direction:column; }\n.side-scroll { flex:1; min-height:0; }\n.topbar { display:flex; align-items:center; height:52px; }\n.brand-full { display:inline-block; } .brand-short { display:none; }\n.brand[data-compact-wordmark="true"] .brand-full { position:absolute; visibility:hidden; display:inline-block; }\n.brand[data-compact-wordmark="true"] .brand-short { display:inline; }\n`;
+const containerRule = source.match(/@container sidebar \(max-width: 230px\) \{[\s\S]*?\n  \}/)?.[0] ?? '';
+const css = `${cssBlocks.join('\n')}\n${containerRule}\n.native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: calc(12px / var(--interface-scale,1)); gap: 4px; }\n.native-mac { --pane-tabbar-height: max(36px, calc(68px / var(--interface-scale, 1))); }\n.mobile-navigation .topbar > .top-actions { padding:0; gap:0; } .mobile-navigation .top-actions > .icon { width:44px; height:44px; }\n.sidebar { width: 320px; display:flex; flex-direction:column; }\n.side-scroll { flex:1; min-height:0; }\n.topbar { display:flex; align-items:center; height:52px; }\n.brand-full { display:inline-block; } .brand-short { display:none; }\n.brand[data-compact-wordmark="true"] .brand-full { position:absolute; visibility:hidden; display:inline-block; }\n.brand[data-compact-wordmark="true"] .brand-short { display:inline; }\n`;
 const extraCss = ':root { --density-control-size:30px; --density-tabbar-inset:0px; } button { box-sizing:border-box; padding:0; border:0; } .workspace { width:320px; } .embedded .topbar { box-sizing:border-box; padding:.5em .5em 0; } .workspace-context { display:grid; place-items:center; flex:none; width:30px; padding-bottom:.5em; } .workspace-context .avatar { display:block; width:24px; height:24px; } .top-actions { display:flex; align-items:center; gap:14px; flex-shrink:0; padding-bottom:.5em; } .tabs { display:flex; flex:1; min-width:0; } .tab-picker-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; padding:0 8px; border:1px solid #bbb; } .workspace.compact-tabs > .topbar { padding-block:.5em; } .workspace.compact-tabs > .topbar > .workspace-context, .workspace.compact-tabs > .topbar > .top-actions { padding-bottom:0; } .mobile-navigation .workspace > .topbar { height:52px; box-sizing:border-box; align-items:center; padding:4px; gap:4px; } .mobile-navigation .topbar > .tabs { align-self:stretch; } .mobile-navigation .topbar > .top-actions { padding:0; gap:0; } .mobile-navigation .top-actions > .icon { width:44px; height:44px; } .mobile-navigation .workspace.compact-tabs > .topbar { padding-block:4px; }';
 const html = fixture.replace('<style id="app-surface-rules"></style>', `<style id="app-surface-rules">${css}${extraCss}</style>`);
 const server = createServer((request, response) => {
@@ -57,6 +58,11 @@ try {
     expect(metrics.fontSize).toBe('13px'); expect(metrics.lineHeight).toBe('13px'); expect(metrics.opacity).toBe('1');
     expect(metrics.labelCenter).toBeGreaterThanOrEqual(metrics.brandCenter - 1);
     expect(Math.abs(metrics.labelCenterX - metrics.brandCenterX)).toBeLessThanOrEqual(0.5);
+    if (!profile.mobile) {
+      await page.locator('.sidebar').evaluate(node => { node.style.width = '220px'; });
+      await expect.poll(() => page.locator('.sidebar-tab > span').evaluateAll(nodes => nodes.map(node => getComputedStyle(node).display))).toEqual(['none','none','none']);
+      await expect(page.locator('.sidebar-tab')).toHaveCount(3);
+    }
     const gaps = await page.locator('.workspace.compact-tabs > .topbar').evaluate(node => { const bar = node.getBoundingClientRect(); const trigger = node.querySelector('.tab-picker-trigger').getBoundingClientRect(); return [trigger.top - bar.top, bar.bottom - trigger.bottom]; });
     expect(Math.abs(gaps[0] - gaps[1])).toBeLessThanOrEqual(1);
     await context.close();

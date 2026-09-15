@@ -4319,6 +4319,7 @@
   }
   .sidebar {
     position: relative;
+    container: sidebar / inline-size;
     display: flex;
     min-height: 0;
     flex-direction: column;
@@ -4418,6 +4419,10 @@
   .sidebar-tab-entry.active { position:relative; z-index:1; color:var(--ink); border-color:var(--line); background:var(--sidebar); }
   .sidebar-tab-entry.active .sidebar-tab { color:var(--ink); }
   .sidebar-tab-entry.active .sidebar-tab:hover { background:var(--sidebar); }
+  @container sidebar (max-width: 230px) {
+    .sidebar-tab { gap:0; }
+    .sidebar-tab span { display:none; }
+  }
   .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
   .project-group { margin: 5px 0 12px; }
   .workspace-approval-list { display:grid; gap:4px; margin:2px 2px 13px; padding-bottom:11px; border-bottom:1px solid var(--line); }
