@@ -1,5 +1,70 @@
 import type { ApprovalRequest, Message, RunEvent } from '$lib/types';
 
+type RecordValue = Record<string, unknown>;
+const acpRecord = (value: unknown): value is RecordValue => !!value && typeof value === 'object' && !Array.isArray(value);
+
+/** ACP envelopes are retained in historical and current diagnostic journals. */
+function acpUpdate(event: RunEvent): RecordValue | null {
+  try {
+    const update = JSON.parse(event.detail)?.update;
+    return acpRecord(update) && ['tool_call', 'tool_call_update', 'plan'].includes(String(update.sessionUpdate)) ? update : null;
+  } catch { return null; }
+}
+function acpToolIdentity(event: RunEvent): string | null {
+  const update = acpUpdate(event);
+  if (!update) return null;
+  if (update.sessionUpdate === 'plan') return 'plan';
+  const kinds: Record<string, string> = { read: 'read', edit: 'edit', delete: 'edit', move: 'edit', search: 'search_files', execute: 'command_execution', think: 'plan', fetch: 'web_fetch', switch_mode: 'plan' };
+  return kinds[String(update.kind)] ?? (typeof update.title === 'string' && update.title.trim() ? update.title.trim().toLowerCase() : 'tool');
+}
+/** Collapse old lifecycle echoes without rewriting the diagnostic journal. */
+function coalesceAcpActivity(events: RunEvent[], messages: Message[]): RunEvent[] {
+  const result: RunEvent[] = [];
+  const calls = new Map<string, number>();
+  const boundaries = messages.filter(message => message.role === 'user' || message.role === 'system');
+  for (const event of [...events].sort((a, b) => a.createdAt - b.createdAt)) {
+    const update = acpUpdate(event);
+    const callId = update?.sessionUpdate === 'plan' ? 'plan' : update?.toolCallId;
+    if (!update || typeof callId !== 'string' || !callId) { result.push(event); continue; }
+    const envelope = JSON.parse(event.detail);
+    const boundary = boundaries.reduce((latest, message) => message.taskId === event.taskId && message.createdAt <= event.createdAt ? Math.max(latest, message.createdAt) : latest, -1);
+    const key = JSON.stringify([event.taskId, envelope.sessionId, boundary, update.sessionUpdate === 'plan' ? 'plan' : 'tool', callId]);
+    const index = calls.get(key);
+    if (index === undefined) { calls.set(key, result.length); result.push(event); continue; }
+    const previous = result[index];
+    const merged = { ...acpUpdate(previous), ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== null)) };
+    result[index] = { ...event, createdAt: previous.createdAt, title: typeof merged.title === 'string' ? merged.title : previous.title, detail: JSON.stringify({ ...envelope, update: merged }) };
+  }
+  return result;
+}
+function acpReadableDetail(event: RunEvent): string | null {
+  const update = acpUpdate(event);
+  if (!update) return null;
+  const lines: string[] = [];
+  if (typeof update.title === 'string') lines.push(update.title);
+  if (typeof update.status === 'string') lines.push(`Status: ${update.status.replaceAll('_', ' ')}`);
+  const text = (value: unknown, depth = 0): string[] => {
+    if (depth > 5 || value == null) return [];
+    if (typeof value === 'string') return value.trim() ? [value] : [];
+    if (Array.isArray(value)) return value.flatMap(item => text(item, depth + 1));
+    if (!acpRecord(value)) return [];
+    if (value.type === 'diff') return [`Changed ${String(value.path ?? 'file')}`, ...(typeof value.newText === 'string' ? [value.newText] : [])];
+    if (value.type === 'terminal') return ['Terminal output is available in the terminal.'];
+    return text(value.text ?? value.content ?? value.message ?? value.error, depth + 1);
+  };
+  if (acpRecord(update.rawInput)) {
+    for (const key of ['command', 'cmd', 'file_path', 'path', 'pattern', 'query', 'url']) {
+      const value = update.rawInput[key];
+      if (typeof value === 'string' && value.trim()) lines.push(`${key}: ${value}`);
+    }
+  }
+  lines.push(...text(update.content), ...text(update.rawOutput), ...text(update.error));
+  if (Array.isArray(update.entries)) {
+    for (const entry of update.entries) if (acpRecord(entry) && typeof entry.content === 'string') lines.push(`${String(entry.status ?? 'pending').replaceAll('_', ' ')}: ${entry.content}`);
+  }
+  return [...new Set(lines)].join('\n\n') || 'Tool update; no additional output reported.';
+}
+
 /** Durable, user-authored Stop record emitted by the native cancellation path. */
 export const CANCELLATION_EVENT_TITLE = 'You cancelled this run.';
 export const CONTEXT_CLEARED_TITLE = 'Context Cleared';
@@ -72,6 +137,8 @@ export function showThinkingFallback(items: ConversationActivityItem[], working:
 }
 
 function toolIdentity(event: RunEvent) {
+  const acpIdentity = acpToolIdentity(event);
+  if (acpIdentity) return acpIdentity;
   const normalize = (value: string) => {
     const title = value.trim().toLowerCase();
     const aliases: Record<string, string> = {
@@ -82,7 +149,7 @@ function toolIdentity(event: RunEvent) {
     return aliases[title] || title;
   };
   const title = normalize(event.title);
-  const specificTitle = title && !['tool activity', 'tool result', 'tool', 'tool_result'].includes(title);
+  const specificTitle = title && !['tool activity', 'acp tool activity', 'tool result', 'tool', 'tool_result'].includes(title);
   try {
     const detail = JSON.parse(event.detail);
     const type = typeof detail?.type === 'string' ? normalize(detail.type) : '';
@@ -250,6 +317,10 @@ export function toolImage(event: RunEvent): ToolImage | null {
 
 /** Friendly label and icon; raw provider tool names stay in the expandable detail. */
 export function toolPresentation(event: RunEvent, inProgress: boolean): ToolPresentation {
+  const acp = acpUpdate(event);
+  if (acp?.status === 'failed') return { icon: 'wrench', label: 'Tool failed' };
+  if (acp?.status === 'completed') inProgress = false;
+  if (acp && acpToolIdentity(event) === 'tool') return { icon: 'wrench', label: inProgress ? 'Using a tool' : 'Used a tool' };
   const tense = (now: string, past: string) => inProgress ? now : past;
   switch (toolCategory(event)) {
     case 'shell': return { icon: 'square-terminal', label: tense('Run a command', 'Ran a command') };
@@ -276,7 +347,8 @@ export function toolPresentation(event: RunEvent, inProgress: boolean): ToolPres
       return { icon: 'plug', label: tense(`Work in ${name}`, `Worked in ${name}`) };
     }
     case 'other': {
-      const name = friendlyToolName(toolFamily(event));
+      const family = toolFamily(event);
+      const name = family.startsWith('event:') ? '' : friendlyToolName(family);
       return { icon: name ? 'wrench' : 'terminal', label: tense(`Use ${name || 'a tool'}`, `Used ${name || 'a tool'}`) };
     }
   }
@@ -421,6 +493,8 @@ export function toolFileChanges(event: RunEvent): ToolFileChange[] {
 
 /** Convert provider JSON into the useful human-readable part of a tool event. */
 export function readableToolDetail(event: RunEvent): string {
+  const acp = acpReadableDetail(event);
+  if (acp !== null) return truncateDetail(acp);
   const raw = event.detail.trim();
   if (!raw || raw === 'null') return 'No additional details.';
   const category = toolCategory(event);
@@ -473,6 +547,8 @@ export function groupConversationActivity(
   compressToolCalls = false,
   approvals: ApprovalRequest[] = [],
 ): ConversationActivityItem[] {
+  const sourceEvents = events;
+  events = coalesceAcpActivity(events, messages);
   const ordered = [
     ...messages.map(value => ({ type: 'message' as const, value, at: value.createdAt })),
     ...events.filter(event => !isNativeMessageTransportArtifact(event)).map(value => ({ type: 'activity' as const, value, at: value.createdAt })),
@@ -507,6 +583,7 @@ export function groupConversationActivity(
       compactionLifecycle
         ? previousCompactionId !== null && previousCompactionId === currentCompactionId
         : toolFamily(previous.values[0]) === toolFamily(item.value)
+          && (acpUpdate(previous.values[0])?.status === 'failed') === (acpUpdate(item.value)?.status === 'failed')
     )) {
       previous.values.push(item.value);
     } else {
@@ -520,7 +597,7 @@ export function groupConversationActivity(
     if (!message.text.trim() && !message.attachments?.length) continue;
     latestReplacementAt.set(message.taskId, Math.max(latestReplacementAt.get(message.taskId) ?? -Infinity, message.createdAt));
   }
-  for (const event of events) {
+  for (const event of sourceEvents) {
     if (isNativeMessageTransportArtifact(event) || isBlankReasoning(event)) continue;
     latestReplacementAt.set(event.taskId, Math.max(latestReplacementAt.get(event.taskId) ?? -Infinity, event.createdAt));
   }
@@ -549,7 +626,7 @@ export function groupConversationActivity(
       continue;
     }
     const family = item.values.every(isShellActivity) ? 'command_execution' : toolFamily(item.values[0]);
-    const key = `${item.values[0].taskId}:${family}`;
+    const key = `${item.values[0].taskId}:${family}:${item.values.some(event => acpUpdate(event)?.status === 'failed') ? 'failed' : ''}`;
     const existing = families.get(key);
     if (!existing) {
       families.set(key, item);

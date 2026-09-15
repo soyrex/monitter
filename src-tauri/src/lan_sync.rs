@@ -6,6 +6,7 @@
 
 use crate::model::{RunEvent, Snapshot};
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub const MAX_LIVE_EVENTS_PER_TASK: usize = 60;
@@ -92,8 +93,89 @@ fn truncate_bytes(value: &str, max: usize) -> String {
 fn compact_detail(event: &RunEvent) -> String {
     if event.kind == "error" {
         truncate_bytes(event.detail.lines().next().unwrap_or(""), MAX_ERROR_DETAIL)
+    } else if event.kind == "tool" {
+        compact_acp_activity_detail(&event.detail)
     } else {
         truncate_bytes(&event.detail, MAX_LIVE_DETAIL)
+    }
+}
+
+fn compact_acp_value(value: Option<&Value>, limit: usize) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    match value {
+        Value::String(text) => Value::String(truncate_bytes(text, limit)),
+        _ if value.to_string().len() <= limit => value.clone(),
+        _ => Value::String(truncate_bytes(&value.to_string(), limit)),
+    }
+}
+
+/// Live snapshots cannot carry unbounded diagnostics, but truncating the raw
+/// JSON would make ACP activity unparsable and prevent lifecycle coalescing.
+/// Retain the identifier and readable state envelope; full input/output stays
+/// available from the on-demand event-detail endpoint.
+fn compact_acp_update(update: &serde_json::Map<String, Value>, include_detail: bool) -> Value {
+    let mut compact = serde_json::Map::new();
+    for (key, limit) in [
+        ("sessionUpdate", 80),
+        ("toolCallId", 160),
+        ("title", 180),
+        ("toolName", 180),
+        ("kind", 100),
+        ("status", 100),
+    ] {
+        if let Some(value) = update.get(key) {
+            compact.insert(key.into(), compact_acp_value(Some(value), limit));
+        }
+    }
+    if include_detail {
+        for (key, limit) in [
+            ("content", 260),
+            ("rawInput", 220),
+            ("rawOutput", 220),
+            ("error", 220),
+            ("locations", 160),
+        ] {
+            if let Some(value) = update.get(key) {
+                compact.insert(key.into(), compact_acp_value(Some(value), limit));
+            }
+        }
+    }
+    Value::Object(compact)
+}
+
+fn compact_acp_activity_detail(detail: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(detail) else {
+        return truncate_bytes(detail, MAX_LIVE_DETAIL);
+    };
+    let Some(session_id) = value.get("sessionId").and_then(Value::as_str) else {
+        return truncate_bytes(detail, MAX_LIVE_DETAIL);
+    };
+    let Some(update) = value.get("update").and_then(Value::as_object) else {
+        return truncate_bytes(detail, MAX_LIVE_DETAIL);
+    };
+    let compact = json!({
+        "sessionId": session_id,
+        "update": compact_acp_update(update, true),
+    });
+    let compact = compact.to_string();
+    if compact.len() <= MAX_LIVE_DETAIL {
+        compact
+    } else {
+        let metadata = json!({
+            "sessionId": session_id,
+            "update": compact_acp_update(update, false),
+        })
+        .to_string();
+        if metadata.len() <= MAX_LIVE_DETAIL {
+            metadata
+        } else {
+            // Do not truncate an identifier: a shortened session or tool ID
+            // could collide with a different lifecycle. The full local event
+            // remains available on demand.
+            json!({"acpActivityTruncated": true}).to_string()
+        }
     }
 }
 
@@ -246,6 +328,30 @@ mod tests {
             .detail
             .ends_with("[truncated]"));
         assert_eq!(snapshot.events.len(), 63);
+    }
+
+    #[test]
+    fn compact_acp_activity_keeps_valid_grouping_metadata() {
+        let detail = json!({
+            "sessionId": "claude-session",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-123",
+                "title": "Read an oversized file",
+                "kind": "read",
+                "status": "failed",
+                "rawInput": {"path": "x".repeat(5_000)},
+                "rawOutput": {"error": "permission denied", "body": "y".repeat(5_000)}
+            }
+        })
+        .to_string();
+        let compact = compact_acp_activity_detail(&detail);
+        assert!(compact.len() <= MAX_LIVE_DETAIL);
+        let compact: Value = serde_json::from_str(&compact).expect("valid ACP JSON");
+        assert_eq!(compact["sessionId"], "claude-session");
+        assert_eq!(compact["update"]["toolCallId"], "tool-123");
+        assert_eq!(compact["update"]["status"], "failed");
+        assert_eq!(compact["update"]["title"], "Read an oversized file");
     }
 
     #[test]

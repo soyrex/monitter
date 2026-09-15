@@ -243,7 +243,7 @@
       usageState.loading = false;
     }
   }
-  let usageRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let usageRefreshTimer: number | undefined;
   function scheduleUsageRefresh() {
     if (embedded || usageRefreshTimer !== undefined) return;
     usageRefreshTimer = window.setTimeout(() => {

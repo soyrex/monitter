@@ -13,7 +13,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{BufReader, Write},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -32,11 +32,74 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(20);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_PERMISSION_HISTORY: usize = 4096;
 const MAX_PENDING_PERMISSIONS: usize = 16;
+const MAX_TOOL_ACTIVITY_ITEMS: usize = 1024;
+const MAX_TOOL_ACTIVITY_BYTES: usize = 2 * 1024 * 1024;
 
 struct PermissionSlot(Arc<AtomicUsize>);
 impl Drop for PermissionSlot {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_updates_keep_identity_and_merge_lifecycle_fields() {
+        let mut updates = HashMap::new();
+        let first = json!({
+            "sessionId": "claude-session",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Read package manifest",
+                "kind": "read",
+                "status": "pending",
+                "rawInput": {"path": "package.json"}
+            }
+        });
+        let (_, first) = normalized_activity(&first, "tool_call", &mut updates)
+            .unwrap()
+            .expect("tool update");
+        assert_eq!(serde_json::from_str::<Value>(&first).unwrap()["update"]["title"], "Read package manifest");
+
+        let final_update = json!({
+            "sessionId": "claude-session",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "failed",
+                "rawOutput": {"error": "permission denied"}
+            }
+        });
+        let (title, detail) = normalized_activity(&final_update, "tool_call_update", &mut updates)
+            .unwrap()
+            .expect("tool update");
+        let detail: Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(title, "Read package manifest");
+        assert_eq!(detail["sessionId"], "claude-session");
+        assert_eq!(detail["update"]["toolCallId"], "call-1");
+        assert_eq!(detail["update"]["status"], "failed");
+        assert_eq!(detail["update"]["rawInput"]["path"], "package.json");
+        assert_eq!(detail["update"]["rawOutput"]["error"], "permission denied");
+    }
+
+    #[test]
+    fn plan_is_a_distinct_normalized_activity() {
+        let mut updates = HashMap::new();
+        let (title, detail) = normalized_activity(
+            &json!({"sessionId":"claude-session", "update":{"content":"Check the manifest"}}),
+            "plan",
+            &mut updates,
+        )
+        .unwrap()
+        .expect("plan");
+        let detail: Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(title, "ACP plan");
+        assert_eq!(detail["update"]["sessionUpdate"], "plan");
+        assert_eq!(detail["update"]["content"], "Check the manifest");
     }
 }
 
@@ -192,6 +255,107 @@ fn session_id(value: &Value) -> Option<&str> {
         .pointer("/result/sessionId")
         .and_then(Value::as_str)
         .or_else(|| value.pointer("/result/session/id").and_then(Value::as_str))
+}
+
+/// ACP sends a `tool_call` followed by partial `tool_call_update` patches.
+/// Keep the provider's identifiers and merge those patches before recording
+/// them, so every activity row remains useful on its own while the UI groups
+/// the lifecycle by `sessionId` and `toolCallId`.
+fn merge_activity_patch(current: &mut Value, patch: &Value) {
+    if current.is_object() && patch.is_object() {
+        let current = current.as_object_mut().expect("checked object");
+        let patch = patch.as_object().expect("checked object");
+        for (key, value) in patch {
+            if value.is_null() {
+                continue;
+            }
+            match current.get_mut(key) {
+                Some(existing) => merge_activity_patch(existing, value),
+                None => {
+                    current.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    } else if !patch.is_null() {
+        *current = patch.clone();
+    }
+}
+
+fn activity_title(update: &Value, fallback: &str) -> String {
+    [
+        update.get("title"),
+        update.get("toolName"),
+        update.pointer("/toolCall/title"),
+        update.pointer("/toolCall/toolName"),
+        update.get("kind"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or(fallback)
+    .to_string()
+}
+
+fn normalized_activity(
+    params: &Value,
+    kind: &str,
+    tool_updates: &mut HashMap<(String, String), Value>,
+) -> Result<Option<(String, String)>, String> {
+    let Some(session) = params.get("sessionId").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let session = session.to_string();
+    let Some(patch) = params.get("update") else {
+        return Ok(None);
+    };
+    if kind == "plan" {
+        let mut update = patch.clone();
+        let Some(object) = update.as_object_mut() else {
+            return Ok(None);
+        };
+        object.insert("sessionUpdate".into(), Value::String("plan".into()));
+        let title = activity_title(&update, "ACP plan");
+        return Ok(Some((title, json!({"sessionId": session, "update": update}).to_string())));
+    }
+
+    let tool_call_id = patch
+        .get("toolCallId")
+        .or_else(|| patch.pointer("/toolCall/id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty());
+    let Some(tool_call_id) = tool_call_id else {
+        return Ok(None);
+    };
+    let tool_call_id = tool_call_id
+        .to_string();
+    let key = (session.clone(), tool_call_id.clone());
+    if !tool_updates.contains_key(&key) && tool_updates.len() >= MAX_TOOL_ACTIVITY_ITEMS {
+        return Err("Too many ACP tool calls in one turn.".into());
+    }
+    let (title, detail) = {
+        let update = tool_updates
+            .entry(key)
+            .or_insert_with(|| json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": tool_call_id,
+            }));
+        merge_activity_patch(update, patch);
+        let Some(object) = update.as_object_mut() else {
+            return Ok(None);
+        };
+        object.insert("sessionUpdate".into(), Value::String("tool_call".into()));
+        object.insert("toolCallId".into(), Value::String(tool_call_id));
+        let title = activity_title(update, "ACP tool action");
+        let detail = json!({"sessionId": session, "update": update}).to_string();
+        (title, detail)
+    };
+    let activity_bytes: usize = tool_updates.values().map(|value| value.to_string().len()).sum();
+    if activity_bytes > MAX_TOOL_ACTIVITY_BYTES {
+        return Err("ACP tool activity exceeds 2 MiB in one turn.".into());
+    }
+    Ok(Some((title, detail)))
 }
 
 fn handle_permission_request(
@@ -562,6 +726,11 @@ fn run(
     let mut pending_reasoning = String::new();
     let mut reasoning_bytes = 0usize;
     let mut turn_images = 0usize;
+    let mut tool_updates = HashMap::<(String, String), Value>::new();
+    // ACP permits message chunks without an item identifier. Those chunks are
+    // one assistant item until a tool/plan boundary, after which they must not
+    // be appended to the narration that preceded the activity.
+    let mut anonymous_message_item = 0usize;
     let mut last_reasoning_flush = Instant::now();
     let mut resolved_cwd = task.cwd.clone();
     let mut seen_permission_ids = HashSet::<String>::new();
@@ -1105,6 +1274,8 @@ fn run(
                 }
                 messages.clear();
                 dirty_messages.clear();
+                tool_updates.clear();
+                anonymous_message_item = 0;
                 phase = "idle";
                 phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
                 continue;
@@ -1156,13 +1327,27 @@ fn run(
                 let used = usage.get("used").and_then(Value::as_i64);
                 let size = usage.get("size").and_then(Value::as_i64);
                 if used.is_none() || size.is_none() {
-                    service.record(&task_id, "error", "Usage capture warning", "ACP usage_update omitted numeric used or size; the run continued.".into());
+                    service.record(
+                        &task_id,
+                        "error",
+                        "Usage capture warning",
+                        "ACP usage_update omitted numeric used or size; the run continued.".into(),
+                    );
                 } else {
                     let detail = json!({"providerTurnId": turn, "used": used, "size": size, "cost": usage.get("cost")}).to_string();
-                    if let Err(error) = service.app_server_event(&task_id, &control, (!turn.is_empty()).then_some(turn.as_str()), Parsed {
-                        native_session_id: None, assistant: None,
-                        event: Some(("usage".into(), "Usage updated".into(), detail)), failed: false,
-                    }) { service.record(&task_id, "error", "Usage capture warning", error); }
+                    if let Err(error) = service.app_server_event(
+                        &task_id,
+                        &control,
+                        (!turn.is_empty()).then_some(turn.as_str()),
+                        Parsed {
+                            native_session_id: None,
+                            assistant: None,
+                            event: Some(("usage".into(), "Usage updated".into(), detail)),
+                            failed: false,
+                        },
+                    ) {
+                        service.record(&task_id, "error", "Usage capture warning", error);
+                    }
                 }
                 continue;
             }
@@ -1182,8 +1367,14 @@ fn run(
                         .pointer("/params/update/messageId")
                         .or_else(|| value.pointer("/params/update/id"))
                         .and_then(Value::as_str)
-                        .unwrap_or("message");
-                    let is_new = !messages.iter().any(|(id, _)| id == item);
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            if anonymous_message_item == 0 {
+                                anonymous_message_item = 1;
+                            }
+                            format!("anonymous-message-{anonymous_message_item}")
+                        });
+                    let is_new = !messages.iter().any(|(id, _)| id == &item);
                     if is_new {
                         if messages.len() >= 1024 {
                             fail(
@@ -1194,7 +1385,7 @@ fn run(
                             );
                             return;
                         }
-                        messages.push((item.to_owned(), String::new()));
+                        messages.push((item.clone(), String::new()));
                     }
                     let turn_bytes: usize = messages.iter().map(|(_, text)| text.len()).sum();
                     if turn_bytes.saturating_add(delta.len()) > 8 * 1024 * 1024 {
@@ -1206,7 +1397,7 @@ fn run(
                         );
                         return;
                     }
-                    let Some((_, text)) = messages.iter_mut().find(|(id, _)| id == item) else {
+                    let Some((_, text)) = messages.iter_mut().find(|(id, _)| id == &item) else {
                         continue;
                     };
                     text.push_str(delta);
@@ -1216,15 +1407,15 @@ fn run(
                     }
                     if !turn.is_empty() {
                         if is_new || content_type == "image" {
-                            if let Err(error) = service
-                                .app_server_message(&task_id, &control, &turn, item, text, None, false)
-                            {
+                            if let Err(error) = service.app_server_message(
+                                &task_id, &control, &turn, &item, text, None, false,
+                            ) {
                                 fail(&service, &task_id, &control, error);
                                 return;
                             }
-                            dirty_messages.remove(item);
+                            dirty_messages.remove(&item);
                         } else {
-                            dirty_messages.insert(item.to_owned());
+                            dirty_messages.insert(item.clone());
                         }
                         if content_type == "image" {
                             turn_images += 1;
@@ -1241,7 +1432,7 @@ fn run(
                                 .as_str()
                                 .ok_or_else(|| "ACP image data is missing.".to_string())
                                 .and_then(|data| {
-                                    service.acp_message_image(&task_id, &control, &turn, item, data)
+                                    service.acp_message_image(&task_id, &control, &turn, &item, data)
                                 });
                             if let Err(error) = result {
                                 fail(&service, &task_id, &control, error);
@@ -1260,6 +1451,37 @@ fn run(
                     pending_reasoning.push_str(delta);
                 }
             } else if matches!(kind, "tool_call" | "tool_call_update" | "plan") {
+                anonymous_message_item = anonymous_message_item.saturating_add(1).max(1);
+                let params = value.get("params").unwrap_or(&Value::Null);
+                let normalized = match normalized_activity(params, kind, &mut tool_updates) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                };
+                let Some((title, detail)) = normalized else {
+                    // A malformed activity update must remain visible rather
+                    // than becoming a misleading generic tool row.
+                    let detail = params.to_string();
+                    let title = if kind == "plan" { "ACP plan" } else { "ACP tool activity" };
+                    let result = service.app_server_event(
+                        &task_id,
+                        &control,
+                        (!turn.is_empty()).then_some(turn.as_str()),
+                        Parsed {
+                            native_session_id: None,
+                            assistant: None,
+                            event: Some(("tool".into(), title.into(), detail)),
+                            failed: false,
+                        },
+                    );
+                    if let Err(error) = result {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                    continue;
+                };
                 let result = service.app_server_event(
                     &task_id,
                     &control,
@@ -1268,23 +1490,9 @@ fn run(
                         native_session_id: None,
                         assistant: None,
                         event: Some((
-                            if kind.contains("thought") {
-                                "reasoning"
-                            } else {
-                                "tool"
-                            }
-                            .into(),
-                            if kind.contains("thought") {
-                                "Reasoning"
-                            } else {
-                                "ACP tool activity"
-                            }
-                            .into(),
-                            value
-                                .get("params")
-                                .cloned()
-                                .unwrap_or(Value::Null)
-                                .to_string(),
+                            "tool".into(),
+                            title,
+                            detail,
                         )),
                         failed: false,
                     },

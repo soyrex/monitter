@@ -813,6 +813,13 @@ Grouping is presentation-only: raw events, details, timestamps and settings rema
 Messages, reasoning and different services separate groups. Counts say “entries” because harnesses
 can emit multiple lifecycle updates for a single call. Individual entry details can collapse.
 
+ACP tool activity retains the provider session and tool-call identity. The transcript merges
+start/progress/completion updates for a call into one entry, renders its reported kind and
+status, and keeps failed calls visible separately from successful calls. Plan updates replace
+the prior plan within the same user-message boundary. Full tool details remain in the diagnostic
+journal. Anonymous assistant text starts a new message segment after tool activity so commentary
+and the final reply are not concatenated across tool calls.
+
 ## Terminal tabs
 
 The terminal icon in each pane (also Controls → New terminal) opens a real interactive shell.
