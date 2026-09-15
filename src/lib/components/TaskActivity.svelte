@@ -6,12 +6,20 @@
   } = $props();
   const number = (value: number) => new Intl.NumberFormat().format(value);
   const label = (status: string) => ({active:'Active',paused:'Paused',blocked:'Blocked',usageLimited:'Usage limit',budgetLimited:'Budget reached'}[status] ?? status);
+  const sparkles = [
+    { x: 3, y: 12, delay: 0 }, { x: 27, y: 5, delay: -.8 },
+    { x: 71, y: 7, delay: -1.6 }, { x: 97, y: 48, delay: -.4 },
+    { x: 82, y: 94, delay: -1.2 }, { x: 16, y: 94, delay: -2 },
+  ];
 </script>
 
 {#if (goal && goal.status !== 'complete') || goalNote || tools.length}
   <div class="task-activity">
     {#if goal && goal.status !== 'complete'}
-      <section class="goal-card" aria-label="Task goal">
+      <section class="goal-card" class:in-progress={goal.status === 'active'} aria-label="Task goal">
+        {#if goal.status === 'active'}<div class="goal-sparkles" aria-hidden="true">
+          {#each sparkles as sparkle}<span style:left={`${sparkle.x}%`} style:top={`${sparkle.y}%`} style:animation-delay={`${sparkle.delay}s`}>✦</span>{/each}
+        </div>{/if}
         <div class="activity-label"><GoalIcon size={14} /><strong>Goal</strong><span class="status">{label(goal.status)}</span></div>
         <details><summary title={goal.objective}>{goal.objective}</summary><p>{goal.objective}</p></details>
         {#if goal.tokensUsed !== undefined}<div class="goal-usage">
@@ -39,6 +47,12 @@
   .task-activity { flex: none; min-height: 0; max-height: 25%; overflow: auto; overscroll-behavior: contain; margin: 10px 20px 0; font-size: calc(12px * var(--interface-font-ratio, 1)); }
   section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 10px 12px; }
   section + section { margin-top: 8px; }
+  .goal-card { position:relative; isolation:isolate; }
+  .goal-card.in-progress { border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); }
+  .goal-sparkles { position:absolute; inset:0; z-index:-1; overflow:hidden; border-radius:inherit; pointer-events:none; }
+  .goal-sparkles span { position:absolute; font-size:8px; line-height:1; color:var(--accent-ink); text-shadow:0 0 7px var(--accent); animation:goal-twinkle 2.6s ease-in-out infinite; }
+  @keyframes goal-twinkle { 0%,100% { opacity:.12; transform:translate(-50%,-50%) scale(.5); } 50% { opacity:.85; transform:translate(-50%,-50%) scale(1); } }
+  @media (prefers-reduced-motion:reduce) { .goal-sparkles span { animation:none; opacity:.45; transform:translate(-50%,-50%); } }
   .activity-label { display: flex; align-items: center; gap: 7px; color: var(--accent-ink); }
   strong { font-weight: 600; }
   .status { margin-left: auto; font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); color: var(--muted); }
