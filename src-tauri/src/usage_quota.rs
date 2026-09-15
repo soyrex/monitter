@@ -9,6 +9,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{
+    ffi::{OsStr, OsString},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -292,9 +293,41 @@ fn configure(command: &mut Command) {
         command.process_group(0);
     }
     command
+        .env("PATH", quota_probe_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+}
+
+/// Finder-launched applications normally receive only the system search path.
+/// The reviewed quota clients are scripts whose shebangs launch `node`, so the
+/// child also needs the standard local package-manager directories even though
+/// Monitter resolves the quota client itself to an absolute path.
+fn quota_probe_path() -> OsString {
+    build_quota_probe_path(
+        std::env::var_os("HOME").as_deref().map(Path::new),
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+fn build_quota_probe_path(home: Option<&Path>, existing: Option<&OsStr>) -> OsString {
+    let mut paths = Vec::new();
+    if let Some(home) = home {
+        paths.push(home.join(".local/bin"));
+        paths.push(home.join(".npm-global/bin"));
+    }
+    paths.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ]);
+    if let Some(existing) = existing {
+        paths.extend(std::env::split_paths(existing).filter(|path| path.is_absolute()));
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| OsString::from("/usr/bin:/bin"))
 }
 
 fn read_codex_rate_limits(child: &mut Child) -> Result<Value, ()> {
@@ -936,6 +969,20 @@ mod tests {
             opencode_go_args(),
             ["provider-quota", "opencode-go", "--json"]
         );
+    }
+
+    #[test]
+    fn quota_probe_path_supplies_node_locations_for_finder_launches() {
+        let path = build_quota_probe_path(
+            Some(Path::new("/Users/tester")),
+            Some(OsStr::new("/usr/bin:/bin:relative-bin")),
+        );
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert!(entries.contains(&PathBuf::from("/Users/tester/.local/bin")));
+        assert!(entries.contains(&PathBuf::from("/Users/tester/.npm-global/bin")));
+        assert!(entries.contains(&PathBuf::from("/opt/homebrew/bin")));
+        assert!(entries.contains(&PathBuf::from("/usr/local/bin")));
+        assert!(!entries.contains(&PathBuf::from("relative-bin")));
     }
 
     #[test]
