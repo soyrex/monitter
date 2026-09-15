@@ -2,7 +2,7 @@
   import {Check,ChevronDown,LoaderCircle,Shield,X} from '@lucide/svelte';
   import {floating} from '$lib/floating';
   import type {Provider,Sandbox} from '$lib/types';
-  let {provider,sandbox,disabled=false,onchange}:{provider:Provider;sandbox:Sandbox;disabled?:boolean;onchange:(sandbox:Sandbox)=>Promise<void>|void}=$props();
+  let {provider,sandbox,disabled=false,appliesNextTurn=false,onchange}:{provider:Provider;sandbox:Sandbox;disabled?:boolean;appliesNextTurn?:boolean;onchange:(sandbox:Sandbox)=>Promise<void>|void}=$props();
   const choices=$derived(provider==='codex'
     ? [
         {id:'read-only' as Sandbox,label:'Read only',description:'Can inspect the workspace, but cannot make changes.'},
@@ -16,7 +16,7 @@
         ]
       : [{id:'harness-configured' as Sandbox,label:'Harness permissions',description:'Uses the permission policy configured by this harness.'}]);
   const value=$derived(choices.find(choice=>choice.id===sandbox)??choices[0]);
-  const title=$derived(disabled ? 'Permissions can be changed when this run finishes.' : provider==='codex' ? 'Permissions for this chat' : 'Harness permission policy for this chat');
+  const title=$derived(disabled ? 'Permissions can be changed when this run finishes.' : appliesNextTurn ? 'Applies to the next turn.' : provider==='codex' ? 'Permissions for this chat' : 'Harness permission policy for this chat');
   let open=$state(false),saving=$state(false),error=$state('');
   let anchor=$state<HTMLButtonElement>(),root=$state<HTMLDivElement>(),panel=$state<HTMLDivElement>();
 
@@ -51,7 +51,7 @@
   {#if open&&anchor}
     <div bind:this={panel} class="access-menu" role="dialog" aria-label="Access permissions" tabindex="-1" use:floating={{anchor,side:'above'}}>
       <header><strong>Access permissions</strong><button aria-label="Close permission picker" onclick={close}><X size={14}/></button></header>
-      {#if disabled}<p class="explanation">Available after this run finishes.</p>{/if}
+      {#if disabled}<p class="explanation">Available after this run finishes.</p>{:else if appliesNextTurn}<p class="explanation">Applies to the next turn.</p>{/if}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       <div class="access-list" role="radiogroup" aria-label="Permission options">
         {#each choices as choice (choice.id)}

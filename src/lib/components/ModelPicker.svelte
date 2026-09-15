@@ -3,7 +3,7 @@
   import {getBridge} from '$lib/bridge';
   import {floating} from '$lib/floating';
   import type {ModelCatalog,ModelSettings,ModelTarget,HarnessModel} from '$lib/types';
-  let {target,settings=null,fallbackModel='',disabled=false,onchange}:{target:ModelTarget;settings?:ModelSettings|null;fallbackModel?:string;disabled?:boolean;onchange:(settings:ModelSettings)=>Promise<void>}=$props();
+  let {target,settings=null,fallbackModel='',disabled=false,appliesNextTurn=false,onchange}:{target:ModelTarget;settings?:ModelSettings|null;fallbackModel?:string;disabled?:boolean;appliesNextTurn?:boolean;onchange:(settings:ModelSettings)=>Promise<void>}=$props();
   const bridge=getBridge(), id=$props.id();
   let catalog=$state<ModelCatalog|null>(null),loading=$state(false),saving=$state(false),error=$state(''),open=$state(false),query=$state('');
   let anchor=$state<HTMLButtonElement>(),root=$state<HTMLDivElement>(),panel=$state<HTMLDivElement>();
@@ -41,12 +41,12 @@
 </script>
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 <div class="model-picker" bind:this={root}>
-  <button class="model-trigger" bind:this={anchor} aria-label={`Model: ${label}`} aria-haspopup="dialog" aria-expanded={open} title={disabled?'Model can be changed when this run finishes':'Choose model and reasoning effort'} onclick={()=>{open=!open;query='';}}>
+  <button class="model-trigger" bind:this={anchor} aria-label={`Model: ${label}`} aria-haspopup="dialog" aria-expanded={open} title={disabled?'Model can be changed when this run finishes':appliesNextTurn?'Applies to the next turn':'Choose model and reasoning effort'} onclick={()=>{open=!open;query='';}}>
     {#if loading||saving}<LoaderCircle size={13} class="spin"/>{:else}<Brain size={14}/>{/if}{#if current.fastMode && selected?.supportsFast}<Zap class="fast-icon" size={11}/>{/if}<span>{label}</span>{#if effort}<small>{effort}</small>{/if}<ChevronDown size={12}/>
   </button>
   {#if open&&anchor}<div bind:this={panel} class="model-menu" role="dialog" aria-label="Model and reasoning" tabindex="-1" use:floating={{anchor,side:'above'}}>
     <header><strong>Model</strong><button aria-label="Refresh models" disabled={loading||saving} onclick={()=>refresh()}><RefreshCw size={14}/></button><button aria-label="Close model picker" onclick={close}><X size={14}/></button></header>
-    {#if disabled}<p class="explanation">Available after this run finishes.</p>{/if}
+    {#if disabled}<p class="explanation">Available after this run finishes.</p>{:else if appliesNextTurn}<p class="explanation">Applies to the next turn.</p>{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if loading&&!catalog}<p class="explanation" role="status">Reading harness models…</p>{:else if catalog}
       {#if catalog.warning}<p class="explanation">{catalog.warning}</p>{/if}

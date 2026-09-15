@@ -683,6 +683,15 @@ pub fn valid_sandbox_for_provider(provider: &str, sandbox: &str) -> bool {
 pub fn known_provider(provider: &str) -> bool {
     matches!(provider, "codex" | "claude" | "opencode" | "hermes" | "acp")
 }
+
+/// True when the provider carries per-turn model/sandbox overrides on the wire
+/// so the next `turn/start` (or equivalent) reflects the latest task snapshot.
+/// Currently only the Codex app-server does — other harnesses bake launch
+/// flags into the resident process and need a restart to apply changes.
+pub fn supports_live_model_change(provider: &str) -> bool {
+    provider == "codex"
+}
+
 pub fn default_snapshot() -> Snapshot {
     let host_id = id();
     let agent_id = id();

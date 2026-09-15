@@ -73,7 +73,14 @@ No fake conversations, progress, token counts, host connections or model replies
 - `create_task { input: CreateTaskInput }` -> Task
 - `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null } }` -> ModelCatalog
 - `set_task_model_settings { taskId: string, settings: ModelSettings }` -> Snapshot
-- `set_task_sandbox { taskId: string, sandbox: Sandbox }` -> Snapshot (idle, unarchived tasks only)
+  Codex tasks may be running: the new model, reasoning effort, and Fast mode are written to the
+  task snapshot and applied on the next `turn/start`. Other harnesses keep the existing
+  "reject while running" rule because their model/sandbox flags are baked into the launch
+  command and need a process restart to apply. Archived tasks still reject.
+- `set_task_sandbox { taskId: string, sandbox: Sandbox }` -> Snapshot
+  Codex tasks may be running: the new sandbox is written to the task snapshot and applied to
+  the next `turn/start` as a fresh `approvalPolicy` + `sandboxPolicy`. Other harnesses and
+  archived tasks still reject.
 - `rename_task { id: string, title: string }` -> Snapshot
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
@@ -759,7 +766,10 @@ catalog discovery is unavailable; they keep their configured models. Catalog fai
 
 `ModelSettings` contains `model`, nullable `reasoningEffort`, and nullable `fastMode`. New drafts keep
 these choices locally until their first send. Existing idle chats retain native session ID, host,
-folder and history when changing model. Running or archived chats reject changes. Codex receives
+folder and history when changing model. Running Codex chats accept changes that take effect on
+the next `turn/start`; running chats from other harnesses (Claude, OpenCode, Hermes, ACP) still
+reject because those harnesses carry model/sandbox flags at process launch. Archived chats always
+reject. Codex receives
 invocation-only model/effort/service-tier overrides; Fast uses the advertised `priority` tier, explicit
 off uses `default` only for models advertising that capability, and resetting clears overrides.
 Models without advertised Fast support send no service-tier override. User CLI configuration and authentication are

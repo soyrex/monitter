@@ -1610,7 +1610,7 @@ impl Service {
         settings: ModelSettings,
     ) -> Result<Snapshot, String> {
         let (task, host) = self.task_and_host(task_id)?;
-        if task.status == "running" {
+        if task.status == "running" && !supports_live_model_change(&task.provider) {
             return Err("This task already has an active turn.".into());
         }
         if task.archived {
@@ -1652,7 +1652,7 @@ impl Service {
                 .iter_mut()
                 .find(|task| task.id == task_id)
                 .ok_or("Task was not found.")?;
-            if task.status == "running" {
+            if task.status == "running" && !supports_live_model_change(&task.provider) {
                 return Err("This task already has an active turn.".into());
             }
             if task.archived {
@@ -1671,7 +1671,7 @@ impl Service {
 
     fn set_task_sandbox(&self, task_id: &str, sandbox: String) -> Result<Snapshot, String> {
         let (task, _) = self.task_and_host(task_id)?;
-        if task.status == "running" {
+        if task.status == "running" && !supports_live_model_change(&task.provider) {
             return Err("Wait for the current run to finish before changing permissions.".into());
         }
         if task.archived {
@@ -1686,7 +1686,7 @@ impl Service {
                 .iter_mut()
                 .find(|task| task.id == task_id)
                 .ok_or("Task was not found.")?;
-            if task.status == "running" {
+            if task.status == "running" && !supports_live_model_change(&task.provider) {
                 return Err(
                     "Wait for the current run to finish before changing permissions.".into(),
                 );
@@ -7025,13 +7025,24 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 
     #[test]
     fn model_settings_reset_rejects_running_or_archived_tasks() {
-        for (status, archived, expected) in [
-            ("running", false, "This task already has an active turn."),
+        // Codex running tasks now accept live changes that land on the next turn;
+        // the archived-task guard must still hold. A non-Codex running task
+        // (e.g. Claude's launch-flag sandbox) keeps the old reject.
+        for (status, archived, provider, expect_err) in [
             (
-                "completed",
+                "running",
                 true,
-                "Restore this archived task before changing its model.",
+                "codex",
+                Some("Restore this archived task before changing its model."),
             ),
+            (
+                "running",
+                false,
+                "claude",
+                Some("This task already has an active turn."),
+            ),
+            // completed + not archived + codex is the happy path; reset succeeds.
+            ("completed", false, "codex", None),
         ] {
             let dir = temp_dir("model-reset-guard");
             let service = Service::open(None, dir.clone()).unwrap();
@@ -7058,22 +7069,135 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                         .unwrap();
                     task.status = status.into();
                     task.archived = archived;
+                    task.provider = provider.into();
                     Ok(())
                 })
                 .unwrap();
-            assert_eq!(
-                service.set_task_model_settings(
-                    &task.id,
-                    ModelSettings {
-                        model: String::new(),
-                        reasoning_effort: None,
-                        fast_mode: None
-                    }
-                ),
-                Err(expected.into())
+            let result = service.set_task_model_settings(
+                &task.id,
+                ModelSettings {
+                    model: String::new(),
+                    reasoning_effort: None,
+                    fast_mode: None,
+                },
             );
+            match expect_err {
+                Some(expected) => assert_eq!(result, Err(expected.into())),
+                None => assert!(result.is_ok(), "expected reset to succeed"),
+            }
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn model_settings_accept_live_change_for_running_codex_task() {
+        // Codex carries model + effort + serviceTier on every turn/start, so a
+        // running Codex task accepts the new ModelSettings; the change is
+        // applied to the next turn rather than the in-flight one.
+        let dir = temp_dir("model-live-codex");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(CreateTaskInput {
+                agent_id,
+                title: "live".into(),
+                native_session_id: None,
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                cwd: None,
+                model_settings: None,
+                sandbox: None,
+            })
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                let task = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap();
+                task.status = "running".into();
+                task.provider = "codex".into();
+                Ok(())
+            })
+            .unwrap();
+        // Prime the catalog cache so the live change can validate the chosen model.
+        let (task_snapshot, host) = service.task_and_host(&task.id).unwrap();
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            task_snapshot.provider,
+            host.id,
+            host.kind,
+            host.address,
+            host.user,
+            host.port,
+            host.identity_file,
+            host.codex_path,
+            host.opencode_path,
+            task_snapshot.cwd
+        );
+        service
+            .model_catalogs
+            .lock()
+            .unwrap()
+            .insert(
+                key,
+                (
+                    Instant::now(),
+                    ModelCatalog {
+                        models: vec![CatalogModel {
+                            id: "gpt-test".into(),
+                            name: "Test".into(),
+                            description: String::new(),
+                            reasoning_efforts: vec![
+                                ReasoningEffortOption {
+                                    id: "high".into(),
+                                    description: String::new(),
+                                },
+                            ],
+                            default_effort: Some("high".into()),
+                            supports_fast: false,
+                            fast_description: None,
+                        }],
+                        current: ModelCatalogCurrent {
+                            model: "gpt-test".into(),
+                            reasoning_effort: Some("high".into()),
+                            fast_mode: None,
+                        },
+                        source: "fixture".into(),
+                        warning: None,
+                    },
+                ),
+            );
+        service
+            .set_task_model_settings(
+                &task.id,
+                ModelSettings {
+                    model: "gpt-test".into(),
+                    reasoning_effort: Some("high".into()),
+                    fast_mode: None,
+                },
+            )
+            .expect("Codex running tasks accept live model changes");
+        let updated = service
+            .snapshot()
+            .unwrap()
+            .tasks
+            .into_iter()
+            .find(|item| item.id == task.id)
+            .unwrap();
+        assert_eq!(updated.model, "gpt-test");
+        assert_eq!(
+            updated.model_settings,
+            Some(ModelSettings {
+                model: "gpt-test".into(),
+                reasoning_effort: Some("high".into()),
+                fast_mode: None,
+            })
+        );
+        assert_eq!(updated.status, "running");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -7111,6 +7235,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             service.set_task_sandbox(&task.id, "harness-configured".into()),
             Err("This permission mode is not supported by the selected harness.".into())
         );
+        // Claude bakes its bypass into the launch flags, so a running Claude
+        // task must still reject. Codex accepts the change because its
+        // sandbox/approval policy is per-turn on the app-server wire.
         service
             .mutate(None, |snapshot| {
                 snapshot
@@ -7126,6 +7253,53 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             service.set_task_sandbox(&task.id, "read-only".into()),
             Err("Wait for the current run to finish before changing permissions.".into())
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sandbox_accepts_live_change_for_running_codex_task() {
+        // Codex carries approvalPolicy and sandboxPolicy on every turn/start,
+        // so a running Codex task accepts the new sandbox; the change is
+        // applied to the next turn rather than the in-flight one.
+        let dir = temp_dir("task-sandbox-live-codex");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(CreateTaskInput {
+                agent_id,
+                title: "live sandbox".into(),
+                native_session_id: Some("saved-session".into()),
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                cwd: None,
+                model_settings: None,
+                sandbox: Some("read-only".into()),
+            })
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        service
+            .set_task_sandbox(&task.id, "workspace-write".into())
+            .expect("Codex running tasks accept live sandbox changes");
+        let updated = service
+            .snapshot()
+            .unwrap()
+            .tasks
+            .into_iter()
+            .find(|item| item.id == task.id)
+            .unwrap();
+        assert_eq!(updated.sandbox, "workspace-write");
+        assert_eq!(updated.status, "running");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7534,6 +7708,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     .find(|item| item.id == task.id)
                     .unwrap()
                     .status = "running".into();
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .provider = "claude".into();
                 Ok(())
             })
             .unwrap();
