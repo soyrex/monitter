@@ -35,6 +35,7 @@ export type AppThemeSelection = {
   light: AppThemeId;
   dark: AppThemeId;
   accent: string | null;
+  contrast: number;
 };
 
 export const appThemes: readonly AppThemePreset[] = [
@@ -90,7 +91,7 @@ export const appThemes: readonly AppThemePreset[] = [
   },
 ];
 
-export const DEFAULT_APP_THEME: AppThemeSelection = { light: 'monitter', dark: 'monitter', accent: null };
+export const DEFAULT_APP_THEME: AppThemeSelection = { light: 'monitter', dark: 'monitter', accent: null, contrast: 0 };
 const storageKey = 'monitter.appearance.app-theme-pair.v2';
 const legacyStorageKey = 'monitter.appearance.app-theme.v1';
 const colourPattern = /^#[0-9a-f]{6}$/i;
@@ -99,12 +100,18 @@ export function normalizeAppTheme(value: unknown): AppThemeId {
   return appThemes.some(theme => theme.id === value) ? value as AppThemeId : 'monitter';
 }
 
+export function normalizeAppThemeContrast(value: unknown): number {
+  const contrast = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(contrast) ? Math.max(0, Math.min(100, Math.round(contrast))) : 0;
+}
+
 export function normalizeAppThemeSelection(value: unknown): AppThemeSelection {
   const candidate = value && typeof value === 'object' ? value as Partial<AppThemeSelection> : {};
   return {
     light: normalizeAppTheme(candidate.light),
     dark: normalizeAppTheme(candidate.dark),
     accent: typeof candidate.accent === 'string' && colourPattern.test(candidate.accent) ? candidate.accent : null,
+    contrast: normalizeAppThemeContrast(candidate.contrast),
   };
 }
 
@@ -137,6 +144,27 @@ export function mixThemeColour(background: string, accent: string, amount: numbe
   return `#${base.map((channel, index) => Math.round(channel * (1 - weight) + highlight[index] * weight).toString(16).padStart(2, '0')).join('')}`.toUpperCase();
 }
 
+/** Increase separation while retaining the hue and identity of the selected preset. */
+export function applyThemeContrast(palette: AppThemePalette, mode: 'light' | 'dark', value: number): AppThemePalette {
+  const contrast = normalizeAppThemeContrast(value) / 100;
+  if (!contrast) return palette;
+  const backgroundTarget = mode === 'dark' ? '#000000' : '#FFFFFF';
+  const foregroundTarget = mode === 'dark' ? '#FFFFFF' : '#000000';
+  const surface = (colour: string) => mixThemeColour(colour, backgroundTarget, contrast * 0.65);
+  const foreground = (colour: string, strength: number) => mixThemeColour(colour, foregroundTarget, contrast * strength);
+  return {
+    ...palette,
+    paper: surface(palette.paper),
+    sidebar: surface(palette.sidebar),
+    panel: surface(palette.panel),
+    soft: surface(palette.soft),
+    code: surface(palette.code),
+    line: foreground(palette.line, 0.35),
+    ink: foreground(palette.ink, 0.55),
+    muted: foreground(palette.muted, 0.5),
+  };
+}
+
 /** Palette selection is presentation state, so each browser/native client can differ. */
 export const appTheme = writable<AppThemeSelection>(loadAppTheme());
 
@@ -153,6 +181,16 @@ export function setAppTheme(mode: 'light' | 'dark', value: AppThemeId): void {
 export function setAppThemeAccent(value: string | null): void {
   appTheme.update(current => {
     const next = { ...current, accent: typeof value === 'string' && colourPattern.test(value) ? value : null };
+    if (typeof window !== 'undefined') {
+      try { window.localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* Live selection still applies. */ }
+    }
+    return next;
+  });
+}
+
+export function setAppThemeContrast(value: number): void {
+  appTheme.update(current => {
+    const next = { ...current, contrast: normalizeAppThemeContrast(value) };
     if (typeof window !== 'undefined') {
       try { window.localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* Live selection still applies. */ }
     }

@@ -67,7 +67,7 @@ try {
   const darkChoices=page.getByRole('listbox',{name:'Dark theme choices',exact:true});
   await expect(darkChoices.getByRole('option')).toHaveCount(10);
   await darkChoices.getByRole('option',{name:'Nord',exact:true}).click();
-  await expect.poll(()=>page.evaluate(()=>({stored:JSON.parse(localStorage.getItem('monitter.appearance.app-theme-pair.v2')||'null'),light:document.documentElement.dataset.appThemeLight,dark:document.documentElement.dataset.appThemeDark,mode:document.documentElement.dataset.theme,paper:getComputedStyle(document.documentElement).getPropertyValue('--paper-base').trim()}))).toEqual({stored:{light:'monitter',dark:'nord',accent:null},light:'monitter',dark:'nord',mode:'light',paper:'#F7F7F7'});
+  await expect.poll(()=>page.evaluate(()=>({stored:JSON.parse(localStorage.getItem('monitter.appearance.app-theme-pair.v2')||'null'),light:document.documentElement.dataset.appThemeLight,dark:document.documentElement.dataset.appThemeDark,mode:document.documentElement.dataset.theme,paper:getComputedStyle(document.documentElement).getPropertyValue('--paper-base').trim()}))).toEqual({stored:{light:'monitter',dark:'nord',accent:null,contrast:0},light:'monitter',dark:'nord',mode:'light',paper:'#F7F7F7'});
   await expect(page.getByRole('region',{name:'Appearance mode',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'dark',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>({mode:document.documentElement.dataset.theme,paper:getComputedStyle(document.documentElement).getPropertyValue('--paper-base').trim(),accent:getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()}))).toEqual({mode:'dark',paper:'#2E3440',accent:'#88C0D0'});

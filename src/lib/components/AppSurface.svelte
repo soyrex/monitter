@@ -4,7 +4,7 @@
   import { responsiveBrand } from '$lib/responsive-brand';
   import { surfaceTint } from '$lib/surface-tint';
   import { borderOpacity } from '$lib/border-opacity';
-  import { appTheme, appThemePreset, mixThemeColour, type AppThemeSelection } from '$lib/app-theme';
+  import { appTheme, appThemePreset, applyThemeContrast, mixThemeColour, type AppThemeSelection } from '$lib/app-theme';
   import { initMotion, motionView } from '$lib/motion';
   import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
@@ -1540,8 +1540,8 @@
     return [target, target, target];
   }
   function browserThemeColours(selectedTheme: AppThemeSelection, tint: number) {
-    const light = appThemePreset(selectedTheme.light).light,
-      dark = appThemePreset(selectedTheme.dark).dark;
+    const light = applyThemeContrast(appThemePreset(selectedTheme.light).light, 'light', selectedTheme.contrast),
+      dark = applyThemeContrast(appThemePreset(selectedTheme.dark).dark, 'dark', selectedTheme.contrast);
     return {
       light: mixThemeColour(light.sidebar, selectedTheme.accent ?? light.accent, (tint / 100) * 0.5),
       dark: mixThemeColour(dark.sidebar, selectedTheme.accent ?? dark.accent, tint / 100),
@@ -1563,8 +1563,8 @@
   }
   function applyAppearance(settings: Snapshot["settings"], selectedTheme: AppThemeSelection = $appTheme, scale = activeInterfaceScale) {
     const root = document.documentElement,
-      light = appThemePreset(selectedTheme.light).light,
-      dark = appThemePreset(selectedTheme.dark).dark,
+      light = applyThemeContrast(appThemePreset(selectedTheme.light).light, 'light', selectedTheme.contrast),
+      dark = applyThemeContrast(appThemePreset(selectedTheme.dark).dark, 'dark', selectedTheme.contrast),
       lightAccent = selectedTheme.accent ?? light.accent,
       darkAccent = selectedTheme.accent ?? dark.accent,
       lightColour = rgb(lightAccent),
