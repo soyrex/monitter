@@ -10,7 +10,7 @@ try {
     // Fixture IDs also need to work at a non-secure LAN origin.
     await page.addInitScript('crypto.randomUUID ??= () => "terminal-fixture-id";' + readFileSync('scripts/ui-fixture.js', 'utf8'));
     await page.goto(process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18438/');
-    await expect(page.locator('.sidebar-views')).toBeVisible({timeout:60000});
+    await expect(page.locator('.sidebar-tabs')).toBeVisible({timeout:60000});
     if (mobile) {
       await page.keyboard.press('Meta+p');
       await page.getByRole('button', {name:/New terminal/}).click();

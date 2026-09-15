@@ -96,7 +96,7 @@ try {
   const workspaceContext = page.locator('[data-workspace-context]').first();
   const expectWorkspace = key => expect(workspaceContext).toHaveAttribute('data-workspace-key', key);
   const ensureSidebarOpen = async () => {
-    const standard = page.getByRole('button', { name: 'Standard view', exact: true });
+    const standard = page.getByRole('tab', { name: 'Agents view', exact: true });
     if (!await standard.isVisible()) {
       await page.getByRole('separator', { name: 'Resize main sidebar', exact: true }).press('Enter');
       await expect(standard).toBeVisible();
@@ -104,12 +104,12 @@ try {
   };
   const chooseSidebarView = async label => {
     await ensureSidebarOpen();
-    const button = page.getByRole('button', { name: `${label} view`, exact: true });
-    if (await button.getAttribute('aria-pressed') !== 'true') await button.click();
-    await expect(button).toHaveAttribute('aria-pressed', 'true');
+    const button = page.getByRole('tab', { name: `${label} view`, exact: true });
+    if (await button.getAttribute('aria-selected') !== 'true') await button.click();
+    await expect(button).toHaveAttribute('aria-selected', 'true');
   };
   const chooseAgent = async (id, name) => {
-    await chooseSidebarView('Standard');
+    await chooseSidebarView('Agents');
     await page.getByRole('button', { name: `Open agent ${name}`, exact: true }).click();
     await expectWorkspace(`agent:${id}`);
   };
@@ -172,7 +172,7 @@ try {
   // In Standard view an agent header is itself workspace navigation, not merely
   // a collapsible label, and restores that agent's saved tab state.
   await chooseProject('beacon', 'Beacon');
-  await chooseSidebarView('Standard');
+  await chooseSidebarView('Agents');
   await page.getByRole('button', { name: 'Open agent North', exact: true }).click();
   await expectWorkspace('agent:north');
   await overlapTab().click();

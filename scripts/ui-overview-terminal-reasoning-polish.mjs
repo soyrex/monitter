@@ -45,7 +45,7 @@ try {
 
   await expect(page.locator('.workspace > .topbar')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'Open terminal'})).toHaveCount(0);
-  await page.getByRole('button',{name:'Standard view',exact:true}).click();
+  await page.getByRole('tab',{name:'Agents view',exact:true}).click();
   await expect(page.locator('.agent-location[data-host-kind="local"]')).toHaveAttribute('aria-label','Local host: This Mac');
   await expect(page.locator('.agent-location[data-host-kind="ssh"]')).toHaveAttribute('aria-label','Remote host: Mira');
 

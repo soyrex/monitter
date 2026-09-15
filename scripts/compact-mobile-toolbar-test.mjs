@@ -129,7 +129,7 @@ try {
     // Agent workspaces identify the agent in the sidebar; the context icon is
     // reserved for All/Activity and project workspaces.
     await expect(desktop.locator('.topbar [data-workspace-context]')).toHaveCount(0);
-    await desktop.getByRole('button', { name: 'Activity view', exact: true }).click();
+    await desktop.getByRole('tab', { name: 'Activity view', exact: true }).click();
     await expect(desktop.locator('.topbar [data-workspace-context]')).toBeVisible();
     expect(desktopErrors).toEqual([]);
     console.log('WebKit desktop toolbar context checks passed.');

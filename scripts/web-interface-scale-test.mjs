@@ -28,7 +28,7 @@ async function verifyViewport(browser, viewport, label) {
     samples.push(await page.evaluate(() => {
       const shell = document.querySelector('.app-shell').getBoundingClientRect();
       const brand = document.querySelector('.brand').getBoundingClientRect();
-      const button = document.querySelector('.view-toggle').getBoundingClientRect();
+      const button = document.querySelector('.brand-action').getBoundingClientRect();
       return {
         shell: { left: shell.left, top: shell.top, width: shell.width, height: shell.height },
         brandHeight: brand.height,

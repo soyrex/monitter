@@ -25,7 +25,7 @@ async function sample(mode) {
   });
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 240_000 });
-    await expect(page.getByRole('button', { name: 'Standard view', exact: true })).toBeVisible({ timeout: 240_000 });
+    await expect(page.getByRole('tab', { name: 'Agents view', exact: true })).toBeVisible({ timeout: 240_000 });
     await expect(page.locator('html')).toHaveAttribute('data-motion', mode);
     for (const view of ['Activity', 'Projects', 'Standard']) await page.getByRole('button', { name: `${view} view`, exact: true }).click();
     await page.waitForTimeout(180);

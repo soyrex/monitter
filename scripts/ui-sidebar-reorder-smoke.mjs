@@ -22,10 +22,10 @@ try {
  await expect(page.locator('.tab-entry:not(.dashboard-tab)')).toHaveCount(0);
  await page.reload();await expect(row('agents','atlas')).toBeVisible();expect(await order('agents')).toEqual(['beta','atlas']);expect(await order('agent-chats:atlas')).toEqual(['c','a','b']);expect(await order('channels')).toEqual(['two','one']);
  await row('agent-chats:atlas','a').locator('.task-select').click();await expect(page.getByRole('textbox',{name:'Task message',exact:true})).toBeVisible();
- await page.getByRole('button',{name:'Projects view',exact:true}).click();
+ await page.getByRole('tab',{name:'Projects view',exact:true}).click();
  await drag(row('projects','p2'),row('projects','p1'));expect(await order('projects')).toEqual(['p2','p1']);
  await drag(row('project-chats:p1','a'),row('project-chats:p1','c'));expect(await order('project-chats:p1')).toEqual(['a','c','b']);
  expect(await page.evaluate(()=>window.__MONITTER_QA__.snapshot().tasks.map(t=>[t.agentId,t.projectId]))).toEqual([['atlas','p1'],['atlas','p1'],['atlas','p1']]);
- await page.getByRole('button',{name:'Activity view',exact:true}).click();expect(await page.locator('.activity-list .task-row').evaluateAll(nodes=>nodes.map(n=>n.dataset.taskId))).toEqual(['c','b','a']);
+ await page.getByRole('tab',{name:'Activity view',exact:true}).click();expect(await page.locator('.activity-list .task-row').evaluateAll(nodes=>nodes.map(n=>n.dataset.taskId))).toEqual(['c','b','a']);
  expect(errors).toEqual([]);console.log('Pointer reordering: agents, chats, channels, projects; persistence, click navigation, unchanged ownership and chronological Activity passed.');
 }finally{await browser.close();}

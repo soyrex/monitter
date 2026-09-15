@@ -15,17 +15,17 @@ async function tap(button) {
 await page.addInitScript(readFileSync('scripts/ui-fixture.js', 'utf8'));
 try {
   await page.goto(process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18439/');
-  const standard = page.getByRole('button', { name: 'Standard view', exact: true });
-  const activity = page.getByRole('button', { name: 'Activity view', exact: true });
-  const projects = page.getByRole('button', { name: 'Projects view', exact: true });
-  await expect(standard).toHaveAttribute('aria-pressed', 'true', { timeout: 120000 });
+  const standard = page.getByRole('tab', { name: 'Agents view', exact: true });
+  const activity = page.getByRole('tab', { name: 'Activity view', exact: true });
+  const projects = page.getByRole('tab', { name: 'Projects view', exact: true });
+  await expect(standard).toHaveAttribute('aria-selected', 'true', { timeout: 120000 });
 
   await tap(projects);
-  await expect(projects).toHaveAttribute('aria-pressed', 'true');
+  await expect(projects).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('.section-label').first()).toContainText('PROJECTS');
 
   await tap(activity);
-  await expect(activity).toHaveAttribute('aria-pressed', 'true');
+  await expect(activity).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('.section-label').first()).toContainText('ACTIVITY');
   await expect.poll(() => page.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web'))).toBe('activity');
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'saveSettings' && call.args.sidebarView))).toEqual([]);

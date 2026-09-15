@@ -329,8 +329,8 @@ project link: cwd, host, native session, running turn, messages and activity tim
 Deleting a project unassigns its chats, including archived/running chats, without deleting them.
 A host referenced by a project workspace cannot be deleted until that mapping is removed.
 
-The sidebar offers Standard (agent groups), Activity (running first, then most recent), and Projects
-(collapsible project folders plus unassigned chats). The selection is stored locally and independently
+The sidebar offers icon tabs for Agents (agent groups), Projects (collapsible project folders plus
+unassigned chats), and Activity (running first, then most recent), in that order. The selection is stored locally and independently
 for native desktop, ordinary web and mobile clients; changing one must not update a shared snapshot or
 alter another client's view. Switching updates the visible list synchronously without waiting for a
 backend settings write. Each browser tab retains its own choice across reloads using session storage;
@@ -673,8 +673,8 @@ That overview occupies the workspace without a desktop tab bar or duplicate term
 retains only its Back to chats navigation. Agent/project sidebar
 metadata shows a compact local-disk or remote-cloud host indicator beside the harness/model line.
 Badges and the global approval entry surface pending approvals even in hidden workspaces. Opening an
-approval navigates to the shared owning chat. The left sidebar is always global: its Standard,
-Activity, Projects and collapsed-rail chat lists show chats from every workspace. Selecting one routes
+approval navigates to the shared owning chat. The left sidebar is always global: its Agents,
+Projects, Activity and collapsed-rail chat lists show chats from every workspace. Selecting one routes
 the right-hand area to its owning agent or project workspace before opening the chat. Global search can
 cross workspaces; tab cycling and split/move operations act only inside the current workspace.
 
@@ -703,8 +703,8 @@ workspace terminal references are preserved too; reload reuses live shells, whil
 open fresh shells at their saved host/folder, as described in Terminal tabs. Deleted/reassigned chats
 are reconciled against current agent/project membership without deleting their history or drafts.
 
-The main sidebar can collapse to agent avatars with chat popovers. Its client-local view menu selects
-Standard, Activity or Projects; nonstandard chat rows include the owning agent's avatar. Chat archive
+The main sidebar can collapse to agent avatars with chat popovers. Its client-local mini-tab row selects
+Agents, Projects or Activity; non-Agent chat rows include the owning agent's avatar. Chat archive
 buttons appear on hover or focus. The monitter menu contains Preferences, Hosts, Agent directory and
 Archived chats. Cmd+, opens Preferences on macOS; Ctrl+, is available on Windows/Linux, alongside the
 platform equivalents for the other shortcuts. The right sidebar uses a dismissible blade when its chat
@@ -872,8 +872,9 @@ Conversation display: `Settings.tintUserMessages` defaults to false for existing
 
 ### Pane controls and window chrome
 
-The main sidebar toggle is the first control in the main pane tab bar. The sidebar brand and
-Standard/Activity/Projects icons share its top row. Native macOS window-control clearance is
+The main sidebar toggle is the first control in the main pane tab bar. Its centered responsive
+mark/wordmark sits above the Agents/Projects/Activity mini-tabs, with New terminal and New chat
+actions at the right of the brand row. Native macOS window-control clearance is
 removed in fullscreen and restored on exit, using the native window fullscreen state.
 Right-sidebar toggles live beside expansion in chat/channel headers only, because those are
 the pane types with run detail or channel-member sidebars. Compact sidebar blades retain

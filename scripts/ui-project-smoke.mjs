@@ -17,7 +17,7 @@ try {
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.goto(url);
   await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 30000 });
-  const setView=async name=>{const button=page.getByRole('button',{name:`${name} view`,exact:true});if(await button.getAttribute('aria-pressed')!=='true')await button.click();await expect(button).toHaveAttribute('aria-pressed','true')};
+  const setView=async name=>{const button=page.getByRole('tab',{name:`${name} view`,exact:true});if(await button.getAttribute('aria-selected')!=='true')await button.click();await expect(button).toHaveAttribute('aria-selected','true')};
   const newChat=async()=>{await page.keyboard.press('Meta+p');await page.getByRole('dialog').getByText('New chat',{exact:true}).click()};
   const openDraftOptions = async () => {
     const options = page.locator('details.draft-advanced');

@@ -11,7 +11,7 @@ const fixture = readFileSync(`${root}/scripts/fixtures/sidebar-chrome-isolated.h
 
 // Keep this fixture deliberately small, but lift the declarations verbatim from
 // AppSurface so this checks the shipped chrome rules rather than a second style.
-const ruleNames = ['.brand', '.brand strong', '.brand-logo-button', '.icon', '.sidebar-views', '.view-toggle', '.mobile-navigation .view-toggle', '.mobile-navigation .brand', '.mobile-navigation .brand-logo-button', '.mobile-navigation .sidebar-views', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
+const ruleNames = ['.brand', '.brand strong', '.brand-logo-button', '.icon', '.brand-actions', '.brand-action', '.sidebar-tabs', '.sidebar-tab-entry', '.sidebar-tab', '.mobile-navigation .brand', '.mobile-navigation .brand-action', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
 const cssBlocks = ruleNames.flatMap(name => {
   const escaped = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&');
   const re = new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{[^}]*\\}`, 'g');
@@ -43,31 +43,33 @@ try {
     const metrics = await page.evaluate(() => {
       const rect = selector => document.querySelector(selector).getBoundingClientRect();
       const style = getComputedStyle(document.querySelector('.brand strong'));
-      const brand = rect('.brand'); const label = rect('.brand strong'); const view = rect('.view-toggle');
+      const brand = rect('.brand'); const label = rect('.brand strong'); const action = rect('.brand-action'); const tab = rect('.sidebar-tab');
       const terminal = rect('.top-actions .icon'); const avatar = rect('.workspace-context .avatar');
-      return { view: [view.width, view.height], terminal: [terminal.width, terminal.height], avatar: [avatar.width, avatar.height], brandCenter: brand.y + brand.height / 2, brandCenterX: brand.x + brand.width / 2, viewCenter: view.y + view.height / 2, labelCenter: label.y + label.height / 2, labelCenterX: label.x + label.width / 2, fontSize: style.fontSize, lineHeight: style.lineHeight, opacity: style.opacity, labelFits: document.querySelector('.brand strong').scrollWidth <= document.querySelector('.brand strong').clientWidth };
+      return { action: [action.width, action.height], tab: [tab.width, tab.height], terminal: [terminal.width, terminal.height], avatar: [avatar.width, avatar.height], brandCenter: brand.y + brand.height / 2, brandCenterX: brand.x + brand.width / 2, actionCenter: action.y + action.height / 2, labelCenter: label.y + label.height / 2, labelCenterX: label.x + label.width / 2, fontSize: style.fontSize, lineHeight: style.lineHeight, opacity: style.opacity, labelFits: document.querySelector('.brand strong').scrollWidth <= document.querySelector('.brand strong').clientWidth };
     });
     const expected = profile.mobile ? 44 : 30;
-    expect(metrics.view).toEqual([expected, expected]);
+    expect(metrics.action).toEqual([expected, expected]);
+    expect(metrics.tab[0]).toBeGreaterThan(50);
+    expect(metrics.tab[1]).toBeGreaterThanOrEqual(25);
     expect(metrics.terminal).toEqual([profile.mobile ? 44 : 30, profile.mobile ? 44 : 30]);
     expect(metrics.avatar).toEqual([24, 24]);
-    expect(Math.abs(metrics.brandCenter - metrics.viewCenter)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(metrics.brandCenter - metrics.actionCenter)).toBeLessThanOrEqual(0.5);
     expect(metrics.fontSize).toBe('13px'); expect(metrics.lineHeight).toBe('13px'); expect(metrics.opacity).toBe('1');
     expect(metrics.labelCenter).toBeGreaterThanOrEqual(metrics.brandCenter - 1);
-    if (profile.mobile) expect(Math.abs(metrics.labelCenterX - metrics.brandCenterX)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(metrics.labelCenterX - metrics.brandCenterX)).toBeLessThanOrEqual(0.5);
     const gaps = await page.locator('.workspace.compact-tabs > .topbar').evaluate(node => { const bar = node.getBoundingClientRect(); const trigger = node.querySelector('.tab-picker-trigger').getBoundingClientRect(); return [trigger.top - bar.top, bar.bottom - trigger.bottom]; });
     expect(Math.abs(gaps[0] - gaps[1])).toBeLessThanOrEqual(1);
     await context.close();
-    console.log(`${profile.name}: view buttons ${expected}x${expected}, chrome alignment, monitter 13px/1`);
+    console.log(`${profile.name}: create actions ${expected}x${expected}, centered brand, labeled sidebar tabs`);
   }
   const narrow = await browser.newContext({ viewport: { width: 320, height: 640 } });
   const page = await narrow.newPage(); await page.goto(`http://127.0.0.1:${address.port}/`); await page.locator('.sidebar').evaluate(node => node.classList.add('native-mac'));
   await expect.poll(() => page.evaluate(() => Boolean(window.__BRAND_QA__))).toBe(true);
   await page.evaluate(() => document.documentElement.style.setProperty('--interface-font-ratio', '1.5'));
   await expect.poll(() => page.locator('.brand strong').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-  await page.locator('.brand').evaluate(node => { node.querySelector('.sidebar-views').remove(); window.__BRAND_QA__.update(); });
+  await page.locator('.brand').evaluate(node => { node.querySelector('.brand-actions').remove(); window.__BRAND_QA__.update(); });
   await expect(page.locator('.brand')).not.toHaveAttribute('data-compact-wordmark');
-  await page.locator('.brand').evaluate(node => { const views = document.createElement('div'); views.className = 'sidebar-views'; views.innerHTML = '<button class="view-toggle">x</button><button class="view-toggle">x</button>'; node.append(views); node.style.width = '120px'; window.__BRAND_QA__.update(); });
+  await page.locator('.brand').evaluate(node => { const actions = document.createElement('div'); actions.className = 'brand-actions'; actions.innerHTML = '<button class="icon brand-action">x</button><button class="icon brand-action">x</button>'; node.append(actions); node.style.width = '120px'; window.__BRAND_QA__.update(); });
   await expect.poll(() => page.locator('.brand').getAttribute('data-compact-wordmark')).toBe('true');
   await expect(page.locator('.brand-short')).toBeVisible();
   await expect(page.locator('.brand-full')).toBeHidden();
@@ -76,7 +78,7 @@ try {
   const compactGaps = await page.locator('.workspace.compact-tabs > .topbar').evaluate(node => { const bar = node.getBoundingClientRect(); const trigger = node.querySelector('.tab-picker-trigger').getBoundingClientRect(); return [trigger.top - bar.top, bar.bottom - trigger.bottom]; });
   expect(Math.abs(compactGaps[0] - compactGaps[1])).toBeLessThanOrEqual(1);
   await expect(page.locator('.brand-full')).toBeVisible();
-  console.log('narrow native chrome: brand label remains bounded beside view actions');
+  console.log('narrow native chrome: centered brand compacts around window and create actions');
   await narrow.close();
   const footerStart = source.indexOf('<footer class="sidebar-footer"');
   const shareInFooter = footerStart >= 0 && source.indexOf('aria-label="Share workspace"', footerStart) >= footerStart && source.indexOf('aria-label="Share workspace"', footerStart) < source.indexOf('</footer>', footerStart);
@@ -85,6 +87,6 @@ try {
   expect(brandAction).toContain('ResizeObserver');
   expect(brandAction).toContain('compactWordmark');
   expect(brandAction).toContain('update: observe');
-  expect(source).toContain("active={task.status === 'running'} activeTooltip=\"Live run\"");
+  expect(source).toContain('active={true} activeTooltip="Live run"');
   console.log('source: Share workspace is sidebar-footer-only; no floating ShareControl/RemoteControl markup; responsive brand action observes remounts');
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

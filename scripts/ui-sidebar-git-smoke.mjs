@@ -81,9 +81,9 @@ try {
 
   // The full sidebar owns the view selector.
   await page.getByRole('button', { name: 'Expand main sidebar', exact: true }).click();
-  const activityView = page.getByRole('button', { name: 'Activity view', exact: true });
+  const activityView = page.getByRole('tab', { name: 'Activity view', exact: true });
   await activityView.click();
-  await expect(activityView).toHaveAttribute('aria-pressed', 'true');
+  await expect(activityView).toHaveAttribute('aria-selected', 'true');
   await expect.poll(() => page.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web'))).toBe('activity');
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'saveSettings' && call.args.sidebarView))).toEqual([]);
   passed.push('sidebar views switch locally without a backend settings write');
@@ -99,7 +99,7 @@ try {
   passed.push('Cmd-K and Cmd-P remain available without footer launchers');
 
   // Both local and SSH task panes ask the bridge only for their own task and show all three scopes.
-  await page.getByRole('button', { name: 'Standard view', exact: true }).click();
+  await page.getByRole('tab', { name: 'Agents view', exact: true }).click();
   for (const [title, taskId, root, stagedText] of [
     ['Local Git chat', 'local-git-task', '/tmp/local-git', 'staged local change'],
     ['Remote Git chat', 'remote-git-task', '/srv/git', 'staged remote change'],

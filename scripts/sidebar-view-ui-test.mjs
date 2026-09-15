@@ -63,31 +63,33 @@ try {
   standardPage.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
   const responses = await Promise.all([projectsPage.goto(baseUrl), standardPage.goto(baseUrl)]);
 
-  await expect(projectsPage.locator('.view-toggle')).toHaveCount(3, { timeout: 240000 }).catch(async error => {
+  await expect(projectsPage.locator('.sidebar-tab')).toHaveCount(3, { timeout: 240000 }).catch(async error => {
     throw new Error(`${error.message}\nPage errors: ${pageErrors.join(' | ')}\nConsole: ${consoleErrors.join(' | ')}\nBody: ${(await projectsPage.locator('body').innerText()).slice(0, 2000)}`);
   });
   if (responses[0]?.status() !== 200) throw new Error(`Workspace returned ${responses[0]?.status()}`);
   assert.deepEqual(pageErrors, []);
 
-  await expect(projectsPage.getByRole('button', { name: 'Projects view' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(standardPage.getByRole('button', { name: 'Standard view' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(projectsPage.getByRole('tab', { name: 'Projects view' })).toHaveAttribute('aria-selected', 'true');
+  await expect(standardPage.getByRole('tab', { name: 'Agents view' })).toHaveAttribute('aria-selected', 'true');
+  await expect(standardPage.getByRole('button', { name: 'New terminal' })).toBeVisible();
+  await expect(standardPage.getByRole('button', { name: 'New chat', exact: true })).toBeVisible();
 
   const started = Date.now();
-  await projectsPage.getByRole('button', { name: 'Activity view' }).click();
-  await expect(projectsPage.getByRole('button', { name: 'Activity view' })).toHaveAttribute('aria-pressed', 'true');
+  await projectsPage.getByRole('tab', { name: 'Activity view' }).click();
+  await expect(projectsPage.getByRole('tab', { name: 'Activity view' })).toHaveAttribute('aria-selected', 'true');
   assert.ok(Date.now() - started < 1000, 'Sidebar view should change without a backend round trip');
   assert.equal(await projectsPage.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web')), 'activity');
   assert.equal(await projectsPage.evaluate(() => window.__settingsWrites), 0);
-  await expect(standardPage.getByRole('button', { name: 'Standard view' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(standardPage.getByRole('tab', { name: 'Agents view' })).toHaveAttribute('aria-selected', 'true');
   assert.equal(await standardPage.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web')), 'standard');
 
   const siblingPage = await projectsClient.newPage();
   await siblingPage.goto(baseUrl);
-  await expect(siblingPage.getByRole('button', { name: 'Projects view' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(projectsPage.getByRole('button', { name: 'Activity view' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(siblingPage.getByRole('tab', { name: 'Projects view' })).toHaveAttribute('aria-selected', 'true');
+  await expect(projectsPage.getByRole('tab', { name: 'Activity view' })).toHaveAttribute('aria-selected', 'true');
   await projectsPage.reload();
-  await expect(projectsPage.getByRole('button', { name: 'Activity view' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(siblingPage.getByRole('button', { name: 'Projects view' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(projectsPage.getByRole('tab', { name: 'Activity view' })).toHaveAttribute('aria-selected', 'true');
+  await expect(siblingPage.getByRole('tab', { name: 'Projects view' })).toHaveAttribute('aria-selected', 'true');
   assert.equal(await projectsPage.evaluate(() => window.__settingsWrites), 0);
 
   await Promise.all([projectsClient.close(), standardClient.close()]);

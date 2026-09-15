@@ -368,7 +368,7 @@
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
   let gitPane = $state<GitPane>();
   const railAgent = $derived(railAgentId ? indexes?.agentById.get(railAgentId) ?? null : null);
-  const sidebarViews = [{ id: 'standard', label: 'Standard', icon: Bot }, { id: 'activity', label: 'Activity', icon: Activity }, { id: 'projects', label: 'Projects', icon: Folder }] as const;
+  const sidebarViews = [{ id: 'standard', label: 'Agents', icon: Bot }, { id: 'projects', label: 'Projects', icon: Folder }, { id: 'activity', label: 'Activity', icon: Activity }] as const;
   const projectIcons = [
     { id: 'folder', label: 'Folder', icon: Folder }, { id: 'briefcase', label: 'Briefcase', icon: Briefcase }, { id: 'code', label: 'Code', icon: Code },
     { id: 'rocket', label: 'Rocket', icon: Rocket }, { id: 'globe', label: 'Globe', icon: Globe }, { id: 'palette', label: 'Palette', icon: Palette },
@@ -3674,10 +3674,14 @@
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
-      {#if !sidebarCompressed}<div class="sidebar-views" role="group" aria-label="Sidebar view">
-        {#each sidebarViews as view}<button class="view-toggle" aria-label={`${view.label} view`} title={`${view.label} view`} aria-pressed={sidebarView === view.id} onclick={()=>setSidebarView(view.id)}><view.icon size={16}/></button>{/each}
+      {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Create">
+        <button class="icon brand-action" type="button" aria-label={terminalBusy?'Opening terminal':'New terminal'} title="New terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
+        <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !snapshot?.agents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
       </div>{/if}
     </div>
+    {#if !sidebarCompressed}<div class="sidebar-tabs" role="tablist" aria-label="Sidebar views">
+      {#each sidebarViews as view}<div class="sidebar-tab-entry" class:active={sidebarView === view.id}><button type="button" class="sidebar-tab" role="tab" aria-label={`${view.label} view`} aria-selected={sidebarView === view.id} title={`${view.label} view`} onclick={()=>setSidebarView(view.id)}><view.icon size={12}/><span>{view.label}</span></button></div>{/each}
+    </div>{/if}
     {#if !sidebarCompressed}
     <nav use:motionView={{key:"sidebar",initial:motionReady,x:6,y:0,duration:160}} class="side-scroll" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
       {#if globalPendingApprovals.length}<div class="workspace-approval-list" aria-label="Pending approvals across workspaces">
@@ -4322,6 +4326,7 @@
     background: var(--sidebar);
   }
   .brand {
+    position: relative;
     height: 38px;
     flex-shrink: 0;
     display: flex;
@@ -4342,7 +4347,7 @@
     opacity: 1;
     letter-spacing: -0.02em;
   }
-  .brand-logo-button { appearance:none; margin:0; padding:0; border:0; color:inherit; background:transparent; cursor:pointer; }
+  .brand-logo-button { appearance:none; position:absolute; left:50%; margin:0; padding:0; border:0; color:inherit; background:transparent; cursor:pointer; translate:-50% 0; }
   .brand-logo-button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:5px; }
   .brand { height: var(--pane-tabbar-height,52px); box-sizing: border-box; }
   .brand-full { display:inline-block; width:110px; height:34px; vertical-align:middle; }
@@ -4356,7 +4361,7 @@
   .native-mac .brand { height: var(--pane-tabbar-height); padding-left: calc(92px / var(--interface-scale,1)); padding-right: 8px; padding-top: 0; padding-bottom: 0; gap: 4px; }
   .native-mac.native-fullscreen .brand { padding-left: 13px; }
   .native-mac.native-fullscreen.sidebar-collapsed { grid-template-columns: 48px minmax(0,1fr); }
-  .native-mac .sidebar-views { gap: 0; }
+  .native-mac .brand-actions { gap: 0; }
   .app-shell { --pane-tabbar-height: var(--density-tabbar-height); }
   .native-mac { --pane-tabbar-height: max(36px, calc(var(--density-native-tabbar-height) / var(--interface-scale, 1))); }
   .native-mac .topbar {
@@ -4401,11 +4406,18 @@
   }
   .sidebar-usage :global(.usage-rings) { border-right:0; border-left:0; border-radius:0; background:transparent; }
   .sidebar-usage.compact { display:grid; place-items:center; width:100%; border-top:1px solid var(--line); }
-  .sidebar-views { display: flex; flex: none; gap: 2px; margin-left: auto; }
-  .view-toggle { display: grid; place-items: center; width: var(--density-control-size); height: var(--density-control-size); padding: 0; border-radius: 6px; color: var(--muted); }
-  .mobile-navigation .view-toggle { width:44px; height:44px; }
-  @media (hover:hover) and (pointer:fine) { .view-toggle:hover { background: var(--soft); color: var(--ink); } }
-  .view-toggle[aria-pressed="true"] { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .brand-actions { display:flex; flex:none; align-items:center; gap:2px; margin-left:auto; }
+  .brand-action { color:var(--muted); }
+  .brand-action:disabled { opacity:.45; }
+  .sidebar-tabs { display:flex; flex:none; align-items:flex-end; gap:3px; min-height:32px; padding:6px 6px 0; border-bottom:1px solid var(--line); background:var(--sidebar); }
+  .sidebar-tab-entry { display:flex; flex:1; align-self:flex-end; align-items:stretch; min-width:0; margin-bottom:-1px; border:1px solid transparent; border-bottom:0; border-radius:6px 6px 0 0; }
+  .sidebar-tab { display:flex; flex:1; align-items:center; justify-content:center; gap:3px; min-width:0; min-height:25px; padding:0 3px; border:0; border-radius:5px 5px 0 0; color:var(--muted); font:600 calc(8.5px * var(--interface-font-ratio, 1)) var(--sans); letter-spacing:.025em; text-transform:uppercase; }
+  .sidebar-tab :global(svg) { flex:none; }
+  .sidebar-tab span { flex:none; max-width:calc(100% - 15px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  @media (hover:hover) and (pointer:fine) { .sidebar-tab:hover { background:var(--soft); color:var(--ink); } }
+  .sidebar-tab-entry.active { position:relative; z-index:1; color:var(--ink); border-color:var(--line); background:var(--sidebar); }
+  .sidebar-tab-entry.active .sidebar-tab { color:var(--ink); }
+  .sidebar-tab-entry.active .sidebar-tab:hover { background:var(--sidebar); }
   .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
   .project-group { margin: 5px 0 12px; }
   .workspace-approval-list { display:grid; gap:4px; margin:2px 2px 13px; padding-bottom:11px; border-bottom:1px solid var(--line); }
@@ -4653,9 +4665,8 @@
     background:var(--paper);
   }
   .mobile-navigation > .sidebar { border-right:0; transform:translateX(0); background:var(--sidebar); }
-  .mobile-navigation .brand { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); padding-inline:8px; gap:0; }
-  .mobile-navigation .brand-logo-button { grid-column:2; justify-self:center; }
-  .mobile-navigation .sidebar-views { grid-column:3; justify-self:end; margin-left:0; }
+  .mobile-navigation .brand { padding-inline:8px; gap:0; }
+  .mobile-navigation .brand-action { width:44px; height:44px; }
   .mobile-navigation > .pane-grid { flex-direction:column; transform:translateX(100%); visibility:hidden; }
   .mobile-navigation.mobile-main > .sidebar { transform:translateX(-100%); visibility:hidden; }
   .mobile-navigation.mobile-main > .pane-grid { transform:translateX(0); visibility:visible; transition-delay:0s; }

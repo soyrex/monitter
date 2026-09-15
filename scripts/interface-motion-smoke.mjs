@@ -85,7 +85,7 @@ for (const engine of (process.env.MOTION_ENGINE === 'chromium' ? [chromium] : [c
     await motionCard.getByRole('button', { name: 'Off', exact: true }).click();
     await expect(page.locator('html')).toHaveAttribute('data-motion', 'off');
     await clearLog();
-    await page.getByRole('button', { name: 'Projects view', exact: true }).click();
+    await page.getByRole('tab', { name: 'Projects view', exact: true }).click();
     expect(await page.evaluate(() => window.__motionLog.length)).toBe(0);
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('data-motion', 'off');

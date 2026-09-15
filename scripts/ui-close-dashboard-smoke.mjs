@@ -3,7 +3,7 @@ const browser=await chromium.launch({headless:true});
 try {
  const page=await browser.newPage({viewport:{width:1440,height:900}}),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.addInitScript({path:'scripts/ui-fixture.js'});await page.goto('http://127.0.0.1:18433',{timeout:60000});
  const panes=page.locator('.pane-leaf');
- async function columns(){await expect(page.getByRole('button',{name:'Standard view',exact:true})).toBeEnabled();await page.keyboard.press('Meta+p');await page.getByRole('button',{name:'Two columns',exact:true}).click();await expect(panes).toHaveCount(2);}
+ async function columns(){await expect(page.getByRole('tab',{name:'Agents view',exact:true})).toBeEnabled();await page.keyboard.press('Meta+p');await page.getByRole('button',{name:'Two columns',exact:true}).click();await expect(panes).toHaveCount(2);}
  await columns();await panes.last().getByRole('button',{name:'Close empty pane',exact:true}).click();await expect(panes).toHaveCount(1);
  await columns();await panes.last().click({position:{x:100,y:150}});await page.keyboard.press('Meta+,');await expect(panes.last().locator('.settings-pane')).toBeVisible();
  await expect(panes).toHaveCount(2);await expect(panes.last().getByRole('button',{name:'Overview',exact:true})).toHaveCount(0);
