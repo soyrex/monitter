@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { CANCELLATION_EVENT_TITLE, CONTEXT_CLEARED_TITLE, contextCompactionPhase, groupConversationActivity, isCancellationEvent, isCancellationMessage, isContextClearedMessage, isNativeMessageTransportArtifact, isShellActivity, readableToolDetail, reasoningSummary, showThinkingFallback, toolCategory, toolFileChanges, toolPresentation } from '../src/lib/activity-grouping.ts';
+import { CANCELLATION_EVENT_TITLE, CONTEXT_CLEARED_TITLE, contextCompactionPhase, groupConversationActivity, isCancellationEvent, isCancellationMessage, isContextClearedMessage, isNativeMessageTransportArtifact, isShellActivity, readableToolDetail, reasoningSummary, showThinkingFallback, toolCategory, toolFileChanges, toolImage, toolPresentation } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
@@ -154,6 +154,9 @@ assert.equal(category('file_change', '{"type":"file_change"}'), 'edit');
 assert.equal(category('apply_patch'), 'edit');
 assert.equal(category('commandExecution'), 'shell');
 assert.equal(category('imageView'), 'image');
+const viewedImage = event('image', 0, 'imageView', '{"type":"imageView","id":"opaque","path":"/tmp/haul-photo.png"}');
+assert.deepEqual(toolImage(viewedImage), { path: '/tmp/haul-photo.png', name: 'haul-photo.png' });
+assert.deepEqual(toolPresentation(viewedImage, false), { icon: 'image', label: 'Viewed image: haul-photo.png' });
 assert.equal(category('ToolSearch'), 'tool_search');
 assert.equal(category('ScheduleWakeup'), 'schedule');
 assert.equal(category('gmail.read_email'), 'mcp');

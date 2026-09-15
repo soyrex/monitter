@@ -17,9 +17,23 @@
   const event = $derived<RunEvent>({
     id: 'reasoning-1', taskId: 'task-1', kind: 'reasoning', title: 'Reasoning', detail, createdAt: reasoningStartedAt,
   });
+  const imageEvent: RunEvent = {
+    id: 'view-image-1', taskId: 'task-1', kind: 'tool', title: 'imageView',
+    detail: '{"type":"imageView","path":"/tmp/cargo.png"}', createdAt: reasoningStartedAt + 1,
+  };
   const conversation = $derived(groupConversationActivity(messages, includeEvent ? [event] : []));
 
   onMount(() => {
+    window.__MONITTER_TEST_BRIDGE__ = {
+      invoke: async command => {
+        if (command === 'read_attachment_file') return {
+          filename: 'cargo.png', mimeType: 'image/png',
+          dataBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=',
+        };
+        throw new Error(`Unexpected test bridge command: ${command}`);
+      },
+      listen: async () => () => {},
+    };
     (window as Window & { __REASONING_QA__?: Record<string, () => void> }).__REASONING_QA__ = {
       activate: () => { running = true; },
       deactivate: () => { running = false; },
@@ -32,7 +46,7 @@
       completeCompaction: () => { compactionEvents = [...compactionEvents, { id: 'compact-complete', taskId: 'task-1', kind: 'tool', title: 'ContextCompaction', detail: '{"type":"ContextCompaction","id":"compact-1","monitterPhase":"completed"}', createdAt: 15_301 }]; },
       interruptCompaction: () => { compactionRunning = false; compactionEvents = [compactionEvents[0]]; },
     };
-    return () => { delete (window as Window & { __REASONING_QA__?: unknown }).__REASONING_QA__; };
+    return () => { delete window.__MONITTER_TEST_BRIDGE__; delete (window as Window & { __REASONING_QA__?: unknown }).__REASONING_QA__; };
   });
 </script>
 
@@ -45,6 +59,7 @@
   {/each}
   {#if showThinkingFallback(conversation, running)}<ThinkingStatus {running} {avatar}/>{/if}
   <RunActivity events={compactionEvents} running={compactionRunning}/>
+  <RunActivity event={imageEvent}/>
 </main>
 
 <style>

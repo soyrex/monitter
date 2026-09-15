@@ -1,12 +1,14 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { AlarmClock, Archive, Bot, BookOpen, Brain, ChevronRight, Download, Eye, FilePen, FileSearch, FolderOpen, Globe, Image, ListChecks, MessageCircle, Monitor, Plug, Search, SquareTerminal, Terminal, Users, Wrench, X } from '@lucide/svelte';
-  import type { RunEvent } from '$lib/types';
-  import { contextCompactionId, contextCompactionPhase, isContextCompaction, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolPresentation, type ToolPresentation } from '$lib/activity-grouping';
+  import type { AttachmentFileData, RunEvent } from '$lib/types';
+  import { getBridge } from '$lib/bridge';
+  import { contextCompactionId, contextCompactionPhase, isContextCompaction, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, type ToolPresentation } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
   import Markdown from './Markdown.svelte';
   import AnimatedTitle from './AnimatedTitle.svelte';
   import ThinkingStatus from './ThinkingStatus.svelte';
+  import ImageLightbox from './ImageLightbox.svelte';
   type DetailLoader = (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
   let { event, events = [], compressed = false, running = false, avatar, onloaddetail }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
@@ -53,6 +55,11 @@
   let loadedDetails = $state<Record<string, string>>({});
   let loadingDetails = $state<Record<string, boolean>>({});
   let detailErrors = $state<Record<string, string>>({});
+  let imagePreviews = $state<Record<string, { src: string; name: string }>>({});
+  let imageLoading = $state<Record<string, boolean>>({});
+  let imageErrors = $state<Record<string, string>>({});
+  let lightbox = $state<{ src: string; alt: string; title?: string } | null>(null);
+  let lightboxOpener = $state<HTMLElement | null>(null);
   const formatTime = (at:number) => new Intl.DateTimeFormat(undefined, {hour:'2-digit',minute:'2-digit'}).format(at);
   function close(restoreFocus=true) { open=false; if(restoreFocus)anchor?.focus(); }
   const expandedEvent = (item: RunEvent): RunEvent => loadedDetails[item.id] === undefined ? item : { ...item, detail: loadedDetails[item.id] };
@@ -70,14 +77,36 @@
       loadingDetails = { ...loadingDetails, [item.id]: false };
     }
   }
+  function previewDataUrl(file: AttachmentFileData): string {
+    if (!/^image\/(png|jpeg|webp)$/i.test(file.mimeType)) throw new Error('The viewed file is not a PNG, JPEG, or WebP image.');
+    if (!/^[a-zA-Z0-9+/=]+$/.test(file.dataBase64)) throw new Error('The image preview data is invalid.');
+    return `data:${file.mimeType};base64,${file.dataBase64}`;
+  }
+  async function hydrateImage(item: RunEvent) {
+    const image = toolImage(item);
+    if (!image || imagePreviews[item.id] || imageLoading[item.id]) return;
+    imageLoading = { ...imageLoading, [item.id]: true };
+    imageErrors = { ...imageErrors, [item.id]: '' };
+    try {
+      const file = await getBridge().readAttachmentFile(image.path);
+      imagePreviews = { ...imagePreviews, [item.id]: { src: previewDataUrl(file), name: image.name } };
+    } catch (reason) {
+      imageErrors = { ...imageErrors, [item.id]: reason instanceof Error ? reason.message : String(reason) };
+    } finally {
+      imageLoading = { ...imageLoading, [item.id]: false };
+    }
+  }
   function toggle() {
     open = !open;
-    if (open) for (const item of items) void hydrateDetail(item);
+    if (open) for (const item of items) { void hydrateDetail(item); void hydrateImage(item); }
   }
   const diffLines = (diff:string) => diff.split('\n').slice(0, 400);
   const diffKind = (line:string) => line.startsWith('+++') || line.startsWith('---') ? 'header' : line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : line.startsWith('@@') ? 'hunk' : 'context';
   function outside(event:PointerEvent) { if(compressed && grouped)return; if(open && event.target instanceof Node && !anchor?.contains(event.target) && !panel?.contains(event.target))close(false); }
   function keys(event:KeyboardEvent) {
+    // The preview owns Escape while its modal lightbox is open. Otherwise this
+    // popup would unmount before the lightbox can restore focus to its image.
+    if (lightbox) return;
     if(!open)return;
     if(event.key==='Escape'){event.preventDefault();event.stopPropagation();close();}
     if(event.key==='Tab' && panel && !(compressed && grouped)){
@@ -109,6 +138,16 @@
   } as const;
   const TriggerIcon = $derived(ICON_COMPONENT[primaryPresentation.icon]);
 </script>
+{#snippet imagePreview(item: RunEvent)}
+  {#if imagePreviews[item.id]}
+    {@const preview=imagePreviews[item.id]}
+    <button class="tool-image-preview" aria-label={`View full-size ${preview.name}`} onclick={event=>{lightboxOpener=event.currentTarget;lightbox={src:preview.src,alt:`Preview of ${preview.name}`,title:preview.name}}}>
+      <img src={preview.src} alt={`Preview of ${preview.name}`}/>
+    </button>
+  {:else if imageLoading[item.id]}<p class="detail-state">Loading image preview…</p>
+  {:else if imageErrors[item.id]}<p class="detail-state error">Image preview unavailable: {imageErrors[item.id]}</p>
+  {/if}
+{/snippet}
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 {#if primary && emptyReasoning}
   <ThinkingStatus {running} {avatar} startedAt={primary.createdAt}/>
@@ -126,6 +165,7 @@
           <summary><ChevronRight size={12} class="call-chevron"/><span>{item.title || 'Tool activity'}</span><time>{formatTime(item.createdAt)}</time></summary>
           <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable output must be keyboard reachable) -->
           <pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>
+          {@render imagePreview(displayItem)}
           {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
           {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
           {#each toolFileChanges(displayItem) as change}
@@ -143,6 +183,7 @@
           <summary><ChevronRight size={12} class="call-chevron"/><span>{item.title || 'Tool activity'}</span><time>{formatTime(item.createdAt)}</time></summary>
           <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable output must be keyboard reachable) -->
           <pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>
+          {@render imagePreview(displayItem)}
           {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
           {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
           {#each toolFileChanges(displayItem) as change}
@@ -176,6 +217,9 @@
   .call{min-width:0;border:1px solid var(--line);border-radius:6px}.call summary{padding:8px 9px;font-size:calc(11px * var(--interface-font-ratio, 1))}.call pre{padding:0 9px 9px;max-height:220px;overflow:auto}
   .diff{margin:0 9px 9px;min-width:0;overflow:hidden;border:1px solid var(--line);border-radius:6px;background:color-mix(in srgb,var(--panel) 86%,var(--soft))}.diff strong{display:block;padding:6px 9px;overflow:hidden;color:var(--muted);border-bottom:1px solid var(--line);font:500 calc(10px * var(--interface-font-ratio, 1)) var(--mono);text-overflow:ellipsis;white-space:nowrap}.diff code{display:block;padding:5px 0;font:calc(10px * var(--interface-font-ratio, 1))/1.45 var(--mono)}.diff code span,.diff code em{display:block;min-width:0;padding:0 9px;white-space:pre-wrap;overflow-wrap:anywhere}.diff .added{color:#238636;background:rgba(46,160,67,.12)}.diff .removed{color:#cf222e;background:rgba(248,81,73,.12)}.diff .hunk{color:var(--accent-ink);background:var(--soft)}.diff .header{color:var(--muted)}.diff em{color:var(--muted);font-style:normal}
   .detail-state{margin:0;padding:0 9px 9px;color:var(--muted);font-size:calc(10px * var(--interface-font-ratio, 1))}.detail-state.error{color:var(--danger)}
+  .tool-image-preview{display:block;width:min(220px,calc(100% - 18px));margin:0 9px 9px;padding:0;border:1px solid var(--line);border-radius:6px;background:var(--soft);cursor:zoom-in;overflow:hidden}.tool-image-preview:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.tool-image-preview img{display:block;width:100%;max-height:150px;object-fit:contain;background:var(--paper)}
   pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(11px * var(--interface-font-ratio, 1))/1.6 var(--mono)}
   @media (max-width:640px){.activity{margin:2px 0 7px}.activity-trigger{padding:6px 0}}
 </style>
+
+<ImageLightbox bind:image={lightbox} returnFocus={lightboxOpener}/>

@@ -222,6 +222,32 @@ export interface ToolPresentation {
   label: string;
 }
 
+export interface ToolImage {
+  /** The provider-approved local path that its image-view tool read. */
+  path: string;
+  /** A deliberately path-free label for the transcript. */
+  name: string;
+}
+
+/**
+ * Image-view events carry the exact file Codex viewed. Keep that path in the
+ * diagnostic payload, but only surface the filename in the compact timeline.
+ */
+export function toolImage(event: RunEvent): ToolImage | null {
+  if (toolCategory(event) !== 'image') return null;
+  try {
+    const parsed = parseToolDetail(event.detail);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const path = (parsed as Record<string, unknown>).path;
+    if (typeof path !== 'string' || !path.trim()) return null;
+    const cleaned = path.trim();
+    const name = cleaned.split(/[\\/]/).filter(Boolean).at(-1) || 'image';
+    return { path: cleaned, name };
+  } catch {
+    return null;
+  }
+}
+
 /** Friendly label and icon; raw provider tool names stay in the expandable detail. */
 export function toolPresentation(event: RunEvent, inProgress: boolean): ToolPresentation {
   const tense = (now: string, past: string) => inProgress ? now : past;
@@ -233,7 +259,10 @@ export function toolPresentation(event: RunEvent, inProgress: boolean): ToolPres
     case 'list_files': return { icon: 'folder-open', label: tense('List files', 'Listed files') };
     case 'web_search': return { icon: 'globe', label: tense('Search the web', 'Searched the web') };
     case 'web_fetch': return { icon: 'download', label: tense('Fetch a web page', 'Fetched a web page') };
-    case 'image': return { icon: 'image', label: tense('View an image', 'Viewed an image') };
+    case 'image': {
+      const image = toolImage(event);
+      return { icon: 'image', label: tense(`Viewing image${image ? `: ${image.name}` : ''}`, `Viewed image${image ? `: ${image.name}` : ''}`) };
+    }
     case 'tool_search': return { icon: 'search', label: tense('Find a tool', 'Found a tool') };
     case 'todo': return { icon: 'list-checks', label: tense('Update the plan', 'Updated the plan') };
     case 'task': return { icon: 'bot', label: tense('Start an agent', 'Started an agent') };
