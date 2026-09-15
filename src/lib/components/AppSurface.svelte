@@ -5277,13 +5277,14 @@
   .composer {
     container-type: inline-size;
     position: relative;
+    z-index: 1;
     flex-shrink: 0;
-    max-height: 40%;
+    max-height: 40dvh;
     overflow: auto;
     overscroll-behavior: contain;
-    width: min(var(--chat-content-max-width), calc(100% - 2 * var(--chat-side-padding, clamp(25px, 4vw, 50px))));
+    width: min(var(--chat-content-max-width), calc(100% - 20px));
     box-sizing: border-box;
-    margin: 0 auto 20px;
+    margin: 0 auto 10px;
     padding: 11px 12px 9px;
     border: 1px solid var(--line);
     border-radius: 10px;

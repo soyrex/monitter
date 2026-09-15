@@ -19,6 +19,7 @@
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ExpandableUserRequest from '$lib/components/ExpandableUserRequest.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
+  import SparkleField from '$lib/components/SparkleField.svelte';
 
   type Avatar = Snippet<[Agent | null | undefined, number?]>;
   type Delivery = Snippet<[OptimisticMessage]>;
@@ -191,7 +192,10 @@
       {/if}
     </MessagePane>
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
-  {@render composer()}
+  <div class="composer-area">
+    <SparkleField active={task.status === 'running'}/>
+    {@render composer()}
+  </div>
 </section>
 
 <style>
@@ -204,6 +208,7 @@
   .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
   .conversation { --chat-content-max-width:900px; display:flex; min-width:0; min-height:0; flex:1; flex-direction:column; grid-column:1; grid-row:2; }
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .composer-area { position:relative; flex-shrink:0; }
   .conversation-head { background:var(--paper); display:flex; flex-shrink:0; overflow:visible; align-items:flex-start; justify-content:space-between; gap:20px; padding:25px clamp(25px,4vw,50px) 17px; border-bottom:1px solid var(--line); }
   .task-heading { align-items:center; padding-top:13px; padding-bottom:13px; }
   .conversation-head h1 { flex:1; min-width:0; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:calc(22px * var(--interface-font-ratio,1)); }
