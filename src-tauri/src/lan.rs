@@ -726,6 +726,73 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn developer_bridge_renderer_reload_preserves_task_and_run_identity() {
+        let root =
+            std::env::temp_dir().join(format!("monitter-dev-ui-state-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let service = Service::open(None, root.join("state")).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(crate::model::CreateTaskInput {
+                agent_id,
+                title: "Developer UI state fixture".into(),
+                native_session_id: Some("native-session-fixture".into()),
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                cwd: None,
+                model_settings: None,
+                sandbox: None,
+            })
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let control = service.reserve_run(&task.id).unwrap();
+        control.mark_resident();
+        let run_id = control.current_run_id().unwrap();
+        let body = r#"{"command":"get_ui_snapshot","args":{}}"#;
+        let request = format!(
+            "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nOrigin: http://127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+
+        for _ in 0..3 {
+            let response = one_request(Arc::clone(&service), root.clone(), "owner-token", &request);
+            assert!(response.starts_with("HTTP/1.1 200"));
+            let value: Value =
+                serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+            let projected = value["result"]["snapshot"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"].as_str() == Some(task.id.as_str()))
+                .unwrap();
+            assert_eq!(projected["id"].as_str(), Some(task.id.as_str()));
+            assert_eq!(
+                projected["nativeSessionId"].as_str(),
+                Some("native-session-fixture")
+            );
+            assert_eq!(projected["status"].as_str(), Some("running"));
+            let resident = service.resident_control(&task.id).unwrap().unwrap();
+            assert!(Arc::ptr_eq(&resident, &control));
+            assert_eq!(resident.current_run_id().unwrap(), run_id);
+        }
+
+        control.cancel();
+        service.release_run(&task.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn one_request(service: Arc<Service>, root: PathBuf, token: &str, request: &str) -> String {
         one_request_with_limiter(
             service,
