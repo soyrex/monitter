@@ -63,6 +63,10 @@ pub struct Agent {
     pub model: String,
     pub host_id: String,
     pub cwd: String,
+    /// Optional local Codex account home. `None` retains the process default
+    /// for future chats; task creation snapshots that default for local Codex.
+    #[serde(default)]
+    pub codex_home: Option<String>,
     pub color: String,
     pub sandbox: String,
     #[serde(default)]
@@ -97,6 +101,10 @@ pub struct Task {
     pub host_id: String,
     pub cwd: String,
     pub provider: String,
+    /// Immutable local Codex account-home snapshot. Legacy tasks without this
+    /// field retain the process default when resumed.
+    #[serde(default)]
+    pub codex_home: Option<String>,
     pub model: String,
     #[serde(default)]
     pub model_settings: Option<ModelSettings>,
@@ -261,7 +269,10 @@ pub struct AllowanceBalance { pub key: String, pub label: String, pub unit: Stri
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionUsageSource {
-    pub provider: String, pub host_id: String, pub source: String, pub state: String, pub plan_type: Option<String>, pub fetched_at: Option<i64>, pub stale_after: Option<i64>, pub last_attempt_at: i64, pub windows: Vec<AllowanceWindow>, pub balances: Vec<AllowanceBalance>, pub error: Option<String>,
+    pub provider: String, pub host_id: String, pub source: String,
+    #[serde(default)] pub codex_home: Option<String>,
+    #[serde(default)] pub account_label: Option<String>,
+    pub state: String, pub plan_type: Option<String>, pub fetched_at: Option<i64>, pub stale_after: Option<i64>, pub last_attempt_at: i64, pub windows: Vec<AllowanceWindow>, pub balances: Vec<AllowanceBalance>, pub error: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -607,6 +618,8 @@ pub struct ModelCatalogTarget {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub codex_home: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -720,6 +733,7 @@ pub fn default_snapshot() -> Snapshot {
             model: String::new(),
             host_id,
             cwd,
+            codex_home: None,
             color: "#3f9d6a".into(),
             sandbox: "read-only".into(),
             avatar: None,
@@ -987,6 +1001,23 @@ mod task_migration_tests {
     }
 
     #[test]
+    fn legacy_agent_and_task_without_codex_home_deserialize() {
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id":"a", "name":"Codex", "description":"", "instructions":"",
+            "provider":"codex", "model":"", "hostId":"h", "cwd":"/tmp",
+            "color":"#000", "sandbox":"read-only"
+        })).unwrap();
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id":"t", "agentId":"a", "title":"Legacy", "nativeSessionId":null,
+            "status":"idle", "createdAt":1, "updatedAt":1, "parentTaskId":null,
+            "channelId":null, "hostId":"h", "cwd":"/tmp", "provider":"codex",
+            "model":"", "sandbox":"read-only", "projectId":null
+        })).unwrap();
+        assert_eq!(agent.codex_home, None);
+        assert_eq!(task.codex_home, None);
+    }
+
+    #[test]
     fn old_projects_default_to_folder_icon_and_accent_colour() {
         let project: Project =
             serde_json::from_str(r##"{"id":"p","name":"Project","description":""}"##).unwrap();
@@ -1050,6 +1081,7 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
         host_id: agent.host_id.clone(),
         cwd: input.cwd.clone().unwrap_or_else(|| agent.cwd.clone()),
         provider: agent.provider.clone(),
+        codex_home: None,
         model: input
             .model_settings
             .as_ref()

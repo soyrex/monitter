@@ -14,11 +14,18 @@ writeFileSync(join(harness, 'App.svelte'), `<script>
   import UsageRings from '${join(root, 'src/lib/components/UsageRings.svelte')}';
   const base = Date.now();
   const resetAfter = (days, hours, minutes) => base + (((days * 24 + hours) * 60 + minutes) * 60000);
-  const usage = {
+  let usage = $state({
     codex: { status: 'ready', active: { label: '5-hour', usedPercent: 98, resetsAt: resetAfter(3, 6, 23) }, weekly: { label: 'Week', usedPercent: 20, resetsAt: resetAfter(7, 0, 0) } },
     claude: { status: 'stale', active: { label: 'Current session', usedPercent: 80, resetsAt: resetAfter(0, 2, 5) } },
     minimax: { status: 'ready', active: { label: 'general 5-hour', usedPercent: 25, resetsAt: resetAfter(0, 4, 30) } },
     'opencode-go': { status: 'error', message: 'Router unavailable.' },
+  });
+  window.setCodexAccounts = (personalFailed = false) => {
+    const accounts = [
+      { key: 'personal', label: 'Personal', status: personalFailed ? 'error' : 'ready', message: personalFailed ? 'Personal unavailable' : null, active: personalFailed ? null : { label: '5-hour', usedPercent: 12 }, weekly: { label: 'Week', usedPercent: 20 } },
+      { key: 'work', label: 'Work', status: 'ready', active: { label: '5-hour', usedPercent: 67, resetsAt: resetAfter(0, 2, 0) }, weekly: null },
+    ];
+    usage = { ...usage, codex: { ...accounts[0], accounts } };
   };
 </script>
 <main class="sidebar"><UsageRings {usage} expanded={true} /></main>
@@ -111,6 +118,27 @@ try {
   expect(ringRow[0].left).toBeLessThan(ringRow[1].left);
   expect(ringRow[1].left).toBeLessThan(ringRow[2].left);
   expect(ringRow[2].left).toBeLessThan(ringRow[3].left);
+  await page.evaluate(() => window.setCodexAccounts());
+  const accountSelector = codex.getByLabel('Codex account', { exact: true });
+  await expect(accountSelector).toBeVisible();
+  await expect(ringValue).toHaveText('12');
+  await accountSelector.selectOption('work');
+  await expect(ringValue).toHaveText('67');
+  await expect(codex).toHaveAttribute('title', /67% used/);
+  await page.setViewportSize({ width: 760, height: 1400 });
+  await expect(codex.locator('.usage-heading')).toContainText('Work');
+  await expect(codex.locator('.usage-weekly')).toHaveCount(0);
+  await page.evaluate(() => window.setCodexAccounts(true));
+  await accountSelector.selectOption('personal');
+  await expect(codex).toHaveClass(/error/);
+  await expect(codex.locator('.usage-message')).toContainText('Personal unavailable');
+  await page.setViewportSize({ width: 760, height: 980 });
+  await expect(accountSelector).toBeVisible();
+  await accountSelector.selectOption('work');
+  await expect(ringValue).toHaveText('67');
+  await expect(codex).not.toHaveClass(/error/);
+  await page.screenshot({ path: join(root, 'verification', 'codex-account-usage.png') });
+  console.log('Account selector keeps Personal/Work usage separate in compact mode, preserves errors, and never borrows missing windows.');
   console.log('Usage switches to a four-ring provider row below 1200px window height while retaining its toggle header.');
 } finally {
   await browser?.close();

@@ -52,7 +52,7 @@ pub(crate) fn refresh_provider_quota(host: &Host, provider: &str) -> Subscriptio
     }
 
     match provider.as_str() {
-        "codex" => refresh_codex(host, attempted_at),
+        "codex" => refresh_codex(host, attempted_at, None),
         "claude" => refresh_claude(host, attempted_at),
         "minimax" | "mmx" => refresh_minimax(host, attempted_at),
         "opencode-go" => refresh_opencode_go(host, attempted_at),
@@ -177,7 +177,20 @@ fn refresh_opencode_go(host: &Host, attempted_at: i64) -> SubscriptionUsageSourc
     }
 }
 
-fn refresh_codex(host: &Host, attempted_at: i64) -> SubscriptionUsageSource {
+/// Probe one account without changing the parent process or reading credentials.
+/// Keep identity on failures too, so one account cannot replace another's meter.
+pub(crate) fn refresh_codex_quota(host: &Host, home: &str, label: &str) -> SubscriptionUsageSource {
+    let mut result = if host.kind == "local" {
+        refresh_codex(host, now(), Some(home))
+    } else {
+        refresh_provider_quota(host, "codex")
+    };
+    result.codex_home = Some(home.into());
+    result.account_label = Some(label.into());
+    result
+}
+
+fn refresh_codex(host: &Host, attempted_at: i64, home: Option<&str>) -> SubscriptionUsageSource {
     let executable = match resolve_local(&host.codex_path) {
         Ok(path) => path,
         Err(_) => {
@@ -192,6 +205,10 @@ fn refresh_codex(host: &Host, attempted_at: i64) -> SubscriptionUsageSource {
     };
     let mut command = Command::new(executable);
     command.arg("app-server");
+    if crate::codex_accounts::configure_command(&mut command, home).is_err() {
+        return probe_error("codex", host, "codex app-server", attempted_at,
+            "Codex account home is unavailable. Check the selected account folder.");
+    }
     configure(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -974,6 +991,8 @@ fn source(
     SubscriptionUsageSource {
         provider: provider.into(),
         host_id: host.id.clone(),
+        codex_home: None,
+        account_label: None,
         source: source_name.into(),
         state: state.into(),
         plan_type,
@@ -1030,6 +1049,51 @@ fn stop_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_quota_routes_each_home_and_preserves_identity_on_failure() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let root = std::env::temp_dir().join(format!("monitter-quota-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("personal")).unwrap();
+        fs::create_dir_all(root.join("work")).unwrap();
+        let executable = root.join("fake-codex");
+        // Only the initialize handshake and account read are accepted. A model
+        // prompt or any authentication mutation makes the probe fail.
+        fs::write(&executable, r#"#!/bin/sh
+IFS= read -r request
+case "$request" in *'"method":"initialize"'*) ;; *) exit 11;; esac
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r request
+case "$request" in *'"method":"initialized"'*) ;; *) exit 12;; esac
+IFS= read -r request
+case "$request" in *'"method":"account/rateLimits/read"'*) ;; *) exit 13;; esac
+case "$CODEX_HOME" in */personal) used=12;; */work) used=67;; *) exit 14;; esac
+printf '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":%s,"windowDurationMins":300}}}}\n' "$used"
+"#).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let host: Host = serde_json::from_value(json!({
+            "id":"local", "name":"Local", "kind":"local", "address":"", "user":"",
+            "port":22, "identityFile":"", "defaultCwd":"", "codexPath":executable,
+            "claudePath":"", "opencodePath":"", "hermesPath":""
+        })).unwrap();
+        let inherited = std::env::var_os("CODEX_HOME");
+        for (folder, label, percent) in [("personal", "Personal", 12.0), ("work", "Work", 67.0)] {
+            let home = root.join(folder).to_string_lossy().into_owned();
+            let result = refresh_codex_quota(&host, &home, label);
+            assert_eq!(result.state, "available");
+            assert_eq!(result.codex_home.as_deref(), Some(home.as_str()));
+            assert_eq!(result.account_label.as_deref(), Some(label));
+            assert_eq!(result.windows[0].used_percent, Some(percent));
+        }
+        let missing = root.join("missing").to_string_lossy().into_owned();
+        let failed = refresh_codex_quota(&host, &missing, "Missing");
+        assert_eq!(failed.state, "error");
+        assert_eq!(failed.codex_home.as_deref(), Some(missing.as_str()));
+        assert_eq!(failed.account_label.as_deref(), Some("Missing"));
+        assert_eq!(std::env::var_os("CODEX_HOME"), inherited);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn codex_windows_convert_seconds_and_keep_provider_percentage() {

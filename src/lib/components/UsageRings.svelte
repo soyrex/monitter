@@ -33,6 +33,8 @@
     message?: string | null;
     /** Unix milliseconds of the last successful source read, if known. */
     updatedAt?: number | null;
+    /** Multiple local Codex profiles remain distinct in the expanded view. */
+    accounts?: { key: string; label: string; status?: UsageRingStatus; active?: UsageRingWindow | null; weekly?: UsageRingWindow | null; message?: string | null }[];
   }
 
   export type UsageRingMap = Partial<Record<UsageRingProvider, UsageRingData>>;
@@ -56,6 +58,7 @@
   let showAbsoluteResets = $state(false);
   let currentTime = $state(Date.now());
   let ringsOnly = $state(false);
+  let selectedAccountKeys = $state<Record<string, string>>({});
 
   /**
    * Preserve the full usage view on tall windows, while keeping the sidebar
@@ -225,11 +228,13 @@
   {#if expanded || compact}
     <div class="usage-body" id="sidebar-usage-body">
       {#each providers as provider (provider.id)}
-        {@const data = usage[provider.id]}
+        {@const sourceData = usage[provider.id]}
+        {@const selectedAccount = sourceData?.accounts?.find(account => account.key === selectedAccountKeys[provider.id]) ?? sourceData?.accounts?.[0]}
+        {@const data = selectedAccount ?? sourceData}
         {@const active = data?.active}
         {@const weekly = data?.weekly}
-        {@const hasValue = showValue(data)}
         {@const status = data?.status ?? 'unavailable'}
+        {@const hasValue = showValue(data)}
         <article
           class="usage-provider"
           class:loading={status === 'loading'}
@@ -260,8 +265,13 @@
             <text class="ring-value" x="20" y="20" text-anchor="middle" dominant-baseline="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
           </svg>
           <small class="usage-ring-label">{provider.label}</small>
+          {#if sourceData?.accounts && sourceData.accounts.length > 1}
+            <select class="account-select" aria-label={`${provider.label} account`} value={selectedAccount?.key} onchange={event => { selectedAccountKeys[provider.id] = event.currentTarget.value; }}>
+              {#each sourceData.accounts as account (account.key)}<option value={account.key}>{account.label}</option>{/each}
+            </select>
+          {/if}
           <div class="usage-copy">
-            <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
+            <div class="usage-heading"><strong>{provider.label}{#if selectedAccount} · {selectedAccount.label}{/if}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
             {#if hasValue}
               <div class="usage-detail">
                 <span>
@@ -313,6 +323,7 @@
             {:else}
               <div class="usage-detail usage-message">{data?.message?.trim() || 'Usage data is not available.'}</div>
             {/if}
+
           </div>
         </article>
       {/each}
@@ -322,6 +333,7 @@
 
 <style>
   .usage-rings { min-width:0; max-width:100%; overflow:hidden; color:var(--ink); border:1px solid var(--line); border-radius:8px; background:color-mix(in srgb,var(--panel) 34%,transparent); font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .account-select { grid-column:1 / -1; grid-row:2; min-width:0; max-width:100%; margin:2px 0 4px; padding:2px 4px; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--muted); font:inherit; }
   .usage-toggle { display:grid; grid-template-columns:minmax(0,1fr) auto 16px; align-items:center; width:100%; height:31px; padding:0 7px 0 10px; color:var(--muted); text-align:left; }
   .usage-toggle:hover { color:var(--ink); background:var(--soft); }
   .usage-toggle > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.09em; }
@@ -337,7 +349,7 @@
   .ring-active { stroke:var(--ring-active-color,var(--accent)); stroke-width:3; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
   .ring-weekly { stroke:color-mix(in srgb,var(--ring-weekly-color,var(--accent)) 45%,var(--muted)); stroke-width:1.5; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
   .ring-value { fill:var(--ink); font:700 9px var(--mono); transform:rotate(90deg); transform-origin:20px 20px; }
-  .usage-copy { display:grid; gap:1px; min-width:0; }
+  .usage-copy { grid-column:2; grid-row:1; display:grid; gap:1px; min-width:0; }
   .usage-heading,.usage-detail,.usage-weekly { display:flex; align-items:baseline; gap:6px; min-width:0; white-space:nowrap; }
   .usage-detail-short,.usage-reset-short { display:none; }
   .usage-heading strong { overflow:hidden; text-overflow:ellipsis; font-size:calc(11.5px * var(--interface-font-ratio,1)); font-weight:550; }
@@ -369,6 +381,7 @@
   .rings-only .usage-provider { grid-template-columns:1fr; grid-template-rows:auto auto; justify-items:center; gap:2px; padding:3px 0; border:0; }
   .rings-only .usage-provider:hover { border-color:transparent; }
   .rings-only .usage-copy { display:none; }
+  .rings-only .account-select,.compact .account-select { grid-column:1; grid-row:3; width:100%; font-size:calc(9px * var(--interface-font-ratio,1)); }
   .rings-only .usage-ring-label { display:block; max-width:100%; overflow:hidden; color:var(--muted); font:calc(8px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.01em; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly,.usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }

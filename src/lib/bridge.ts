@@ -29,6 +29,7 @@ import type {
   Attachment,
   AttachmentTarget,
   AttachmentFileData,
+  CodexAccount,
   Sandbox,
   RunEvent,
   UiSnapshotResponse,
@@ -47,6 +48,7 @@ export interface MonitterBridge {
   getSnapshot(): Promise<Snapshot>;
   getTaskEvents(taskId: string, before?: number, limit?: number): Promise<TaskEventsPage>;
   getUsageOverview(policy?: UsageRefreshPolicy): Promise<UsageOverview>;
+  listCodexAccounts(): Promise<CodexAccount[]>;
   getProcessMetrics(): Promise<ProcessMetricsSample>;
   getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
   saveHost(host: Host): Promise<Snapshot>;
@@ -219,6 +221,7 @@ const nativeBridge: MonitterBridge = {
   getSnapshot: () => getCachedSnapshot(),
   getTaskEvents: (taskId, before, limit) => invoke<TaskEventsPage>('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
   getUsageOverview: (policy) => invoke<UsageOverview>('get_usage_overview', policy === undefined ? {} : { policy }),
+  listCodexAccounts: () => invoke<CodexAccount[]>('list_codex_accounts'),
   getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
   getTaskEventDetail: (taskId, eventId, offset, limit) => invoke<EventDetailChunk>('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
@@ -312,6 +315,7 @@ const previewBridge: MonitterBridge = {
   getSnapshot: async () => emptyPreviewSnapshot(),
   getTaskEvents: async () => ({ events: [], nextBefore: null }),
   getUsageOverview: async () => emptyUsageOverview(),
+  listCodexAccounts: () => desktopOnly(),
   getProcessMetrics: () => desktopOnly(),
   getTaskEventDetail: () => desktopOnly(),
   saveHost: () => desktopOnly(),
@@ -377,6 +381,7 @@ export function getBridge(): MonitterBridge {
       getSnapshot: () => test.invoke("get_snapshot") as Promise<Snapshot>,
       getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,
       getUsageOverview: (policy) => test.invoke('get_usage_overview', policy === undefined ? {} : { policy }) as Promise<UsageOverview>,
+      listCodexAccounts: () => test.invoke('list_codex_accounts') as Promise<CodexAccount[]>,
       getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
       saveHost: (host) =>

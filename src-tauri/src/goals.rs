@@ -21,15 +21,20 @@ pub(crate) fn read_goal(host: &Host, task: &Task) -> Result<Option<Value>, Strin
         .as_deref()
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| "A Codex session ID is required to read its goal.".to_string())?;
-    let mut child = app_server_command(host)?.spawn().map_err(|error| {
-        format!("Could not start Codex app-server for read-only goal lookup: {error}")
-    })?;
+    let mut child = app_server_command(host, task.codex_home.as_deref())?
+        .spawn()
+        .map_err(|error| {
+            format!("Could not start Codex app-server for read-only goal lookup: {error}")
+        })?;
     let result = read_goal_from_child(&mut child, thread_id);
     stop_child(&mut child);
     result
 }
 
-fn app_server_command(host: &Host) -> Result<Command, String> {
+fn app_server_command(host: &Host, codex_home: Option<&str>) -> Result<Command, String> {
+    if host.kind != "local" && codex_home.is_some() {
+        return Err("A selected Codex account home can only run on this Mac, not over SSH.".into());
+    }
     let mut command = if host.kind == "local" {
         let mut command = Command::new(resolve_local(&host.codex_path)?);
         command.arg("app-server");
@@ -50,6 +55,9 @@ fn app_server_command(host: &Host) -> Result<Command, String> {
         return Err("Host kind must be local or ssh.".into());
     };
     isolate_process_group(&mut command);
+    if host.kind == "local" {
+        crate::codex_accounts::configure_command(&mut command, codex_home)?;
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -276,5 +284,29 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(goal.get("tokenBudget").is_none());
+    }
+
+    #[test]
+    fn local_goal_probe_receives_selected_codex_home() {
+        let host = Host {
+            id: "local".into(),
+            name: "local".into(),
+            kind: "local".into(),
+            address: "localhost".into(),
+            user: String::new(),
+            port: 0,
+            identity_file: String::new(),
+            default_cwd: "/tmp".into(),
+            codex_path: "/bin/echo".into(),
+            claude_path: String::new(),
+            opencode_path: String::new(),
+            hermes_path: String::new(),
+        };
+        let command = app_server_command(&host, Some("/tmp")).unwrap();
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("CODEX_HOME")
+                && (value == Some(std::ffi::OsStr::new("/private/tmp"))
+                    || value == Some(std::ffi::OsStr::new("/tmp")))
+        }));
     }
 }

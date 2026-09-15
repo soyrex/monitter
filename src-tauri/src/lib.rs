@@ -23,6 +23,7 @@ mod app_server_service;
 mod app_server_tests;
 mod attachments;
 mod codex_app_server;
+mod codex_accounts;
 mod collaboration;
 mod collaboration_runtime;
 mod collaboration_transport;
@@ -285,6 +286,15 @@ pub(crate) struct Service {
 
 const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
 
+fn model_catalog_key(host: &Host, provider: &str, cwd: &str, codex_home: Option<&str>) -> String {
+    [
+        provider.to_owned(), host.id.clone(), host.kind.clone(), host.address.clone(),
+        host.user.clone(), host.port.to_string(), host.identity_file.clone(),
+        host.codex_path.clone(), host.opencode_path.clone(), cwd.to_owned(),
+        codex_home.unwrap_or_default().to_owned(),
+    ].join("\u{1f}")
+}
+
 fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
     // ACP sessions are valid only for their immutable launcher snapshot as
     // well as their host. This prevents two differently configured ACP
@@ -294,7 +304,14 @@ fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
         .flatten()
         .and_then(|launch| serde_json::to_string(launch).ok())
         .unwrap_or_default();
-    format!("{}:{}:{}:{}", task.provider, host.id, launch, native)
+    // Legacy `None` means the same inherited home which a newly-created task
+    // snapshots. Normalize it here so the two cannot write one native session.
+    let codex_home = if task.provider == "codex" && host.kind == "local" {
+        codex_accounts::effective_home(task.codex_home.as_deref()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    format!("{}:{}:{}:{}:{}", task.provider, host.id, launch, codex_home, native)
 }
 
 fn provider_name(provider: &str) -> String {
@@ -587,6 +604,7 @@ impl Service {
             "get_usage_overview" => value(self.usage_overview(
                 args.get("policy").and_then(serde_json::Value::as_str),
             )?),
+            "list_codex_accounts" => value(self.list_codex_accounts()?),
             "save_host" => {
                 let mut host: Host = arg(&args, "host")?;
                 self.mutate(None, |s| {
@@ -669,6 +687,8 @@ impl Service {
                     if !s.hosts.iter().any(|h| h.id == agent.host_id) {
                         return Err("Agent host was not found.".into());
                     }
+                    let host = s.hosts.iter().find(|h| h.id == agent.host_id).unwrap();
+                    normalize_agent_codex_home(&mut agent, host)?;
                     if let Some(current) = s.agents.iter_mut().find(|x| x.id == agent.id) {
                         *current = agent
                     } else {
@@ -1547,20 +1567,9 @@ impl Service {
         host: &Host,
         provider: &str,
         cwd: &str,
+        codex_home: Option<&str>,
     ) -> Result<ModelCatalog, String> {
-        let key = [
-            provider.to_owned(),
-            host.id.clone(),
-            host.kind.clone(),
-            host.address.clone(),
-            host.user.clone(),
-            host.port.to_string(),
-            host.identity_file.clone(),
-            host.codex_path.clone(),
-            host.opencode_path.clone(),
-            cwd.to_owned(),
-        ]
-        .join("\u{1f}");
+        let key = model_catalog_key(host, provider, cwd, codex_home);
         if let Ok(cache) = self.model_catalogs.lock() {
             if let Some((when, catalog)) = cache.get(&key) {
                 if when.elapsed() < MODEL_CATALOG_CACHE_TTL {
@@ -1569,7 +1578,7 @@ impl Service {
             }
         }
         let catalog = if provider == "codex" {
-            models::read_codex_catalog(host, cwd)?
+            models::read_codex_catalog(host, cwd, codex_home)?
         } else if provider == "opencode" {
             models::read_opencode_catalog(host, cwd)?
         } else {
@@ -1627,7 +1636,7 @@ impl Service {
             let catalog = if task.provider == "acp" {
                 self.acp_task_model_catalog(task_id)?
             } else {
-                self.model_catalog(&host, &task.provider, &task.cwd)?
+                self.model_catalog(&host, &task.provider, &task.cwd, task.codex_home.as_deref())?
             };
             let model = catalog
                 .models
@@ -2351,28 +2360,58 @@ impl Service {
             return Err("Usage refresh policy is invalid.".into());
         }
         let mut overview = self.store.usage_overview()?;
-        let local_host = self
+        let data = self
             .data
             .lock()
-            .map_err(|_| "Monitter state lock failed.".to_string())?
-            .snapshot
-            .hosts
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let local_host = data.snapshot.hosts
             .iter()
             .find(|host| host.kind == "local")
             .cloned();
+        let configured_homes = data.snapshot.agents.iter()
+            .filter(|agent| agent.provider == "codex")
+            .map(|agent| agent.codex_home.clone())
+            .chain(data.snapshot.tasks.iter()
+                .filter(|task| task.provider == "codex")
+                .map(|task| task.codex_home.clone()))
+            .flatten()
+            .collect::<Vec<_>>();
+        // Keep a saved-but-deleted home in quota refreshes as an explicit
+        // failure source. Discovery itself remains existing-directory-only.
+        let mut homes = codex_accounts::list_accounts(configured_homes.iter().cloned().map(Some))
+            .into_iter().map(|account| (account.home.clone(), account))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for home in configured_homes {
+            if std::path::Path::new(&home).is_absolute() {
+                homes.entry(home.clone()).or_insert_with(|| codex_accounts::CodexAccount {
+                    label: codex_accounts::account_label(&home), home,
+                });
+            }
+        }
+        let homes = homes.into_values().collect::<Vec<_>>();
+        drop(data);
         let mut cache = self
             .quota_cache
             .lock()
             .map_err(|_| "Monitter quota cache lock failed.".to_string())?;
         let stale = cache
             .as_ref()
-            .is_none_or(|(fetched, _)| fetched.elapsed() >= Duration::from_secs(60));
+            .is_none_or(|(fetched, sources)| {
+                fetched.elapsed() >= Duration::from_secs(60)
+                    || sources.iter().filter(|source| source.provider == "codex")
+                        .filter_map(|source| source.codex_home.as_deref())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        != homes.iter().map(|account| account.home.as_str()).collect()
+            });
         if policy == "refresh" || (policy == "if-stale" && stale) {
             if let Some(host) = local_host.as_ref() {
-                let sources = ["codex", "claude", "minimax", "opencode-go"]
+                let mut sources = ["claude", "minimax", "opencode-go"]
                     .into_iter()
                     .map(|provider| usage_quota::refresh_provider_quota(host, provider))
-                    .collect();
+                    .collect::<Vec<_>>();
+                sources.extend(homes.iter().map(|account| {
+                    usage_quota::refresh_codex_quota(host, &account.home, &account.label)
+                }));
                 *cache = Some((Instant::now(), sources));
             }
         }
@@ -2381,6 +2420,17 @@ impl Service {
             .map(|(_, sources)| sources.clone())
             .unwrap_or_default();
         Ok(overview)
+    }
+
+    /// Directory discovery only: account configuration and credentials remain
+    /// private to the Codex CLI. The caller gets canonical local paths/labels.
+    fn list_codex_accounts(&self) -> Result<Vec<codex_accounts::CodexAccount>, String> {
+        let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
+        Ok(codex_accounts::list_accounts(
+            data.snapshot.agents.iter().map(|agent| agent.codex_home.clone()).chain(
+                data.snapshot.tasks.iter().map(|task| task.codex_home.clone()),
+            ),
+        ))
     }
 
     fn mark_usage_final(&self, task_id: &str) {
@@ -2567,7 +2617,7 @@ impl Service {
             if reset {
                 return self.mutate_data(None, |data| create_task_in_data(data, input));
             }
-            let (host, provider, cwd) = {
+            let (host, provider, cwd, codex_home) = {
                 let data = self
                     .data
                     .lock()
@@ -2612,9 +2662,9 @@ impl Service {
                 if cwd.trim().is_empty() {
                     return Err("Agent or host must specify a task folder.".into());
                 }
-                (host, agent.provider.clone(), cwd)
+                (host, agent.provider.clone(), cwd, agent.codex_home.clone())
             };
-            let catalog = self.model_catalog(&host, &provider, &cwd)?;
+            let catalog = self.model_catalog(&host, &provider, &cwd, codex_home.as_deref())?;
             let model = catalog
                 .models
                 .iter()
@@ -3987,6 +4037,7 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     if task.cwd.trim().is_empty() {
         return Err("Agent or host must specify a task folder.".into());
     }
+    prepare_task_codex_home(&mut task, &agent, &host)?;
     let instructions = agent_instructions(&agent, &state.settings.user_name);
     if !instructions.trim().is_empty() {
         state.messages.push(Message {
@@ -4197,6 +4248,15 @@ async fn get_usage_overview(
     tauri::async_runtime::spawn_blocking(move || service.usage_overview(policy.as_deref()))
         .await
         .map_err(|error| format!("Usage overview worker failed: {error}"))?
+}
+
+/// Native desktop and owner-LAN discovery of local account directories. It
+/// neither reads credentials nor starts a Codex session.
+#[tauri::command]
+fn list_codex_accounts(
+    state: State<'_, AppState>,
+) -> Result<Vec<codex_accounts::CodexAccount>, String> {
+    state.0.list_codex_accounts()
 }
 
 #[tauri::command]
@@ -4526,6 +4586,8 @@ fn save_agent(state: State<'_, AppState>, mut agent: Agent) -> Result<Snapshot, 
         if !snapshot.hosts.iter().any(|host| host.id == agent.host_id) {
             return Err("Agent host was not found.".into());
         }
+        let host = snapshot.hosts.iter().find(|host| host.id == agent.host_id).unwrap();
+        normalize_agent_codex_home(&mut agent, host)?;
         if let Some(current) = snapshot
             .agents
             .iter_mut()
@@ -4537,6 +4599,32 @@ fn save_agent(state: State<'_, AppState>, mut agent: Agent) -> Result<Snapshot, 
         }
         Ok(snapshot.clone())
     })
+}
+
+fn normalize_agent_codex_home(agent: &mut Agent, host: &Host) -> Result<(), String> {
+    let Some(home) = agent.codex_home.as_deref() else {
+        return Ok(());
+    };
+    if agent.provider != "codex" {
+        return Err("Only local Codex agents can use an explicit account home.".into());
+    }
+    if host.kind != "local" {
+        return Err("Codex account homes are available only on a local host.".into());
+    }
+    agent.codex_home = codex_accounts::validate_explicit_home(Some(home))?;
+    Ok(())
+}
+
+/// Validate the profile again at task creation, including old/imported state,
+/// then snapshot the actual local Codex home. This prevents malformed saved
+/// non-Codex or SSH settings from being silently discarded on a new chat.
+fn prepare_task_codex_home(task: &mut Task, agent: &Agent, host: &Host) -> Result<(), String> {
+    let mut validated = agent.clone();
+    normalize_agent_codex_home(&mut validated, host)?;
+    if task.provider == "codex" && host.kind == "local" {
+        task.codex_home = Some(codex_accounts::effective_home(validated.codex_home.as_deref())?);
+    }
+    Ok(())
 }
 
 const MAX_AVATAR_DATA_URL_BYTES: usize = 3 * 1024 * 1024;
@@ -4803,6 +4891,9 @@ impl Service {
                 .find(|host| host.id == agent.host_id)
                 .cloned()
                 .ok_or("Auto-name agent host was not found.")?;
+            let codex_home = (host.kind == "local")
+                .then(|| codex_accounts::effective_home(agent.codex_home.as_deref()))
+                .transpose()?;
             let task = Task {
                 id: id(),
                 agent_id: agent.id,
@@ -4817,6 +4908,7 @@ impl Service {
                 host_id: host.id.clone(),
                 cwd: agent.cwd,
                 provider: agent.provider,
+                codex_home,
                 model: String::new(),
                 model_settings: None,
                 sandbox: "read-only".into(),
@@ -4867,6 +4959,9 @@ impl Service {
                 .find(|host| host.id == agent.host_id)
                 .cloned()
                 .ok_or("Auto-name agent host was not found.")?;
+            let codex_home = (host.kind == "local")
+                .then(|| codex_accounts::effective_home(agent.codex_home.as_deref()))
+                .transpose()?;
             let task = Task {
                 id: id(),
                 agent_id: agent.id,
@@ -4881,6 +4976,7 @@ impl Service {
                 host_id: host.id.clone(),
                 cwd: agent.cwd,
                 provider: agent.provider,
+                codex_home,
                 model: String::new(),
                 model_settings: None,
                 sandbox: "read-only".into(),
@@ -4922,6 +5018,9 @@ impl Service {
                 .find(|host| host.id == agent.host_id)
                 .cloned()
                 .ok_or("Auto-name agent host was not found.")?;
+            let codex_home = (host.kind == "local")
+                .then(|| codex_accounts::effective_home(agent.codex_home.as_deref()))
+                .transpose()?;
             let task = Task {
                 id: id(),
                 agent_id: agent.id,
@@ -4936,6 +5035,7 @@ impl Service {
                 host_id: host.id.clone(),
                 cwd: agent.cwd,
                 provider: agent.provider,
+                codex_home,
                 model: String::new(),
                 model_settings: None,
                 sandbox: "read-only".into(),
@@ -4949,7 +5049,7 @@ impl Service {
         }
         // A catalog is authoritative when available. Prefer only advertised
         // lightweight model IDs, otherwise retain the selected harness default.
-        if let Ok(catalog) = self.model_catalog(&host, "codex", &task.cwd) {
+        if let Ok(catalog) = self.model_catalog(&host, "codex", &task.cwd, task.codex_home.as_deref()) {
             if let Some(model) = catalog
                 .models
                 .iter()
@@ -5436,6 +5536,7 @@ fn send_channel_message_accepted(
                 if task.cwd.trim().is_empty() {
                     return Err("Agent or host must specify a task folder.".into());
                 }
+                prepare_task_codex_home(&mut task, &agent, &host)?;
                 task.status = "running".into();
                 let instructions = agent_instructions(&agent, &state.settings.user_name);
                 if !instructions.trim().is_empty() {
@@ -5809,7 +5910,7 @@ async fn get_model_catalog(
             .data
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())?;
-        let (host, provider, cwd, selected) = if let Some(task_id) = target.task_id.as_deref() {
+        let (host, provider, cwd, selected, codex_home) = if let Some(task_id) = target.task_id.as_deref() {
             let task = data
                 .snapshot
                 .tasks
@@ -5828,6 +5929,7 @@ async fn get_model_catalog(
                     reasoning_effort: None,
                     fast_mode: None,
                 }),
+                task.codex_home.clone(),
             )
         } else if let Some(agent_id) = target.agent_id.as_deref() {
             let agent = data
@@ -5876,6 +5978,7 @@ async fn get_model_catalog(
                     reasoning_effort: None,
                     fast_mode: None,
                 },
+                target.codex_home.clone().or_else(|| agent.codex_home.clone()),
             )
         } else {
             return Err("Model catalog needs a task or agent target.".into());
@@ -5888,7 +5991,7 @@ async fn get_model_catalog(
                 acp_session_config::model_catalog(&serde_json::Value::Null)?
             }
         } else {
-            service.model_catalog(&host, &provider, &cwd)?
+            service.model_catalog(&host, &provider, &cwd, codex_home.as_deref())?
         };
         if !selected.model.trim().is_empty() {
             catalog.current.model = selected.model;
@@ -6181,6 +6284,7 @@ pub fn run() {
             get_ui_snapshot,
             get_task_events,
             get_usage_overview,
+            list_codex_accounts,
             get_task_event_detail,
             get_lan_server_info,
             resolve_approval,
@@ -7152,18 +7256,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .unwrap();
         // Prime the catalog cache so the live change can validate the chosen model.
         let (task_snapshot, host) = service.task_and_host(&task.id).unwrap();
-        let key = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            task_snapshot.provider,
-            host.id,
-            host.kind,
-            host.address,
-            host.user,
-            host.port,
-            host.identity_file,
-            host.codex_path,
-            host.opencode_path,
-            task_snapshot.cwd
+        let key = model_catalog_key(
+            &host,
+            &task_snapshot.provider,
+            &task_snapshot.cwd,
+            task_snapshot.codex_home.as_deref(),
         );
         service
             .model_catalogs
@@ -7350,18 +7447,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             })
             .unwrap();
         let (task_snapshot, host) = service.task_and_host(&task.id).unwrap();
-        let key = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            task_snapshot.provider,
-            host.id,
-            host.kind,
-            host.address,
-            host.user,
-            host.port,
-            host.identity_file,
-            host.codex_path,
-            host.opencode_path,
-            task_snapshot.cwd
+        let key = model_catalog_key(
+            &host,
+            &task_snapshot.provider,
+            &task_snapshot.cwd,
+            task_snapshot.codex_home.as_deref(),
         );
         let catalog = ModelCatalog {
             models: vec![CatalogModel {
@@ -7650,6 +7740,69 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             model_settings: None,
             sandbox: None,
         }
+    }
+
+    #[test]
+    fn local_codex_chats_pin_home_across_agent_switch_and_reopen() {
+        let dir = temp_dir("codex-home-pinning");
+        let first_home = dir.join("first-account");
+        let second_home = dir.join("second-account");
+        std::fs::create_dir_all(&first_home).unwrap();
+        std::fs::create_dir_all(&second_home).unwrap();
+        let first_home = std::fs::canonicalize(first_home).unwrap().to_string_lossy().into_owned();
+        let second_home = std::fs::canonicalize(second_home).unwrap().to_string_lossy().into_owned();
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        service.mutate(None, |snapshot| {
+            snapshot.agents[0].codex_home = Some(first_home.clone());
+            Ok(())
+        }).unwrap();
+        let original = service.create_task(task_input(agent_id.clone(), "Original", None)).unwrap();
+        assert_eq!(original.codex_home.as_deref(), Some(first_home.as_str()));
+        service.mutate(None, |snapshot| {
+            snapshot.agents[0].codex_home = Some(second_home.clone());
+            Ok(())
+        }).unwrap();
+        let newer = service.create_task(task_input(agent_id, "New account", None)).unwrap();
+        assert_eq!(newer.codex_home.as_deref(), Some(second_home.as_str()));
+        drop(service);
+        let reopened = Service::open(None, dir.clone()).unwrap().snapshot().unwrap();
+        assert_eq!(reopened.tasks.iter().find(|task| task.id == original.id).unwrap().codex_home.as_deref(), Some(first_home.as_str()));
+        assert_eq!(reopened.tasks.iter().find(|task| task.id == newer.id).unwrap().codex_home.as_deref(), Some(second_home.as_str()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn native_session_home_scope_normalizes_legacy_default_and_separates_accounts() {
+        let snapshot = default_snapshot();
+        let host = &snapshot.hosts[0];
+        let input = task_input(snapshot.agents[0].id.clone(), "Session", None);
+        let legacy = task_from_agent(&snapshot.agents[0], &input);
+        let default_home = codex_accounts::effective_home(None).unwrap();
+        let mut explicit_default = legacy.clone();
+        explicit_default.codex_home = Some(default_home);
+        assert_eq!(native_session_key(&legacy, host, "same"), native_session_key(&explicit_default, host, "same"));
+        let root = temp_dir("codex-session-scope");
+        let one = root.join("one"); let two = root.join("two");
+        std::fs::create_dir_all(&one).unwrap(); std::fs::create_dir_all(&two).unwrap();
+        let mut first = legacy.clone(); first.codex_home = Some(std::fs::canonicalize(one).unwrap().to_string_lossy().into_owned());
+        let mut second = legacy.clone(); second.codex_home = Some(std::fs::canonicalize(two).unwrap().to_string_lossy().into_owned());
+        assert_ne!(native_session_key(&first, host, "same"), native_session_key(&second, host, "same"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn task_home_rejects_imported_non_codex_and_ssh_profiles() {
+        let snapshot = default_snapshot();
+        let home = std::fs::canonicalize("/tmp").unwrap().to_string_lossy().into_owned();
+        let input = task_input(snapshot.agents[0].id.clone(), "Invalid", None);
+        let mut task = task_from_agent(&snapshot.agents[0], &input);
+        let mut non_codex = snapshot.agents[0].clone();
+        non_codex.provider = "claude".into(); non_codex.codex_home = Some(home.clone());
+        assert!(prepare_task_codex_home(&mut task, &non_codex, &snapshot.hosts[0]).is_err());
+        let mut ssh = snapshot.hosts[0].clone(); ssh.kind = "ssh".into();
+        let mut codex = snapshot.agents[0].clone(); codex.codex_home = Some(home);
+        assert!(prepare_task_codex_home(&mut task, &codex, &ssh).is_err());
     }
 
     #[test]
@@ -8740,6 +8893,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     host_id: host_id.clone(),
                     cwd: "/snapshotted-task-cwd".into(),
                     provider: "codex".into(),
+                    codex_home: None,
                     model: String::new(),
                     model_settings: None,
                     sandbox: "read-only".into(),

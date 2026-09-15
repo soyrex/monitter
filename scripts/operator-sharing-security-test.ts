@@ -16,7 +16,7 @@ const task = (id: string, overrides: Partial<Task> = {}): Task => ({
   nativeSessionId: `native-${id}`, archived: false, status: 'idle', createdAt: 1,
   updatedAt: 2, parentTaskId: null, channelId: null, projectId: null,
   hostId: 'private-host', cwd: '/private/workspace', provider: 'codex', model: 'private-model',
-  sandbox: 'workspace-write', ...overrides,
+  sandbox: 'workspace-write', codexHome: '/private/.codex-work', ...overrides,
 });
 const settings = { accent: '#123456', theme: 'dark' as const, interfaceScale: 125,
   showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false,
@@ -28,7 +28,8 @@ const source: Snapshot & { futureOwnerSecret: string } = {
   agents: [{ id: 'agent', name: 'Agent', description: 'Public description', instructions: 'secret instructions',
     avatar: 'data:image/png;base64,c2VjcmV0', provider: 'codex', model: 'private-model', hostId: 'private-host',
     cwd: '/private/workspace', color: '#000', sandbox: 'workspace-write', expertise: ['private expertise'],
-    responsibilities: ['private responsibility'], skills: ['private skill'], collaborationEnabled: true }],
+    responsibilities: ['private responsibility'], skills: ['private skill'], collaborationEnabled: true,
+    codexHome: '/private/.codex-work' }],
   tasks: [task(selectedId), task(hiddenId), task('archived', { archived: true }), task('channel', { channelId: 'channel-1' })],
   messages: [
     { id: 'visible', taskId: selectedId, role: 'assistant', text: 'hello', createdAt: 1,
@@ -75,7 +76,7 @@ assert.deepEqual(visitor.approvalRequests, []);
 assert.deepEqual(visitor.approvalRules, []);
 const serialized = JSON.stringify(visitor);
 for (const secret of ['/private', 'secret instructions', 'secret system profile', 'hidden chat',
-  'secret queued text', 'secret approval', 'future private value', 'native-']) assert.ok(!serialized.includes(secret), secret);
+  'secret queued text', 'secret approval', 'future private value', 'native-', 'codexHome', '.codex-work']) assert.ok(!serialized.includes(secret), secret);
 assert.equal(source.tasks[0].cwd, '/private/workspace', 'Projection must not mutate owner state.');
 assert.equal(source.messages[0].attachments?.[0].path, '/private/secret.txt');
 

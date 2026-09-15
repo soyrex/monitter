@@ -805,6 +805,9 @@ fn build_command_with_options(
     if task.cwd.trim().is_empty() {
         return Err("Task folder cannot be empty.".into());
     }
+    if task.provider == "codex" && host.kind != "local" && task.codex_home.is_some() {
+        return Err("A selected Codex account home can only run on this Mac, not over SSH.".into());
+    }
     let local_opencode_config = if host.kind == "local" && task.provider == "opencode" {
         collaboration
             .map(|(_, helper)| {
@@ -880,6 +883,9 @@ fn build_command_with_options(
     };
     isolate_child(&mut command);
     if host.kind == "local" {
+        if task.provider == "codex" {
+            crate::codex_accounts::configure_command(&mut command, task.codex_home.as_deref())?;
+        }
         if let Some((grant, _helper)) = collaboration {
             command.env("MONITTER_ENDPOINT", &grant.endpoint);
             command.env("MONITTER_TOKEN", &grant.token);
@@ -1102,6 +1108,9 @@ pub fn build_probe_command(host: &Host, provider: &str) -> Result<Command, Strin
 }
 
 pub fn resume_command(host: &Host, task: &Task, native: &str) -> Result<String, String> {
+    if task.provider == "codex" && host.kind != "local" && task.codex_home.is_some() {
+        return Err("A selected Codex account home can only run on this Mac, not over SSH.".into());
+    }
     let cli = if host.kind == "local" {
         resolve_local_provider(&task.provider, configured_path(host, &task.provider)?)?
             .display()
@@ -1121,13 +1130,22 @@ pub fn resume_command(host: &Host, task: &Task, native: &str) -> Result<String, 
             ))
         }
     };
+    let account_prefix = if task.provider == "codex" && host.kind == "local" {
+        format!(
+            "CODEX_HOME={} ",
+            posix_quote(&crate::codex_accounts::effective_home(task.codex_home.as_deref())?)
+        )
+    } else {
+        String::new()
+    };
     let inner = format!(
-        "cd {} && {} {}",
+        "cd {} && {}{} {}",
         if host.kind == "ssh" {
             remote_path(&task.cwd)
         } else {
             posix_quote(&task.cwd)
         },
+        account_prefix,
         if host.kind == "ssh" {
             remote_path(&cli)
         } else {
@@ -3162,7 +3180,40 @@ mod tests {
             sandbox: "read-only".into(),
             project_id: None,
             acp: None,
+            codex_home: None,
         }
+    }
+
+    #[test]
+    fn local_codex_commands_receive_the_task_account_home() {
+        let mut scoped = task(None, "");
+        scoped.codex_home = Some("/tmp".into());
+        let mut local = host("local");
+        local.codex_path = "/usr/bin/true".into();
+        let command = build_command(&local, &scoped).unwrap();
+        assert!(command.get_envs().any(|(key, value)| key == std::ffi::OsStr::new("CODEX_HOME")
+            && (value == Some(std::ffi::OsStr::new("/private/tmp"))
+                || value == Some(std::ffi::OsStr::new("/tmp")))));
+    }
+
+    #[test]
+    fn selected_codex_home_is_rejected_for_ssh_command() {
+        let mut scoped = task(None, "");
+        scoped.codex_home = Some("/tmp".into());
+        assert!(build_command(&host("ssh"), &scoped)
+            .unwrap_err()
+            .contains("only run on this Mac"));
+    }
+
+    #[test]
+    fn local_resume_command_keeps_the_task_account_home() {
+        let mut scoped = task(Some("thread-1"), "");
+        scoped.codex_home = Some("/tmp".into());
+        let mut local = host("local");
+        local.codex_path = "/usr/bin/true".into();
+        let command = resume_command(&local, &scoped, "thread-1").unwrap();
+        assert!(command.contains("CODEX_HOME='/private/tmp'") || command.contains("CODEX_HOME='/tmp'"));
+        assert!(command.contains("resume 'thread-1'"));
     }
 
     #[test]
