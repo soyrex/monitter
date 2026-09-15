@@ -103,7 +103,7 @@
       });
       // The invite is a fragment so it is never sent to the hosted web server
       // or leaked through its request logs/referrers.
-      link = `${publicUrl}#invite=${encodeURIComponent(next.invitation)}`;
+      link = `${publicUrl}#invite=${encodeURIComponent(next.invitation)}&accent=${encodeURIComponent(snapshot.settings.accent ?? '#3f9d6a')}&theme=${snapshot.settings.theme ?? 'light'}`;
       qr = await QRCode.toDataURL(link, { width: 260, margin: 2 });
       if (current !== generation) { next.close(); return; }
       const created = await registerPairingCode(next.invitation);
