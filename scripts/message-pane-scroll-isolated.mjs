@@ -72,6 +72,21 @@ try {
     const grow = async name => { const before = await metrics(); await invoke(name); await expect.poll(async () => (await metrics()).total).toBeGreaterThan(before.total + 8); };
 
     await atBottom();
+    await page.locator('.messages').evaluate(node => {
+      node.dispatchEvent(new WheelEvent('wheel', { deltaY: 12, bubbles: true }));
+      node.dispatchEvent(new WheelEvent('wheel', { deltaX: 18, deltaY: 4, bubbles: true }));
+      node.focus();
+      node.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      const touchEvent = (type, clientY) => {
+        const event = new Event(type, { bubbles: true });
+        Object.defineProperty(event, 'touches', { value: [{ clientY }] });
+        return event;
+      };
+      node.dispatchEvent(touchEvent('touchstart', 160));
+      node.dispatchEvent(touchEvent('touchmove', 120));
+    });
+    await grow('growExisting');
+    await atBottom();
     await grow('growExisting');
     await atBottom();
     const jumpButton = page.locator('.jump-latest');
@@ -123,7 +138,9 @@ try {
       const sample = () => {
         maximumGap = Math.max(maximumGap, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop);
         minimumTop = Math.min(minimumTop, viewport.scrollTop);
-        if (performance.now() - started < 1_300) requestAnimationFrame(sample);
+        // The shared clock ticks on wall-clock seconds, which can fall before
+        // this run's next elapsed second. Allow two ticks plus render time.
+        if (performance.now() - started < 2_300) requestAnimationFrame(sample);
         else resolve({ maximumGap, minimumTop, rowHeight: row.getBoundingClientRect().height, timerText: row.querySelector('time')?.textContent, top: viewport.scrollTop });
       };
       requestAnimationFrame(sample);

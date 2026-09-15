@@ -14,6 +14,7 @@
   let lastViewportHeight = 0;
   let lastScrollHeight = 0;
   let followFrame: number | undefined;
+  let touchY: number | undefined;
   const bottomThreshold = 50;
   let documentVisible = $state(true);
 
@@ -37,7 +38,8 @@
 
   function pinToLatest() {
     if (!viewport) return;
-    viewport.scrollTop = viewport.scrollHeight;
+    const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    if (Math.abs(viewport.scrollTop - bottom) > 1) viewport.scrollTop = bottom;
     showJump = false;
     // Keep programmatic scroll events from being mistaken for reader intent.
     rememberMetrics();
@@ -55,7 +57,27 @@
   }
 
   function handleScrollKey(event: KeyboardEvent) {
+    if (event.target !== viewport || event.defaultPrevented) return;
+    const towardLatest = ['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey);
+    if (towardLatest && followingLatest) return;
     if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) detachFromLatest();
+  }
+
+  function handleWheel(event: WheelEvent) {
+    // Trackpad momentum and horizontal gestures at the bottom must not silently
+    // disable following: no scroll event will arrive to turn it back on.
+    if (event.ctrlKey || event.deltaY === 0 || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    if (event.deltaY < 0) detachFromLatest();
+  }
+
+  function handleTouchStart(event: TouchEvent) {
+    touchY = event.touches[0]?.clientY;
+  }
+
+  function handleTouchMove(event: TouchEvent) {
+    const nextY = event.touches[0]?.clientY;
+    if (nextY !== undefined && touchY !== undefined && nextY > touchY) detachFromLatest();
+    touchY = nextY;
   }
 
   function handleScrollPointer(event: PointerEvent) {
@@ -88,7 +110,7 @@
     // instead of measuring the new, larger bottom gap as a reader scrolling up.
     if (viewport && (viewport.clientHeight !== lastViewportHeight || viewport.scrollHeight !== lastScrollHeight)) {
       if (followingLatest) followLayout();
-      else showJump = true;
+      else showJump = !atAbsoluteLatest();
       rememberMetrics();
       return;
     }
@@ -101,7 +123,7 @@
         showJump = false;
       } else {
         followingLatest = false;
-        showJump = !atAbsoluteLatest() || moved;
+        showJump = !atAbsoluteLatest();
       }
       rememberMetrics();
       return;
@@ -136,7 +158,7 @@
       // Covers streamed content, expanded tools, images/fonts and pane resizing.
       // Readers who scrolled up keep their place as new content arrives.
       if (followingLatest) followLayout();
-      else showJump = true;
+      else showJump = !atAbsoluteLatest();
       rememberMetrics();
     });
     if (viewport) observer.observe(viewport);
@@ -161,7 +183,7 @@
 <div class="message-pane" class:has-sticky-request={stickyRequest}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (the scroll pane must support keyboard scrolling) -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (wheel, touch and scrollbar intent must detach follow mode before scroll) -->
-  <div class="messages" bind:this={viewport} onscroll={handleScroll} onwheel={detachFromLatest} ontouchmove={detachFromLatest} onkeydown={handleScrollKey} onpointerdown={handleScrollPointer} role="region" aria-label="Messages" tabindex="0">
+  <div class="messages" bind:this={viewport} onscroll={handleScroll} onwheel={handleWheel} ontouchstart={handleTouchStart} ontouchmove={handleTouchMove} onkeydown={handleScrollKey} onpointerdown={handleScrollPointer} role="region" aria-label="Messages" tabindex="0">
     {#if header}<div class="message-header" bind:this={heading}>{@render header()}</div>{/if}
     <div class="message-content" use:messageArrival bind:this={content}>{@render children()}</div>
   </div>

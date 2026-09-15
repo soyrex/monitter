@@ -51,7 +51,7 @@
 </script>
 
 <main>
-  <MessagePane {resetKey}>
+  <MessagePane {resetKey} {thinking}>
     {#each entries as entry (entry.id)}
       <article class:tall={entry.tall}>{entry.text}</article>
     {/each}

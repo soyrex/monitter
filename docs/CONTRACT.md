@@ -513,12 +513,13 @@ Cmd-P is the controls palette. Both preserve drafts, contain keyboard focus and 
 arrow navigation, Enter and Escape. Settings use native checkbox inputs styled/announced as switches.
 
 Activating a chat or channel opens its message pane at the latest message. Incoming content follows
-the bottom while the reader is already there. The first wheel, touch movement, scrollbar drag, or
-scrolling key cancels any pending automatic follow before the viewport moves; scrolling up therefore
+the bottom while the reader is already there. The first upward wheel, touch movement toward older
+messages, scrollbar drag, or upward scrolling key cancels any pending automatic follow before the viewport moves; scrolling up therefore
 pauses immediately, even inside the normal near-bottom threshold, and shows a keyboard-accessible
 down-arrow button to jump back. Successful sends reveal the submitted message
 in the same active conversation. A delayed send acknowledgement cannot scroll a different chat.
 Content/pane resizing preserves bottom-following, including late image/font loads and tool expansion.
+Downward and horizontal gestures at the bottom preserve following, including trackpad momentum.
 
 RunEvent.kind additionally accepts `computer`, `goal`, and `log`. Computer detail contains
 `{id,phase:"started"|"completed",tool,summary}`. Only start records in the current user turn of a
