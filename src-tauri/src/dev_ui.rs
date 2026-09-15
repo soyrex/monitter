@@ -8,7 +8,7 @@ use std::{
     thread,
     time::Duration,
 };
-use tauri::{AppHandle, Manager, Url, WebviewWindow, Wry};
+use tauri::{AppHandle, Emitter, Manager, Url, WebviewWindow, Wry};
 
 pub const LOAD_MENU_ID: &str = "load-dev-ui";
 pub const PACKAGED_MENU_ID: &str = "use-packaged-ui";
@@ -27,6 +27,30 @@ pub struct DevUiState {
     navigation_generation: Arc<AtomicU64>,
 }
 
+#[derive(Default)]
+struct WatchdogTracker {
+    consecutive_failures: u8,
+    fallback_requested: bool,
+}
+
+impl WatchdogTracker {
+    fn observe(&mut self, probe_succeeded: bool) -> bool {
+        if self.fallback_requested {
+            return false;
+        }
+        self.consecutive_failures = if probe_succeeded {
+            0
+        } else {
+            self.consecutive_failures.saturating_add(1)
+        };
+        if self.consecutive_failures < MAX_CONSECUTIVE_PROBE_FAILURES {
+            return false;
+        }
+        self.fallback_requested = true;
+        true
+    }
+}
+
 impl DevUiState {
     pub fn capture(app: &AppHandle<Wry>) -> Result<Self, String> {
         let window = main_window(app)?;
@@ -43,33 +67,20 @@ impl DevUiState {
         let generation = self.navigation_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let state = self.clone();
         thread::spawn(move || {
-            let mut failures = 0;
+            let mut tracker = WatchdogTracker::default();
             loop {
                 thread::sleep(WATCH_INTERVAL);
                 if state.navigation_generation.load(Ordering::SeqCst) != generation {
                     return;
                 }
-                failures = if probe().is_ok() { 0 } else { failures + 1 };
-                if failures < MAX_CONSECUTIVE_PROBE_FAILURES {
+                if !tracker.observe(probe().is_ok()) {
                     continue;
                 }
-                if state
-                    .navigation_generation
-                    .compare_exchange(
-                        generation,
-                        generation + 1,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    )
-                    .is_ok()
-                {
-                    let _ = main_window(&app).and_then(|window| {
-                        window
-                            .navigate((*state.packaged_url).clone())
-                            .map_err(|error| {
-                                format!("Could not restore the packaged interface: {error}")
-                            })
-                    });
+                if claim_fallback(&state.navigation_generation, generation) {
+                    if let Err(error) = restore_packaged(&app, &state.packaged_url) {
+                        eprintln!("{error}");
+                        let _ = app.emit(ERROR_EVENT, error);
+                    }
                 }
                 return;
             }
@@ -94,9 +105,24 @@ pub fn enter(app: &AppHandle<Wry>) -> Result<(), String> {
 
 pub fn leave(app: &AppHandle<Wry>, state: &DevUiState) -> Result<(), String> {
     state.cancel_watchdog();
+    restore_packaged(app, &state.packaged_url)
+}
+
+fn restore_packaged(app: &AppHandle<Wry>, packaged_url: &Url) -> Result<(), String> {
     main_window(app)?
-        .navigate((*state.packaged_url).clone())
+        .navigate(packaged_url.clone())
         .map_err(|error| format!("Could not restore the packaged interface: {error}"))
+}
+
+fn claim_fallback(navigation_generation: &AtomicU64, expected: u64) -> bool {
+    navigation_generation
+        .compare_exchange(
+            expected,
+            expected.wrapping_add(1),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
 }
 
 fn main_window(app: &AppHandle<Wry>) -> Result<WebviewWindow<Wry>, String> {
@@ -178,5 +204,34 @@ mod tests {
         assert!(!is_compatible_marker_response(
             "HTTP/1.1 200 OK\r\n\r\n{\"app\":\"monitter\",\"hotUiProtocol\":1} trailing"
         ));
+    }
+
+    #[test]
+    fn watchdog_requires_consecutive_failures_and_resets_after_success() {
+        let mut tracker = WatchdogTracker::default();
+        assert!(!tracker.observe(false));
+        assert!(!tracker.observe(false));
+        assert!(!tracker.observe(true));
+        assert_eq!(tracker.consecutive_failures, 0);
+
+        assert!(!tracker.observe(false));
+        assert!(!tracker.observe(false));
+        assert!(tracker.observe(false));
+        assert!(!tracker.observe(false), "fallback is requested only once");
+    }
+
+    #[test]
+    fn only_the_current_watchdog_can_claim_fallback() {
+        let generation = AtomicU64::new(7);
+        assert!(
+            !claim_fallback(&generation, 6),
+            "a stale watchdog cannot navigate"
+        );
+        assert!(claim_fallback(&generation, 7));
+        assert_eq!(generation.load(Ordering::SeqCst), 8);
+        assert!(
+            !claim_fallback(&generation, 7),
+            "fallback cannot be claimed twice"
+        );
     }
 }
