@@ -35,9 +35,14 @@ No fake conversations, progress, token counts, host connections or model replies
   probes, never sends a model prompt, changes authentication, or exposes account identifiers.
   Codex uses app-server account rate limits; MiniMax uses `mmx quota show --output json
   --non-interactive`; OpenCode Go asks the local Codex Router credential broker to query its
-  provider usage endpoint without exposing the API key to Monitter; Claude remains explicitly
-  unsupported until a structured allowance is observed through its supported session transport.
-  All allowance timestamps are Unix milliseconds.
+  provider usage endpoint without exposing the API key to Monitter. Claude uses
+  `claude -p "/usage" --output-format json`: the local command reports zero model turns and
+  tokens, and Monitter accepts only its successful `local_command: "usage"` result. The
+  `Current session` and `Current week (all models)` headlines are account allowance windows;
+  the explicitly approximate, machine-local `What's contributing` analysis is discarded.
+  Reset text with an omitted year is resolved to the next plausible occurrence in its named
+  timezone. Freshness expiry and probe failures remain visible. All allowance timestamps
+  are Unix milliseconds.
 - `save_host { host: Host }` -> Snapshot (empty id creates)
 - `delete_host { id: string }` -> Snapshot (reject referenced/default local host)
 - `probe_host { host: Host }` -> ProbeResult (unsaved settings allowed; versions keyed provider)

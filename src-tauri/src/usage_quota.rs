@@ -5,20 +5,25 @@
 
 use crate::{
     model::{now, AllowanceBalance, AllowanceWindow, Host, SubscriptionUsageSource},
-    runner::resolve_local,
+    runner::{resolve_local, resolve_local_provider},
 };
+use jiff::{Timestamp, Zoned};
+use regex::Regex;
 use serde_json::{json, Value};
 use std::{
     ffi::{OsStr, OsString},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{mpsc, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+// The verified local command itself is quick, but a cold Claude CLI can take
+// longer than the other quota clients to initialise its Node runtime.
+const CLAUDE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 const STALE_AFTER_MS: i64 = 60_000;
 
@@ -26,26 +31,12 @@ const STALE_AFTER_MS: i64 = 60_000;
 /// host.  The returned source intentionally carries failures rather than
 /// returning raw CLI/protocol errors, as those errors can contain account data.
 ///
-/// Supported provider names are `codex`, `minimax` (with `mmx` accepted as an
-/// alias), and `opencode-go`. Claude has no safe on-demand allowance read path
-/// yet.
+/// Supported provider names are `codex`, `claude`, `minimax` (with `mmx`
+/// accepted as an alias), and `opencode-go`.
 pub(crate) fn refresh_provider_quota(host: &Host, provider: &str) -> SubscriptionUsageSource {
     let attempted_at = now();
     let provider = provider.trim().to_ascii_lowercase();
 
-    if provider == "claude" {
-        return source(
-            "claude",
-            host,
-            "Claude on-demand allowance refresh",
-            "unsupported",
-            attempted_at,
-            None,
-            vec![],
-            vec![],
-            None,
-        );
-    }
     if host.kind != "local" {
         return source(
             canonical_provider(&provider),
@@ -62,6 +53,7 @@ pub(crate) fn refresh_provider_quota(host: &Host, provider: &str) -> Subscriptio
 
     match provider.as_str() {
         "codex" => refresh_codex(host, attempted_at),
+        "claude" => refresh_claude(host, attempted_at),
         "minimax" | "mmx" => refresh_minimax(host, attempted_at),
         "opencode-go" => refresh_opencode_go(host, attempted_at),
         _ => source(
@@ -74,6 +66,61 @@ pub(crate) fn refresh_provider_quota(host: &Host, provider: &str) -> Subscriptio
             vec![],
             vec![],
             None,
+        ),
+    }
+}
+
+/// Claude's local `/usage` command is a zero-token CLI command. It is kept as
+/// a separate, short-lived argv invocation so it cannot affect a resident
+/// Claude chat or its authentication/configuration.
+fn refresh_claude(host: &Host, attempted_at: i64) -> SubscriptionUsageSource {
+    let executable = match resolve_local_provider("claude", &host.claude_path) {
+        Ok(path) => path,
+        Err(_) => {
+            return probe_error(
+                "claude",
+                host,
+                "claude /usage",
+                attempted_at,
+                "Claude quota probe is unavailable on this host.",
+            )
+        }
+    };
+    let mut command = Command::new(executable);
+    command.args(claude_usage_args());
+    configure(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            return probe_error(
+                "claude",
+                host,
+                "claude /usage",
+                attempted_at,
+                "Could not start the Claude quota probe.",
+            )
+        }
+    };
+    let result = read_all_bounded_with_timeout(&mut child, CLAUDE_PROBE_TIMEOUT)
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ()))
+        .and_then(|value| normalize_claude_usage(value, attempted_at));
+    stop_child(&mut child);
+    match result {
+        Ok(windows) => success(
+            "claude",
+            host,
+            "claude -p /usage --output-format json",
+            attempted_at,
+            None,
+            windows,
+            vec![],
+        ),
+        Err(_) => probe_error(
+            "claude",
+            host,
+            "claude -p /usage --output-format json",
+            attempted_at,
+            "Claude quota probe did not return supported account usage.",
         ),
     }
 }
@@ -282,6 +329,11 @@ fn minimax_args() -> [&'static str; 5] {
     ["quota", "show", "--output", "json", "--non-interactive"]
 }
 
+/// Literal Claude CLI argv. `/usage` is a local command, not a model prompt.
+fn claude_usage_args() -> [&'static str; 4] {
+    ["-p", "/usage", "--output-format", "json"]
+}
+
 fn opencode_go_args() -> [&'static str; 3] {
     ["provider-quota", "opencode-go", "--json"]
 }
@@ -431,9 +483,13 @@ fn spawn_json_reader(stdout: impl Read + Send + 'static) -> mpsc::Receiver<Resul
 }
 
 fn read_all_bounded(child: &mut Child) -> Result<Vec<u8>, ()> {
+    read_all_bounded_with_timeout(child, PROBE_TIMEOUT)
+}
+
+fn read_all_bounded_with_timeout(child: &mut Child, timeout: Duration) -> Result<Vec<u8>, ()> {
     let stdout = child.stdout.take().ok_or(())?;
     let (tx, rx) = mpsc::channel();
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     thread::spawn(move || {
         let mut reader = stdout;
         let mut bytes = Vec::new();
@@ -471,6 +527,111 @@ fn read_all_bounded(child: &mut Child) -> Result<Vec<u8>, ()> {
             None => thread::sleep(Duration::from_millis(10)),
         }
     }
+}
+
+static CLAUDE_SESSION_LINE: OnceLock<Regex> = OnceLock::new();
+static CLAUDE_WEEK_LINE: OnceLock<Regex> = OnceLock::new();
+
+/// Decode Claude's one-object JSON response and retain only the two
+/// account-level allowance lines. Raw output is never returned or logged.
+fn normalize_claude_usage(value: Value, attempted_at: i64) -> Result<Vec<AllowanceWindow>, ()> {
+    let object = value.as_object().ok_or(())?;
+    if object.get("local_command").and_then(Value::as_str) != Some("usage")
+        || object.get("is_error").and_then(Value::as_bool) != Some(false)
+    {
+        return Err(());
+    }
+    let result = object
+        .get("result")
+        .and_then(Value::as_str)
+        .filter(|result| !result.trim().is_empty())
+        .ok_or(())?;
+    let session = claude_line_regex(&CLAUDE_SESSION_LINE, "Current\\s+session");
+    let week = claude_line_regex(
+        &CLAUDE_WEEK_LINE,
+        "Current\\s+week\\s*\\(\\s*all\\s+models\\s*\\)",
+    );
+    Ok(vec![
+        claude_window("session", "Current session", session, result, attempted_at)?,
+        claude_window(
+            "week_all_models",
+            "Current week (all models)",
+            week,
+            result,
+            attempted_at,
+        )?,
+    ])
+}
+
+/// Exactly two compiled, multiline expressions track the provider's two
+/// labelled allowance lines while tolerating markdown, spacing and separators.
+fn claude_line_regex(slot: &'static OnceLock<Regex>, heading: &str) -> &'static Regex {
+    slot.get_or_init(|| {
+        Regex::new(&format!(
+            r"(?im)^\s*(?:[-*#>]+\s*)?{heading}\s*(?:[:*_-]+\s*)*(?<percent>\d{{1,3}}(?:\.\d+)?)\s*%\s*used\b.*?\bresets?\s+(?<month>[A-Za-z]{{3,9}})\s+(?<day>\d{{1,2}})(?:\s*,?\s*(?<year>\d{{4}}))?\s+at\s+(?<hour>\d{{1,2}})(?::(?<minute>\d{{2}}))?\s*(?<meridiem>am|pm)\s*\(\s*(?<zone>[A-Za-z0-9_+\-/]+)\s*\)\s*$"
+        ))
+        .expect("constant Claude usage regex is valid")
+    })
+}
+
+fn claude_window(
+    key: &str,
+    label: &str,
+    regex: &Regex,
+    result: &str,
+    attempted_at: i64,
+) -> Result<AllowanceWindow, ()> {
+    let captures = regex.captures(result).ok_or(())?;
+    let used_percent = captures
+        .name("percent")
+        .ok_or(())?
+        .as_str()
+        .parse::<f64>()
+        .map_err(|_| ())?;
+    if !(0.0..=100.0).contains(&used_percent) {
+        return Err(());
+    }
+    let zone = captures.name("zone").ok_or(())?.as_str();
+    let initial_year = match captures.name("year") {
+        Some(year) => year.as_str().parse::<i16>().map_err(|_| ())?,
+        None => Timestamp::from_millisecond(attempted_at)
+            .and_then(|timestamp| timestamp.in_tz(zone))
+            .map(|zoned| zoned.year())
+            .map_err(|_| ())?,
+    };
+    let timestamp = claude_reset_timestamp(&captures, initial_year)?;
+    let resets_at = if captures.name("year").is_none() && timestamp < attempted_at {
+        claude_reset_timestamp(&captures, initial_year.checked_add(1).ok_or(())?)?
+    } else {
+        timestamp
+    };
+    Ok(AllowanceWindow {
+        key: key.into(),
+        label: label.into(),
+        metric: "combined".into(),
+        used_percent: Some(used_percent),
+        used: None,
+        limit: None,
+        unit: "unknown".into(),
+        resets_at: Some(resets_at),
+    })
+}
+
+fn claude_reset_timestamp(captures: &regex::Captures<'_>, year: i16) -> Result<i64, ()> {
+    let month = captures.name("month").ok_or(())?.as_str();
+    let day = captures.name("day").ok_or(())?.as_str();
+    let hour = captures.name("hour").ok_or(())?.as_str();
+    let minute = captures
+        .name("minute")
+        .map_or("00", |minute| minute.as_str());
+    let meridiem = captures.name("meridiem").ok_or(())?.as_str();
+    let zone = captures.name("zone").ok_or(())?.as_str();
+    Zoned::strptime(
+        "%Y %b %e at %I:%M%p %Q",
+        format!("{year} {month} {day} at {hour}:{minute}{meridiem} {zone}"),
+    )
+    .map(|zoned| zoned.timestamp().as_millisecond())
+    .map_err(|_| ())
 }
 
 fn normalize_codex(
@@ -986,8 +1147,86 @@ mod tests {
     }
 
     #[test]
-    fn claude_is_explicitly_unsupported_without_an_error() {
-        let host = Host {
+    fn claude_uses_the_verified_literal_argv() {
+        assert_eq!(
+            claude_usage_args(),
+            ["-p", "/usage", "--output-format", "json"]
+        );
+    }
+
+    #[test]
+    fn claude_parses_the_verified_account_windows_without_retaining_raw_output() {
+        let attempted_at = 1_789_473_600_000;
+        let windows = normalize_claude_usage(json!({
+            "local_command": "usage", "is_error": false,
+            "result": "Current session: 0% used · resets Sep 15 at 7pm (Europe/Madrid)\nCurrent week (all models): 6% used · resets Sep 19 at 1am (Europe/Madrid)"
+        }), attempted_at).unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].key, "session");
+        assert_eq!(windows[0].used_percent, Some(0.0));
+        assert_eq!(windows[0].resets_at, Some(1_789_491_600_000));
+        assert_eq!(windows[1].key, "week_all_models");
+        assert_eq!(windows[1].used_percent, Some(6.0));
+        assert_eq!(windows[1].resets_at, Some(1_789_772_400_000));
+        assert!(windows
+            .iter()
+            .all(|window| window.metric == "combined" && window.unit == "unknown"));
+    }
+
+    #[test]
+    fn claude_parser_tolerates_heading_spacing_decimal_percent_and_named_zone() {
+        let windows = normalize_claude_usage(json!({
+            "local_command":"usage", "is_error":false,
+            "result":"** Current session ** : 24.5 % used - resets Sep 15, 2026 at 7:05 PM (America/New_York)\n> current week ( all models ) : 76 % used - resets Sep 19, 2026 at 1 AM (America/New_York)"
+        }), 0).unwrap();
+        assert_eq!(windows[0].used_percent, Some(24.5));
+        assert_eq!(windows[1].used_percent, Some(76.0));
+        assert!(windows.iter().all(|window| window.resets_at.is_some()));
+    }
+
+    #[test]
+    fn claude_omitted_year_advances_to_the_next_plausible_reset() {
+        let windows = normalize_claude_usage(json!({
+            "local_command":"usage", "is_error":false,
+            "result":"Current session: 1% used; resets Sep 15 at 7pm (Europe/Madrid)\nCurrent week (all models): 2% used; resets Sep 19 at 1am (Europe/Madrid)"
+        }), 1_789_500_000_000).unwrap();
+        let year = Timestamp::from_millisecond(windows[0].resets_at.unwrap())
+            .unwrap()
+            .in_tz("Europe/Madrid")
+            .unwrap()
+            .year();
+        assert_eq!(year, 2027);
+    }
+
+    #[test]
+    fn claude_parser_rejects_malformed_or_error_envelopes_and_incomplete_usage() {
+        let valid_result = "Current session: 1% used; resets in 1h\nCurrent week (all models): 2% used; resets in 1d";
+        assert!(normalize_claude_usage(json!(null), 0).is_err());
+        assert!(normalize_claude_usage(
+            json!({"local_command":"other", "is_error":false, "result":valid_result}),
+            0
+        )
+        .is_err());
+        assert!(normalize_claude_usage(
+            json!({"local_command":"usage", "is_error":true, "result":valid_result}),
+            0
+        )
+        .is_err());
+        assert!(normalize_claude_usage(
+            json!({"local_command":"usage", "is_error":false, "result":"Current session: 1% used"}),
+            0
+        )
+        .is_err());
+        assert!(normalize_claude_usage(
+            json!({"local_command":"usage", "is_error":false, "result":42}),
+            0
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn claude_failure_remote_and_freshness_states_are_explicit() {
+        let mut host = Host {
             id: "local".into(),
             name: "Local".into(),
             kind: "local".into(),
@@ -997,12 +1236,37 @@ mod tests {
             identity_file: String::new(),
             default_cwd: String::new(),
             codex_path: String::new(),
-            claude_path: String::new(),
+            claude_path: "/definitely/not/a/claude-binary".into(),
             opencode_path: String::new(),
             hermes_path: String::new(),
         };
-        let source = refresh_provider_quota(&host, "claude");
-        assert_eq!(source.state, "unsupported");
-        assert_eq!(source.error, None);
+        let failed = refresh_provider_quota(&host, "claude");
+        assert_eq!(failed.state, "error");
+        assert_eq!(failed.fetched_at, None);
+        assert_eq!(failed.stale_after, None);
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("Claude quota probe is unavailable on this host.")
+        );
+
+        host.kind = "ssh".into();
+        let remote = refresh_provider_quota(&host, "claude");
+        assert_eq!(remote.state, "not-applicable");
+        assert_eq!(remote.error, None);
+
+        host.kind = "local".into();
+        let fetched_at = 1_789_473_600_000;
+        let available = success(
+            "claude",
+            &host,
+            "claude -p /usage --output-format json",
+            fetched_at,
+            None,
+            vec![],
+            vec![],
+        );
+        assert_eq!(available.state, "available");
+        assert_eq!(available.fetched_at, Some(fetched_at));
+        assert_eq!(available.stale_after, Some(fetched_at + STALE_AFTER_MS));
     }
 }

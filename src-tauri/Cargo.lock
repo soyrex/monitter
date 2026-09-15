@@ -2111,9 +2111,11 @@ name = "monitter"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "jiff",
  "libc",
  "objc2-app-kit",
  "portable-pty",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
