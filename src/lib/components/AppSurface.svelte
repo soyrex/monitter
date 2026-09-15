@@ -2626,7 +2626,10 @@
   }
   const slashItems = $derived([
     ...(pane === "channel" ? channelCommands : []),
-    { id: "new", label: "/new", detail: "Open a local New chat draft" },
+    ...(pane === "task" ? [
+      { id: "context-new", label: "/new", detail: "Clear context and start fresh" },
+      { id: "context-clear", label: "/clear", detail: "Alias for /new" },
+    ] : [{ id: "new", label: "/new", detail: "Open a local New chat draft" }]),
     { id: "settings", label: "/settings", detail: "Open Monitter preferences" },
     ...(pane === "task" ? [{ id: "project", label: "/project", detail: "Choose the project for this chat" }] : []),
     ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel) ? [{ id: "autoname", label: "/autoname", detail: "Generate a title from recent content" }] : []),
@@ -2672,7 +2675,11 @@
     error = "";
     notice = "";
     saveCurrentDraft();
-    if (item.id === "new") openTaskComposer(null, agentId, projectId);
+    if ((item.id === "context-new" || item.id === "context-clear") && task) {
+      await run(() => bridge.clearTaskContext(task.id), "Context cleared.");
+      scrollRevision += 1;
+    }
+    else if (item.id === "new") openTaskComposer(null, agentId, projectId);
     else if (item.id === "settings") routeSettings();
     else if (item.id === "project") {
       if (currentTaskDraft) document.getElementById("task-project")?.focus();
