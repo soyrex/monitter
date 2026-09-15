@@ -10,7 +10,7 @@
   import ThinkingStatus from './ThinkingStatus.svelte';
   import ImageLightbox from './ImageLightbox.svelte';
   type DetailLoader = (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
-  let { event, events = [], compressed = false, running = false, avatar, onloaddetail }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader } = $props();
+  let { event, events = [], compressed = false, running = false, active = true, avatar, onloaddetail }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean; active?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
   const primary = $derived(items[0]);
   const latest = $derived(items.at(-1));
@@ -150,7 +150,7 @@
 {/snippet}
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 {#if primary && emptyReasoning}
-  <ThinkingStatus {running} {avatar} startedAt={primary.createdAt}/>
+  <ThinkingStatus {running} {active} {avatar} startedAt={primary.createdAt}/>
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning summary</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if primary && latest}

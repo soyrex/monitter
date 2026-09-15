@@ -19,8 +19,8 @@ try {
   page = await browser.newPage({ viewport: { width: 1120, height: 680 } });
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
-  await page.goto(url);
-  await expect(page.getByRole('button', { name: 'Monitter menu', exact: true })).toBeVisible({ timeout: 30000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120_000 });
+  await expect(page.getByRole('complementary', { name: 'Agents and tasks', exact: true })).toBeVisible({ timeout: 120_000 });
 
   await page.evaluate(source => { window.__scrollLongText = Function(`return (${source})`)(); }, longText.toString());
   const ids = await page.evaluate(() => {
@@ -132,14 +132,20 @@ try {
 
     await scrollUp();
     const before = await metrics();
+    const heldText = await page.locator('.message-content').textContent();
     await incoming();
-    await waitForHeightGrowth(before.total);
+    await expect(jump).toHaveAttribute('data-pending-updates', 'true');
+    expect((await metrics()).total).toBe(before.total);
+    expect(await page.locator('.message-content').textContent()).toBe(heldText);
     await expect.poll(async () => (await metrics()).top).toBeGreaterThanOrEqual(before.top - 2);
     const after = await metrics();
     expect(after.top).toBeLessThanOrEqual(before.top + 2);
     await expect(jump).toBeVisible();
     await assertDocumentDoesNotScroll();
-    passed.push(`${label}: activate at bottom / jump / follow / preserve history`);
+    await jump.click();
+    await atBottom();
+    await expect(jump).toHaveAttribute('data-pending-updates', 'false');
+    passed.push(`${label}: activate at bottom / jump / follow / freeze and flush history`);
   };
 
   const openChatA = async () => page.getByRole('button', { name: /Scroll chat A/ }).first().click();
@@ -163,8 +169,11 @@ try {
   await atBottom();
   await scrollUp();
   lateBefore = await metrics();
+  const heldStreamText = await page.locator('.message-content').textContent();
   await expandChatMessage(ids.chatA);
-  await waitForHeightGrowth(lateBefore.total);
+  await expect(jump).toHaveAttribute('data-pending-updates', 'true');
+  expect(await page.locator('.message-content').textContent()).toBe(heldStreamText);
+  expect((await metrics()).total).toBe(lateBefore.total);
   const lateAfter = await metrics();
   expect(lateAfter.top).toBeGreaterThanOrEqual(lateBefore.top - 2);
   expect(lateAfter.top).toBeLessThanOrEqual(lateBefore.top + 2);

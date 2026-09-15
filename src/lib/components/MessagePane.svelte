@@ -3,7 +3,7 @@
   import { onMount, type Snippet } from 'svelte';
   import { ArrowDown } from '@lucide/svelte';
 
-  let { resetKey, children, header, stickyRequest = false, active = true, thinking = false }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean; thinking?: boolean } = $props();
+  let { resetKey, children, header, stickyRequest = false, active = true, thinking = false, pendingUpdates = false, onfollowchange }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean; thinking?: boolean; pendingUpdates?: boolean; onfollowchange?: (following: boolean) => void } = $props();
   let viewport = $state<HTMLDivElement>();
   let content = $state<HTMLDivElement>();
   let heading = $state<HTMLDivElement>();
@@ -17,6 +17,15 @@
   let touchY: number | undefined;
   const bottomThreshold = 50;
   let documentVisible = $state(true);
+  let lastResetKey = $state<string | undefined>();
+  let lastActive = $state<boolean | undefined>();
+  const jumpVisible = $derived(showJump || pendingUpdates);
+
+  function setFollowing(value: boolean) {
+    if (followingLatest === value) return;
+    followingLatest = value;
+    onfollowchange?.(value);
+  }
 
   function distanceFromLatest() {
     return viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop) : 0;
@@ -48,9 +57,9 @@
   function detachFromLatest() {
     if (!viewport || !active) return;
     readerDetached = true;
-    followingLatest = false;
+    setFollowing(false);
     detachedScrollTop = viewport.scrollTop;
-    showJump = !atAbsoluteLatest();
+    showJump = !atAbsoluteLatest() || pendingUpdates;
     if (followFrame !== undefined) cancelAnimationFrame(followFrame);
     followFrame = undefined;
     rememberMetrics();
@@ -100,7 +109,7 @@
 
   function jumpToLatest() {
     readerDetached = false;
-    followingLatest = true;
+    setFollowing(true);
     followLayout();
   }
 
@@ -110,7 +119,7 @@
     // instead of measuring the new, larger bottom gap as a reader scrolling up.
     if (viewport && (viewport.clientHeight !== lastViewportHeight || viewport.scrollHeight !== lastScrollHeight)) {
       if (followingLatest) followLayout();
-      else showJump = !atAbsoluteLatest();
+      else showJump = !atAbsoluteLatest() || pendingUpdates;
       rememberMetrics();
       return;
     }
@@ -119,17 +128,17 @@
       detachedScrollTop = viewport.scrollTop;
       if (moved && atAbsoluteLatest()) {
         readerDetached = false;
-        followingLatest = true;
+        setFollowing(true);
         showJump = false;
       } else {
-        followingLatest = false;
-        showJump = !atAbsoluteLatest();
+        setFollowing(false);
+        showJump = !atAbsoluteLatest() || pendingUpdates;
       }
       rememberMetrics();
       return;
     }
-    followingLatest = nearLatest();
-    showJump = !followingLatest;
+    setFollowing(nearLatest());
+    showJump = !followingLatest || pendingUpdates;
     rememberMetrics();
     if (followingLatest) followLayout();
   }
@@ -137,14 +146,17 @@
   // A conversation activation or explicit send requests a jump after Svelte
   // has rendered that conversation. Background updates do not change this key.
   $effect(() => {
-    resetKey;
-    if (active && documentVisible) jumpToLatest();
+    const changed = resetKey !== lastResetKey || active !== lastActive;
+    lastResetKey = resetKey;
+    lastActive = active;
+    if (changed && active && documentVisible) jumpToLatest();
   });
 
   onMount(() => {
     const visibilityChanged = () => {
       documentVisible = document.visibilityState !== 'hidden';
-      if (documentVisible && active) { rememberMetrics(); jumpToLatest(); }
+      // Returning to a visible window must not discard a reader's held place.
+      if (documentVisible && active) { rememberMetrics(); if (followingLatest) followLayout(); }
     };
     documentVisible = document.visibilityState !== 'hidden';
     document.addEventListener('visibilitychange', visibilityChanged);
@@ -158,7 +170,7 @@
       // Covers streamed content, expanded tools, images/fonts and pane resizing.
       // Readers who scrolled up keep their place as new content arrives.
       if (followingLatest) followLayout();
-      else showJump = !atAbsoluteLatest();
+      else showJump = !atAbsoluteLatest() || pendingUpdates;
       rememberMetrics();
     });
     if (viewport) observer.observe(viewport);
@@ -187,10 +199,10 @@
     {#if header}<div class="message-header" bind:this={heading}>{@render header()}</div>{/if}
     <div class="message-content" use:messageArrival bind:this={content}>{@render children()}</div>
   </div>
-  <button class="jump-latest" class:visible={showJump} class:thinking aria-label="Jump to latest message" title="Jump to latest message" aria-hidden={!showJump} tabindex={showJump ? 0 : -1} disabled={!showJump} onclick={() => {
+  <button class="jump-latest" class:visible={jumpVisible} class:thinking data-pending-updates={pendingUpdates} aria-label="Jump to latest message" title={pendingUpdates ? 'Jump to latest message — new updates waiting' : 'Jump to latest message'} aria-hidden={!jumpVisible} tabindex={jumpVisible ? 0 : -1} disabled={!jumpVisible} onclick={() => {
       jumpToLatest();
       viewport?.focus({ preventScroll: true });
-    }}><ArrowDown size={18} /></button>
+    }}><ArrowDown size={18} />{#if pendingUpdates}<span class="update-pending" aria-hidden="true">New updates waiting</span>{/if}</button>
 </div>
 
 <style>
@@ -210,6 +222,7 @@
   .jump-latest.thinking.visible::after { bottom:-4px; left:1px; font-size:6px; animation-delay:.65s; }
   .jump-latest:hover { color: var(--accent-ink); border-color: var(--accent); background: var(--soft); }
   .jump-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .update-pending { position:absolute; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%); width:max-content; max-width:130px; padding:3px 6px; border-radius:9px; color:var(--on-accent); background:var(--accent); font:9px/1.1 var(--mono); box-shadow:0 2px 8px #0003; }
   @keyframes jump-attention-glow { 50% { box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 26%,transparent),0 0 20px color-mix(in srgb,var(--accent) 40%,transparent),0 3px 12px #0002; } }
   @keyframes jump-attention-twinkle { 0%,100% { opacity:.15; transform:scale(.45) rotate(-15deg); } 50% { opacity:1; transform:scale(1) rotate(15deg); } }
   @media (max-width: 640px) { .message-content { padding-top: 14px; padding-bottom: calc(var(--scroll-fade) + 8px); } .jump-latest { bottom: 10px; } }

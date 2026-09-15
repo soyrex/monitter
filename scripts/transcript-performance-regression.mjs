@@ -31,7 +31,7 @@ assert.doesNotMatch(virtualList, /start\s*=\s*Math\.min\(start,\s*stickyIndex\)/
   'a pinned request must not expand the virtual window across every later row');
 assert.match(virtualList, /role="feed"/);
 assert.match(virtualList, /ResizeObserver/);
-assert.match(appSurface, /items=\{activeChannel\.messages\}[\s\S]{0,180}active=\{true\}/,
+assert.match(appSurface, /items=\{displayedChannelTranscript\.messages\}[\s\S]{0,180}active=\{true\}/,
   'visible channel panes must render transcript rows even when another split has focus');
 const taskTranscript = await readFile(`${root}/src/lib/components/TaskTranscript.svelte`, 'utf8');
 assert.match(taskTranscript, /<TranscriptVirtualList[\s\S]{0,260}active=\{true\}/,
@@ -44,7 +44,7 @@ assert.match(thinkingStatus, /label = labels\[0\];\s*labelBucket = 0;/,
   'new status must keep the initial Thinking label');
 assert.match(thinkingStatus, /nextBucket > labelBucket/,
   'label rotation must wait for a later five-second bucket');
-assert.match(appSurface, /<TranscriptVirtualList\s+items=\{activeChannel\.messages\}/,
+assert.match(appSurface, /<TranscriptVirtualList\s+items=\{displayedChannelTranscript\.messages\}/,
   'channel histories must use the same bounded transcript renderer');
 
 console.log('transcript performance regression: bounded generic rows, visibility-aware observers, and active-only terminal scheduling are present.');

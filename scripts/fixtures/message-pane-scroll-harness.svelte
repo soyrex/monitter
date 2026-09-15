@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import MessagePane from '../../src/lib/components/MessagePane.svelte';
+  import { createTranscriptBuffer } from '../../src/lib/transcript-buffer.svelte';
   import ThinkingStatus from '../../src/lib/components/ThinkingStatus.svelte';
 
   type Entry = { id: number; text: string; tall: boolean };
@@ -11,6 +12,11 @@
   let thinkingStartedAt = $state<number>();
   let timerProbe = $state(0);
   let nextId = 18;
+  let buffering = $state(false);
+  const buffer = createTranscriptBuffer(() => resetKey, () => entries, () => JSON.stringify(entries));
+  const displayedEntries = $derived(buffering ? buffer.value() : entries);
+  const pendingUpdates = $derived(buffering && buffer.pendingUpdates());
+  function followChanged(following: boolean) { if (buffering) buffer.setFollowing(following); }
 
   function append(label: string, tall = false) {
     entries = [...entries, { id: nextId++, text: `${label}. ${paragraph.repeat(10)}`, tall }];
@@ -37,8 +43,11 @@
 
   onMount(() => {
     (window as Window & { __PANE_QA__?: unknown }).__PANE_QA__ = {
+      enableBuffer: () => { buffering = true; },
       append: () => append('Streaming reply growth'),
       growExisting,
+      mutateFirst: () => { entries[0].text = 'Changed while reading'; },
+      switchChat: () => { entries = [{ id: nextId++, text: 'Other conversation', tall: false }]; resetKey = `other:${nextId}`; },
       send: () => { append('Sent message'); resetKey = `send:${nextId}`; },
       growThenScrollBeforeObserver,
       shrinkThenGrow,
@@ -51,8 +60,8 @@
 </script>
 
 <main>
-  <MessagePane {resetKey} {thinking}>
-    {#each entries as entry (entry.id)}
+  <MessagePane {resetKey} {thinking} {pendingUpdates} onfollowchange={followChanged}>
+    {#each displayedEntries as entry (entry.id)}
       <article class:tall={entry.tall}>{entry.text}</article>
     {/each}
     {#if thinking}

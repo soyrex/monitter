@@ -190,6 +190,8 @@ tool approval for managed servers, never the built-in collaboration allowlist.
 
 ## Busy messages
 
+When a reader scrolls above a transcript's latest entry, the frontend holds a data snapshot of that transcript. New messages and updates to streamed text or tool activity continue in the backend, but are not rendered into the held view. The down-arrow indicates once updates are waiting and releases the latest view when activated or when the reader manually returns to the bottom. Sending a message and switching chats also release the held snapshot. Approval controls and failure notices remain live outside the held transcript.
+
 Chat sends render a frontend-local outgoing message immediately and clear the captured composer
 text/attachments while the command is in flight. Sending, Sent and Not confirmed distinguish
 transport progress from agent execution; Sent means Monitter accepted the message, not that the

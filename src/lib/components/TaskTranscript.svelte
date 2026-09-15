@@ -18,6 +18,7 @@
   import Markdown from '$lib/components/Markdown.svelte';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ExpandableUserRequest from '$lib/components/ExpandableUserRequest.svelte';
+  import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
 
   type Avatar = Snippet<[Agent | null | undefined, number?]>;
   type Delivery = Snippet<[OptimisticMessage]>;
@@ -58,6 +59,7 @@
     onOpenCollaboration,
     onOpenApproval,
     onLoadFullEventDetail,
+    liveError = '',
     onStop,
     onEditTask,
     onShare,
@@ -95,22 +97,34 @@
     onOpenCollaboration: (value: CollaborationRecord) => void;
     onOpenApproval: (request: ApprovalRequest) => void;
     onLoadFullEventDetail: (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
+    liveError?: string;
     onStop: () => void;
     onEditTask: () => void;
     onShare: () => void;
   } = $props();
 
   let taskMenuAnchor = $state<HTMLButtonElement>();
-  const latestUserRequest = $derived(conversationItems
-    .flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : [])
-    .at(-1));
-  const thinking = $derived.by(() => {
-    if (task.status !== 'running' || pendingApprovals.length) return false;
-    const latest = conversationItems.at(-1);
-    return showThinkingFallback(conversationItems, true) ||
-      (latest?.type === 'reasoning-group' && latest.values.every(isBlankReasoning));
+  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
+  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, optimisticMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
+  const transcriptBuffer = createTranscriptBuffer<TranscriptDisplay>(
+    () => task.id,
+    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, conversationItems, optimisticMessages, confirmedDeliveryIds, collaborations, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
+    () => transcriptFingerprint,
+  );
+  const display = $derived(transcriptBuffer.value());
+  const displayTask = $derived(display.task);
+  const displayAgent = $derived(display.agent);
+  const displayItems = $derived(display.conversationItems);
+  const displayOptimisticMessages = $derived(display.optimisticMessages);
+  const displayConfirmedDeliveryIds = $derived(display.confirmedDeliveryIds);
+  const displayCollaborations = $derived(display.collaborations);
+  const displayLatestUserRequest = $derived(displayItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
+  const displayThinking = $derived.by(() => {
+    if (displayTask.status !== 'running' || display.hasPendingApprovals) return false;
+    const latest = displayItems.at(-1);
+    return showThinkingFallback(displayItems, true) || (latest?.type === 'reasoning-group' && latest.values.every(isBlankReasoning));
   });
-  const collaborationFor = (id: string) => collaborations.find(item => item.id === id);
+  function handleFollowChange(following: boolean) { transcriptBuffer.setFollowing(following); }
 </script>
 
 {#if showHeader}<div class="conversation-head task-heading pane-task-header">
@@ -132,22 +146,22 @@
 {/if}
 <section class="conversation">
     <TaskActivity {goal} {goalNote} tools={computerTools} onstop={onStop} disabled={busy} />
-    <MessagePane {active} {thinking} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!latestUserRequest}>
-      {#if conversationItems.length}<TranscriptVirtualList
-        items={conversationItems}
+    <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
+      {#if displayItems.length}<TranscriptVirtualList
+        items={displayItems}
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
-        stickyKey={latestUserRequest?.id ?? null}
+        stickyKey={displayLatestUserRequest?.id ?? null}
         active={true}>
         {#snippet children(item, _index)}
           {#if item.type === 'activity'}
-            {@const collaboration=item.value.kind==='collaboration' ? collaborationFor(item.value.detail) : null}
-            {#if collaboration}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>onOpenCollaboration(collaboration)}/>{:else}<RunActivity event={item.value} onloaddetail={onLoadFullEventDetail}/>{/if}
+            {@const collaboration=item.value.kind==='collaboration' ? displayCollaborations.find(value => value.id === item.value.detail) : null}
+            {#if collaboration}<SubagentActivity {collaboration} agent={display.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>onOpenCollaboration(collaboration)}/>{:else}<RunActivity active={active && !transcriptBuffer.held()} event={item.value} onloaddetail={onLoadFullEventDetail}/>{/if}
           {:else if item.type === 'reasoning-group'}
-            <RunActivity events={item.values} onloaddetail={onLoadFullEventDetail} running={task.status === 'running' && item === conversationItems.at(-1) && !pendingApprovals.length}>
-              {#snippet avatar()}{@render messageAvatar(agent)}{/snippet}
+            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} running={displayTask.status === 'running' && item === displayItems.at(-1) && !display.hasPendingApprovals}>
+              {#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}
             </RunActivity>
           {:else if item.type === 'tool-group'}
-            <RunActivity events={item.values} onloaddetail={onLoadFullEventDetail} compressed={snapshot.settings.compressToolCalls === true} running={task.status === 'running'}/>
+            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} compressed={display.settings.compressToolCalls === true} running={displayTask.status === 'running'}/>
           {:else if item.type === 'approval'}
             {@const approvalText=approvalEventText(item.value)}
             <button class={`approval-inline ${item.value.status}`} onclick={()=>onOpenApproval(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{formatTime(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
@@ -155,27 +169,28 @@
             {@const message=item.value}
             {#if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator" aria-label={`Context Cleared at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · Context Cleared</time><span aria-hidden="true"></span></div>
             {:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
-            {:else if !message.collaborationId || !collaborationFor(message.collaborationId)}
-              {@const optimistic=optimisticMessages.find(item=>item.id===message.id)}
-              {@const confirmed=confirmedDeliveryIds[message.id]}
+            {:else if !message.collaborationId || !displayCollaborations.find(value => value.id === message.collaborationId)}
+              {@const optimistic=displayOptimisticMessages.find(item=>item.id===message.id)}
+              {@const confirmed=displayConfirmedDeliveryIds[message.id]}
               {@const operator=message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}
-              <article class:user={message.role==='user'} class:tinted={message.role==='user' && snapshot.settings.tintUserMessages} class:sticky-user-request={message.role==='user' && message.id===latestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={optimistic?.status} aria-label={message.role==='user' && message.id===latestUserRequest?.id ? 'Latest user request' : undefined}>
-                <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (agent?.name ?? 'Agent') : 'System')} createdAt={message.createdAt}>
-                  {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? snapshot.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? agent : null)}{/if}{/snippet}
+              <article class:user={message.role==='user'} class:tinted={message.role==='user' && display.settings.tintUserMessages} class:sticky-user-request={message.role==='user' && message.id===displayLatestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={optimistic?.status} aria-label={message.role==='user' && message.id===displayLatestUserRequest?.id ? 'Latest user request' : undefined}>
+                <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (displayAgent?.name ?? 'Agent') : 'System')} createdAt={message.createdAt}>
+                  {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null)}{/if}{/snippet}
                   {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
-                {#if message.role==='user' && message.id===latestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>{:else}<Markdown text={message.role==='user' ? operatorMessageText(message.text) : message.text}/>{/if}
+                {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>{:else}<Markdown text={message.role==='user' ? operatorMessageText(message.text) : message.text}/>{/if}
                 <AttachmentList attachments={message.attachments ?? []}/>
                 {#if message.streamStatus==='streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus==='interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
               </article>
             {/if}
           {/if}
         {/snippet}
-      </TranscriptVirtualList>{:else if !pendingApprovals.length}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
-      {#if showThinkingFallback(conversationItems, task.status==='running' || selectedTaskStarting, pendingApprovals.length > 0)}
-        <ThinkingStatus {active} starting={task.status!=='running'} running={task.status==='running'} startedAt={latestUserRequest?.createdAt}>{#snippet avatar()}{@render messageAvatar(agent)}{/snippet}</ThinkingStatus>
+      </TranscriptVirtualList>{:else if !display.hasPendingApprovals}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
+      {#if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}
+        <ThinkingStatus active={active && !transcriptBuffer.held()} starting={displayTask.status!=='running'} running={displayTask.status==='running'} startedAt={displayLatestUserRequest?.createdAt}>{#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}</ThinkingStatus>
       {/if}
     </MessagePane>
+    {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
   {@render composer()}
 </section>
 
@@ -188,6 +203,7 @@
   .pane-task-header { grid-column: 1 / -1; grid-row: 1; }
   .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
   .conversation { --chat-content-max-width:900px; display:flex; min-width:0; min-height:0; flex:1; flex-direction:column; grid-column:1; grid-row:2; }
+  .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .conversation-head { background:var(--paper); display:flex; flex-shrink:0; overflow:visible; align-items:flex-start; justify-content:space-between; gap:20px; padding:25px clamp(25px,4vw,50px) 17px; border-bottom:1px solid var(--line); }
   .task-heading { align-items:center; padding-top:13px; padding-bottom:13px; }
   .conversation-head h1 { flex:1; min-width:0; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:calc(22px * var(--interface-font-ratio,1)); }

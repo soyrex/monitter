@@ -131,6 +131,7 @@
   import PaneSurface from '$lib/components/PaneSurface.svelte';
   import RootSurfaceLifecycle from '$lib/components/RootSurfaceLifecycle.svelte';
   import TaskTranscript from '$lib/components/TaskTranscript.svelte';
+  import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { balancePaneLayout, paneIds } from '$lib/panes';
@@ -561,6 +562,12 @@
     (event.kind !== "tool" || snapshot?.settings.showToolActivity !== false) &&
     (event.kind !== "reasoning" || snapshot?.settings.showReasoningSummaries !== false),
   ));
+  const selectedTaskLiveError = $derived.by(() => {
+    if (selectedTask?.status !== 'error') return '';
+    const latest = events.filter(event => event.taskId === selectedTask.id && event.kind === 'error').at(-1);
+    const value = (latest?.detail || latest?.title || '').trim();
+    return value ? value.slice(0, 500) : '';
+  });
   const timelinePage = $derived(selectedTask ? timelinePages[selectedTask.id] : undefined);
   // Older journals can contain raw conversation start envelopes. Their
   // completed content already lives in chat, so never present them as tools.
@@ -1440,10 +1447,29 @@
       ? indexes?.runningTasksByChannel.get(activeChannel.id) ?? []
       : [],
   );
+  const channelLiveErrors = $derived(activeChannel
+    ? (snapshot?.tasks ?? []).filter(task => task.channelId === activeChannel.id && task.status === 'error')
+    : []);
   const activeChannelStarting = $derived(
     !!(activeChannel && (composerPending[`channel:${activeChannel.id}`]
       || (activeChannelTasks.length && !activeChannelTasks.some(taskIsStepping)))),
   );
+  type ChannelTranscriptDisplay = { messages: Channel['messages']; agents: Agent[]; tintUserMessages: boolean; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; waiting: { agentId: string; starting: boolean }[] };
+  const channelWaiting = $derived.by(() => [
+    ...[...new Set(activeChannelTasks.map(task => task.agentId))].map(agentId => ({ agentId, starting: false })),
+    ...(activeChannel && composerPending[`channel:${activeChannel.id}`] && !activeChannelTasks.length ? effectiveRecipients.map(agentId => ({ agentId, starting: true })) : []),
+  ]);
+  const channelTranscriptFingerprint = $derived(JSON.stringify({
+    messages: activeChannel?.messages ?? [],
+    optimistic: optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel?.id),
+    confirmedDeliveryIds, waiting: channelWaiting,
+  }));
+  const channelTranscriptBuffer = createTranscriptBuffer<ChannelTranscriptDisplay>(
+    () => activeChannel?.id ?? '',
+    () => ({ messages: activeChannel?.messages ?? [], agents: snapshot?.agents ?? [], tintUserMessages: snapshot?.settings.tintUserMessages === true, optimisticMessages: optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel?.id), confirmedDeliveryIds, waiting: channelWaiting }),
+    () => channelTranscriptFingerprint,
+  );
+  const displayedChannelTranscript = $derived(channelTranscriptBuffer.value());
   const localHost = $derived(indexes?.localHost ?? null);
   const defaultAgent = $derived(indexes?.defaultAgent ?? null);
   const text = (reason: unknown) =>
@@ -3209,7 +3235,7 @@
 {/snippet}
 
 {#snippet agentWaiting(agent: Agent | null | undefined, starting = false, startedAt?: number)}
-  <ThinkingStatus active={embedded ? active : activePaneId === 'main'} {starting} running={!starting} {startedAt}>
+  <ThinkingStatus active={(embedded ? active : activePaneId === 'main') && !channelTranscriptBuffer.held()} {starting} running={!starting} {startedAt}>
     {#snippet avatar()}{@render messageAvatar(agent)}{/snippet}
   </ThinkingStatus>
 {/snippet}
@@ -3430,25 +3456,25 @@
           </div>
         {/if}
         <section class="conversation">
-        <MessagePane active={embedded ? active : activePaneId === 'main'} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
-          {#if activeChannel.messages.length || optimisticMessages.some(message => message.kind === 'channel' && message.targetId === activeChannel.id)}<TranscriptVirtualList
-              items={activeChannel.messages}
+        <MessagePane active={embedded ? active : activePaneId === 'main'} pendingUpdates={channelTranscriptBuffer.pendingUpdates()} onfollowchange={channelTranscriptBuffer.setFollowing} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
+          {#if displayedChannelTranscript.messages.length || displayedChannelTranscript.optimisticMessages.length}<TranscriptVirtualList
+              items={displayedChannelTranscript.messages}
               getKey={(message) => message.id}
               active={true}>
               {#snippet children(message, _index)}<article
                 class:user={message.role === "user"}
-                class:tinted={message.role === "user" && snapshot?.settings.tintUserMessages}
+                class:tinted={message.role === "user" && displayedChannelTranscript.tintUserMessages}
                 class="message"
                   data-live-entry={message.role==='assistant'}
               >
-                <MessageMeta name={message.role === "user" ? "You" : (snapshot?.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
-                  {#snippet avatar()}{@render messageAvatar(snapshot?.agents.find(agent=>agent.id===message.agentId))}{/snippet}
-                  {#if confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
+                <MessageMeta name={message.role === "user" ? "You" : (displayedChannelTranscript.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
+                  {#snippet avatar()}{@render messageAvatar(displayedChannelTranscript.agents.find(agent=>agent.id===message.agentId))}{/snippet}
+                  {#if displayedChannelTranscript.confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
                 <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
               </article>{/snippet}
             </TranscriptVirtualList>
-              {#each optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel.id) as message (message.id)}
+              {#each displayedChannelTranscript.optimisticMessages as message (message.id)}
                 <article class="message user optimistic-message" data-delivery-status={message.status}>
                   <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
                   <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
@@ -3461,13 +3487,13 @@
                 explicit linked task.
               </p>
             </div>{/if}
-          {#each [...new Set(activeChannelTasks.map(task=>task.agentId))] as agentId}
-            {@render agentWaiting(snapshot.agents.find(agent=>agent.id===agentId))}
+          {#each displayedChannelTranscript.waiting as waiting}
+            {@render agentWaiting(displayedChannelTranscript.agents.find(agent=>agent.id===waiting.agentId), waiting.starting)}
           {/each}
-          {#if composerPending[`channel:${activeChannel.id}`] && !activeChannelTasks.length}
-            {#each effectiveRecipients as agentId}{@render agentWaiting(snapshot.agents.find(agent=>agent.id===agentId), true)}{/each}
-          {/if}
         </MessagePane>
+        {#if channelTranscriptBuffer.held() && channelLiveErrors.length}<div class="live-channel-status" aria-live="polite">
+          {#each channelLiveErrors as task}<p class="live-transcript-notice" role="status">{(events.filter(event=>event.taskId===task.id&&event.kind==='error').at(-1)?.detail || 'A channel task stopped with an error.').slice(0, 500)}</p>{/each}
+        </div>{/if}
         <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
         <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
         <div class="composer" use:fileDrop>
@@ -3608,6 +3634,7 @@
           onOpenCollaboration={openCollaborationTask}
           onOpenApproval={openApprovalHistory}
           onLoadFullEventDetail={loadFullEventDetail}
+          liveError={selectedTaskLiveError}
           onStop={() => { void run(() => bridge.cancelTask(selectedTask.id), "Stopping task…"); }}
           onEditTask={() => { renameTitle = selectedTask.title; taskProjectId = selectedTask.projectId ?? ''; modal = 'taskSettings'; }}
           onShare={shareSelectedChat}
@@ -4177,6 +4204,8 @@
 >
 
 <style>
+  .live-channel-status { flex:none; min-height:0; max-height:120px; overflow:auto; padding:0 var(--chat-side-padding, clamp(25px,4vw,50px)); color:var(--danger,#bd655b); }
+  .live-transcript-notice { margin:7px 0; white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
   .side-scroll, .brand, .agent-group, .project-group { position:relative; }
   .sidebar-mode-content { position:relative; }
   :global(.group-chevron) { transition:transform 150ms ease-out; }

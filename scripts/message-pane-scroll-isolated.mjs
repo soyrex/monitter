@@ -186,8 +186,67 @@ try {
       const clearance = await page.locator('.message-content').evaluate(node => ({ padding: Number.parseFloat(getComputedStyle(node).paddingBottom), fade: Number.parseFloat(getComputedStyle(node.closest('.messages')).getPropertyValue('--scroll-fade')) }));
       expect(clearance.padding).toBeGreaterThanOrEqual(clearance.fade + 8);
     }
+    // Buffering uses the same production helper as direct and channel chats.
+    await invoke('enableBuffer');
+    await atBottom();
+    // A gesture can detach before any physical movement; queued updates must
+    // still expose a usable arrow rather than trapping the reader at old bottom.
+    await page.locator('.messages').evaluate(node => node.dispatchEvent(new WheelEvent('wheel', { deltaY: -1, bubbles: true })));
+    await invoke('append');
+    await expect(jumpButton).toBeVisible();
+    await jumpButton.click();
+    await atBottom();
+    await scrollUp();
+    const frozenText = await page.locator('.message-content').textContent();
+    const frozenMetrics = await metrics();
+    const frozenCount = await page.locator('article').count();
+    await invoke('append');
+    await invoke('growExisting');
+    await invoke('mutateFirst');
+    await page.waitForTimeout(100);
+    expect(await page.locator('.message-content').textContent()).toBe(frozenText);
+    expect(await page.locator('article').count()).toBe(frozenCount);
+    expect(await metrics()).toEqual(frozenMetrics);
+    await expect(jumpButton).toHaveAttribute('data-pending-updates', 'true');
+    await page.evaluate(async () => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await new Promise(resolve => setTimeout(resolve, 30));
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.waitForTimeout(50);
+    expect(await page.locator('.message-content').textContent()).toBe(frozenText);
+    await expect(jumpButton).toHaveAttribute('data-pending-updates', 'true');
+    await jumpButton.click();
+    await atBottom();
+    await expect(page.locator('article')).toHaveCount(frozenCount + 1);
+    await expect(page.locator('article').first()).toContainText('Changed while reading');
+    await expect(jumpButton).toHaveAttribute('data-pending-updates', 'false');
+
+    // Reaching the old bottom manually also flushes to the new bottom.
+    await scrollUp();
+    await invoke('append');
+    await setBottomGap(0);
+    await atBottom();
+    await expect(page.locator('article')).toHaveCount(frozenCount + 2);
+    await expect(jumpButton).toHaveAttribute('data-pending-updates', 'false');
+
+    // Sending and switching chats must release the held view without leakage.
+    await scrollUp();
+    await invoke('append');
+    await invoke('send');
+    await atBottom();
+    await expect(page.locator('article')).toHaveCount(frozenCount + 4);
+    await scrollUp();
+    await invoke('append');
+    await invoke('switchChat');
+    await atBottom();
+    await expect(page.locator('article')).toHaveCount(1);
+    await expect(page.locator('article')).toContainText('Other conversation');
+    await expect(jumpButton).toHaveAttribute('data-pending-updates', 'false');
     expect(errors).toEqual([]);
-    assertions.push(`${profile.name}: strict 50px intent threshold, stable elapsed timer, immediate live-text bottom correction, thinking-aware jump sparkle, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance`);
+    assertions.push(`${profile.name}: strict 50px intent threshold, stable elapsed timer, immediate live-text bottom correction, thinking-aware jump sparkle, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance, frozen updates, manual catch-up, visibility preservation, conversation isolation`);
     await context.close();
   }
   console.log(`${messagePaneRef ? `${messagePaneRef}: ` : 'working tree: '}${assertions.join('\n')}`);
