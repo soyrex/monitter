@@ -6,7 +6,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
@@ -1519,6 +1519,10 @@ pub struct RunControl {
     app_server_turn: Mutex<Option<String>>,
     app_server_next_request: Mutex<i64>,
     app_server_turn_requests: Mutex<HashSet<i64>>,
+    // Steers share the current turn instead of beginning a new one. Keep the
+    // durable queue record and its expected native turn together so the
+    // reader can either confirm the send or safely return it to the queue.
+    app_server_steer_requests: Mutex<HashMap<i64, AppServerSteerRequest>>,
     acp_config_requests: Mutex<HashSet<i64>>,
     // A later ACP turn is reserved before its optional model configuration is
     // sent. This makes the config acknowledgement a real ordering barrier and
@@ -1535,6 +1539,12 @@ pub struct RunControl {
     remote_supervised: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct AppServerSteerRequest {
+    pub queued_message_id: String,
+    pub expected_turn_id: String,
+}
+
 impl RunControl {
     pub fn new(remote_supervised: bool) -> Arc<Self> {
         Arc::new(Self {
@@ -1548,6 +1558,7 @@ impl RunControl {
             app_server_turn: Mutex::new(None),
             app_server_next_request: Mutex::new(10),
             app_server_turn_requests: Mutex::new(HashSet::new()),
+            app_server_steer_requests: Mutex::new(HashMap::new()),
             acp_config_requests: Mutex::new(HashSet::new()),
             acp_turn_reserved: Mutex::new(false),
             acp_prompt_after_config: Mutex::new(None),
@@ -1767,6 +1778,56 @@ impl RunControl {
             .insert(request_id);
         if let Err(error) = self.send_control(&frame.to_string()) {
             let _ = self.take_app_server_turn_request(request_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Append a user follow-up to the current Codex app-server turn. Unlike a
+    /// normal resident send this must not call `begin_run`, alter task
+    /// settings, or clear the current turn identity.
+    pub(crate) fn send_app_server_steer(
+        &self,
+        prompt: &str,
+        queued_message_id: String,
+    ) -> Result<(), String> {
+        if self.is_cancelled() {
+            return Err("Task was stopped before the follow-up could be steered.".into());
+        }
+        let thread_id = self
+            .current_app_server_thread()
+            .ok_or("Codex is still starting; the follow-up cannot be steered yet.")?;
+        let expected_turn_id = self
+            .current_app_server_turn()
+            .ok_or("Codex has no active turn to steer.")?;
+        let request_id = {
+            let mut next = self
+                .app_server_next_request
+                .lock()
+                .map_err(|_| "Codex app-server request lock failed.".to_string())?;
+            let id = *next;
+            *next = next.saturating_add(1);
+            id
+        };
+        let frame = serde_json::json!({
+            "id": request_id,
+            "method": "turn/steer",
+            "params": {
+                "threadId": thread_id,
+                "expectedTurnId": expected_turn_id,
+                "input": [{"type": "text", "text": prompt, "text_elements": []}]
+            }
+        });
+        let request = AppServerSteerRequest {
+            queued_message_id,
+            expected_turn_id,
+        };
+        self.app_server_steer_requests
+            .lock()
+            .map_err(|_| "Codex app-server steering lock failed.".to_string())?
+            .insert(request_id, request);
+        if let Err(error) = self.send_control(&frame.to_string()) {
+            let _ = self.take_app_server_steer_request(request_id);
             return Err(error);
         }
         Ok(())
@@ -2033,6 +2094,13 @@ impl RunControl {
             .lock()
             .map(|mut requests| requests.remove(&id))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn take_app_server_steer_request(&self, id: i64) -> Option<AppServerSteerRequest> {
+        self.app_server_steer_requests
+            .lock()
+            .ok()
+            .and_then(|mut requests| requests.remove(&id))
     }
 
     pub(crate) fn has_app_server_turn_request(&self) -> bool {

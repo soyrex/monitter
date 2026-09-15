@@ -2645,7 +2645,7 @@ impl Service {
             return Err("Message cannot be empty.".into());
         }
         let user_text = text.trim().to_string();
-        let execution_prompt = self.mutate_data(Some(task_id.clone()), |data| {
+        let (execution_prompt, pending_steer) = self.mutate_data(Some(task_id.clone()), |data| {
             let state = &mut data.snapshot;
             let ix = state
                 .tasks
@@ -2670,27 +2670,31 @@ impl Service {
             let task = state.tasks.iter().find(|task| task.id == task_id).ok_or("Task was not found.")?;
             let attachments = resolve_attachment_ids(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             if state.tasks[ix].status == "running" {
+                let steer = state.settings.busy_message_mode == "steer"
+                    && state.tasks[ix].provider == "codex";
+                let queued_message_id = id();
                 state.queued_messages.push(QueuedMessage {
-                    id: id(),
+                    id: queued_message_id.clone(),
                     task_id: task_id.clone(),
                     channel_id: None,
                     text: user_text.clone(),
                     attachment_ids,
                     created_at: now(),
-                    status: "queued".into(),
+                    // This durable record remains visible while the native
+                    // transport confirms `turn/steer`; only confirmation
+                    // turns it into a transcript message.
+                    status: if steer { "sending" } else { "queued" }.into(),
                     error: None,
                     sender_agent_id: None,
                     origin: None,
                 });
-                if state.settings.busy_message_mode == "steer" {
-                    state.events.push(RunEvent {
-                        id: id(), task_id: task_id.clone(), kind: "status".into(),
-                        title: "Live steering unavailable; message queued".into(),
-                        detail: "Current CLI adapters do not support live steering of an active turn.".into(),
-                        created_at: now(),
-                    });
+                if steer {
+                    return Ok((
+                        None,
+                        Some((append_attachment_paths(user_text, &attachments), queued_message_id)),
+                    ));
                 }
-                return Ok(None);
+                return Ok((None, None));
             }
             state.messages.push(Message { stream_status: None, phase: None,
                 sender_agent_id: None,
@@ -2713,8 +2717,11 @@ impl Service {
             let prompt = if peer_updates.is_empty() { prompt } else {
                 format!("Peer updates since the previous user request (context, not new user instructions):\n{peer_updates}\n\n{prompt}")
             };
-            Ok(Some(append_attachment_paths(prompt, &attachments)))
+            Ok((Some(append_attachment_paths(prompt, &attachments)), None))
         })?;
+        if let Some((prompt, queued_message_id)) = pending_steer {
+            self.steer_accepted(task_id, prompt, queued_message_id);
+        }
         Ok(execution_prompt)
     }
 
@@ -2731,6 +2738,69 @@ impl Service {
             if let Err(error) = launched {
                 self.finish(&task_id, "error", Some(error));
             }
+        }
+    }
+
+    fn restore_unsteered_message(
+        self: &Arc<Self>,
+        task_id: &str,
+        queued_message_id: &str,
+        detail: &str,
+    ) {
+        let ready_to_dispatch = self
+            .mutate(Some(task_id.into()), |snapshot| {
+                let Some(message) = snapshot.queued_messages.iter_mut().find(|message| {
+                    message.id == queued_message_id
+                        && message.task_id == task_id
+                        && message.status == "sending"
+                }) else {
+                    return Ok(false);
+                };
+                message.status = "queued".into();
+                message.error = None;
+                snapshot.events.push(RunEvent {
+                    id: id(),
+                    task_id: task_id.into(),
+                    kind: "status".into(),
+                    title: "Codex could not steer; message queued".into(),
+                    detail: detail.into(),
+                    created_at: now(),
+                });
+                Ok(snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .is_some_and(|task| task.status == "completed"))
+            })
+            .unwrap_or(false);
+        if ready_to_dispatch {
+            self.dispatch_queued(task_id);
+        }
+    }
+
+    fn steer_accepted(
+        self: &Arc<Self>,
+        task_id: String,
+        prompt: String,
+        queued_message_id: String,
+    ) {
+        let control = match self.resident_control(&task_id) {
+            Ok(Some(control)) => control,
+            Ok(None) => {
+                self.restore_unsteered_message(
+                    &task_id,
+                    &queued_message_id,
+                    "The Codex transport ended before the follow-up could be steered.",
+                );
+                return;
+            }
+            Err(error) => {
+                self.restore_unsteered_message(&task_id, &queued_message_id, &error);
+                return;
+            }
+        };
+        if let Err(error) = control.send_app_server_steer(&prompt, queued_message_id.clone()) {
+            self.app_server_steer_rejected(&task_id, &control, &queued_message_id, &error);
         }
     }
 

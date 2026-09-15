@@ -403,8 +403,8 @@
         </section>
         <section class="setting-card" aria-labelledby="busy-heading">
           <div class="card-heading"><h2 id="busy-heading">Busy agents</h2><p>Choose what happens when you send another message during a running turn.</p></div>
-          <label class="switch-row"><span><strong>Steer busy agents when supported</strong><small>Off queues a message for the next turn. On requests steering where a connected harness supports it; otherwise it queues safely.</small></span><input type="checkbox" role="switch" aria-label="Steer busy agents when supported" checked={settings.busyMessageMode === "steer"} onchange={(event) => void save({ busyMessageMode: event.currentTarget.checked ? "steer" : "queue" })} /></label>
-          <p class="hint">Current CLI integrations use the queue; live steering is not connected yet. Queued messages appear above the input box.</p>
+          <label class="switch-row"><span><strong>Default to steering busy agents</strong><small>Off queues a message for the next turn. On steers a live Codex turn when possible; other harnesses queue safely.</small></span><input type="checkbox" role="switch" aria-label="Default to steering busy agents" checked={settings.busyMessageMode === "steer"} onchange={(event) => void save({ busyMessageMode: event.currentTarget.checked ? "steer" : "queue" })} /></label>
+          <p class="hint">Codex follow-ups stay queued until its app-server confirms the steer. Queued messages appear above the input box.</p>
         </section>
         <section class="setting-card" aria-labelledby="permissions-heading">
           <div class="card-heading"><h2 id="permissions-heading">Agent permissions</h2><p>Permission modes are configured per agent. Each task keeps the permission mode captured when it was created, so changing an agent affects future tasks.</p></div>

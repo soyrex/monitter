@@ -381,7 +381,11 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         }
         if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let is_turn_request = control.take_app_server_turn_request(id);
-            let known_request = id == INITIALIZE_ID || id == THREAD_ID || is_turn_request;
+            let steer_request = control.take_app_server_steer_request(id);
+            let known_request = id == INITIALIZE_ID
+                || id == THREAD_ID
+                || is_turn_request
+                || steer_request.is_some();
             if !known_request {
                 service.complete_app_server_turn(
                     &task_id,
@@ -394,6 +398,34 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 );
                 terminal = true;
                 break;
+            }
+            if let Some(steer) = steer_request {
+                if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+                    service.app_server_steer_rejected(
+                        &task_id,
+                        &control,
+                        &steer.queued_message_id,
+                        error,
+                    );
+                    continue;
+                }
+                let accepted_turn = value.pointer("/result/turnId").and_then(Value::as_str);
+                if accepted_turn != Some(steer.expected_turn_id.as_str()) {
+                    service.app_server_steer_rejected(
+                        &task_id,
+                        &control,
+                        &steer.queued_message_id,
+                        "Codex returned a steering acknowledgement without the expected active turn ID.",
+                    );
+                    continue;
+                }
+                service.app_server_steer_accepted(
+                    &task_id,
+                    &control,
+                    &steer.expected_turn_id,
+                    &steer.queued_message_id,
+                );
+                continue;
             }
             if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
                 service.complete_app_server_turn(

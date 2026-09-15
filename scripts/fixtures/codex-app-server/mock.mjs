@@ -72,6 +72,13 @@ rl.on('line', (line) => {
     return delay > 0 ? setTimeout(result, delay) : result();
   }
   if (request.method === 'turn/start') return beginTurn(request.id, request.params);
+  if (request.method === 'turn/steer') {
+    if (!activeTurn) return rpcError(request.id, -32602, 'No active fixture turn');
+    if (request.params?.threadId !== threadId || request.params?.expectedTurnId !== turnId || !userInputText(request.params?.input)) {
+      return rpcError(request.id, -32602, 'fixture requires the active thread, turn, and text input');
+    }
+    return response(request.id, { turnId });
+  }
   if (request.method === 'turn/interrupt') {
     if (!activeTurn) return rpcError(request.id, -32602, 'No active fixture turn');
     activeTurn = false; response(request.id, {}); notification('turn/completed', { threadId, turn: turn('interrupted') }); return;

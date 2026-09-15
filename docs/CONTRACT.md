@@ -186,13 +186,16 @@ indicators are window-local UI state, not new provider messages or simulated ass
 The per-pane outbox is retained in sessionStorage where available; reloading changes an in-flight
 item to Not confirmed and never automatically replays it.
 
-`Settings.busyMessageMode` defaults to `queue`. `Snapshot.queuedMessages` persists FIFO records per
-task, including the original text, attachment IDs, optional channel, status and error. A busy direct
-chat or selected busy channel recipient queues its follow-up; idle recipients still start immediately,
-and a channel user message is recorded once at submission rather than again when a recipient drains.
-Current CLI adapters do not support live steering, so `steer` safely queues and records a visible
-fallback event. The next queued item starts only after its owned native run releases. A restart changes
-an uncertain `sending` item to `error` and never replays it automatically. Cancelling, kicking,
+`Settings.busyMessageMode` defaults to `queue`; the Settings toggle selects the default queue-versus-steer
+behaviour for busy agents. `Snapshot.queuedMessages` persists FIFO records per task, including the
+original text, attachment IDs, optional channel, status and error. A busy direct chat or selected busy
+channel recipient queues its follow-up; idle recipients still start immediately, and a channel user
+message is recorded once at submission rather than again when a recipient drains. With `steer`, a live
+local Codex app-server task sends `turn/steer` using its current thread and turn IDs. Monitter retains a
+visible `sending` record until Codex acknowledges the matching turn, then persists it as a user message;
+an unavailable, stale, or unsteerable turn returns the record to FIFO with a visible fallback event.
+Other CLI adapters safely queue. The next queued item starts only after its owned native run releases. A
+restart changes an uncertain `sending` item to `error` and never replays it automatically. Cancelling, kicking,
 archiving or deleting prevents queued follow-ups from launching; task deletion removes their records.
 
 ## Agent identity

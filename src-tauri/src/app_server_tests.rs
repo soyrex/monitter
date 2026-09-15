@@ -150,6 +150,31 @@ mod tests {
                 .iter()
                 .any(|request| request.task_id == task.id)
         });
+        service
+            .mutate(None, |snapshot| {
+                snapshot.settings.busy_message_mode = "steer".into();
+                Ok(())
+            })
+            .unwrap();
+        service
+            .send_fast(task.id.clone(), "steered fixture".into(), vec![])
+            .unwrap();
+        wait_until(&service, &task.id, Duration::from_secs(5), |snapshot| {
+            snapshot.messages.iter().any(|message| {
+                message.task_id == task.id
+                    && message.role == "user"
+                    && message.text == "steered fixture"
+            })
+        });
+        let steering = service.snapshot().unwrap();
+        assert!(steering
+            .queued_messages
+            .iter()
+            .all(|message| message.task_id != task.id));
+        assert!(steering
+            .tasks
+            .iter()
+            .any(|item| item.id == task.id && item.status == "running"));
         resolve_fixture_requests(&service, &task.id);
         wait_until(&service, &task.id, Duration::from_secs(5), |snapshot| {
             snapshot
@@ -234,6 +259,34 @@ mod tests {
         assert!(service
             .app_server_message(&task.id, &stale, "turn-1", "item-1", "stale", None, true)
             .is_err());
+        let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
+    }
+
+    #[test]
+    fn unavailable_codex_steer_returns_the_message_to_fifo() {
+        let service = Service::open(None, dir("steer-fallback")).unwrap();
+        let task = running_task(&service, "/bin/echo");
+        service
+            .mutate(None, |snapshot| {
+                snapshot.settings.busy_message_mode = "steer".into();
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(service
+            .accept_send(task.id.clone(), "wait for the next turn".into(), vec![])
+            .unwrap()
+            .is_none());
+        let snapshot = service.snapshot().unwrap();
+        let queued = snapshot
+            .queued_messages
+            .iter()
+            .find(|message| message.task_id == task.id)
+            .unwrap();
+        assert_eq!(queued.status, "queued");
+        assert!(snapshot.events.iter().any(|event| {
+            event.task_id == task.id && event.title == "Codex could not steer; message queued"
+        }));
         let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
     }
 
