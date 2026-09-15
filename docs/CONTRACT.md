@@ -337,8 +337,9 @@ optional `Agent.acp` / `Task.acp` launcher contains an executable `command` and
 an exact string-array `args`, never a shell command. Older records omit it.
 New ACP tasks copy the agent's launcher; editing the agent does not retarget an
 existing chat. Non-ACP tasks do not carry an ACP launcher. Session ownership
-distinguishes ACP launch configurations. ACP uses `harness-configured` permissions;
-it is not an OS sandbox or a blanket permission bypass.
+distinguishes ACP launch configurations. ACP normally uses `harness-configured` permissions.
+An explicit `yolo` selection requests the live session's advertised `bypassPermissions` mode;
+if that exact option is absent the launch fails visibly. ACP remains a transport, not an OS sandbox.
 
 Agent settings offer searchable presets and a custom ACP launcher. The catalog
 is convenience metadata, not a restriction on which compatible executables can

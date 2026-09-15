@@ -9,10 +9,10 @@
         {id:'workspace-write' as Sandbox,label:'Workspace write',description:'Can edit files within the selected workspace.'},
         {id:'yolo' as Sandbox,label:'YOLO',description:'Skips permission prompts and sandbox restrictions. Use only when explicitly trusted.'},
       ]
-    : provider==='claude'
+    : provider==='claude' || provider==='acp'
       ? [
           {id:'harness-configured' as Sandbox,label:'Harness permissions',description:'Uses the permission policy configured by Claude Code.'},
-          {id:'yolo' as Sandbox,label:'YOLO',description:'Skips permission prompts. Use only when explicitly trusted.'},
+          {id:'yolo' as Sandbox,label:'YOLO',description:provider==='acp' ? 'Requests the ACP agent’s advertised bypassPermissions mode. Use only when explicitly trusted.' : 'Skips permission prompts. Use only when explicitly trusted.'},
         ]
       : [{id:'harness-configured' as Sandbox,label:'Harness permissions',description:'Uses the permission policy configured by this harness.'}]);
   const value=$derived(choices.find(choice=>choice.id===sandbox)??choices[0]);

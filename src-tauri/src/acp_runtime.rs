@@ -27,6 +27,7 @@ const INITIALIZE_ID: i64 = 1;
 const SESSION_ID: i64 = 2;
 const FIRST_PROMPT_ID: i64 = 3;
 const MODEL_CONFIG_ID: i64 = 4;
+const PERMISSION_CONFIG_ID: i64 = 5;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(20);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_PERMISSION_HISTORY: usize = 4096;
@@ -848,6 +849,29 @@ fn run(
                     fail(&service, &task_id, &control, "ACP has not advertised support for saved fast mode or reasoning effort settings.");
                     return;
                 }
+                let permission = match crate::acp_session_config::configured_permission_request(
+                    &session_result,
+                    &session,
+                    &task.sandbox,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                };
+                if let Some((method, params)) = permission {
+                    if let Err(error) = send(
+                        &control,
+                        acp_protocol::request(json!(PERMISSION_CONFIG_ID), method, params),
+                    ) {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                    phase = "session/permissions";
+                    phase_deadline = Instant::now() + SESSION_TIMEOUT;
+                    continue;
+                }
                 if initial_prompt.is_some() {
                     let configured = match crate::acp_session_config::configured_model_request(
                         &session_result,
@@ -902,6 +926,70 @@ fn run(
                 phase = "prompt";
                 // A prompt response is completion, not an acknowledgement;
                 // valid model/tool activity must not time out an active turn.
+                phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+                continue;
+            }
+            if id == PERMISSION_CONFIG_ID {
+                if phase != "session/permissions" {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP permission response was out of order.",
+                    );
+                    return;
+                }
+                let session_result = value.get("result").cloned().unwrap_or(Value::Null);
+                if let Some(options) = session_result.get("configOptions") {
+                    if let Err(error) = control.update_acp_config_options(options) {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                }
+                let session = control.current_app_server_thread().unwrap_or_default();
+                if session.is_empty() {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP session was lost before permission configuration.",
+                    );
+                    return;
+                }
+                if initial_prompt.is_some() {
+                    let configured = match crate::acp_session_config::configured_model_request(
+                        &session_result,
+                        &session,
+                        &task.model,
+                    ) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            fail(&service, &task_id, &control, error);
+                            return;
+                        }
+                    };
+                    if let Some((method, params)) = configured {
+                        if let Err(error) = send(
+                            &control,
+                            acp_protocol::request(json!(MODEL_CONFIG_ID), method, params),
+                        ) {
+                            fail(&service, &task_id, &control, error);
+                            return;
+                        }
+                        phase = "session/model";
+                        phase_deadline = Instant::now() + SESSION_TIMEOUT;
+                        continue;
+                    }
+                }
+                let Some(prompt) = initial_prompt.as_deref() else {
+                    phase = "idle";
+                    phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+                    continue;
+                };
+                turn = format!("acp:{FIRST_PROMPT_ID}");
+                control.set_app_server_turn(turn.clone());
+                if let Err(error) = control.mark_app_server_turn_request(FIRST_PROMPT_ID).and_then(|_| send(&control, acp_protocol::request(json!(FIRST_PROMPT_ID), "session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":prompt}]})))) { fail(&service,&task_id,&control,error); return; }
+                phase = "prompt";
                 phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
                 continue;
             }

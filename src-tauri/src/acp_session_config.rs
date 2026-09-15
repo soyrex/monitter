@@ -174,6 +174,33 @@ pub fn configured_model_request(
     Err("This ACP agent did not advertise model selection. Clear the configured model to use its default.".into())
 }
 
+/// ACP owns permission semantics. YOLO is honored only when the live session
+/// advertises the exact full-access mode; Monitter never guesses from an agent
+/// name or silently treats a configured harness as unrestricted.
+pub fn configured_permission_request(
+    session_result: &Value,
+    session_id: &str,
+    sandbox: &str,
+) -> Result<Option<(&'static str, Value)>, String> {
+    if sandbox == "harness-configured" {
+        return Ok(None);
+    }
+    if sandbox != "yolo" {
+        return Err("This ACP task has an unsupported permission policy.".into());
+    }
+    let options = parse_options(&session_result["configOptions"])?;
+    let mode = options
+        .iter()
+        .find(|option| option.category.as_deref() == Some("mode"))
+        .ok_or("This ACP agent did not advertise a permission mode selector; YOLO was not enabled.")?;
+    if !mode.options.iter().any(|option| option.value == "bypassPermissions") {
+        return Err("This ACP agent did not advertise bypassPermissions; YOLO was not enabled.".into());
+    }
+    let params = selection_params(&options, session_id, &mode.id, "bypassPermissions")?;
+    Ok((mode.current_value != "bypassPermissions")
+        .then_some(("session/set_config_option", params)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +265,26 @@ mod tests {
             "session/set_model"
         );
         assert!(configured_model_request(&result, "s", "other").is_err());
+    }
+
+    #[test]
+    fn yolo_requires_an_advertised_bypass_permission_mode() {
+        let result = json!({"configOptions":[{
+            "id":"mode","name":"Mode","category":"mode","type":"select",
+            "currentValue":"default","options":[
+                {"value":"default","name":"Manual"},
+                {"value":"bypassPermissions","name":"Bypass permissions"}
+            ]
+        }]});
+        assert!(configured_permission_request(&result, "s", "harness-configured")
+            .unwrap()
+            .is_none());
+        let (method, params) = configured_permission_request(&result, "s", "yolo")
+            .unwrap()
+            .unwrap();
+        assert_eq!(method, "session/set_config_option");
+        assert_eq!(params["configId"], "mode");
+        assert_eq!(params["value"], "bypassPermissions");
+        assert!(configured_permission_request(&json!({}), "s", "yolo").is_err());
     }
 }
