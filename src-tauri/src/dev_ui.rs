@@ -132,6 +132,10 @@ fn main_window(app: &AppHandle<Wry>) -> Result<WebviewWindow<Wry>, String> {
 
 fn probe() -> Result<(), String> {
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18_420);
+    probe_at(address)
+}
+
+fn probe_at(address: SocketAddr) -> Result<(), String> {
     let mut stream = TcpStream::connect_timeout(&address, PROBE_TIMEOUT).map_err(|_| {
         "Start Monitter's Vite bridge with `npm run dev:app-ui`, then try again.".to_string()
     })?;
@@ -177,6 +181,7 @@ fn is_compatible_marker_response(response: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn hot_ui_origin_is_exact_loopback() {
@@ -204,6 +209,30 @@ mod tests {
         assert!(!is_compatible_marker_response(
             "HTTP/1.1 200 OK\r\n\r\n{\"app\":\"monitter\",\"hotUiProtocol\":1} trailing"
         ));
+    }
+
+    #[test]
+    fn socket_probe_requests_the_exact_loopback_marker() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(PROBE_TIMEOUT)).unwrap();
+            let mut request = [0_u8; 1024];
+            let read = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"app\":\"monitter\",\"hotUiProtocol\":1}",
+                )
+                .unwrap();
+            String::from_utf8(request[..read].to_vec()).unwrap()
+        });
+
+        assert!(probe_at(address).is_ok());
+        let request = server.join().unwrap();
+        assert!(request.starts_with(&format!("GET {DEV_UI_MARKER} HTTP/1.1\r\n")));
+        assert!(request.contains("\r\nHost: 127.0.0.1:18420\r\n"));
+        assert!(request.ends_with("\r\nConnection: close\r\n\r\n"));
     }
 
     #[test]
