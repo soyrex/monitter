@@ -229,7 +229,7 @@ const nativeBridge: MonitterBridge = {
   saveAgent: (agent) => invoke<Snapshot>("save_agent", { agent }),
   deleteAgent: (id) => invoke<Snapshot>("delete_agent", { id }),
   createTask: (input) => invoke<Task>("create_task", { input }),
-  chooseLocalFolder: (initial = '') => invoke<string | null>("choose_local_folder", { initial }),
+  chooseLocalFolder: (initial = '') => isLanBrowser() ? desktopOnly() : invoke<string | null>("choose_local_folder", { initial }),
   renameTask: (id, title) => invoke<Snapshot>("rename_task", { id, title }),
   autoname: target => invoke<Snapshot>("autoname", { target }),
   deleteTask: (id) => invoke<Snapshot>("delete_task", { id }),
@@ -271,7 +271,7 @@ const nativeBridge: MonitterBridge = {
   previewTaskDeletion: taskId => invoke<TaskDeletionPreview>("preview_task_deletion", { taskId }),
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
   storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, previewDataUrl, sourceId}),
-  readAttachmentFile: sourcePath => invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
+  readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
   onChanged: async (handler) => {
     changedSubscribers.add(handler);
     const changed = () => scheduleSnapshotRefresh();

@@ -49,4 +49,22 @@ assert.match(
   /identifier = "allow-use-packaged-ui"[\s\S]*?commands\.allow = \["use_packaged_ui"\]/,
 );
 
+const bridgeSource = readFileSync(new URL('../src/lib/bridge.ts', import.meta.url), 'utf8');
+assert.match(
+  bridgeSource,
+  /chooseLocalFolder:[^\n]+isLanBrowser\(\) \? desktopOnly\(\)/,
+  'developer UI must not proxy the native folder picker',
+);
+assert.match(
+  bridgeSource,
+  /readAttachmentFile:[^\n]+isLanBrowser\(\) \? desktopOnly\(\)/,
+  'developer UI must not proxy arbitrary local file reads',
+);
+const appSurfaceSource = readFileSync(new URL('../src/lib/components/AppSurface.svelte', import.meta.url), 'utf8');
+assert.match(
+  appSurfaceSource,
+  /\{#if nativeRuntime && [^\n]+<button class="icon" aria-label="Browse working folder"/,
+  'developer UI must hide the unavailable native folder picker',
+);
+
 console.log('Hot UI marker and remote-IPC boundary contracts passed.');
