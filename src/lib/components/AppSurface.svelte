@@ -3897,9 +3897,9 @@
           >Permissions<select aria-label="Permissions" bind:value={agentDraft.sandbox}
             >{#if agentDraft.provider === "codex"}<option value="read-only">Read only</option><option
               value="workspace-write">Workspace write</option>
-            {:else}<option value="harness-configured">Use harness permissions</option>{/if}{#if ['codex','claude'].includes(agentDraft.provider)}<option value="yolo">YOLO — skip permissions</option>{/if}</select
+            {:else}<option value="harness-configured">Use harness permissions</option>{/if}{#if ['codex','claude','acp'].includes(agentDraft.provider)}<option value="yolo">YOLO — skip permissions</option>{/if}</select
           >{#if agentDraft.provider !== "codex" && agentDraft.sandbox !== 'yolo'}<small>Uses this harness's permissions on the selected host. Monitter shows approval controls only when this harness exposes a live response channel.</small>{/if}</label
-        ><label class="check-row"><input type="checkbox" role="switch" disabled={!['codex','claude'].includes(agentDraft.provider)} checked={agentDraft.sandbox === 'yolo'} onchange={event => { if (agentDraft) agentDraft.sandbox = event.currentTarget.checked ? 'yolo' : (agentDraft.provider === 'codex' ? 'read-only' : 'harness-configured'); }} /> YOLO — skip permissions<small>{['codex','claude'].includes(agentDraft.provider) ? 'Applies to new chats. Existing chats keep their saved permissions.' : 'This harness has no verified skip-permissions mode.'}</small></label
+        ><label class="check-row"><input type="checkbox" role="switch" disabled={!['codex','claude','acp'].includes(agentDraft.provider)} checked={agentDraft.sandbox === 'yolo'} onchange={event => { if (agentDraft) agentDraft.sandbox = event.currentTarget.checked ? 'yolo' : (agentDraft.provider === 'codex' ? 'read-only' : 'harness-configured'); }} /> YOLO — skip permissions<small>{['codex','claude'].includes(agentDraft.provider) ? 'Applies to new chats. Existing chats keep their saved permissions.' : agentDraft.provider === 'acp' ? 'Applies to new chats only when the ACP agent advertises bypassPermissions.' : 'This harness has no verified skip-permissions mode.'}</small></label
         ><label
           >Colour<input type="color" bind:value={agentDraft.color} /></label
         >

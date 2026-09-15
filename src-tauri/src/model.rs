@@ -675,7 +675,7 @@ pub fn valid_sandbox_for_provider(provider: &str, sandbox: &str) -> bool {
         "codex" => valid_sandbox(sandbox) || sandbox == "yolo",
         "claude" => sandbox == "harness-configured" || sandbox == "yolo",
         "opencode" | "hermes" => sandbox == "harness-configured",
-        "acp" => sandbox == "harness-configured",
+        "acp" => sandbox == "harness-configured" || sandbox == "yolo",
         _ => false,
     }
 }
@@ -895,6 +895,7 @@ mod tests {
     fn yolo_is_limited_to_providers_with_a_documented_bypass() {
         assert!(valid_sandbox_for_provider("codex", "yolo"));
         assert!(valid_sandbox_for_provider("claude", "yolo"));
+        assert!(valid_sandbox_for_provider("acp", "yolo"));
         assert!(!valid_sandbox_for_provider("opencode", "yolo"));
         assert!(!valid_sandbox_for_provider("hermes", "yolo"));
     }
