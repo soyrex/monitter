@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ChevronDown } from '@lucide/svelte';
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
 
   /**
    * A display-only projection of provider allowance data. The owner is
@@ -55,26 +55,22 @@
   }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; class?: string } = $props();
   let showAbsoluteResets = $state(false);
   let currentTime = $state(Date.now());
-  let pane = $state<HTMLElement>();
-  let horizontal = $state(false);
+  let ringsOnly = $state(false);
 
   /**
-   * Measure the full form before switching layouts. Measuring the compact form
-   * itself would immediately drop below the threshold and make it oscillate.
+   * Preserve the full usage view on tall windows, while keeping the sidebar
+   * light on shorter screens. This deliberately follows the window height,
+   * rather than the panel's own height, so it cannot oscillate between modes.
    */
   $effect(() => {
     usage; compact; expanded;
-    if (compact || !expanded || !pane) { horizontal = false; return; }
-    let cancelled = false;
-    async function measure() {
-      horizontal = false;
-      await tick();
-      if (!cancelled && pane) horizontal = pane.getBoundingClientRect().height > window.innerHeight * 0.3;
-    }
-    void measure();
-    const onResize = () => void measure();
+    const updateLayout = () => { ringsOnly = !compact && expanded && window.outerHeight < 1200; };
+    updateLayout();
+    const onResize = () => updateLayout();
     window.addEventListener('resize', onResize);
-    return () => { cancelled = true; window.removeEventListener('resize', onResize); };
+    return () => {
+      window.removeEventListener('resize', onResize);
+    };
   });
 
   onMount(() => {
@@ -218,7 +214,7 @@
   }
 </script>
 
-<section bind:this={pane} class:compact class:expanded class:horizontal class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
+<section class:compact class:expanded class={`usage-rings ${className}${ringsOnly ? ' rings-only' : ''}`.trim()} aria-label="Provider usage">
   {#if !compact}
     <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" onclick={toggle}>
       <span>MODEL USAGE</span>
@@ -263,6 +259,7 @@
             {/if}
             <text class="ring-value" x="20" y="20" text-anchor="middle" dominant-baseline="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
           </svg>
+          <small class="usage-ring-label">{provider.label}</small>
           <div class="usage-copy">
             <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
             {#if hasValue}
@@ -367,15 +364,12 @@
   .compact .usage-provider { grid-template-columns:40px; padding:4px; }
   .compact .usage-copy { display:none; }
   .compact .usage-provider:hover { border-color:color-mix(in srgb,var(--accent) 22%,transparent); }
-  .horizontal {
-    .usage-provider { align-items:start; }
-    .usage-ring { margin-top:2px; }
-    .usage-copy { gap:2px; }
-    .usage-detail,.usage-weekly { display:grid; grid-template-columns:minmax(0,1fr); gap:1px; align-items:baseline; white-space:normal; }
-    .usage-detail-long,.usage-reset-long { display:none; }
-    .usage-detail-short,.usage-reset-short { display:inline; }
-    .usage-reset { overflow:visible; text-overflow:clip; }
-  }
+  .usage-ring-label { display:none; }
+  .rings-only .usage-body { grid-template-columns:repeat(4,minmax(0,1fr)); justify-items:center; gap:0; padding:6px 4px; }
+  .rings-only .usage-provider { grid-template-columns:1fr; grid-template-rows:auto auto; justify-items:center; gap:2px; padding:3px 0; border:0; }
+  .rings-only .usage-provider:hover { border-color:transparent; }
+  .rings-only .usage-copy { display:none; }
+  .rings-only .usage-ring-label { display:block; max-width:100%; overflow:hidden; color:var(--muted); font:calc(8px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.01em; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly,.usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }
 </style>
