@@ -5,7 +5,7 @@
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
   import { floating } from '$lib/floating';
-  import { isBlankReasoning, isCancellationMessage, showThinkingFallback, type ConversationActivityItem } from '$lib/activity-grouping';
+  import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, showThinkingFallback, type ConversationActivityItem } from '$lib/activity-grouping';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
@@ -153,7 +153,8 @@
             <button class={`approval-inline ${item.value.status}`} onclick={()=>onOpenApproval(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{formatTime(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
           {:else}
             {@const message=item.value}
-            {#if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
+            {#if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator" aria-label={`Context Cleared at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · Context Cleared</time><span aria-hidden="true"></span></div>
+            {:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
             {:else if !message.collaborationId || !collaborationFor(message.collaborationId)}
               {@const optimistic=optimisticMessages.find(item=>item.id===message.id)}
               {@const confirmed=confirmedDeliveryIds[message.id]}
@@ -217,6 +218,9 @@
   .cancellation-event :global(.message-meta) { flex:1; min-width:0; margin:0; }
   .cancellation-event :global(.message-meta time) { margin-left:auto; }
   .cancellation-event :global(svg) { flex:none; color:#b56a54; }
+  .context-cleared-event { display:flex; align-items:center; gap:10px; margin:5px 0 18px; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.045em; white-space:nowrap; }
+  .context-cleared-event > span { height:1px; flex:1; background:var(--line); }
+  .context-cleared-event time { flex:none; }
   .optimistic-message { border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); }
   .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
   :global(.delivery-status[data-delivery-status="sending"]) { color:var(--accent); }

@@ -747,6 +747,9 @@ impl Service {
                         .unwrap_or_default(),
                 )?,
             ),
+            "clear_task_context" => snapshot_value(
+                self.clear_task_context(&arg::<String>(&args, "taskId")?)?,
+            ),
             "send_message_fast" => {
                 self.send_fast(
                     arg(&args, "taskId")?,
@@ -2117,6 +2120,59 @@ impl Service {
             task.project_id = project_id;
             Ok(snapshot.clone())
         })
+    }
+
+    fn clear_task_context(&self, task_id: &str) -> Result<Snapshot, String> {
+        let resident = self.resident_control(task_id)?;
+        let snapshot = self.mutate(Some(task_id.into()), |snapshot| {
+            let task_index = snapshot
+                .tasks
+                .iter()
+                .position(|task| task.id == task_id)
+                .ok_or_else(|| "Task was not found.".to_string())?;
+            if snapshot.tasks[task_index].archived {
+                return Err("Restore this archived task before clearing its context.".into());
+            }
+            if snapshot.tasks[task_index].status == "running" {
+                return Err("Stop this running task before clearing its context.".into());
+            }
+            if snapshot.queued_messages.iter().any(|message| {
+                message.task_id == task_id && matches!(message.status.as_str(), "queued" | "sending")
+            }) {
+                return Err("Cancel or send this chat's queued messages before clearing its context.".into());
+            }
+            if snapshot.approval_requests.iter().any(|request| {
+                request.task_id == task_id && request.status == "pending"
+            }) {
+                return Err("Resolve this chat's pending request before clearing its context.".into());
+            }
+            let cleared_at = now();
+            snapshot.tasks[task_index].native_session_id = None;
+            snapshot.tasks[task_index].updated_at = cleared_at;
+            snapshot.messages.push(Message {
+                stream_status: None,
+                phase: None,
+                id: id(),
+                task_id: task_id.into(),
+                role: "system".into(),
+                text: CONTEXT_CLEARED_MESSAGE.into(),
+                created_at: cleared_at,
+                sender_agent_id: None,
+                collaboration_id: None,
+                attachments: vec![],
+            });
+            Ok(snapshot.clone())
+        })?;
+        if let Some(control) = resident {
+            control.terminate_owned();
+            self.release_app_server_run(task_id, &control);
+        } else {
+            self.release_run(task_id);
+        }
+        if let Ok(mut pending) = self.pending_codex_images.lock() {
+            pending.remove(task_id);
+        }
+        Ok(snapshot)
     }
 
     fn launch(self: &Arc<Self>, task_id: String, prompt: String) -> Result<(), String> {
@@ -3769,18 +3825,34 @@ fn prepare_channel_mention_routes(
 /// The saved profile is initialization context, not a new user message. Send
 /// it once, including when a channel/peer delivery is a chat's first turn.
 fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<String> {
-    let mut messages = snapshot
+    let messages = snapshot
         .messages
         .iter()
-        .filter(|message| message.task_id == task_id);
-    if messages.clone().any(|message| {
+        .filter(|message| message.task_id == task_id)
+        .collect::<Vec<_>>();
+    let context_start = messages
+        .iter()
+        .rposition(|message| is_context_cleared_message(message))
+        .map_or(0, |index| index + 1);
+    if messages[context_start..].iter().any(|message| {
         message.role == "user" || message.role == "assistant" || message.sender_agent_id.is_some()
     }) {
         return None;
     }
     messages
-        .find(|message| message.role == "system")
+        .iter()
+        .find(|message| message.role == "system" && !is_context_cleared_message(message))
         .map(|message| message.text.clone())
+}
+
+const CONTEXT_CLEARED_MESSAGE: &str = "Context Cleared";
+
+fn is_context_cleared_message(message: &Message) -> bool {
+    message.role == "system"
+        && message.text == CONTEXT_CLEARED_MESSAGE
+        && message.sender_agent_id.is_none()
+        && message.collaboration_id.is_none()
+        && message.attachments.is_empty()
 }
 
 fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result<Task, String> {
@@ -4950,6 +5022,14 @@ fn set_task_archived(
 }
 
 #[tauri::command]
+fn clear_task_context(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Snapshot, String> {
+    state.0.clear_task_context(&task_id)
+}
+
+#[tauri::command]
 fn send_message(
     state: State<'_, AppState>,
     task_id: String,
@@ -6031,6 +6111,7 @@ pub fn run() {
             preview_task_deletion,
             delete_archived_task,
             set_task_archived,
+            clear_task_context,
             send_message,
             send_message_fast,
             resume_task,
@@ -6525,6 +6606,86 @@ name@rafa.test",
                 .text,
             "You are acting as Codex. You are an agent running inside the Monitter harness. Your user is \"Alex\".\n\nAgent settings and instructions:\n\nPurpose: Local Codex CLI\n\nKeep this instruction"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clearing_context_preserves_history_and_replays_saved_instructions() {
+        let dir = temp_dir("clear-context");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(task_input(agent_id, "Clear context", None))
+            .unwrap();
+        let original_instructions = initial_task_instructions(&service.snapshot().unwrap(), &task.id)
+            .expect("new task has saved instructions");
+        service
+            .mutate(None, |snapshot| {
+                let task = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap();
+                task.native_session_id = Some("old-provider-session".into());
+                task.status = "completed".into();
+                snapshot.messages.push(Message {
+                    stream_status: None,
+                    phase: None,
+                    id: id(),
+                    task_id: task.id.clone(),
+                    role: "user".into(),
+                    text: "old request".into(),
+                    created_at: now(),
+                    sender_agent_id: None,
+                    collaboration_id: None,
+                    attachments: vec![],
+                });
+                snapshot.messages.push(Message {
+                    stream_status: None,
+                    phase: None,
+                    id: id(),
+                    task_id: task.id.clone(),
+                    role: "assistant".into(),
+                    text: "old answer".into(),
+                    created_at: now(),
+                    sender_agent_id: None,
+                    collaboration_id: None,
+                    attachments: vec![],
+                });
+                Ok(())
+            })
+            .unwrap();
+
+        let cleared = service.clear_task_context(&task.id).unwrap();
+        let cleared_task = cleared.tasks.iter().find(|item| item.id == task.id).unwrap();
+        assert!(cleared_task.native_session_id.is_none());
+        assert!(cleared.messages.iter().any(|message| {
+            message.task_id == task.id && message.role == "user" && message.text == "old request"
+        }));
+        assert!(is_context_cleared_message(cleared.messages.last().unwrap()));
+        assert_eq!(
+            initial_task_instructions(&cleared, &task.id),
+            Some(original_instructions)
+        );
+
+        service
+            .mutate(None, |snapshot| {
+                snapshot.messages.push(Message {
+                    stream_status: None,
+                    phase: None,
+                    id: id(),
+                    task_id: task.id.clone(),
+                    role: "user".into(),
+                    text: "fresh request".into(),
+                    created_at: now(),
+                    sender_agent_id: None,
+                    collaboration_id: None,
+                    attachments: vec![],
+                });
+                Ok(())
+            })
+            .unwrap();
+        assert!(initial_task_instructions(&service.snapshot().unwrap(), &task.id).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -71,6 +71,7 @@ No fake conversations, progress, token counts, host connections or model replies
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
 - `delete_task { id: string }` -> Snapshot (archived only; reject running; preserve native CLI history)
 - `send_message { taskId: string, text: string, attachmentIds?: string[] }` -> Snapshot (starts asynchronously)
+- `clear_task_context { taskId: string }` -> Snapshot (idle, unarchived tasks with no queued messages or pending requests only; preserves visible history, clears the native provider session, and appends a `Context Cleared` system boundary)
 - `send_message_fast { taskId: string, text: string, attachmentIds?: string[] }` -> `{ accepted: true }`
   Same durable acceptance and execution semantics, without a full-history acknowledgement payload.
   Provider startup/control delivery follows acceptance; failures appear through task state and
@@ -509,7 +510,7 @@ fabricated objective/status/token metrics. OpenCode plans are not presented as n
 ## Slash menu
 
 Typing `/` opens a filtered, keyboard-accessible menu labelled Monitter commands. These are app
-actions: `/new` opens an independent draft, `/settings` opens preferences, `/project` selects the
+actions: `/new` and `/clear` reset the active chat's provider context while preserving its visible transcript; outside an active chat `/new` opens an independent draft. `/settings` opens preferences, `/project` selects the
 chat's project, `/stop` cancels a running task, `/resume` continues the saved native session in this chat, and
 `/goal` reads the available Codex goal. Task-specific actions only appear in applicable contexts.
 `/autoname` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming uses the configured default Codex agent (first Codex agent, then first agent), makes an ephemeral read-only title run with user config/rules ignored and no persisted task or session, and preserves channel history/membership and terminal session identity.

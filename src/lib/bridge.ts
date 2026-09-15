@@ -66,6 +66,7 @@ export interface MonitterBridge {
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | SendAccepted>;
+  clearTaskContext(taskId: string): Promise<Snapshot>;
   cancelQueuedMessage(id: string): Promise<Snapshot>;
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
   cancelTask(taskId: string): Promise<Snapshot>;
@@ -237,6 +238,7 @@ const nativeBridge: MonitterBridge = {
   deleteProject: id => invoke<Snapshot>("delete_project", {id}),
   setTaskProject: (taskId, projectId) => invoke<Snapshot>("set_task_project", {taskId, projectId}),
   sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
+  clearTaskContext: (taskId) => invoke<Snapshot>('clear_task_context', { taskId }),
   cancelQueuedMessage: (id) => invoke<Snapshot>("cancel_queued_message", { id }),
   editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
   cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
@@ -329,6 +331,7 @@ const previewBridge: MonitterBridge = {
   deleteProject: () => desktopOnly(),
   setTaskProject: () => desktopOnly(),
   sendMessage: () => desktopOnly(),
+  clearTaskContext: () => desktopOnly(),
   cancelQueuedMessage: () => desktopOnly(),
   editQueuedMessage: () => desktopOnly(),
   cancelTask: () => desktopOnly(),
@@ -402,6 +405,7 @@ export function getBridge(): MonitterBridge {
       setTaskProject: (taskId, projectId) => test.invoke("set_task_project", {taskId, projectId}) as Promise<Snapshot>,
       sendMessage: (taskId, text, attachmentIds = []) =>
         test.invoke("send_message", { taskId, text, attachmentIds }) as Promise<Snapshot>,
+      clearTaskContext: (taskId) => test.invoke('clear_task_context', { taskId }) as Promise<Snapshot>,
       cancelQueuedMessage: (id) => test.invoke("cancel_queued_message", { id }) as Promise<Snapshot>,
       editQueuedMessage: (id, text) => test.invoke("edit_queued_message", { id, text }) as Promise<Snapshot>,
       cancelTask: (taskId) =>

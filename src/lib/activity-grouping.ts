@@ -2,6 +2,7 @@ import type { ApprovalRequest, Message, RunEvent } from '$lib/types';
 
 /** Durable, user-authored Stop record emitted by the native cancellation path. */
 export const CANCELLATION_EVENT_TITLE = 'You cancelled this run.';
+export const CONTEXT_CLEARED_TITLE = 'Context Cleared';
 
 /** Only this concise status record belongs in the ordinary chat transcript. */
 export function isCancellationEvent(event: RunEvent): boolean {
@@ -11,6 +12,12 @@ export function isCancellationEvent(event: RunEvent): boolean {
 /** The transcript companion to the diagnostic cancellation event. */
 export function isCancellationMessage(message: Pick<Message, 'role' | 'text' | 'senderAgentId' | 'attachments'>): boolean {
   return message.role === 'system' && message.text === CANCELLATION_EVENT_TITLE &&
+    !message.senderAgentId && !message.attachments?.length;
+}
+
+/** A durable boundary between independent provider contexts in one visible chat. */
+export function isContextClearedMessage(message: Pick<Message, 'role' | 'text' | 'senderAgentId' | 'attachments'>): boolean {
+  return message.role === 'system' && message.text === CONTEXT_CLEARED_TITLE &&
     !message.senderAgentId && !message.attachments?.length;
 }
 

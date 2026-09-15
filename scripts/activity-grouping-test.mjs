@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { CANCELLATION_EVENT_TITLE, contextCompactionPhase, groupConversationActivity, isCancellationEvent, isCancellationMessage, isNativeMessageTransportArtifact, isShellActivity, readableToolDetail, reasoningSummary, showThinkingFallback, toolCategory, toolFileChanges, toolPresentation } from '../src/lib/activity-grouping.ts';
+import { CANCELLATION_EVENT_TITLE, CONTEXT_CLEARED_TITLE, contextCompactionPhase, groupConversationActivity, isCancellationEvent, isCancellationMessage, isContextClearedMessage, isNativeMessageTransportArtifact, isShellActivity, readableToolDetail, reasoningSummary, showThinkingFallback, toolCategory, toolFileChanges, toolPresentation } from '../src/lib/activity-grouping.ts';
 
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
@@ -21,6 +21,8 @@ assert.equal(isCancellationEvent(cancellation), true);
 assert.equal(isCancellationEvent({ ...cancellation, title: 'Cancellation requested' }), false);
 assert.equal(isCancellationMessage({ id: 'cancelled-message', taskId: 'task', role: 'system', text: CANCELLATION_EVENT_TITLE, createdAt: 5, attachments: [] }), true);
 assert.equal(isCancellationMessage({ id: 'agent-message', taskId: 'task', role: 'assistant', text: CANCELLATION_EVENT_TITLE, createdAt: 5, attachments: [] }), false);
+assert.equal(isContextClearedMessage({ id: 'cleared-message', taskId: 'task', role: 'system', text: CONTEXT_CLEARED_TITLE, createdAt: 6, attachments: [] }), true);
+assert.equal(isContextClearedMessage({ id: 'fake-cleared-message', taskId: 'task', role: 'user', text: CONTEXT_CLEARED_TITLE, createdAt: 6, attachments: [] }), false);
 assert.deepEqual(groupConversationActivity([{ id: 'cancelled-message', taskId: 'task', role: 'system', text: CANCELLATION_EVENT_TITLE, createdAt: 5, attachments: [] }], []).map(item => item.type), ['message'], 'The durable cancellation transcript record remains an inline conversation item');
 console.log('native message transport artifacts are absorbed by ordinary chat bubbles');
 
