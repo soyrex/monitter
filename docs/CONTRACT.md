@@ -272,9 +272,10 @@ fixed tab bar; mobile touch targets retain their accessible minimum sizes in eve
 `tabStyle` is `classic` or `modern`, defaulting to `classic`; missing values from existing saved
 workspaces resolve to `classic`. It is a shared desktop/LAN appearance preference.
 Modern tabs use straight edges and fill a bar four pixels shorter than Classic's base bar height,
-with a 32px minimum. Right-sidebar tabs follow the same style inside the sidebar, below the unified
-chat header. Their row is 34px in Classic and 32px in Modern, with horizontal overflow confined to
-the tab list. Empty workspace tab-strip space remains a native window-drag region; tab buttons
+with a 32px minimum. The left-sidebar view tabs and right-sidebar detail tabs follow the same style;
+the left view tabs sit below the Monitter header and the detail tabs below the unified chat header.
+Their rows are 34px in Classic and 32px in Modern, with horizontal overflow confined to the tab
+lists. Empty workspace tab-strip space remains a native window-drag region; tab buttons
 keep their separate reorder/move behavior.
 Solid accent-colour controls choose black or white foreground icons and labels from the higher WCAG
 contrast ratio. The paired mobile interface uses the same computed foreground.

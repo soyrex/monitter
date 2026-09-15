@@ -3670,7 +3670,7 @@
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
 <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !isTauri()} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
-  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
+  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;sidebarScrolled=false;railAgentId=null}}/>{/if}
     <div class="brand" class:scrolled={sidebarScrolled} use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
@@ -4420,6 +4420,11 @@
   .sidebar-tab-entry.active .sidebar-tab:hover { background:var(--sidebar); }
   .sidebar-tab-action { display:grid; place-items:center; flex:none; width:25px; height:25px; margin-bottom:0; border-radius:5px 5px 0 0; color:var(--muted); }
   @media (hover:hover) and (pointer:fine) { .sidebar-tab-action:hover { background:var(--soft); color:var(--ink); } }
+  .sidebar.modern-tabs .sidebar-tabs-row { min-height:max(28px, calc(var(--density-detail-tabs-height) - 2px)); height:max(28px, calc(var(--density-detail-tabs-height) - 2px)); padding:0; gap:0; align-items:stretch; }
+  .sidebar.modern-tabs .sidebar-tabs { gap:0; align-items:stretch; }
+  .sidebar.modern-tabs .sidebar-tab-entry { align-self:stretch; margin-bottom:0; border:0; border-right:1px solid var(--line); border-radius:0; }
+  .sidebar.modern-tabs .sidebar-tab { border-radius:0; }
+  .sidebar.modern-tabs .sidebar-tab-action { align-self:stretch; width:max(28px, var(--density-detail-tab-height)); height:auto; margin:0; border-left:1px solid var(--line); border-radius:0; }
   @container sidebar (max-width: 270px) {
     .sidebar-tab { gap:2px; padding-inline:2px; font-size:calc(8.5px * var(--interface-font-ratio, 1)); letter-spacing:.045em; }
   }
