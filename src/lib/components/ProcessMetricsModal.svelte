@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Bot, Code, Monitor, Network, Terminal, Wrench } from '@lucide/svelte';
   import Modal from './Modal.svelte';
   import type { ProcessMetricsProcess, ProcessMetricsSample } from '$lib/types';
 
@@ -14,6 +15,15 @@
   const latest = $derived(samples.at(-1) ?? null);
   const previous = $derived(samples.at(-2) ?? null);
   const processKey = (process: ProcessMetricsProcess) => `${process.pid}:${process.startedAt}`;
+  function processIcon(process: ProcessMetricsProcess) {
+    if (process.pid === latest?.rootPid) return Monitor;
+    const name = process.name.toLowerCase();
+    if (/codex|claude|opencode|open-code|hermes|acp|agent|minimax|mmx/.test(name)) return Bot;
+    if (/node|npm|npx|bun|deno|python|ruby|perl|java/.test(name)) return Code;
+    if (/ssh|sshd|tunnel|relay|websocket/.test(name)) return Network;
+    if (/zsh|bash|fish|shell|terminal|(^|\/)sh$/.test(name)) return Terminal;
+    return Wrench;
+  }
   const formatMemory = (bytes: number) => {
     const mib = bytes / (1024 * 1024);
     return mib >= 1024 ? `${(mib / 1024).toFixed(2)} GB` : `${Math.round(mib)} MB`;
@@ -119,26 +129,30 @@
       </div>
       <section class="process-list" aria-label="Live process breakdown">
         <header><span>PROCESS</span><span>CPU</span><span>RAM</span><span>RECENT CPU</span></header>
-        {#if rows.length}
-          {#each rows as row (processKey(row.process))}
-            {@const points=processHistory(row.process)}
-            <div class="process-row">
-              <div class="process-name" style:padding-left={`${row.depth * 17}px`}>
-                {#if row.depth}<i aria-hidden="true"></i>{/if}
-                <span>{row.process.pid === latest.rootPid ? 'Monitter' : row.process.name || 'Process'}</span>
-                <small>PID {row.process.pid}</small>
+        <div class="process-scroll">
+          {#if rows.length}
+            {#each rows as row (processKey(row.process))}
+              {@const points=processHistory(row.process)}
+              {@const ProcessIcon=processIcon(row.process)}
+              <div class="process-row">
+                <div class="process-name" style:padding-left={`${row.depth * 17}px`}>
+                  {#if row.depth}<i aria-hidden="true"></i>{/if}
+                  <span class="process-icon" aria-hidden="true"><ProcessIcon size={14}/></span>
+                  <span>{row.process.pid === latest.rootPid ? 'Monitter' : row.process.name || 'Process'}</span>
+                  <small>PID {row.process.pid}</small>
+                </div>
+                <strong>{formatCpu(row.cpu)}</strong>
+                <strong>{formatMemory(row.process.residentMemoryBytes)}</strong>
+                <svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true">
+                  <line x1="0" y1="23" x2="92" y2="23"/>
+                  {#if points}<polyline points={points}/>{/if}
+                </svg>
               </div>
-              <strong>{formatCpu(row.cpu)}</strong>
-              <strong>{formatMemory(row.process.residentMemoryBytes)}</strong>
-              <svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true">
-                <line x1="0" y1="23" x2="92" y2="23"/>
-                {#if points}<polyline points={points}/>{/if}
-              </svg>
-            </div>
-          {/each}
-        {:else}
-          <p class="process-empty">Per-process details will appear after the native app is rebuilt and relaunched.</p>
-        {/if}
+            {/each}
+          {:else}
+            <p class="process-empty">Per-process details will appear after the native app is rebuilt and relaunched.</p>
+          {/if}
+        </div>
       </section>
     {:else if !error}
       <p class="empty">Collecting the first process sample…</p>
@@ -150,7 +164,7 @@
   .resource-modal{display:grid;gap:18px}.metrics-error,.empty{margin:0;padding:24px;color:var(--muted);text-align:center}.metrics-error{color:var(--danger)}
   .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.summary>div{display:grid;gap:3px;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.summary span,.process-list>header{color:var(--muted);font:600 calc(9px * var(--interface-font-ratio,1)) var(--mono);letter-spacing:.08em}.summary strong{font:600 calc(19px * var(--interface-font-ratio,1)) var(--mono)}.summary small{overflow:hidden;color:var(--muted);font-size:calc(10px * var(--interface-font-ratio,1));text-overflow:ellipsis;white-space:nowrap}
   .charts{display:grid;grid-template-columns:1fr 1fr;gap:12px}.charts section{min-width:0;padding:11px 12px 8px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--panel) 84%,var(--soft))}.charts header{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;font-size:calc(11px * var(--interface-font-ratio,1))}.charts header span{color:var(--muted)}.charts header strong{font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono)}.charts svg{display:block;width:100%;height:112px;overflow:visible}.charts line,.process-sparkline line{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke}.charts polyline,.process-sparkline polyline{fill:none;stroke:var(--accent);stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.memory-chart polyline{stroke:#6e9f82}
-  .process-list{overflow:hidden;border:1px solid var(--line);border-radius:9px}.process-list>header,.process-row{display:grid;grid-template-columns:minmax(190px,1fr) 72px 82px 100px;align-items:center;gap:10px}.process-list>header{padding:8px 12px;border-bottom:1px solid var(--line);background:var(--soft)}.process-list>header span:not(:first-child){text-align:right}.process-row{min-height:42px;padding:4px 12px;border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent)}.process-row:last-child{border-bottom:0}.process-row>strong{text-align:right;font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono)}.process-name{position:relative;display:flex;align-items:baseline;gap:8px;min-width:0}.process-name i{position:absolute;left:3px;width:9px;height:9px;border-bottom:1px solid var(--line);border-left:1px solid var(--line)}.process-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(12px * var(--interface-font-ratio,1));font-weight:500}.process-name small{flex:none;color:var(--muted);font:calc(9px * var(--interface-font-ratio,1)) var(--mono)}.process-sparkline{justify-self:end;width:92px;height:24px}
+  .process-list{overflow:hidden;border:1px solid var(--line);border-radius:9px}.process-list>header,.process-row{display:grid;grid-template-columns:minmax(190px,1fr) 72px 82px 100px;align-items:center;gap:10px}.process-list>header{padding:8px 12px;border-bottom:1px solid var(--line);background:var(--soft)}.process-list>header span:not(:first-child){text-align:right}.process-scroll{max-height:min(36vh,360px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.process-row{min-height:42px;padding:4px 12px;border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent)}.process-row:last-child{border-bottom:0}.process-row>strong{text-align:right;font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono)}.process-name{position:relative;display:flex;align-items:center;gap:8px;min-width:0}.process-name i{position:absolute;left:3px;width:9px;height:9px;border-bottom:1px solid var(--line);border-left:1px solid var(--line)}.process-name>span:not(.process-icon){overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(12px * var(--interface-font-ratio,1));font-weight:500}.process-icon{display:grid;flex:none;place-items:center;width:24px;height:24px;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:6px;color:var(--muted);background:color-mix(in srgb,var(--soft) 68%,transparent)}.process-name small{flex:none;color:var(--muted);font:calc(9px * var(--interface-font-ratio,1)) var(--mono)}.process-sparkline{justify-self:end;width:92px;height:24px}
   .process-empty{margin:0;padding:24px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1));line-height:1.5;text-align:center}
   @media(max-width:700px){.summary{grid-template-columns:1fr}.charts{grid-template-columns:1fr}.process-list>header,.process-row{grid-template-columns:minmax(130px,1fr) 58px 72px}.process-list>header span:last-child,.process-sparkline{display:none}}
 </style>
