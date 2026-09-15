@@ -7,7 +7,7 @@
   import { borderOpacity, setBorderOpacity, DEFAULT_BORDER_OPACITY } from '$lib/border-opacity';
   import { motionPreference, motionView, setMotionPreference, type MotionPreference } from '$lib/motion';
   import { setTerminalTheme, terminalTheme, terminalThemes, type TerminalThemeId } from '$lib/terminal-theme';
-  import { appTheme, appThemePreset, appThemes, resetAppTheme, setAppTheme, setAppThemeAccent, type AppThemeId } from '$lib/app-theme';
+  import { appTheme, appThemePreset, appThemes, applyThemeContrast, resetAppTheme, setAppTheme, setAppThemeAccent, setAppThemeContrast, type AppThemeId } from '$lib/app-theme';
   import { isLanBrowser } from '$lib/lan';
   import { remoteControlOpen, setRemoteControlTarget } from '$lib/workspace-panels';
   import LanSettings from './LanSettings.svelte';
@@ -82,6 +82,8 @@
   const selectedTerminalTheme = $derived(terminalThemes.find(option=>option.id === $terminalTheme) ?? terminalThemes[0]);
   const selectedLightTheme = $derived(appThemePreset($appTheme.light));
   const selectedDarkTheme = $derived(appThemePreset($appTheme.dark));
+  const selectedLightPalette = $derived(applyThemeContrast(selectedLightTheme.light, 'light', $appTheme.contrast));
+  const selectedDarkPalette = $derived(applyThemeContrast(selectedDarkTheme.dark, 'dark', $appTheme.contrast));
   const advancedAccent = $derived($appTheme.accent ?? selectedLightTheme.light.accent);
 
   let pending = $state(0);
@@ -249,7 +251,7 @@
           <div class="app-theme-selectors">
             {#each ['light', 'dark'] as mode}
               {@const selected = mode === 'light' ? selectedLightTheme : selectedDarkTheme}
-              {@const palette = selected[mode as 'light' | 'dark']}
+              {@const palette = mode === 'light' ? selectedLightPalette : selectedDarkPalette}
               <label class="app-theme-label">
                 <span>{mode === 'light' ? 'Light theme' : 'Dark theme'}</span>
                 <details class="rich-theme-select">
@@ -270,6 +272,15 @@
               </label>
             {/each}
           </div>
+        </section>
+
+        <section class="setting-card" aria-labelledby="contrast-heading">
+          <div class="card-heading inline-heading"><div><h2 id="contrast-heading">Contrast</h2><p>Push surfaces and text further apart while keeping the selected themes.</p></div><strong>{$appTheme.contrast}%</strong></div>
+          <label class="range-setting">Theme contrast
+            <input class="range" type="range" use:rangeFill={$appTheme.contrast} aria-label="Theme contrast" aria-valuetext={`${$appTheme.contrast}% stronger than the preset`} min="0" max="100" step="1" value={$appTheme.contrast} oninput={event=>setAppThemeContrast(Number(event.currentTarget.value))} />
+          </label>
+          <div class="range-footer"><span>Preset</span><button type="button" onclick={()=>setAppThemeContrast(0)}>Reset to preset</button><span>Maximum</span></div>
+          <p class="hint">Dark palettes use darker surfaces and lighter text; light palettes do the reverse. Saved on this device/browser.</p>
         </section>
 
         <details class="advanced-theme">
@@ -301,7 +312,7 @@
               <p class="hint">Saved on this device/browser.</p>
             </section>
 
-            <button type="button" class="reset-theme" onclick={resetAppTheme}>Reset both themes and accent</button>
+            <button type="button" class="reset-theme" onclick={resetAppTheme}>Reset themes, accent and contrast</button>
           </div>
         </details>
 

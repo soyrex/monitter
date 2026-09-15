@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { appTheme, appThemePreset, mixThemeColour } from '$lib/app-theme';
+  import { appTheme, appThemePreset, applyThemeContrast, mixThemeColour } from '$lib/app-theme';
   import { surfaceTint } from '$lib/surface-tint';
   import AnimatedTitle from './AnimatedTitle.svelte';
 
@@ -18,8 +18,8 @@
   }
 
   const mode = storedAppearanceMode();
-  const light = $derived(appThemePreset($appTheme.light).light);
-  const dark = $derived(appThemePreset($appTheme.dark).dark);
+  const light = $derived(applyThemeContrast(appThemePreset($appTheme.light).light, 'light', $appTheme.contrast));
+  const dark = $derived(applyThemeContrast(appThemePreset($appTheme.dark).dark, 'dark', $appTheme.contrast));
   const lightAccent = $derived($appTheme.accent ?? light.accent);
   const darkAccent = $derived($appTheme.accent ?? dark.accent);
   const themeStyle = $derived([

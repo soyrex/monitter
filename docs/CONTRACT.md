@@ -230,11 +230,13 @@ Mocha, Dracula, Gruvbox Dark, Molokai, Nord, One Dark, Solarized Dark, Wombat, a
 the choice applies the full foreground, background, cursor, selection, and 16-colour ANSI palette to
 all mounted terminals immediately; new terminals inherit it.
 
-The whole-app palette pair is client-local in `monitter.appearance.app-theme-pair.v2`. Light and dark
+The whole-app palette pair and contrast boost are client-local in `monitter.appearance.app-theme-pair.v2`. Light and dark
 appearance each have an independent rich selector with ten paired families: Monitter, Catppuccin,
 Dracula, Gruvbox, Nord, One, Solarized, Tokyo Night, Wombat, and XTerm. System appearance swaps the
 selected light/dark palettes through CSS, including their surfaces, text, line, code, and accent colours,
-without a reload. The System/Light/Dark appearance mode sits above the palette selectors. The collapsed
+without a reload. A 0–100 contrast slider sits directly below the palette selectors and defaults to 0,
+preserving each preset. Increasing it progressively moves dark-theme surfaces toward black and text toward
+white, with the inverse treatment for light themes; accent hues remain unchanged. The System/Light/Dark appearance mode sits above the palette selectors. The collapsed
 Advanced theme controls let one optional accent, tint intensity, and border opacity apply to both; clearing the accent override
 restores each palette's own accent. A legacy single-preset selection is migrated once when no paired
 selection exists. Density, motion, scale, tabs, pane controls, and terminal themes remain independent.
