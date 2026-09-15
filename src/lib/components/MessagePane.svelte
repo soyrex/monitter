@@ -9,6 +9,8 @@
   let heading = $state<HTMLDivElement>();
   let showJump = $state(false);
   let followingLatest = true;
+  let readerDetached = false;
+  let detachedScrollTop = 0;
   let lastViewportHeight = 0;
   let lastScrollHeight = 0;
   let followFrame: number | undefined;
@@ -41,6 +43,27 @@
     rememberMetrics();
   }
 
+  function detachFromLatest() {
+    if (!viewport || !active) return;
+    readerDetached = true;
+    followingLatest = false;
+    detachedScrollTop = viewport.scrollTop;
+    showJump = !atAbsoluteLatest();
+    if (followFrame !== undefined) cancelAnimationFrame(followFrame);
+    followFrame = undefined;
+    rememberMetrics();
+  }
+
+  function handleScrollKey(event: KeyboardEvent) {
+    if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) detachFromLatest();
+  }
+
+  function handleScrollPointer(event: PointerEvent) {
+    if (!viewport) return;
+    const right = viewport.getBoundingClientRect().right;
+    if (event.pointerType !== 'touch' && event.clientX >= right - 14) detachFromLatest();
+  }
+
   function followLayout() {
     pinToLatest();
     // Svelte children, font/image layout and composer resizing can settle after
@@ -54,6 +77,7 @@
   }
 
   function jumpToLatest() {
+    readerDetached = false;
     followingLatest = true;
     followLayout();
   }
@@ -64,14 +88,28 @@
     // instead of measuring the new, larger bottom gap as a reader scrolling up.
     if (viewport && (viewport.clientHeight !== lastViewportHeight || viewport.scrollHeight !== lastScrollHeight)) {
       if (followingLatest) followLayout();
-      else if (atAbsoluteLatest()) { followingLatest = true; showJump = false; }
       else showJump = true;
+      rememberMetrics();
+      return;
+    }
+    if (readerDetached && viewport) {
+      const moved = Math.abs(viewport.scrollTop - detachedScrollTop) > 0.5;
+      detachedScrollTop = viewport.scrollTop;
+      if (moved && atAbsoluteLatest()) {
+        readerDetached = false;
+        followingLatest = true;
+        showJump = false;
+      } else {
+        followingLatest = false;
+        showJump = !atAbsoluteLatest() || moved;
+      }
       rememberMetrics();
       return;
     }
     followingLatest = nearLatest();
     showJump = !followingLatest;
     rememberMetrics();
+    if (followingLatest) followLayout();
   }
 
   // A conversation activation or explicit send requests a jump after Svelte
@@ -98,7 +136,6 @@
       // Covers streamed content, expanded tools, images/fonts and pane resizing.
       // Readers who scrolled up keep their place as new content arrives.
       if (followingLatest) followLayout();
-      else if (atAbsoluteLatest()) { followingLatest = true; showJump = false; }
       else showJump = true;
       rememberMetrics();
     });
@@ -123,7 +160,8 @@
 
 <div class="message-pane" class:has-sticky-request={stickyRequest}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (the scroll pane must support keyboard scrolling) -->
-  <div class="messages" bind:this={viewport} onscroll={handleScroll} role="region" aria-label="Messages" tabindex="0">
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions (wheel, touch and scrollbar intent must detach follow mode before scroll) -->
+  <div class="messages" bind:this={viewport} onscroll={handleScroll} onwheel={detachFromLatest} ontouchmove={detachFromLatest} onkeydown={handleScrollKey} onpointerdown={handleScrollPointer} role="region" aria-label="Messages" tabindex="0">
     {#if header}<div class="message-header" bind:this={heading}>{@render header()}</div>{/if}
     <div class="message-content" use:messageArrival bind:this={content}>{@render children()}</div>
   </div>
