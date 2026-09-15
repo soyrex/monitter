@@ -51,9 +51,8 @@ async function run(width, mobile) {
 
   const sidebar = page.getByRole('complementary', { name: 'Agents and tasks', exact: true });
   await expect(sidebar).toBeVisible();
-  const agentsLabel = sidebar.locator('.section-label').filter({ hasText: 'AGENTS' });
-  await expect(agentsLabel).toBeVisible();
-  await expect(agentsLabel.getByRole('button')).toHaveCount(0);
+  await expect(sidebar.getByRole('tab', { name: 'Agents view', exact: true })).toBeVisible();
+  await expect(sidebar.locator('.sidebar-mode-content > .section-label')).toHaveCount(0);
 
   for (const name of ['Atlas', 'Beta', 'Gamma']) {
     const row = sidebar.locator('.agent-row').filter({ hasText: name });

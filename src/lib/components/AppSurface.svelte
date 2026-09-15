@@ -3679,8 +3679,11 @@
         <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !snapshot?.agents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
       </div>{/if}
     </div>
-    {#if !sidebarCompressed}<div class="sidebar-tabs" role="tablist" aria-label="Sidebar views">
-      {#each sidebarViews as view}<div class="sidebar-tab-entry" class:active={sidebarView === view.id}><button type="button" class="sidebar-tab" role="tab" aria-label={`${view.label} view`} aria-selected={sidebarView === view.id} title={`${view.label} view`} onclick={()=>setSidebarView(view.id)}><view.icon size={12}/><span>{view.label}</span></button></div>{/each}
+    {#if !sidebarCompressed}<div class="sidebar-tabs-row">
+      <div class="sidebar-tabs" role="tablist" aria-label="Sidebar views">
+        {#each sidebarViews as view}<div class="sidebar-tab-entry" class:active={sidebarView === view.id}><button type="button" class="sidebar-tab" role="tab" aria-label={`${view.label} view`} aria-selected={sidebarView === view.id} title={`${view.label} view`} onclick={()=>setSidebarView(view.id)}><view.icon size={12}/><span>{view.label}</span></button></div>{/each}
+      </div>
+      {#if sidebarView === 'projects'}<button class="sidebar-tab-action" type="button" aria-label="New project" title="New project" onclick={()=>editProject()}><Plus size={14}/></button>{/if}
     </div>{/if}
     {#if !sidebarCompressed}
     <nav use:motionView={{key:"sidebar",initial:motionReady,x:6,y:0,duration:160}} class="side-scroll" onscroll={event=>sidebarScrolled=event.currentTarget.scrollTop>0}>
@@ -3689,9 +3692,6 @@
       </div>{/if}
       <div class="sidebar-mode-content" use:motionView={{key:sidebarView,x:16*sidebarMotionDirection,y:0,duration:180,opacity:0.35}}>
       {#if sidebarView === 'standard'}
-      <div class="section-label">
-        <span>AGENTS</span>
-      </div>
       {#if snapshot?.agents.length}{#each sidebarSorted(snapshot.agents,'agents') as agent}{@const agentTasks =
             sidebarSorted(activeTasks.filter(
               (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId,
@@ -3733,11 +3733,9 @@
           >
         </div>{/if}
       {:else if sidebarView === 'activity'}
-        <div class="section-label"><span>ACTIVITY</span><button aria-label="New chat" title="New chat" onclick={()=>openTaskComposer()}><Plus size={15}/></button></div>
         <p class="view-hint">Running first, then most recent.</p>
         <div class="activity-list">{#each activityTasks as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}</div>
       {:else}
-        <div class="section-label"><span>PROJECTS</span><button aria-label="New project" title="New project" onclick={()=>editProject()}><Plus size={15}/></button></div>
         {#each sidebarSorted(projects,'projects') as project (project.id)}
           {@const projectTasks = sidebarSorted(activityTasks.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
           {@const ProjectIcon = projectIconComponent(project.icon)}
@@ -4410,15 +4408,21 @@
   .brand-actions { display:flex; flex:none; align-items:center; gap:2px; margin-left:auto; }
   .brand-action { color:var(--muted); }
   .brand-action:disabled { opacity:.45; }
-  .sidebar-tabs { display:flex; flex:none; align-items:flex-end; gap:3px; min-height:32px; padding:6px 6px 0; border-bottom:1px solid var(--line); background:var(--sidebar); }
+  .sidebar-tabs-row { display:flex; flex:none; align-items:flex-end; gap:3px; min-height:32px; padding:6px 6px 0; border-bottom:1px solid var(--line); background:var(--sidebar); }
+  .sidebar-tabs { display:flex; flex:1; min-width:0; align-items:flex-end; gap:3px; }
   .sidebar-tab-entry { display:flex; flex:1; align-self:flex-end; align-items:stretch; min-width:0; margin-bottom:-1px; border:1px solid transparent; border-bottom:0; border-radius:6px 6px 0 0; }
-  .sidebar-tab { display:flex; flex:1; align-items:center; justify-content:center; gap:3px; min-width:0; min-height:25px; padding:0 3px; border:0; border-radius:5px 5px 0 0; color:var(--muted); font:600 calc(8.5px * var(--interface-font-ratio, 1)) var(--sans); letter-spacing:.025em; text-transform:uppercase; }
+  .sidebar-tab { display:flex; flex:1; align-items:center; justify-content:center; gap:3px; min-width:0; min-height:25px; padding:0 3px; border:0; border-radius:5px 5px 0 0; color:var(--muted); font:calc(9px * var(--interface-font-ratio, 1)) var(--mono); letter-spacing:.08em; text-transform:uppercase; }
   .sidebar-tab :global(svg) { flex:none; }
   .sidebar-tab span { flex:none; max-width:calc(100% - 15px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   @media (hover:hover) and (pointer:fine) { .sidebar-tab:hover { background:var(--soft); color:var(--ink); } }
   .sidebar-tab-entry.active { position:relative; z-index:1; color:var(--ink); border-color:var(--line); background:var(--sidebar); }
   .sidebar-tab-entry.active .sidebar-tab { color:var(--ink); }
   .sidebar-tab-entry.active .sidebar-tab:hover { background:var(--sidebar); }
+  .sidebar-tab-action { display:grid; place-items:center; flex:none; width:25px; height:25px; margin-bottom:0; border-radius:5px 5px 0 0; color:var(--muted); }
+  @media (hover:hover) and (pointer:fine) { .sidebar-tab-action:hover { background:var(--soft); color:var(--ink); } }
+  @container sidebar (max-width: 270px) {
+    .sidebar-tab { gap:2px; padding-inline:2px; font-size:calc(8.5px * var(--interface-font-ratio, 1)); letter-spacing:.045em; }
+  }
   @container sidebar (max-width: 230px) {
     .sidebar-tab { gap:0; }
     .sidebar-tab span { display:none; }

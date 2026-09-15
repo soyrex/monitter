@@ -22,11 +22,11 @@ try {
 
   await tap(projects);
   await expect(projects).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('.section-label').first()).toContainText('PROJECTS');
+  await expect(page.locator('.sidebar-mode-content > .section-label')).toHaveCount(0);
 
   await tap(activity);
   await expect(activity).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('.section-label').first()).toContainText('ACTIVITY');
+  await expect(page.locator('.sidebar-mode-content > .section-label')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => localStorage.getItem('monitter.sidebar-view.v2:web'))).toBe('activity');
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'saveSettings' && call.args.sidebarView))).toEqual([]);
   expect(errors).toEqual([]);

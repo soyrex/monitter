@@ -11,7 +11,7 @@ const fixture = readFileSync(`${root}/scripts/fixtures/sidebar-chrome-isolated.h
 
 // Keep this fixture deliberately small, but lift the declarations verbatim from
 // AppSurface so this checks the shipped chrome rules rather than a second style.
-const ruleNames = ['.sidebar', '.brand', '.brand strong', '.brand-logo-button', '.icon', '.brand-actions', '.brand-action', '.sidebar-tabs', '.sidebar-tab-entry', '.sidebar-tab', '.mobile-navigation .brand', '.mobile-navigation .brand-action', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
+const ruleNames = ['.sidebar', '.brand', '.brand strong', '.brand-logo-button', '.icon', '.brand-actions', '.brand-action', '.sidebar-tabs-row', '.sidebar-tabs', '.sidebar-tab-entry', '.sidebar-tab', '.mobile-navigation .brand', '.mobile-navigation .brand-action', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
 const cssBlocks = ruleNames.flatMap(name => {
   const escaped = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&');
   const re = new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{[^}]*\\}`, 'g');

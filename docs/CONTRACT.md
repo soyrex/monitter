@@ -330,8 +330,9 @@ Deleting a project unassigns its chats, including archived/running chats, withou
 A host referenced by a project workspace cannot be deleted until that mapping is removed.
 
 The sidebar offers icon tabs for Agents (agent groups), Projects (collapsible project folders plus
-unassigned chats), and Activity (running first, then most recent), in that order. Narrow sidebar widths
-retain all three tab icons while hiding their visible labels. The selection is stored locally and independently
+unassigned chats), and Activity (running first, then most recent), in that order. These tabs replace
+the matching content headings. Their compact heading-scale labels tighten with the sidebar width;
+narrow widths retain all three tab icons while hiding their visible labels. The selection is stored locally and independently
 for native desktop, ordinary web and mobile clients; changing one must not update a shared snapshot or
 alter another client's view. Switching updates the visible list synchronously without waiting for a
 backend settings write. Each browser tab retains its own choice across reloads using session storage;
