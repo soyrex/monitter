@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ChevronDown } from '@lucide/svelte';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
 
   /**
    * A display-only projection of provider allowance data. The owner is
@@ -55,6 +55,27 @@
   }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; class?: string } = $props();
   let showAbsoluteResets = $state(false);
   let currentTime = $state(Date.now());
+  let pane = $state<HTMLElement>();
+  let horizontal = $state(false);
+
+  /**
+   * Measure the full form before switching layouts. Measuring the compact form
+   * itself would immediately drop below the threshold and make it oscillate.
+   */
+  $effect(() => {
+    usage; compact; expanded;
+    if (compact || !expanded || !pane) { horizontal = false; return; }
+    let cancelled = false;
+    async function measure() {
+      horizontal = false;
+      await tick();
+      if (!cancelled && pane) horizontal = pane.getBoundingClientRect().height > window.innerHeight * 0.3;
+    }
+    void measure();
+    const onResize = () => void measure();
+    window.addEventListener('resize', onResize);
+    return () => { cancelled = true; window.removeEventListener('resize', onResize); };
+  });
 
   onMount(() => {
     try {
@@ -89,6 +110,31 @@
     if (unlimited) return '∞';
     const normalized = percent(value);
     return normalized === null ? '—' : `${Math.round(normalized)}%`;
+  }
+
+  type Rgb = readonly [red: number, green: number, blue: number];
+  const usageGreen: Rgb = [63, 157, 106];
+  const usageOrange: Rgb = [224, 133, 51];
+  const usageRed: Rgb = [205, 76, 76];
+
+  function blendColor(from: Rgb, to: Rgb, amount: number): string {
+    const progress = Math.max(0, Math.min(1, amount));
+    return `rgb(${from.map((channel, index) => Math.round(channel + (to[index] - channel) * progress)).join(' ')})`;
+  }
+
+  /**
+   * Allowance data is expressed as used percentage, while the warning scale is
+   * based on capacity remaining: green above 40%, orange from 40–10%, and red
+   * for the final 10%. Interpolating at each boundary keeps the change smooth.
+   */
+  function usageColor(window: UsageRingWindow | null | undefined): string {
+    if (window?.unlimited) return 'var(--accent)';
+    const used = percent(window?.usedPercent);
+    if (used === null) return 'var(--accent)';
+    const remaining = 100 - used;
+    if (remaining >= 40) return blendColor(usageGreen, usageGreen, 0);
+    if (remaining >= 10) return blendColor(usageOrange, usageGreen, (remaining - 10) / 30);
+    return blendColor(usageRed, usageOrange, remaining / 10);
   }
 
   function resetTimestamp(window: UsageRingWindow | null | undefined): number | null {
@@ -172,7 +218,7 @@
   }
 </script>
 
-<section class:compact class:expanded class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
+<section bind:this={pane} class:compact class:expanded class:horizontal class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
   {#if !compact}
     <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" onclick={toggle}>
       <span>MODEL USAGE</span>
@@ -197,7 +243,7 @@
           aria-label={providerTitle(provider, data)}
           title={providerTitle(provider, data)}
         >
-          <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`}>
+          <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`} style={`--ring-active-color:${usageColor(active)};--ring-weekly-color:${usageColor(weekly)}`}>
             <circle class="ring-track" cx="20" cy="20" r={radius} />
             <circle
               class="ring-active"
@@ -215,28 +261,31 @@
                 stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
               />
             {/if}
-            <text class="ring-value" x="20" y="21" text-anchor="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
+            <text class="ring-value" x="20" y="20" text-anchor="middle" dominant-baseline="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
           </svg>
           <div class="usage-copy">
             <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
             {#if hasValue}
               <div class="usage-detail">
-                <span>{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used.`}</span>
+                <span>
+                  <span class="usage-detail-long">{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used.`}</span>
+                  <span class="usage-detail-short">{active?.unlimited ? 'U: ∞' : `U: ${percentText(active?.usedPercent)}`}</span>
+                </span>
                 {#if resetTimestamp(active) !== null}
                   {@const activeReset = resetTimestamp(active)!}
                   <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}>
                     {#if showAbsoluteResets}
-                      Resets {absoluteReset(activeReset)}
+                      <span class="usage-reset-long">Resets {absoluteReset(activeReset)}</span><span class="usage-reset-short">R: {absoluteReset(activeReset)}</span>
                     {:else}
                       {@const relative = relativeReset(activeReset)}
-                      {relative.prefix} <strong>{relative.value}</strong>
+                      <span class="usage-reset-long">{relative.prefix} </span><span class="usage-reset-short">R: </span><strong>{relative.value}</strong>
                     {/if}
                   </button>
                 {:else}
                   {#if active?.resetLabel?.trim()}
-                    <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}>{resetText(active)}</button>
+                    <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}><span class="usage-reset-long">{resetText(active)}</span><span class="usage-reset-short">R: {resetText(active)}</span></button>
                   {:else}
-                    <span class="usage-reset" title={resetText(active)}>{resetText(active)}</span>
+                    <span class="usage-reset" title={resetText(active)}><span class="usage-reset-long">{resetText(active)}</span><span class="usage-reset-short">R: {resetText(active)}</span></span>
                   {/if}
                 {/if}
               </div>
@@ -247,19 +296,19 @@
                     {@const weeklyReset = resetTimestamp(weekly)!}
                     <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}>
                       {#if showAbsoluteResets}
-                        Resets {absoluteReset(weeklyReset)}
+                        <span class="usage-reset-long">Resets {absoluteReset(weeklyReset)}</span><span class="usage-reset-short">R: {absoluteReset(weeklyReset)}</span>
                       {:else}
                         {@const relative = relativeReset(weeklyReset)}
-                        {relative.prefix} <strong>{relative.value}</strong>
+                        <span class="usage-reset-long">{relative.prefix} </span><span class="usage-reset-short">R: </span><strong>{relative.value}</strong>
                       {/if}
                     </button>
                   {:else}
-                    {#if weekly.unlimited}
-                      <span class="usage-reset">Unlimited</span>
+                  {#if weekly.unlimited}
+                      <span class="usage-reset"><span class="usage-reset-long">Unlimited</span><span class="usage-reset-short">R: ∞</span></span>
                     {:else if weekly.resetLabel?.trim()}
-                      <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}>{resetText(weekly)}</button>
+                      <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}><span class="usage-reset-long">{resetText(weekly)}</span><span class="usage-reset-short">R: {resetText(weekly)}</span></button>
                     {:else}
-                      <span class="usage-reset">{resetText(weekly)}</span>
+                      <span class="usage-reset"><span class="usage-reset-long">{resetText(weekly)}</span><span class="usage-reset-short">R: {resetText(weekly)}</span></span>
                     {/if}
                   {/if}
                 </div>
@@ -288,11 +337,12 @@
   .usage-ring { display:block; width:40px; height:40px; overflow:visible; transform:rotate(-90deg); }
   .usage-ring circle { fill:none; stroke-linecap:round; }
   .ring-track { stroke:color-mix(in srgb,var(--muted) 20%,transparent); stroke-width:3; }
-  .ring-active { stroke:var(--accent); stroke-width:3; transition:stroke-dashoffset .2s ease; }
-  .ring-weekly { stroke:color-mix(in srgb,var(--accent) 45%,var(--muted)); stroke-width:1.5; transition:stroke-dashoffset .2s ease; }
+  .ring-active { stroke:var(--ring-active-color,var(--accent)); stroke-width:3; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
+  .ring-weekly { stroke:color-mix(in srgb,var(--ring-weekly-color,var(--accent)) 45%,var(--muted)); stroke-width:1.5; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
   .ring-value { fill:var(--ink); font:700 9px var(--mono); transform:rotate(90deg); transform-origin:20px 20px; }
   .usage-copy { display:grid; gap:1px; min-width:0; }
   .usage-heading,.usage-detail,.usage-weekly { display:flex; align-items:baseline; gap:6px; min-width:0; white-space:nowrap; }
+  .usage-detail-short,.usage-reset-short { display:none; }
   .usage-heading strong { overflow:hidden; text-overflow:ellipsis; font-size:calc(11.5px * var(--interface-font-ratio,1)); font-weight:550; }
   .usage-status { overflow:hidden; color:var(--muted); text-overflow:ellipsis; font:calc(9.5px * var(--interface-font-ratio,1)) var(--mono); }
   .usage-detail { color:var(--muted); font:calc(9.5px * var(--interface-font-ratio,1)) var(--mono); }
@@ -317,6 +367,15 @@
   .compact .usage-provider { grid-template-columns:40px; padding:4px; }
   .compact .usage-copy { display:none; }
   .compact .usage-provider:hover { border-color:color-mix(in srgb,var(--accent) 22%,transparent); }
+  .horizontal {
+    .usage-provider { align-items:start; }
+    .usage-ring { margin-top:2px; }
+    .usage-copy { gap:2px; }
+    .usage-detail,.usage-weekly { display:grid; grid-template-columns:minmax(0,1fr); gap:1px; align-items:baseline; white-space:normal; }
+    .usage-detail-long,.usage-reset-long { display:none; }
+    .usage-detail-short,.usage-reset-short { display:inline; }
+    .usage-reset { overflow:visible; text-overflow:clip; }
+  }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly,.usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }
 </style>

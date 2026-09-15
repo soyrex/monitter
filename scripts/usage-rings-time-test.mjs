@@ -15,9 +15,9 @@ writeFileSync(join(harness, 'App.svelte'), `<script>
   const base = Date.now();
   const resetAfter = (days, hours, minutes) => base + (((days * 24 + hours) * 60 + minutes) * 60000);
   const usage = {
-    codex: { status: 'ready', active: { label: '5-hour', usedPercent: 92, resetsAt: resetAfter(3, 6, 23) }, weekly: { label: 'Week', usedPercent: 20, resetsAt: resetAfter(7, 0, 0) } },
-    claude: { status: 'stale', active: { label: 'Current session', usedPercent: 10, resetsAt: resetAfter(0, 2, 5) } },
-    minimax: { status: 'ready', active: { label: 'general 5-hour', usedPercent: 92, resetsAt: resetAfter(0, 4, 30) } },
+    codex: { status: 'ready', active: { label: '5-hour', usedPercent: 98, resetsAt: resetAfter(3, 6, 23) }, weekly: { label: 'Week', usedPercent: 20, resetsAt: resetAfter(7, 0, 0) } },
+    claude: { status: 'stale', active: { label: 'Current session', usedPercent: 80, resetsAt: resetAfter(0, 2, 5) } },
+    minimax: { status: 'ready', active: { label: 'general 5-hour', usedPercent: 25, resetsAt: resetAfter(0, 4, 30) } },
     'opencode-go': { status: 'error', message: 'Router unavailable.' },
   };
 </script>
@@ -59,7 +59,10 @@ try {
   await expect(resetButtons).toHaveCount(4);
 
   const codex = providers.filter({ hasText: 'Codex' });
-  await expect(codex).toContainText('92% used. Resets in 3d 6h 23m');
+  await page.setViewportSize({ width: 760, height: 1400 });
+  await expect.poll(() => codex.innerText()).toMatch(/98% used\.\s*Resets in\s*3d 6h 23m/);
+  await page.setViewportSize({ width: 760, height: 700 });
+  await expect.poll(() => codex.innerText()).toMatch(/U:\s*98%\s*R:\s*3d 6h 23m/);
   await expect(codex.locator('.usage-reset strong').first()).toHaveText('3d 6h 23m');
   expect(Number(await codex.locator('.usage-reset strong').first().evaluate(node => getComputedStyle(node).fontWeight))).toBeGreaterThanOrEqual(600);
   await expect(providers.filter({ hasText: 'MiniMax' })).toContainText('general 5-hour');
@@ -68,16 +71,41 @@ try {
   await expect(providers.filter({ hasText: 'OpenCode Go' })).toHaveClass(/error/);
   await expect(resetButtons.first()).toHaveAttribute('aria-label', /Show absolute reset dates and times for all provider windows/);
 
+  const activeStroke = async name => providers.filter({ hasText: name }).locator('.usage-ring').evaluate(node => node.style.getPropertyValue('--ring-active-color'));
+  const [redStroke, orangeStroke, greenStroke] = await Promise.all([
+    activeStroke('Codex'), activeStroke('Claude'), activeStroke('MiniMax'),
+  ]);
+  const rgb = stroke => stroke.match(/\d+/g).map(Number);
+  const [red, orange, green] = [redStroke, orangeStroke, greenStroke].map(rgb);
+  expect(red[0]).toBeGreaterThan(red[1]);
+  expect(orange[0]).toBeGreaterThan(orange[1]);
+  expect(green[1]).toBeGreaterThan(green[0]);
+
+  const ringValue = codex.locator('.ring-value');
+  await expect(ringValue).toHaveAttribute('x', '20');
+  await expect(ringValue).toHaveAttribute('y', '20');
+  await expect(ringValue).toHaveAttribute('dominant-baseline', 'middle');
+
+  const horizontalLayout = await codex.evaluate(node => {
+    const ring = node.querySelector('.usage-ring')?.getBoundingClientRect();
+    const copy = node.querySelector('.usage-copy')?.getBoundingClientRect();
+    const detail = node.querySelector('.usage-detail')?.getBoundingClientRect();
+    const reset = node.querySelector('.usage-detail .usage-reset')?.getBoundingClientRect();
+    return { ringRight: ring?.right, copyLeft: copy?.left, detailTop: detail?.top, resetTop: reset?.top };
+  });
+  expect(horizontalLayout.ringRight).toBeLessThan(horizontalLayout.copyLeft);
+  expect(horizontalLayout.resetTop).toBeGreaterThan(horizontalLayout.detailTop);
+
   await resetButtons.first().press('Enter');
-  await expect(resetButtons.filter({ hasText: 'Resets in' })).toHaveCount(0);
+  await expect(resetButtons.filter({ hasText: 'R: 3d 6h 23m' })).toHaveCount(0);
   for (let index = 0; index < 4; index += 1) {
-    await expect(resetButtons.nth(index)).toContainText('Resets ');
+    await expect(resetButtons.nth(index)).toContainText('R: ');
   }
   await expect(resetButtons.first()).toHaveAttribute('aria-label', /Show relative reset times for all provider windows/);
 
   await resetButtons.last().click();
-  await expect(resetButtons.filter({ hasText: 'Resets in' })).toHaveCount(4);
-  console.log('Usage rings show bold relative resets, toggle all times together, retain status states, and label MiniMax as 5-hour.');
+  await expect(resetButtons.filter({ hasText: 'R: ' })).toHaveCount(4);
+  console.log('Usage rings switch to the sidebar horizontal U/R summary, toggle all times together, retain status states, and label MiniMax as 5-hour.');
 } finally {
   await browser?.close();
   if (child.exitCode === null && child.signalCode === null) {
