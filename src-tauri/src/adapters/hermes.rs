@@ -111,17 +111,28 @@ pub fn parse_event(value: &Value) -> Vec<Parsed> {
                 }]
             }
         }
-        "reasoning" => vec![event(
-            native_session_id,
-            "reasoning",
-            "Reasoning",
-            value
+        "reasoning" => {
+            // Hermes calls these records reasoning, but its TUI gateway uses
+            // them for the operator-facing progress updates that appear
+            // between tool calls. Keep the raw record for the diagnostic
+            // timeline while also persisting the text as ordinary assistant
+            // output so it is visible in the chat transcript.
+            let text = value
                 .get("text")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
-                .into(),
-            false,
-        )],
+                .to_owned();
+            if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![Parsed {
+                    native_session_id,
+                    assistant: Some(text.clone()),
+                    event: Some(("output".into(), "Hermes progress".into(), text)),
+                    failed: false,
+                }]
+            }
+        }
         "tool" => {
             let name = value
                 .get("name")
@@ -322,6 +333,16 @@ mod tests {
             "type": "output", "session_id": "session-123", "text": "Done."
         }));
         assert_eq!(output[0].assistant.as_deref(), Some("Done."));
+
+        let progress = parse_event(&serde_json::json!({
+            "type": "reasoning", "session_id": "session-123", "text": "Searching the inbox..."
+        }));
+        assert_eq!(
+            progress[0].assistant.as_deref(),
+            Some("Searching the inbox...")
+        );
+        assert_eq!(progress[0].event.as_ref().unwrap().0, "output");
+        assert_eq!(progress[0].event.as_ref().unwrap().1, "Hermes progress");
 
         let computer = parse_event(&serde_json::json!({
             "type": "tool", "session_id": "session-123", "name": "computer_use",
