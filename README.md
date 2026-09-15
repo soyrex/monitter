@@ -9,6 +9,15 @@ Requires Node/npm, Rust and Xcode command-line tools. Install dependencies with 
 `npm run tauri dev`. The development frontend uses loopback port 18420. `npm run dev` is a browser
 design preview; agent execution requires the native app.
 
+An installed build can use that same hot-reloading frontend without launching a second native
+backend. Run `npm run dev` in the worktree you are editing, then choose **Monitter → Load
+Hot-Reload UI** in the app menu. The app verifies Monitter's marker on exact loopback port 18420
+before navigating its existing window, so the same native state and running sessions stay attached.
+Use the in-window **Use packaged UI** control (or the matching app-menu item) to switch back. If the
+Vite server disappears, the window returns to the packaged interface after three failed checks.
+Only frontend changes hot reload; Rust/backend changes still require rebuilding and reinstalling.
+Because the Vite port is fixed, run one Monitter `npm run dev` server at a time.
+
 ```sh
 npm run check
 npm run build

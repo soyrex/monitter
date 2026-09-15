@@ -46,12 +46,29 @@ pub fn build_for_shortcut_mode(
     )?;
     #[cfg(target_os = "macos")]
     {
+        let load_dev_ui = MenuItem::with_id(
+            app,
+            crate::dev_ui::LOAD_MENU_ID,
+            "Load Hot-Reload UI",
+            true,
+            None::<&str>,
+        )?;
+        let use_packaged_ui = MenuItem::with_id(
+            app,
+            crate::dev_ui::PACKAGED_MENU_ID,
+            "Use Packaged UI",
+            true,
+            None::<&str>,
+        )?;
         let application = Submenu::with_items(
             app,
             "Monitter",
             true,
             &[
                 &Native::about(app, Some("About Monitter"), None)?,
+                &Native::separator(app)?,
+                &load_dev_ui,
+                &use_packaged_ui,
                 &Native::separator(app)?,
                 &Native::services(app, None)?,
                 &Native::separator(app)?,

@@ -4,11 +4,26 @@ import process from "node:process";
 import { webDevPlugin, webDevProxy } from './scripts/vite-web-dev.mjs';
 const host = process.env.TAURI_DEV_HOST;
 
+export const hotUiMarkerPlugin = () => ({
+  name: 'monitter-hot-ui-marker',
+  /** @param {import('vite').ViteDevServer} server */
+  configureServer(server) {
+    server.middlewares.use((request, response, next) => {
+      if (request.url?.split('?', 1)[0] !== '/__monitter_dev__') return next();
+      response.statusCode = 200;
+      response.setHeader('Content-Type', 'application/json');
+      response.setHeader('Cache-Control', 'no-store');
+      response.end(JSON.stringify({ app: 'monitter', hotUiProtocol: 1 }));
+    });
+  },
+});
+
 // https://vite.dev/config/
 export default defineConfig(({ command, mode }) => {
   const webDev = command === 'serve' && mode === 'monitter-web';
+  const loopbackHotUi = command === 'serve' && !webDev && (!host || host === '127.0.0.1' || host === 'localhost');
   return {
-  plugins: [...(webDev ? [webDevPlugin()] : []), sveltekit()],
+  plugins: [...(webDev ? [webDevPlugin()] : []), ...(loopbackHotUi ? [hotUiMarkerPlugin()] : []), sveltekit()],
   // Keep dependency transforms local when isolated worktrees reuse node_modules.
   cacheDir: ".svelte-kit/vite-cache",
 

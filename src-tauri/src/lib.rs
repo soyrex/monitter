@@ -27,6 +27,7 @@ mod collaboration;
 mod collaboration_runtime;
 mod collaboration_transport;
 mod deletion;
+mod dev_ui;
 mod extensions;
 mod extensions_runtime;
 mod git;
@@ -5260,6 +5261,19 @@ fn set_native_escape_shield(state: State<'_, AppState>, enabled: bool) {
 }
 
 #[tauri::command]
+fn load_dev_ui(app: AppHandle) -> Result<(), String> {
+    dev_ui::enter(&app)
+}
+
+#[tauri::command]
+fn use_packaged_ui(
+    app: AppHandle,
+    state: State<'_, dev_ui::DevUiState>,
+) -> Result<(), String> {
+    dev_ui::leave(&app, &state)
+}
+
+#[tauri::command]
 fn save_channel(state: State<'_, AppState>, channel: Channel) -> Result<Snapshot, String> {
     state.0.save_channel(channel)
 }
@@ -6096,13 +6110,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .menu(menu::build)
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "close-tab" {
-                if let Err(error) = app.emit("monitter-close-tab", ()) {
-                    eprintln!("Could not dispatch close-tab action: {error}");
+            let result = match event.id().as_ref() {
+                "close-tab" => app
+                    .emit("monitter-close-tab", ())
+                    .map_err(|error| format!("Could not dispatch close-tab action: {error}")),
+                dev_ui::LOAD_MENU_ID => dev_ui::enter(app),
+                dev_ui::PACKAGED_MENU_ID => {
+                    let state = app.state::<dev_ui::DevUiState>();
+                    dev_ui::leave(app, &state)
                 }
+                _ => Ok(()),
+            };
+            if let Err(error) = result {
+                eprintln!("{error}");
+                let _ = app.emit(dev_ui::ERROR_EVENT, error);
             }
         })
         .setup(|app| {
+            let dev_ui_state = dev_ui::DevUiState::capture(app.handle())?;
             let dir = app
                 .path()
                 .app_data_dir()
@@ -6131,6 +6156,7 @@ pub fn run() {
             install_macos_escape_shield(app.handle().clone(), Arc::clone(&service));
             service.initialize_collaboration()?;
             service.dispatch_startup_queues();
+            app.manage(dev_ui_state);
             app.manage(AppState(service));
             // The listener may immediately dispatch through app.state(), so it
             // starts only after the Tauri state has been registered.
@@ -6192,6 +6218,8 @@ pub fn run() {
             stop_channel_agent_conversation,
             save_settings,
             set_native_escape_shield,
+            load_dev_ui,
+            use_packaged_ui,
             save_channel,
             set_channel_membership,
             send_channel_message,
