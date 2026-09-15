@@ -53,12 +53,27 @@
     expanded = $bindable(true),
     class: className = '',
   }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; class?: string } = $props();
+  let showAbsoluteResets = $state(false);
+  let currentTime = $state(Date.now());
 
   onMount(() => {
     try {
       const stored = localStorage.getItem(storageKey);
       if (stored === 'true' || stored === 'false') expanded = stored === 'true';
     } catch { /* Keep the expanded default when local storage is unavailable. */ }
+
+    const refreshCurrentTime = () => { currentTime = Date.now(); };
+    const untilNextMinute = 60_000 - (Date.now() % 60_000);
+    let minuteTimer: number | undefined;
+    const firstRefresh = window.setTimeout(() => {
+      refreshCurrentTime();
+      minuteTimer = window.setInterval(refreshCurrentTime, 60_000);
+    }, untilNextMinute);
+
+    return () => {
+      window.clearTimeout(firstRefresh);
+      if (minuteTimer !== undefined) window.clearInterval(minuteTimer);
+    };
   });
 
   function toggle() {
@@ -76,15 +91,59 @@
     return normalized === null ? '—' : `${Math.round(normalized)}%`;
   }
 
+  function resetTimestamp(window: UsageRingWindow | null | undefined): number | null {
+    return typeof window?.resetsAt === 'number' && Number.isFinite(window.resetsAt) ? window.resetsAt : null;
+  }
+
+  function compactDuration(minutes: number): string {
+    const days = Math.floor(minutes / 1_440);
+    const hours = Math.floor((minutes % 1_440) / 60);
+    const remainingMinutes = minutes % 60;
+    return [
+      days > 0 ? `${days}d` : '',
+      hours > 0 ? `${hours}h` : '',
+      remainingMinutes > 0 ? `${remainingMinutes}m` : '',
+    ].filter(Boolean).join(' ') || '0m';
+  }
+
+  function relativeReset(timestamp: number): { prefix: string; value: string } {
+    const difference = timestamp - currentTime;
+    if (difference >= 60_000) return { prefix: 'Resets in', value: compactDuration(Math.ceil(difference / 60_000)) };
+    if (difference > 0) return { prefix: 'Resets in', value: 'less than a minute' };
+    if (difference > -60_000) return { prefix: 'Reset due', value: 'now' };
+    return { prefix: 'Reset overdue by', value: compactDuration(Math.floor(Math.abs(difference) / 60_000)) };
+  }
+
+  function absoluteReset(timestamp: number): string {
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    }).format(timestamp);
+  }
+
   function resetText(window: UsageRingWindow | null | undefined): string {
     if (!window) return 'Reset time unavailable';
-    if (window.resetLabel?.trim()) return window.resetLabel.trim();
-    if (typeof window.resetsAt === 'number' && Number.isFinite(window.resetsAt)) {
-      return `Resets ${new Intl.DateTimeFormat(undefined, {
-        weekday: 'short', hour: 'numeric', minute: '2-digit',
-      }).format(window.resetsAt)}`;
+    const timestamp = resetTimestamp(window);
+    if (timestamp !== null) {
+      if (showAbsoluteResets) return `Resets ${absoluteReset(timestamp)}`;
+      const relative = relativeReset(timestamp);
+      return `${relative.prefix} ${relative.value}`;
     }
+    if (window.resetLabel?.trim()) return window.resetLabel.trim();
     return 'Reset time unavailable';
+  }
+
+  function toggleResetDisplay(): void {
+    showAbsoluteResets = !showAbsoluteResets;
+  }
+
+  function resetToggleAction(): string {
+    return showAbsoluteResets
+      ? 'Show relative reset times for all provider windows'
+      : 'Show absolute reset dates and times for all provider windows';
+  }
+
+  function resetToggleLabel(window: UsageRingWindow | null | undefined): string {
+    return `${resetText(window)}. ${resetToggleAction()}`;
   }
 
   function stateLabel(data: UsageRingData | undefined): string {
@@ -161,9 +220,49 @@
           <div class="usage-copy">
             <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
             {#if hasValue}
-              <div class="usage-detail"><span>{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used`}</span><span class="usage-reset" title={resetText(active)}>{resetText(active)}</span></div>
+              <div class="usage-detail">
+                <span>{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used.`}</span>
+                {#if resetTimestamp(active) !== null}
+                  {@const activeReset = resetTimestamp(active)!}
+                  <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}>
+                    {#if showAbsoluteResets}
+                      Resets {absoluteReset(activeReset)}
+                    {:else}
+                      {@const relative = relativeReset(activeReset)}
+                      {relative.prefix} <strong>{relative.value}</strong>
+                    {/if}
+                  </button>
+                {:else}
+                  {#if active?.resetLabel?.trim()}
+                    <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}>{resetText(active)}</button>
+                  {:else}
+                    <span class="usage-reset" title={resetText(active)}>{resetText(active)}</span>
+                  {/if}
+                {/if}
+              </div>
               {#if weekly}
-                <div class="usage-weekly" title={resetText(weekly)}><span>{weekly.label} {weekly.unlimited ? '∞' : percentText(weekly.usedPercent)}</span><span>{weekly.unlimited ? 'Unlimited' : resetText(weekly)}</span></div>
+                <div class="usage-weekly" title={resetText(weekly)}>
+                  <span>{weekly.label} {weekly.unlimited ? '∞' : percentText(weekly.usedPercent)}</span>
+                  {#if resetTimestamp(weekly) !== null}
+                    {@const weeklyReset = resetTimestamp(weekly)!}
+                    <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}>
+                      {#if showAbsoluteResets}
+                        Resets {absoluteReset(weeklyReset)}
+                      {:else}
+                        {@const relative = relativeReset(weeklyReset)}
+                        {relative.prefix} <strong>{relative.value}</strong>
+                      {/if}
+                    </button>
+                  {:else}
+                    {#if weekly.unlimited}
+                      <span class="usage-reset">Unlimited</span>
+                    {:else if weekly.resetLabel?.trim()}
+                      <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}>{resetText(weekly)}</button>
+                    {:else}
+                      <span class="usage-reset">{resetText(weekly)}</span>
+                    {/if}
+                  {/if}
+                </div>
               {/if}
             {:else}
               <div class="usage-detail usage-message">{data?.message?.trim() || 'Usage data is not available.'}</div>
@@ -197,7 +296,11 @@
   .usage-heading strong { overflow:hidden; text-overflow:ellipsis; font-size:calc(11.5px * var(--interface-font-ratio,1)); font-weight:550; }
   .usage-status { overflow:hidden; color:var(--muted); text-overflow:ellipsis; font:calc(9.5px * var(--interface-font-ratio,1)) var(--mono); }
   .usage-detail { color:var(--muted); font:calc(9.5px * var(--interface-font-ratio,1)) var(--mono); }
-  .usage-reset { overflow:hidden; text-overflow:ellipsis; }
+  .usage-reset { min-width:0; overflow:hidden; padding:0; color:inherit; border:0; background:transparent; font:inherit; text-align:left; text-overflow:ellipsis; }
+  button.usage-reset { cursor:pointer; }
+  .usage-reset strong { color:var(--ink); font-weight:650; }
+  button.usage-reset:hover { color:var(--ink); }
+  button.usage-reset:focus-visible { outline:1px solid var(--accent); outline-offset:2px; border-radius:2px; }
   .usage-weekly { overflow:hidden; color:color-mix(in srgb,var(--muted) 85%,var(--ink)); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); }
   .usage-weekly span { overflow:hidden; text-overflow:ellipsis; }
   .usage-weekly span:last-child { color:var(--muted); }

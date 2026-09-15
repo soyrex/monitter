@@ -34,7 +34,8 @@ No fake conversations, progress, token counts, host connections or model replies
   cached subscription allowance sources. A refresh may perform bounded, read-only local CLI
   probes, never sends a model prompt, changes authentication, or exposes account identifiers.
   Codex uses app-server account rate limits; MiniMax uses `mmx quota show --output json
-  --non-interactive`; OpenCode Go asks the local Codex Router credential broker to query its
+  --non-interactive`, with `current_interval` represented as its five-hour rolling window;
+  OpenCode Go asks the local Codex Router credential broker to query its
   provider usage endpoint without exposing the API key to Monitter. Claude uses
   `claude -p "/usage" --output-format json`: the local command reports zero model turns and
   tokens, and Monitter accepts only its successful `local_command: "usage"` result. The
@@ -43,6 +44,9 @@ No fake conversations, progress, token counts, host connections or model replies
   Reset text with an omitted year is resolved to the next plausible occurrence in its named
   timezone. Freshness expiry and probe failures remain visible. All allowance timestamps
   are Unix milliseconds.
+  The usage widget presents reset timestamps as minute-granularity relative durations by
+  default. Activating any reset duration toggles every timestamp in that widget to a localized
+  absolute date and time; activating one again returns the whole widget to relative durations.
 - `save_host { host: Host }` -> Snapshot (empty id creates)
 - `delete_host { id: string }` -> Snapshot (reject referenced/default local host)
 - `probe_host { host: Host }` -> ProbeResult (unsaved settings allowed; versions keyed provider)

@@ -21,6 +21,7 @@
     "test:workspaces": "node scripts/workspace-persistence-test.mjs",
     "test:workspaces:ui": "node scripts/ui-scoped-workspaces-smoke.mjs",
     "test:overview:ui": "node scripts/ui-global-overview-workspace-smoke.mjs",
+    "test:usage-rings": "node scripts/usage-rings-time-test.mjs",
     "test:native": "node scripts/native-smoke.mjs",
     "build:mac:local": "node scripts/build-macos.mjs --debug",
     "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py",

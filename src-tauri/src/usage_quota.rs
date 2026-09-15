@@ -769,8 +769,8 @@ fn normalize_minimax(value: Value) -> Result<Vec<AllowanceWindow>, ()> {
             &mut windows,
             &key,
             name,
-            "interval",
-            "Interval",
+            "five_hour",
+            "5-hour",
             model.get("current_interval_status"),
             model.get("current_interval_remaining_percent"),
             model.get("end_time"),
@@ -1079,6 +1079,8 @@ mod tests {
             "weekly_end_time":1789948800000i64
         }]})).unwrap();
         assert_eq!(windows[0].used_percent, Some(12.0));
+        assert_eq!(windows[0].key, "general-five_hour");
+        assert_eq!(windows[0].label, "general 5-hour");
         assert_eq!(windows[0].resets_at, Some(1_789_430_400_000));
         assert_eq!(windows[1].used_percent, Some(37.0));
     }
