@@ -944,11 +944,12 @@ rewritten as if the agent authored new text. User-authored queued messages remai
 ## LAN browser access
 
 The desktop hot-reload interface is separate from LAN browser access. An installed app may load
-`http://127.0.0.1:18420/monitter-app-ui/?monitter-dev-ui=1` only after the native marker probe
-succeeds. Its Tauri capability is restricted to returning to the packaged main-window URL; arbitrary
+`http://127.0.0.1:18420/monitter-app-ui/?monitter-dev-ui=1` only after a native compatibility-marker
+probe succeeds. The marker is not an authentication mechanism. Its Tauri capability is restricted to returning to the packaged main-window URL; arbitrary
 hosts, LAN peers, the `dev:web` port, and the developer renderer receive no native task, terminal,
-filesystem, approval or settings IPC. The renderer instead uses the existing localhost LAN bridge and
-its access-code checks, just as a browser client does. The frontend displays a persistent `DEV UI · HMR`
+filesystem, approval or settings IPC. The renderer instead uses the existing localhost developer bridge,
+which requires the per-process LAN access code even while general LAN prototyping leaves its code gate
+disabled; its proxy rejects originless and foreign write requests before adding the bridge marker. The frontend displays a persistent `DEV UI · HMR`
 badge and returns to packaged assets after three consecutive marker failures. This mode reuses the
 installed app's native process rather than starting a competing Tauri backend.
 

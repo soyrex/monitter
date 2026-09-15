@@ -24,6 +24,16 @@ const proxy = Object.values(webDevProxy())[0];
 assert.equal(proxy.target, 'http://127.0.0.1:18436');
 assert.equal(proxy.headers.origin, proxy.target);
 assert.equal(proxy.changeOrigin, true);
+const appUiProxy = Object.values(webDevProxy({ developerBridge: true }))[0];
+assert.equal(appUiProxy.headers['x-monitter-dev-bridge'], '1');
+const appUiOrigin = 'http://127.0.0.1:18420';
+let appUiStatus;
+webDevGuard(appUiOrigin)(
+  { url: '/api/invoke', method: 'POST', headers: { host: '127.0.0.1:18420' }, socket: { remoteAddress: '127.0.0.1' } },
+  { writeHead(code) { appUiStatus = code; }, end() {} },
+  () => assert.fail('originless app-ui write reached proxy'),
+);
+assert.equal(appUiStatus, 403);
 assert.equal(request({ peer: '8.8.8.8' }), 403);
 for (const ip of ['192.168.10.110', '100.121.138.9']) {
   const base = `http://${ip}:18450`;

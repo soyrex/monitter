@@ -28,6 +28,7 @@ const AUTH_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// Trusted-LAN temporary mode. Keep the access-code machinery in place so it
 /// can be re-enabled without changing the HTTP contract.
 pub const REQUIRE_ACCESS_CODE: bool = false;
+const DEV_BRIDGE_HEADER: &str = "x-monitter-dev-bridge";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,19 +160,27 @@ fn handle(
         if !valid_host(request.headers.get("host")) {
             return reply(&mut stream, 421, "text/plain", b"Invalid Host", None);
         }
+        let developer_bridge = request
+            .headers
+            .get(DEV_BRIDGE_HEADER)
+            .is_some_and(|value| value == "1");
         if request.method == "GET" && request.path == "/api/access" {
             return reply(
                 &mut stream,
                 200,
                 "application/json",
-                serde_json::json!({"required": require_access_code})
+                serde_json::json!({"required": require_access_code || developer_bridge})
                     .to_string()
                     .as_bytes(),
                 Some("no-store"),
             );
         }
         if request.method == "POST" && request.path == "/api/invoke" {
-            if !same_origin(request.headers.get("origin"), request.headers.get("host")) {
+            if !same_origin(
+                request.headers.get("origin"),
+                request.headers.get("host"),
+                developer_bridge,
+            ) {
                 return reply(
                     &mut stream,
                     403,
@@ -183,7 +192,7 @@ fn handle(
             // The lock check, code comparison, and failed-attempt increment are
             // one critical section. Otherwise simultaneous requests could all
             // compare before the fifth failure establishes the server-wide lock.
-            let auth = if require_access_code {
+            let auth = if require_access_code || developer_bridge {
                 let mut limiter = auth_limiter
                     .lock()
                     .map_err(|_| "LAN access limiter unavailable.".to_string())?;
@@ -434,8 +443,10 @@ fn local_ip(ip: IpAddr) -> bool {
         IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
     }
 }
-fn same_origin(origin: Option<&String>, host: Option<&String>) -> bool {
-    let Some(origin) = origin else { return true };
+fn same_origin(origin: Option<&String>, host: Option<&String>, required: bool) -> bool {
+    let Some(origin) = origin else {
+        return !required;
+    };
     let Some(host) = host else { return false };
     origin == &format!("http://{host}")
 }
@@ -624,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_mode_keeps_lan_guards_and_does_not_touch_access_code_limiter() {
+    fn developer_bridge_requires_a_code_without_changing_unrestricted_lan_mode() {
         let root =
             std::env::temp_dir().join(format!("monitter-lan-access-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -646,13 +657,51 @@ mod tests {
         assert!(unrestricted.starts_with("HTTP/1.1 200"));
         assert!(limiter.lock().unwrap().failed_attempts.is_empty());
 
+        let dev_bridge_unauthorized = one_request_with_limiter(
+            Arc::clone(&service),
+            root.clone(),
+            "owner-token",
+            &format!(
+                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nOrigin: http://127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            Arc::clone(&limiter),
+            false,
+        );
+        assert!(dev_bridge_unauthorized.starts_with("HTTP/1.1 401"));
+
+        let dev_bridge_missing_origin = one_request_with_limiter(
+            Arc::clone(&service),
+            root.clone(),
+            "owner-token",
+            &format!(
+                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            Arc::clone(&limiter),
+            false,
+        );
+        assert!(dev_bridge_missing_origin.starts_with("HTTP/1.1 403"));
+
+        let dev_bridge_access = one_request_with_limiter(
+            Arc::clone(&service),
+            root.clone(),
+            "owner-token",
+            "GET /api/access HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\n\r\n",
+            Arc::clone(&limiter),
+            false,
+        );
+        assert!(dev_bridge_access.starts_with("HTTP/1.1 200"));
+        assert!(dev_bridge_access.contains("\"required\":true"));
+
+        let protected_limiter = Arc::new(Mutex::new(AuthRateLimiter::default()));
         for _ in 0..MAX_FAILED_AUTH_ATTEMPTS {
             let denied = one_request_with_limiter(
                 Arc::clone(&service),
                 root.clone(),
                 "owner-token",
                 &request,
-                Arc::clone(&limiter),
+                Arc::clone(&protected_limiter),
                 true,
             );
             assert!(denied.starts_with("HTTP/1.1 401"));
@@ -662,7 +711,7 @@ mod tests {
             root.clone(),
             "owner-token",
             &request,
-            limiter,
+            protected_limiter,
             true,
         );
         assert!(locked.starts_with("HTTP/1.1 429"));

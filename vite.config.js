@@ -36,7 +36,7 @@ export default defineConfig(({ command, mode }) => {
     port: appUi ? 18420 : webDev ? 18450 : 18420,
     strictPort: true,
     host: appUi ? '127.0.0.1' : webDev ? '0.0.0.0' : host || "127.0.0.1",
-    ...(webDev ? { cors: false, proxy: webDevProxy() } : {}),
+    ...(webDev ? { cors: false, proxy: webDevProxy({ developerBridge: appUi }) } : {}),
     hmr: !webDev && host
       ? {
           protocol: "ws",

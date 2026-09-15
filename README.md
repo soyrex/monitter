@@ -11,8 +11,8 @@ design preview; agent execution requires the native app.
 
 An installed build can use a hot-reloading frontend without launching a second native backend. Run
 `npm run dev:app-ui` in the worktree you are editing, then choose **Monitter → Load Hot-Reload UI**.
-The app verifies Monitter's marker on exact IPv4 loopback port 18420 before navigating its existing
-window. The developer UI uses the already-running app's authenticated LAN bridge, so enter the
+The app verifies a compatible marker on exact IPv4 loopback port 18420 before navigating its existing
+window. The developer UI uses the already-running app's developer bridge, so enter the
 six-digit access code from **Settings → LAN access** after it loads. It has no direct native IPC:
 the only remote native command is **Use packaged UI**, which is also available in the app menu.
 If the Vite server disappears, the window returns to packaged assets after three bounded checks.
