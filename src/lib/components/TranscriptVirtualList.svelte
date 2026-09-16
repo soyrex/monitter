@@ -1,6 +1,7 @@
 <script lang="ts" generics="T">
   import { createVirtualizer, defaultRangeExtractor, type VirtualizerOptions } from '@tanstack/svelte-virtual';
   import { flushSync, untrack, type Snippet } from 'svelte';
+  import { get } from 'svelte/store';
   import { useTranscriptScrollController } from '$lib/transcript-scroll-owner';
 
   /** Bounded renderer with one virtualizer owning transcript geometry and scrolling. */
@@ -24,7 +25,16 @@
   let scrollMargin = $state(0);
   let footerObserver: ResizeObserver | undefined;
   let unregisterOwner: (() => void) | undefined;
+  let committingOptions = false;
+  let canFlushMeasurements = false;
   const controller = useTranscriptScrollController();
+
+  const onVirtualizerChange = (_instance: unknown, sync: boolean) => {
+    // setOptions and initial measurement run during Svelte's own update. A
+    // later ResizeObserver delivery is outside that update and must synchronously
+    // commit its new range before core applies a scroll adjustment.
+    if (sync && !committingOptions && canFlushMeasurements) flushSync();
+  };
 
   const virtualizer = createVirtualizer<HTMLElement, HTMLDivElement>({
     count: 0,
@@ -41,27 +51,37 @@
     scrollEndThreshold: 50,
     // The adapter publishes before this callback. Flush the measured range
     // before core applies a synchronous end-anchor adjustment.
-    onChange: (_instance, sync) => { if (sync) flushSync(); },
+    onChange: onVirtualizerChange,
   });
+
+  const instance = () => get(virtualizer);
+  const rows = $derived($virtualizer.getVirtualItems().toSorted((left, right) => left.index - right.index));
+  const renderedEnd = $derived(rows.length ? rows.at(-1)!.end - scrollMargin : 0);
 
   function setVirtualizerOptions(options: Partial<VirtualizerOptions<HTMLElement, HTMLDivElement>>) {
     // The Svelte adapter publishes on every setOptions call. Effects that both
     // read its store and write options loop forever, so option writes are
     // deliberately untracked and keyed only by component inputs.
-    untrack(() => $virtualizer.setOptions(options));
+    untrack(() => {
+      committingOptions = true;
+      instance().setOptions({ ...options, onChange: onVirtualizerChange });
+      committingOptions = false;
+    });
   }
 
   function updateFooterHeight() {
-    const next = Math.ceil(footerElement?.getBoundingClientRect().height ?? 0);
-    if (next === footerHeight) return;
-    footerHeight = next;
-    setVirtualizerOptions({ paddingEnd: next });
-    // Footer measurements use the same virtualizer-owned scroll write.
-    if (controller && controller.isFollowing()) $virtualizer.scrollToEnd({ behavior: 'instant' });
+    untrack(() => {
+      const next = Math.ceil(footerElement?.getBoundingClientRect().height ?? 0);
+      if (next === footerHeight) return;
+      footerHeight = next;
+      setVirtualizerOptions({ paddingEnd: next });
+      // Footer measurements use the same virtualizer-owned scroll write.
+      if (controller && controller.isFollowing()) instance().scrollToEnd({ behavior: 'instant' });
+    });
   }
 
   function measureRow(node: HTMLDivElement) {
-    $virtualizer.measureElement(node);
+    instance().measureElement(node);
   }
 
   $effect(() => {
@@ -86,19 +106,20 @@
 
   $effect(() => {
     if (!root) return;
-    scrollParent = root.closest<HTMLElement>('.messages');
+    const virtualRoot = root;
+    scrollParent = virtualRoot.closest<HTMLElement>('.messages');
     setVirtualizerOptions({ getScrollElement: () => scrollParent });
     const measureMargin = () => {
       if (!scrollParent) return;
-      scrollMargin = root.getBoundingClientRect().top - scrollParent.getBoundingClientRect().top + scrollParent.scrollTop;
+      scrollMargin = virtualRoot.getBoundingClientRect().top - scrollParent.getBoundingClientRect().top + scrollParent.scrollTop;
     };
     measureMargin();
     const observer = new ResizeObserver(measureMargin);
-    observer.observe(root);
+    observer.observe(virtualRoot);
     if (scrollParent) observer.observe(scrollParent);
     unregisterOwner = controller?.register({
-      scrollToLatest: () => $virtualizer.scrollToEnd({ behavior: 'instant' }),
-      isAtLatest: () => $virtualizer.isAtEnd(50),
+      scrollToLatest: () => instance().scrollToEnd({ behavior: 'instant' }),
+      isAtLatest: () => instance().isAtEnd(50),
       setFollowing: following => setVirtualizerOptions({ anchorTo: following ? 'end' : 'start', followOnAppend: following ? 'instant' : false }),
     });
     return () => { observer.disconnect(); unregisterOwner?.(); unregisterOwner = undefined; scrollParent = null; };
@@ -112,9 +133,10 @@
     return () => { footerObserver?.disconnect(); footerObserver = undefined; };
   });
 
+  queueMicrotask(() => { canFlushMeasurements = true; });
+
 </script>
 
-{@const rows = $virtualizer.getVirtualItems().toSorted((left, right) => left.index - right.index)}
 <div class="transcript-virtual-list" bind:this={root} role="feed" aria-busy={!active} aria-label="Conversation transcript">
   {#if rows.length}<div aria-hidden="true" style:height={`${Math.max(0, rows[0].start - scrollMargin)}px`}></div>{/if}
   {#each rows as row, index (row.key)}
@@ -124,12 +146,11 @@
       {@render children(item, row.index)}
     </div>
   {/each}
-  {@const renderedEnd = rows.length ? rows.at(-1)!.end - scrollMargin : 0}
   <div aria-hidden="true" style:height={`${Math.max(0, $virtualizer.getTotalSize() - footerHeight - renderedEnd)}px`}></div>
   {#if footer}<div class="transcript-footer" bind:this={footerElement}>{@render footer()}</div>{/if}
 </div>
 
 <style>
   .transcript-virtual-list,.transcript-row,.transcript-footer { min-width:0; }
-  .transcript-row { overflow-anchor:none; }
+  .transcript-row { display:flow-root; overflow-anchor:none; }
 </style>
