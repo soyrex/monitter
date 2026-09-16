@@ -197,7 +197,7 @@
     border: 1px solid var(--line);
     border-radius: 13px;
     background: var(--panel);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8) !important;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, var(--modal-shadow-opacity, .4)) !important;
   }
   .modal.wide { width: min(860px, 100%); }
   header {
