@@ -1,177 +1,111 @@
 # Monitter
 
-Your agents, together. A macOS workspace for persistent agents and their local or SSH harness sessions.
-Built with Tauri 2, Rust, Svelte 5 and TypeScript from Alex's supplied interface designs.
+**Your agents, together.**
 
-## Development
+A cross-platform workspace for running, watching, and coordinating AI agents. Keep multiple conversations in view, give every project its own workspace, and work with agents on your computer or a remote machine over SSH.
 
-Requires Node/npm, Rust and Xcode command-line tools. Install dependencies with `npm ci`, then run
-`npm run tauri dev`. The development frontend uses loopback port 18420. `npm run dev` is a browser
-design preview; agent execution requires the native app.
+Monitter brings your existing CLI harnesses into one interface. It uses their native sessions and authentication, with native adapters and support for the **Agent Client Protocol (ACP)**.
 
-An installed build can use a hot-reloading frontend without launching a second native backend. Run
-`npm run dev:app-ui` in the worktree you are editing, then choose **Monitter → Load Hot-Reload UI**.
-The app verifies a compatible marker on exact IPv4 loopback port 18420 before navigating its existing
-window. The developer UI uses the already-running app's developer bridge, so enter the
-six-digit access code from **Settings → LAN access** after it loads. It has no direct native IPC:
-the only remote native command is **Use packaged UI**, which is also available in the app menu.
-If the Vite server disappears, the window returns to packaged assets after three bounded checks.
-Only frontend changes hot reload; Rust/backend changes still require rebuilding and reinstalling.
-Because the bridge port is fixed, run one Monitter `npm run dev:app-ui` server at a time.
+**Known to run on macOS, Android, and iOS. Windows and Linux are untested—we welcome testers and contributions.** The mobile apps are paired controllers: agents keep running on the connected desktop or its configured remote hosts.
+
+![Two live agent conversations, project navigation, provider usage rings, and resource graphs](docs/screenshots/multipane-workspaces-draft.jpg)
+
+*Real Monitter workspace: two agent chats side by side, with project navigation and monitoring in the sidebar.*
+
+## A workspace for more than one agent
+
+- **Multiple panes.** Keep agent conversations side by side, follow parallel work, and expand the pane that needs your attention.
+- **Project workspaces.** Group chats by project, switch between saved workspaces, and configure working folders for local and SSH hosts. One project can involve several agents and machines.
+- **Persistent conversations.** Keep native session IDs, transcripts, tabs, and execution settings together. Resume work without turning every follow-up into a new session.
+- **Cross-agent collaboration.** Let supported agents discover peers, exchange messages, and delegate linked tasks. The receiving agent uses its own harness and host, and results return to the originating conversation.
+- **Native and ACP harnesses.** Native adapters cover Codex, Claude Code, OpenCode, and Hermes. ACP connects compatible agents through a common protocol, locally or over SSH. Capabilities vary by harness; a successful connection is not a guarantee that every provider feature is supported.
+
+## Keep the work visible
+
+![Live CPU and RAM history with the Monitter and harness process breakdown](docs/screenshots/resource-monitor-draft.jpg)
+
+*Resource monitoring shows the app and its owned harness processes together.*
+
+- **CPU and RAM graphs.** See Monitter and its owned harness processes in the sidebar, then open a resource breakdown with usage history and per-process details. Native resource monitoring is currently macOS-specific.
+- **Provider usage rings.** Watch reported account allowances and reset windows for supported providers, including Codex, Claude, MiniMax, and OpenCode Go. Missing or stale readings are shown explicitly.
+- **Context and goals.** See reported context usage and supported goal budgets alongside the conversation. The goal box stays above the composer while messages scroll.
+- **Readable activity.** Inspect tool calls, available reasoning summaries, errors, approvals, and run details without losing the conversation. Scroll back to read while new output waits for you.
+- **Git and terminals.** Inspect the current branch and changes, view tracked processes, and open a terminal in the chat's working folder.
+
+## A garbage disposal for idle CLI processes
+
+Persistent agents should not mean an ever-growing collection of idle processes.
+
+Monitter's runtime collector retires eligible local harnesses after more than five minutes of inactivity, freeing their processes and disposable helpers while preserving the conversation and native session. Your next message resumes that session.
+
+Cleanup is conservative: active work, queued messages, pending approvals, and uncertain background jobs keep a runtime alive. It only targets processes Monitter owns. Automatic retirement currently covers eligible macOS Codex app-server, Claude stream-json, and resumable ACP sessions; SSH runtimes are retained.
+
+## Your agents can live on another machine
+
+Configure a host, working folder, and harness executable, then control the agent over **SSH** from the same workspace.
+
+Monitter uses your system SSH configuration, keys, and host-key checks. The harness must already be installed and authenticated on the remote machine. Native and ACP connections use that machine's session and credentials; Monitter does not replace the harness with its own model API.
+
+## Take the conversation with you
+
+- **Android and iOS controllers.** Pair a phone with the desktop to read conversations, send messages, and stop work. Execution stays on the host.
+- **Browser sharing.** Share selected chats or project scope through an approval-based invitation. Guests join by name, and shared chat supports uploads and read-only model, effort, permissions, and context information where available.
+- **Observer presence.** A sparkling eye shows connected observers with access to a chat; its tooltip lists their names.
+- **Make it yours.** Light and dark themes, configurable accents, interface scaling, tab styles, and flexible pane layouts.
+
+## Platform status
+
+| Platform | Status |
+| --- | --- |
+| macOS | Confirmed running; main desktop development and validation platform. |
+| Android | Confirmed running as a paired mobile controller. |
+| iOS | Confirmed running as a paired mobile controller. |
+| Windows | Untested. Build and compatibility reports welcome. |
+| Linux | Untested. Build and compatibility reports welcome. |
+
+This is an actively developed project, not a claim of feature parity across platforms. Desktop packaging, native process monitoring, and harness integration need more cross-platform testing. Provider support also depends on the installed CLI or ACP bridge and its version.
+
+## Build and try it
+
+The desktop app uses **Tauri 2, Rust, Svelte 5, and TypeScript**. Install Node/npm, Rust, and the native Tauri build dependencies for your operating system. On macOS, this includes Xcode command-line tools.
+
+```sh
+npm ci
+npm run tauri dev
+```
+
+Agent execution requires a configured host with an installed, authenticated harness. `npm run dev` runs the browser design preview; it does not start native agents.
 
 ```sh
 npm run check
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
-npm run build:mac
-npm run install:mac
 ```
 
-For a first local build using the development Rust profile, run `npm run build:mac:local`, followed
-by `npm run install:mac -- --debug`. This packages the production frontend and the same native
-execution service, while retaining Rust debug symbols. The default `build:mac` uses release optimization.
+Platform build instructions:
 
-Browser interaction checks run with `npm run dev` in one terminal and `npm run test:ui` in another.
-They use a test-only transport and do not invoke an agent. Real harness checks are explicit:
-`npm run test:native -- local` or `npm run test:native -- mira` after building the `monitter-smoke`
-binary with Cargo. These use the existing authenticated CLI and save evidence in `verification/`.
+- macOS: `npm run build:mac`, then `npm run install:mac`. For a local debug package, use `npm run build:mac:local` and `npm run install:mac -- --debug`.
+- Android: [Android build and pairing guide](mobile-android/README.md).
+- iOS: [iOS build and device guide](mobile-ios/README.md).
 
-The macOS package is locally ad-hoc signed for this Mac. Distribution would require Developer ID
-signing and notarization. The installer verifies the bundle signature, preserves an existing app,
-and never disables Gatekeeper.
+The macOS build is locally ad-hoc signed; this is not a notarized public installer.
 
-## How it works
+For frontend development with an installed macOS app, run `npm run dev:app-ui`, then choose **Monitter → Load Hot-Reload UI**. Follow the LAN access pairing prompt if requested. Backend changes still require a rebuild. Run only one hot-reload server on port 18420 at a time.
 
-An agent has a name, instructions, harness, model, host, working folder and optional local avatar image. Each task keeps its own
-native session ID and a snapshot of the host/folder/model/permissions chosen when it was created.
-Codex runs through the actual installed CLI and uses that host's existing authentication. Monitter
-does not call a replacement model API or copy credentials between hosts.
+## Testers welcome
 
-New chat opens a draft tab with a message box, suggestions, and agent/project choices. The harness
-starts when you send the first message. You can switch between draft tabs without losing text;
-these unsent drafts stay in the current window until you quit.
+Especially on Windows and Linux: try building the desktop app, connect a harness, and tell us what works and what breaks. Mobile device reports and native/ACP compatibility reports are welcome too.
 
-Projects group chats independently of agents, with optional working folders for each local or SSH
-host. Multiple agents can share a project. Its folder applies to new chats; moving an existing chat
-preserves its original session and folder. The sidebar switches between Standard agent groups,
-Activity ordered by running/recent chats, and collapsible Projects folders.
+When opening an issue, include your OS and version, Monitter commit, harness/version, whether the connection is local or SSH, and steps to reproduce. Remove credentials and private conversation content from logs and screenshots.
 
-Appearance includes a saved 80–200% scale slider (125% default), Cmd+plus/minus shortcuts in 5% steps,
-theme and accent, independent tool-activity
-and reasoning-summary toggles, and Enter-to-send versus Cmd+Enter-to-send. Tool events and available
-reasoning summaries appear as collapsible blocks in the conversation. Open task tabs occupy the
-integrated macOS window header; closing a tab keeps the task and its draft. Each chat has a compact
-subject header, with execution details and agent identity in Run Detail. The monitter dropdown
-contains Preferences and Hosts. The window itself never
-scrolls: sidebar, messages, run detail, dialogs and long tool output have bounded overflow.
-Chats and channels open at the latest message. Scrolling up pauses automatic following and reveals
-a down arrow to jump back; sending a message returns that conversation to the bottom.
-Cmd-K switches channels, chats, agents and projects, including restoring archived chats. Cmd-P provides
-controls and setting toggles. Chat rows have archive/delete buttons; deletion requires confirmation.
-Typing `/` offers Monitter actions such as new chat, settings and project selection, with applicable
-Stop, terminal resume and read-only goal actions. Native harness commands need their own adapters;
-unsupported commands stay unsent with an explanation. Use `//` for a literal slash message.
+## More detail
 
-The Codex adapter follows Orbit's subprocess approach: `codex exec --json` for a first turn,
-`codex exec resume` for later turns, prompts on stdin and structured events read from stdout.
-The native session ID also lets you resume the task in a terminal. Attaching by ID does not take
-over a running Codex Desktop or terminal process; finish its active turn first. Existing earlier
-transcript import is separate from conversation context preserved by the Codex harness.
+- [Architecture and command boundary](docs/CONTRACT.md)
+- [ACP adapter and compatibility](docs/ACP-ADAPTER.md)
+- [Idle runtime retirement](docs/IDLE-RUNTIME-RETIREMENT.md)
+- [Mobile controller](docs/MOBILE-CONTROLLER.md)
+- [Validation evidence and known limits](docs/VALIDATION.md)
+- [Shared browser interface](share-web/README.md)
+- [Design reference](design/reference.html)
 
-For Codex, read-only is the default. Workspace write is an explicit per-task choice at creation. Codex exec is
-noninteractive: escalation requests are not approved automatically. If a tool is blocked, the error
-is shown; Monitter does not present a pretend approval flow or use a bypass-all-permissions flag.
-
-## Additional harnesses and activity
-
-Source adapters now include Claude Code (`--print --output-format stream-json`), OpenCode
-(`run --format json`), and Hermes (the installed TUI gateway through a standard-library Python
-bridge). Each uses the host's native authentication and durable session IDs. Claude/OpenCode/Hermes
-use **harness-configured permissions**, not Codex's OS sandbox. Monitter never enables bypass mode;
-interactive approval requests are declined. Hermes needs its official source/venv installation
-and Python 3; its full-duplex gateway supports richer activity than its one-shot CLI.
-
-A compact in-chat panel shows actual computer-tool start/completion events and stops the owned
-turn. Codex goals come from read-only `app-server thread/goal/get`; actual budgets/usage are displayed
-only when reported. Hermes goal updates retain the gateway's reported text. This does not add a
-Monitter goal scheduler or claim that every harness implements Codex's `/goal` command.
-
-The existing local/Mira Codex integration has live validation. The new adapters currently have
-parser/command/protocol tests; live account, tool, resume and cancellation checks remain to run.
-This feature batch was packaged and installed after Alex returned, with Cmd-K/Cmd-P verified in
-the native app. See [validation](docs/VALIDATION.md) for evidence and remaining live-harness checks.
-
-## SSH
-
-Use a normal SSH host alias or address, optional user/port/identity file, explicit remote executable
-path and working folder. Monitter uses system SSH and its existing keys, agent, host configuration
-and host-key checks. Password/host-key prompts are not handled in the app: complete the normal first
-`ssh <host>` connection in Terminal, then test the host in Monitter.
-
-Use the **same alias** that works in Terminal. `mira` and `mira.local` are different
-SSH configuration and known-host lookup names, even when they resolve to the same
-machine. Changing to an IP can likewise lose the configured user, key or trusted
-host identity. Test the exact saved target noninteractively with
-`ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8 <host> true`.
-For a new host, verify its fingerprint through a trusted channel before accepting
-it in Terminal; do not disable host-key checking or remove a changed key blindly.
-
-ACP discovery and collaboration-helper staging report bounded SSH failure details.
-Host-key errors occur before the agent starts; authentication failures require the
-configured SSH key/agent, while a successful connection followed by “command not
-found” needs the remote executable path. No failed chat is automatically resent.
-
-The selected harness must already be installed and signed in on the remote host. Paths often differ from the Mac,
-and a noninteractive SSH shell may not include npm's bin folder. For the authorized Mira test:
-
-- SSH alias: `mira`
-- Codex path: `/home/alex/.npm-global/bin/codex`
-- Test working folder: `/home/alex/.local/share/monitter/smoke-workspace`
-
-Remote hosts also need Python 3. Monitter runs a small inline supervisor using only its standard
-library; it does not install a remote service. The supervisor owns each harness process group and
-stops it when Monitter closes the control connection. The local Codex adapter runs directly.
-
-## Channels and future versions
-
-V1 channels live on this Mac. Choose the agents that should receive a message; messages do not
-start an uncontrolled agent-to-agent loop. Delegated tasks retain a link to their parent task.
-
-Multiplayer channels are explicitly deferred: a later version will allow colleagues or friends
-to join channels and share selected agents. See [the future requirement](docs/FUTURE_MULTIPLAYER.md).
-No invitations, shared credentials, collaboration server or iOS client is included in v1.
-
-## Design and provenance
-
-- Original supplied HTML: [design/reference.html](design/reference.html)
-- Comparison of available views: [docs/DESIGN_VIEW_AUDIT.md](docs/DESIGN_VIEW_AUDIT.md)
-- Architecture and command boundary: [docs/CONTRACT.md](docs/CONTRACT.md)
-- Acceptance and current scope: [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md)
-- Orbit reference implementation: https://github.com/xinnaider/orbit
-- Bundled IBM Plex font licenses: `static/licenses/`
-
-This app is independently implemented; Orbit was studied for its CLI execution and resume patterns.
-Build/test evidence and known limits are recorded in [docs/VALIDATION.md](docs/VALIDATION.md).
-
-## Agent discovery and messaging
-
-Open **monitter → Agent directory** to find agents by expertise, responsibility or skill. Edit an
-agent's Collaboration profile to publish those details or turn collaboration off. New chats receive
-the agent's profile and saved instructions.
-
-Enabled Codex agents can discover peers, send messages and delegate work using Monitter tools.
-Delegations create linked chats, use the recipient's own harness and host, and return actual results
-to the source chat. Projects follow the delegation and select the recipient host's optional folder.
-Run Detail shows the resulting message/delegation history. A message delivered to an active agent's
-inbox is an acknowledgement of receipt, not a claim that its requested work is finished.
-
-The runtime also has scoped Claude and OpenCode tool injection. Hermes currently supports receiving
-routed tasks through its native adapter; callable Hermes collaboration tools are not yet exposed.
-Host authentication remains with each native CLI. This runs while Monitter is open; no hosted
-collaboration service, multiplayer sharing or iOS client is included.
-
-The opt-in `scripts/collaboration-smoke.py --peer local|mira` exercises real Codex discovery,
-delegation, peer inbox delivery, returned results and native-session resume in isolated app state.
-Use `--coordinator mira --peer mira` to run both agents over SSH; `--model` selects a model supported
-by both installed CLIs (the proof defaults to GPT-5.5 for Mira 0.130 compatibility). It consumes existing
-Codex account usage and is not part of the offline unit test suite.
+Monitter is independently implemented. [Orbit](https://github.com/xinnaider/orbit) informed early CLI execution and resume patterns. Bundled font licenses are in `static/licenses/`.
