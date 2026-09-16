@@ -5340,7 +5340,9 @@
     padding: 11px 12px 9px;
     border: 1px solid var(--line);
     border-radius: 10px;
-    background: var(--panel);
+    background: color-mix(in srgb, var(--panel) 80%, transparent);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
   }
   .composer textarea {
