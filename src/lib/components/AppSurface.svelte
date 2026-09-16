@@ -3512,7 +3512,7 @@
         {/if}
         <section class="conversation">
         <MessagePane active={embedded ? active : activePaneId === 'main'} pendingUpdates={channelTranscriptBuffer.pendingUpdates()} onfollowchange={channelTranscriptBuffer.setFollowing} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
-          {#if displayedChannelTranscript.messages.length || displayedChannelTranscript.optimisticMessages.length}<TranscriptVirtualList
+          <TranscriptVirtualList
               items={displayedChannelTranscript.messages}
               getKey={(message) => message.id}
               active={embedded ? active : activePaneId === 'main'}>
@@ -3538,19 +3538,16 @@
               {#each displayedChannelTranscript.waiting as waiting}
                 {@render agentWaiting(displayedChannelTranscript.agents.find(agent=>agent.id===waiting.agentId), waiting.starting)}
               {/each}
+                {#if !displayedChannelTranscript.messages.length && !displayedChannelTranscript.optimisticMessages.length}<div class="blank-conversation">
+                  <MessageSquare size={24} />
+                  <h2>Start this channel</h2>
+                  <p>
+                    Pick the agents who should receive your message. Each gets an
+                    explicit linked task.
+                  </p>
+                </div>{/if}
               {/snippet}
-            </TranscriptVirtualList>{:else}<div class="blank-conversation">
-              <MessageSquare size={24} />
-              <h2>Start this channel</h2>
-              <p>
-                Pick the agents who should receive your message. Each gets an
-                explicit linked task.
-              </p>
-            </div>
-              {#each displayedChannelTranscript.waiting as waiting}
-                {@render agentWaiting(displayedChannelTranscript.agents.find(agent=>agent.id===waiting.agentId), waiting.starting)}
-              {/each}
-            {/if}
+            </TranscriptVirtualList>
         </MessagePane>
         {#if channelTranscriptBuffer.held() && channelLiveErrors.length}<div class="live-channel-status" aria-live="polite">
           {#each channelLiveErrors as task}<p class="live-transcript-notice" role="status">{(events.filter(event=>event.taskId===task.id&&event.kind==='error').at(-1)?.detail || 'A channel task stopped with an error.').slice(0, 500)}</p>{/each}

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { messageArrival } from '$lib/navigation-motion';
-  import { onMount, type Snippet } from 'svelte';
+  import { onMount, tick, type Snippet } from 'svelte';
   import { ArrowDown } from '@lucide/svelte';
   import { provideTranscriptScrollController, type TranscriptScrollOwner } from '$lib/transcript-scroll-owner';
 
@@ -16,6 +16,7 @@
   let lastResetKey = $state<string | undefined>();
   let owner: TranscriptScrollOwner | undefined;
   let pendingLatestRequest = false;
+  let jumpRequest = 0;
   const jumpVisible = $derived(showJump || pendingUpdates);
 
   provideTranscriptScrollController({
@@ -51,6 +52,8 @@
 
   function detachFromLatest() {
     if (!viewport || !active) return;
+    jumpRequest += 1;
+    pendingLatestRequest = false;
     readerDetached = true;
     setFollowing(false);
     detachedScrollTop = viewport.scrollTop;
@@ -87,10 +90,15 @@
     if (event.pointerType !== 'touch' && event.clientX >= right - 14) detachFromLatest();
   }
 
-  function jumpToLatest() {
+  async function jumpToLatest() {
     readerDetached = false;
     setFollowing(true);
     showJump = false;
+    const request = ++jumpRequest;
+    // Let the current transcript rows/footer enter TanStack's count and
+    // measurement pipeline before asking it for the end offset.
+    await tick();
+    if (request !== jumpRequest || readerDetached || !followingLatest) return;
     if (owner) owner.scrollToLatest();
     else pendingLatestRequest = true;
   }
@@ -118,14 +126,14 @@
   $effect(() => {
     const changed = resetKey !== lastResetKey;
     lastResetKey = resetKey;
-    if (changed && active && documentVisible) jumpToLatest();
+    if (changed && active && documentVisible) void jumpToLatest();
   });
 
   onMount(() => {
     const visibilityChanged = () => {
       documentVisible = document.visibilityState !== 'hidden';
       // Returning to a visible window must not discard a reader's held place.
-      if (documentVisible && active && followingLatest) jumpToLatest();
+      if (documentVisible && active && followingLatest) void jumpToLatest();
     };
     documentVisible = document.visibilityState !== 'hidden';
     document.addEventListener('visibilitychange', visibilityChanged);

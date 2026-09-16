@@ -63,9 +63,10 @@
     // read its store and write options loop forever, so option writes are
     // deliberately untracked and keyed only by component inputs.
     untrack(() => {
+      const previousCommitting = committingOptions;
       committingOptions = true;
-      instance().setOptions({ ...options, onChange: onVirtualizerChange });
-      committingOptions = false;
+      try { instance().setOptions({ ...options, onChange: onVirtualizerChange }); }
+      finally { committingOptions = previousCommitting; }
     });
   }
 
@@ -81,7 +82,12 @@
   }
 
   function measureRow(node: HTMLDivElement) {
-    instance().measureElement(node);
+    // This action can run while Svelte is mounting a newly visible range.
+    // Its immediate measurement must not force a nested flush.
+    const previousCommitting = committingOptions;
+    committingOptions = true;
+    try { instance().measureElement(node); }
+    finally { committingOptions = previousCommitting; }
   }
 
   $effect(() => {
@@ -152,5 +158,6 @@
 
 <style>
   .transcript-virtual-list,.transcript-row,.transcript-footer { min-width:0; }
-  .transcript-row { display:flow-root; overflow-anchor:none; }
+  .transcript-row,.transcript-footer { display:flow-root; }
+  .transcript-row { overflow-anchor:none; }
 </style>
