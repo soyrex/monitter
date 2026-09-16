@@ -552,6 +552,7 @@ actions: `/new` and `/clear` reset the active chat's provider context while pres
 chat's project, `/stop` cancels a running task, `/resume` continues the saved native session in this chat, and
 `/goal` reads the available Codex goal. Task-specific actions only appear in applicable contexts.
 `/autoname` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming uses the configured default Codex agent (first Codex agent, then first agent), makes an ephemeral read-only title run with user config/rules ignored and no persisted task or session, and preserves channel history/membership and terminal session identity.
+`/terminal` opens a terminal tab in the current host and folder; `/terminal <command>` runs that shell command in the new interactive tab (for example `/terminal npm build`). The command is written to the PTY after the shell starts, so the tab stays interactive when it finishes.
 Selection supports arrows, Enter, Escape and clicking. IME composition does not select an action.
 
 The current CLI transports do not expose a shared native slash-command catalog. Unknown commands
@@ -593,6 +594,9 @@ Grants are revoked on run completion. A bundled Python stdio MCP helper exposes 
 - `get_task_result`, `wait_for_task`: read the actual result and incoming peer messages.
 - `list_messages`: deliver queued messages to this active turn and return its durable inbox.
 - `cancel_delegation`: cancel an active delegation owned by this task.
+- `terminal_run`: open an interactive Monitter terminal tab and run a shell command in it.
+  Requires `command` (bounded to 4096 bytes); optional `cwd` defaults to the caller task's
+  saved folder. The shell stays interactive after the command finishes.
 
 Repeated writes with the same caller task and request ID return the same delivery; changing its
 recipient or message is rejected. A sender cannot address arbitrary existing chats or cancel another

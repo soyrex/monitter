@@ -3552,9 +3552,10 @@ impl Service {
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
             return Err("Monitter is shutting down.".into());
         }
+        let command = target.command.clone();
         let (host, cwd) = self.terminal_target(target)?;
         let id = id();
-        let session = terminal::open(id.clone(), &host, cwd, cols, rows)?;
+        let session = terminal::open(id.clone(), &host, cwd, cols, rows, command)?;
         let snapshot = session.snapshot()?;
         let mut terminals = self
             .terminals
@@ -8767,6 +8768,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 agent_id: None,
                 host_id: None,
                 project_id: Some("project".into()),
+                command: None,
             })
             .unwrap();
         assert_eq!(task_host.name, "Saved task host");
@@ -8778,6 +8780,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 agent_id: Some(agent_id),
                 host_id: None,
                 project_id: Some("project".into()),
+                command: None,
             })
             .unwrap();
         assert_eq!(agent_host.name, "Edited agent host");
@@ -8789,6 +8792,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 agent_id: None,
                 host_id: Some(agent_host.id.clone()),
                 project_id: None,
+                command: None,
             })
             .unwrap();
         assert_eq!(restored_cwd, "/restored-shell-folder");
@@ -8799,6 +8803,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 agent_id: None,
                 host_id: Some("deleted-host".into()),
                 project_id: None,
+                command: None,
             })
             .is_err());
         let _ = std::fs::remove_dir_all(dir);

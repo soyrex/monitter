@@ -1730,6 +1730,21 @@
       workspaceConnected = false;
       error = text(reason);
     }
+    void discoverTerminals();
+  }
+  async function discoverTerminals() {
+    // Agent or LAN-initiated terminals live in the backend registry but never
+    // arrive via the snapshot. After every reload, surface any not yet mounted
+    // in this pane so the user can click the new tab.
+    if (!bridge.available) return;
+    try {
+      for (const session of await bridge.listTerminals()) {
+        if ($terminalSessions[session.id]) continue;
+        registerTerminal(session);
+        if (!openTerminalIds.includes(session.id)) openTerminalIds = [...openTerminalIds, session.id];
+        rememberTab({ kind: 'terminal', id: session.id });
+      }
+    } catch { /* Best-effort: the terminal itself surfaces read/input errors. */ }
   }
   async function run<T>(
     action: () => Promise<T>,
@@ -1918,8 +1933,13 @@
     return {};
   }
   export async function newTerminal() {
+    await runTerminalCommand('');
+  }
+  async function runTerminalCommand(command: string) {
     if(terminalBusy)return;
-    const target=terminalTarget();terminalBusy=true;error='';
+    const target=terminalTarget();
+    if(command) target.command=command;
+    terminalBusy=true;error='';
     try {const session=await bridge.openTerminal(target,80,24);registerTerminal(session);openTerminalTab(session.id);}
     catch(reason){error=`Could not open terminal: ${text(reason)}`;}
     finally{terminalBusy=false;}
@@ -2677,6 +2697,7 @@
       { id: "context-clear", label: "/clear", detail: "Alias for /new" },
     ] : [{ id: "new", label: "/new", detail: "Open a local New chat draft" }]),
     { id: "settings", label: "/settings", detail: "Open Monitter preferences" },
+    { id: "terminal", label: "/terminal", detail: "Run a command in a terminal tab: /terminal <command>" },
     ...(pane === "task" ? [{ id: "project", label: "/project", detail: "Choose the project for this chat" }] : []),
     ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel) ? [{ id: "autoname", label: "/autoname", detail: "Generate a title from recent content" }] : []),
     ...(selectedTask?.status === "running" ? [{ id: "stop", label: "/stop", detail: "Stop this running task" }] : []),
@@ -2698,6 +2719,8 @@
     if (!isSlashCommand(composer)) return false;
     const channelCommand = pane === 'channel' ? parseChannelCommand(composer) : null;
     if(channelCommand) { void executeChannelCommand(channelCommand.name,channelCommand.args,composer); return true; }
+    const terminalCommand = composer.trim().match(/^\/terminal(?:\s+([\s\S]*))?$/i);
+    if (terminalCommand) { void runTerminalCommand(terminalCommand[1]?.trim() ?? ''); return true; }
     const command = composer.trim().toLowerCase();
     void selectSlash(slashItems.find(item => item.label === command));
     return true;
@@ -2713,6 +2736,7 @@
       if(['invite','kick','topic'].includes(name)) { composer=`/${name} `; slashOpen=false; return; }
       await executeChannelCommand(name,'',composer); return;
     }
+    if (item.id === 'terminal') { composer = '/terminal '; slashOpen = false; return; }
     const task = selectedTask;
     const agentId = currentDraftId ? taskAgentId : selectedAgent?.id ?? null;
     const projectId = currentDraftId ? taskProjectId : task?.projectId ?? focusedProjectId;
@@ -2743,6 +2767,7 @@
     if (event.isComposing) return;
     const typedChannelCommand = pane==='channel' ? parseChannelCommand(composer) : null;
     if(event.key==='Enter' && !event.shiftKey && typedChannelCommand && (typedChannelCommand.args || !['invite','kick'].includes(typedChannelCommand.name))) { event.preventDefault(); handleSlashSubmit(); return; }
+    if(event.key==='Enter' && !event.shiftKey && /^\/terminal(?:\s|$)/i.test(composer.trim())) { event.preventDefault(); handleSlashSubmit(); return; }
     if (slashOpen && isSlashCommand(composer)) {
       if (event.key === "ArrowDown") { event.preventDefault(); slashIndex = Math.min(slashIndex + 1, Math.max(0, slashVisibleItems.length - 1)); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); slashIndex = Math.max(0, slashIndex - 1); return; }

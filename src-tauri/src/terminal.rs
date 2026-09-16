@@ -16,6 +16,7 @@ use std::{
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_READ_BYTES: usize = 256 * 1024;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
+const MAX_COMMAND_BYTES: usize = 4096;
 const TITLE_SETTLE: Duration = Duration::from_secs(5);
 const TITLE_POLL: Duration = Duration::from_secs(1);
 
@@ -32,6 +33,8 @@ pub struct TerminalTarget {
     pub host_id: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,8 +138,14 @@ pub fn open(
     cwd: String,
     cols: u16,
     rows: u16,
+    initial_command: Option<String>,
 ) -> Result<Arc<Session>, String> {
     validate_size(cols, rows)?;
+    if let Some(command) = initial_command.as_deref() {
+        if command.is_empty() || command.len() > MAX_COMMAND_BYTES || command.contains('\0') {
+            return Err("Terminal command must be 1-4096 bytes without NUL characters.".into());
+        }
+    }
     if cwd.trim().is_empty() {
         return Err("Terminal needs a working directory.".into());
     }
@@ -204,6 +213,9 @@ pub fn open(
     if session.local_pty {
         let title_session = Arc::clone(&session);
         thread::spawn(move || monitor_title(title_session));
+    }
+    if let Some(command) = initial_command {
+        let _ = session.write(format!("{command}\n").as_bytes());
     }
     Ok(session)
 }
@@ -558,7 +570,7 @@ mod tests {
     #[test]
     fn local_pty_rejects_missing_working_directory() {
         let missing = format!("/tmp/monitter-terminal-missing-{}", crate::model::id());
-        let error = match open("test".into(), &local_host(), missing, 80, 24) {
+        let error = match open("test".into(), &local_host(), missing, 80, 24, None) {
             Ok(_) => panic!("missing cwd opened"),
             Err(error) => error,
         };
@@ -641,7 +653,7 @@ mod tests {
 
     #[test]
     fn native_pty_projects_custom_and_auto_titles_through_exit() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24).unwrap();
+        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
         assert_eq!(session.snapshot().unwrap().title, "Terminal");
         session.set_auto_title("Terminal: zsh".into()).unwrap();
         session.rename("Build logs".into()).unwrap();
@@ -662,7 +674,7 @@ mod tests {
 
     #[test]
     fn read_batches_large_output_and_drains_tail_before_exit() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24).unwrap();
+        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
         session.write(b"python3 -c 'import sys; sys.stdout.write(\"x\" * 300000 + \"TAIL_\" + \"MARKER\\n\")'\nexit\n").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut after = 0;
@@ -698,7 +710,7 @@ mod tests {
 
     #[test]
     fn close_reaps_a_started_foreground_child() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24).unwrap();
+        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
         session
             .write(b"sleep 10 & child=$!; printf '%s%s\\n' CLOSE_ PID=$child; wait $child\n")
             .unwrap();
@@ -733,7 +745,7 @@ mod tests {
 
     #[test]
     fn local_pty_accepts_input_resize_and_interrupt() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24).unwrap();
+        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
         session
             .write(b"printf '%s%s\\n' MONITTER_PTY_ MARKER\n")
             .unwrap();
@@ -762,7 +774,15 @@ mod tests {
             .iter()
             .find(|host| host.kind == "ssh" && host.name.eq_ignore_ascii_case("Mira"))
             .unwrap();
-        let session = open("mira-proof".into(), host, host.default_cwd.clone(), 80, 24).unwrap();
+        let session = open(
+            "mira-proof".into(),
+            host,
+            host.default_cwd.clone(),
+            80,
+            24,
+            None,
+        )
+        .unwrap();
         wait_for_any_output(&session, std::time::Duration::from_secs(20));
         let initial = session.read(0).unwrap();
         eprintln!(

@@ -26,6 +26,7 @@ const MAX_DEPTH: usize = 4;
 const MAX_PER_TASK: usize = 24;
 const MAX_PER_ROOT: usize = 64;
 const MAX_ACTIVE: usize = 4;
+const MAX_TERMINAL_COMMAND: usize = 4096;
 const DELIVERY_UNCERTAIN: &str =
     "Delivery was interrupted by Monitter restarting; it was not replayed because delivery is uncertain.";
 const DELIVERED_TO_ACTIVE_TURN: &str =
@@ -55,6 +56,7 @@ impl Service {
             "cancel_delegation" => {
                 self.cancel_protocol(caller_task, required_string(args, "collaboration_id")?)
             }
+            "terminal_run" => self.terminal_run_protocol(caller_task, args),
             _ => Err("Unknown Monitter collaboration tool.".into()),
         }
     }
@@ -133,6 +135,47 @@ impl Service {
             })
             .collect::<Vec<_>>();
         Ok(json!({"agents": agents, "caller_task_id": caller_task}))
+    }
+
+    fn terminal_run_protocol(
+        self: &Arc<Self>,
+        caller_task: &str,
+        args: &serde_json::Map<String, Value>,
+    ) -> Result<Value, String> {
+        let command = required_string(args, "command")?;
+        if command.len() > MAX_TERMINAL_COMMAND {
+            return Err("command is too long.".into());
+        }
+        let cwd = string_arg(args, "cwd")?.map(str::to_string);
+        let (task, _agent) = self.require_collaboration_caller(caller_task)?;
+        let target = if let Some(cwd) = cwd {
+            crate::terminal::TerminalTarget {
+                cwd: Some(cwd),
+                task_id: None,
+                agent_id: Some(task.agent_id.clone()),
+                host_id: None,
+                project_id: None,
+                command: Some(command),
+            }
+        } else {
+            crate::terminal::TerminalTarget {
+                cwd: None,
+                task_id: Some(caller_task.into()),
+                agent_id: None,
+                host_id: None,
+                project_id: None,
+                command: Some(command),
+            }
+        };
+        let session = self.open_terminal(target, 80, 24)?;
+        self.changed(None);
+        Ok(json!({
+            "id": session.id,
+            "title": session.title,
+            "cwd": session.cwd,
+            "status": session.status,
+            "exitCode": session.exit_code,
+        }))
     }
 
     fn queue_protocol(
@@ -762,6 +805,7 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
         "wait_for_task" => &["collaboration_id", "timeout_seconds"],
         "list_messages" => &[],
+        "terminal_run" => &["command", "cwd"],
         _ => return Err("Unknown Monitter collaboration tool.".into()),
     };
     if args.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -1475,5 +1519,39 @@ mod tests {
         let crab = "🦀".repeat(1_000);
         assert!(truncate(&crab, 999).len() <= 999);
         assert_eq!(compact_entries(&vec!["x".repeat(1_000); 12]).len(), 4);
+    }
+
+    #[test]
+    fn terminal_run_opens_session_writes_command_and_enforces_bounds() {
+        let (service, dir) = service("terminal-run");
+        let caller = service.snapshot().unwrap().agents[0].clone();
+        let root = task(&service, &caller, "Root", None, None);
+        running(&service, &root.id);
+        let cwd = service.snapshot().unwrap().hosts[0].default_cwd.clone();
+        let oversized = "x".repeat(MAX_TERMINAL_COMMAND + 1);
+        assert!(service
+            .protocol(
+                &root.id,
+                "terminal_run",
+                json!({"command": oversized.clone()}),
+            )
+            .is_err());
+        assert!(service
+            .protocol(&root.id, "terminal_run", json!({"command":"x","bogus":1}),)
+            .is_err());
+        let response = service
+            .protocol(
+                &root.id,
+                "terminal_run",
+                json!({"command": "printf 'MCP_TERMINAL_OK\\n'"}),
+            )
+            .unwrap();
+        let id = response["id"].as_str().unwrap().to_string();
+        assert!(!id.is_empty());
+        assert_eq!(response["status"], "running");
+        assert_eq!(response["cwd"], cwd);
+        assert!(service.terminals.lock().unwrap().contains_key(&id));
+        service.close_terminal(&id).unwrap();
+        let _ = fs::remove_dir_all(dir);
     }
 }

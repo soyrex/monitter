@@ -165,6 +165,7 @@ const MONITTER_TOOLS: &[&str] = &[
     "wait_for_task",
     "list_messages",
     "cancel_delegation",
+    "terminal_run",
 ];
 
 fn claude_tool_names() -> String {

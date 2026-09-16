@@ -251,7 +251,7 @@ export interface ModelCatalog {
 }
 
 
-export interface TerminalTarget { cwd?: string; taskId?: string; agentId?: string; hostId?: string; projectId?: string | null; }
+export interface TerminalTarget { cwd?: string; taskId?: string; agentId?: string; hostId?: string; projectId?: string | null; command?: string; }
 /** `title` is the display title. A custom title takes precedence over `autoTitle`. */
 export interface TerminalSession { id: string; title: string; autoTitle?: string | null; customTitle?: string | null; hostId: string; cwd: string; status: 'running' | 'exited'; exitCode: number | null; }
 /** `session` is optional for an older LAN desktop; normal native reads include it. */

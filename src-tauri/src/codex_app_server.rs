@@ -1600,7 +1600,7 @@ fn thread_request(
     let mut config = extensions.codex_config();
     if has_grant {
         if let Some(helper) = helper {
-            config.extend(json!({"mcp_servers.monitter.command":"python3","mcp_servers.monitter.args":[helper],"mcp_servers.monitter.env_vars":["MONITTER_ENDPOINT","MONITTER_TOKEN"],"mcp_servers.monitter.required":true,"mcp_servers.monitter.enabled_tools":["list_agents","delegate_task","send_message","get_task_result","wait_for_task","list_messages","cancel_delegation"]}).as_object().cloned().unwrap_or_default());
+            config.extend(json!({"mcp_servers.monitter.command":"python3","mcp_servers.monitter.args":[helper],"mcp_servers.monitter.env_vars":["MONITTER_ENDPOINT","MONITTER_TOKEN"],"mcp_servers.monitter.required":true,"mcp_servers.monitter.enabled_tools":["list_agents","delegate_task","send_message","get_task_result","wait_for_task","list_messages","cancel_delegation","terminal_run"]}).as_object().cloned().unwrap_or_default());
         }
     }
     if !config.is_empty() {
