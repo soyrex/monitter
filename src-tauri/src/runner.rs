@@ -7,7 +7,6 @@ use crate::{
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
@@ -157,34 +156,22 @@ fn remote_cli<'a>(host: &'a Host, provider: &'a str) -> Result<&'a str, String> 
     })
 }
 
-const MONITTER_TOOLS: &[&str] = &[
-    "list_agents",
-    "delegate_task",
-    "send_message",
-    "get_task_result",
-    "wait_for_task",
-    "list_messages",
-    "cancel_delegation",
-    "terminal_run",
-];
-
 fn claude_tool_names() -> String {
-    MONITTER_TOOLS
+    crate::collaboration_mcp::tool_names()
         .iter()
         .map(|tool| format!("mcp__monitter__{tool}"))
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn claude_mcp_config(helper: &str) -> String {
+fn claude_mcp_config(endpoint: &str) -> String {
     serde_json::json!({
         "mcpServers": {
             "monitter": {
-                "command": "python3",
-                "args": [helper],
-                "env": {
-                    "MONITTER_ENDPOINT": "${MONITTER_ENDPOINT}",
-                    "MONITTER_TOKEN": "${MONITTER_TOKEN}"
+                "type": "http",
+                "url": endpoint,
+                "headers": {
+                    "Authorization": "Bearer ${MONITTER_TOKEN}"
                 }
             }
         }
@@ -192,7 +179,7 @@ fn claude_mcp_config(helper: &str) -> String {
     .to_string()
 }
 
-fn merge_opencode_mcp_config(existing: Option<&str>, helper: &str) -> Result<String, String> {
+fn merge_opencode_mcp_config(existing: Option<&str>, endpoint: &str) -> Result<String, String> {
     let mut config = match existing.filter(|value| !value.trim().is_empty()) {
         Some(value) => serde_json::from_str::<Value>(value)
             .map_err(|_| "Existing OpenCode inline configuration is invalid.".to_string())?,
@@ -212,19 +199,19 @@ fn merge_opencode_mcp_config(existing: Option<&str>, helper: &str) -> Result<Str
             // OpenCode 1.18's installed schema uses server names directly
             // below `mcp`; newer documentation describes a v2 `servers`
             // nesting that this local CLI rejects.
-            "type": "local",
-            "command": ["python3", helper],
-            "environment": {
-                "MONITTER_ENDPOINT": "{env:MONITTER_ENDPOINT}",
-                "MONITTER_TOKEN": "{env:MONITTER_TOKEN}"
+            "type": "remote",
+            "url": endpoint,
+            "headers": {
+                "Authorization": "Bearer {env:MONITTER_TOKEN}"
             },
+            "oauth": false,
             "enabled": true
         }),
     );
     Ok(config.to_string())
 }
 
-fn codex_args(task: &Task, collaboration_helper: Option<&str>) -> Vec<String> {
+fn codex_args(task: &Task, collaboration_endpoint: Option<&str>) -> Vec<String> {
     // These are exec options and must precede the optional resume subcommand.
     let mut args = vec!["exec".into()];
     if task.sandbox == "yolo" {
@@ -255,19 +242,17 @@ fn codex_args(task: &Task, collaboration_helper: Option<&str>) -> Vec<String> {
             args.extend(["-c".into(), format!("service_tier={tier:?}")]);
         }
     }
-    if let Some(helper) = collaboration_helper {
+    if let Some(endpoint) = collaboration_endpoint {
         // This only layers the Monitter server over the user's ordinary Codex
         // configuration. Credentials stay in the child environment, never in
         // an argument, event, or shell fragment.
-        let helper_args = serde_json::to_string(&vec![helper]).unwrap_or_else(|_| "[]".into());
-        let tools = serde_json::to_string(MONITTER_TOOLS).unwrap_or_else(|_| "[]".into());
+        let tools = serde_json::to_string(&crate::collaboration_mcp::tool_names())
+            .unwrap_or_else(|_| "[]".into());
         args.extend([
             "-c".into(),
-            "mcp_servers.monitter.command=\"python3\"".into(),
+            format!("mcp_servers.monitter.url={endpoint:?}"),
             "-c".into(),
-            format!("mcp_servers.monitter.args={helper_args}"),
-            "-c".into(),
-            "mcp_servers.monitter.env_vars=[\"MONITTER_ENDPOINT\",\"MONITTER_TOKEN\"]".into(),
+            "mcp_servers.monitter.bearer_token_env_var=\"MONITTER_TOKEN\"".into(),
             "-c".into(),
             "mcp_servers.monitter.required=true".into(),
             "-c".into(),
@@ -393,10 +378,7 @@ if header.startswith(COLLAB_PREFIX):
         raise SystemExit("invalid Monitter collaboration credentials")
     os.environ["MONITTER_ENDPOINT"] = endpoint
     os.environ["MONITTER_TOKEN"] = token
-    opencode_helper = config.get("opencodeHelper")
-    if opencode_helper is not None:
-        if not isinstance(opencode_helper, str) or not opencode_helper:
-            raise SystemExit("invalid Monitter OpenCode configuration")
+    if config.get("opencodeHttp") is True:
         try:
             existing = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
             opencode = json.loads(existing) if existing.strip() else {}
@@ -406,8 +388,9 @@ if header.startswith(COLLAB_PREFIX):
             if not isinstance(mcp, dict):
                 raise ValueError()
             mcp["monitter"] = {
-                "type": "local", "command": ["python3", opencode_helper],
-                "environment": {"MONITTER_ENDPOINT": "{env:MONITTER_ENDPOINT}", "MONITTER_TOKEN": "{env:MONITTER_TOKEN}"},
+                "type": "remote", "url": endpoint,
+                "headers": {"Authorization": "Bearer {env:MONITTER_TOKEN}"},
+                "oauth": False,
                 "enabled": True,
             }
             os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode, separators=(",", ":"))
@@ -628,42 +611,10 @@ pub(crate) fn build_command(host: &Host, task: &Task) -> Result<Command, String>
     build_command_with_collaboration(host, task, None)
 }
 
-/// Reads up to `limit` bytes from `pipe` on a worker thread while continuing
-/// to drain the pipe once the cap is reached. Used by the SSH helper
-/// staging path to keep verbose diagnostics from blocking a full
-/// stdout/stderr pipe. The historical `title_` prefix is retained to avoid
-/// renaming a shared reader; the naming subprocess path was retired in
-/// favour of the resident Monitter Admin broker.
-fn title_reader<R: Read + Send + 'static>(
-    mut pipe: R,
-    limit: usize,
-) -> mpsc::Receiver<Result<Vec<u8>, String>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result = (|| {
-            let mut bytes = Vec::new();
-            let mut buffer = [0u8; 8192];
-            loop {
-                let count = pipe.read(&mut buffer).map_err(|error| error.to_string())?;
-                if count == 0 {
-                    break;
-                }
-                let keep = count.min(limit.saturating_sub(bytes.len()));
-                bytes.extend_from_slice(&buffer[..keep]);
-                // Continue draining after the capture limit so verbose diagnostics
-                // cannot block the child on a full stdout/stderr pipe.
-            }
-            Ok(bytes)
-        })();
-        let _ = sender.send(result);
-    });
-    receiver
-}
-
 fn build_command_with_collaboration(
     host: &Host,
     task: &Task,
-    collaboration: Option<(&SessionGrant, &str)>,
+    collaboration: Option<&SessionGrant>,
 ) -> Result<Command, String> {
     build_command_with_options(host, task, collaboration, None)
 }
@@ -671,7 +622,7 @@ fn build_command_with_collaboration(
 fn build_command_with_options(
     host: &Host,
     task: &Task,
-    collaboration: Option<(&SessionGrant, &str)>,
+    collaboration: Option<&SessionGrant>,
     claude_mcp_config_path: Option<&std::path::Path>,
 ) -> Result<Command, String> {
     if !valid_sandbox_for_provider(&task.provider, &task.sandbox) {
@@ -682,10 +633,10 @@ fn build_command_with_options(
     }
     let local_opencode_config = if host.kind == "local" && task.provider == "opencode" {
         collaboration
-            .map(|(_, helper)| {
+            .map(|grant| {
                 merge_opencode_mcp_config(
                     std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
-                    helper,
+                    &grant.endpoint,
                 )
             })
             .transpose()?
@@ -693,7 +644,7 @@ fn build_command_with_options(
         None
     };
     let args = match task.provider.as_str() {
-        "codex" => codex_args(task, collaboration.map(|(_, helper)| helper)),
+        "codex" => codex_args(task, collaboration.map(|grant| grant.endpoint.as_str())),
         "claude" => {
             let mut args = adapters::claude::args(task);
             if let Some(path) = claude_mcp_config_path {
@@ -701,12 +652,12 @@ fn build_command_with_options(
                 if collaboration.is_some() {
                     args.extend(["--allowedTools".into(), claude_tool_names()]);
                 }
-            } else if let Some((_, helper)) = collaboration {
+            } else if let Some(grant) = collaboration {
                 // --mcp-config layers this config over normal Claude settings.
                 // --strict-mcp-config is intentionally absent so user servers remain.
                 args.extend([
                     "--mcp-config".into(),
-                    claude_mcp_config(helper),
+                    claude_mcp_config(&grant.endpoint),
                     "--allowedTools".into(),
                     claude_tool_names(),
                 ]);
@@ -755,7 +706,7 @@ fn build_command_with_options(
     };
     isolate_child(&mut command);
     if host.kind == "local" {
-        if let Some((grant, _helper)) = collaboration {
+        if let Some(grant) = collaboration {
             command.env("MONITTER_ENDPOINT", &grant.endpoint);
             command.env("MONITTER_TOKEN", &grant.token);
             if task.provider == "opencode" {
@@ -1454,7 +1405,6 @@ pub struct RunControl {
     acp_transport: AtomicBool,
     acp_control: Mutex<Option<mpsc::SyncSender<String>>>,
     auxiliary: Mutex<Vec<Child>>,
-    remote_helper_cleanups: Mutex<Vec<(Host, String)>>,
     remote_supervised: bool,
 }
 
@@ -1487,7 +1437,6 @@ impl RunControl {
             acp_transport: AtomicBool::new(false),
             acp_control: Mutex::new(None),
             auxiliary: Mutex::new(Vec::new()),
-            remote_helper_cleanups: Mutex::new(Vec::new()),
             remote_supervised,
         })
     }
@@ -2100,14 +2049,6 @@ impl RunControl {
             }
             children.clear();
         }
-        let cleanups = self
-            .remote_helper_cleanups
-            .lock()
-            .map(|mut entries| std::mem::take(&mut *entries))
-            .unwrap_or_default();
-        for (host, directory) in cleanups {
-            cleanup_remote_helper(&host, &directory);
-        }
     }
 
     pub(crate) fn install(
@@ -2215,11 +2156,16 @@ pub(crate) fn terminate_bounded(child: &mut Child) {
 }
 
 pub(crate) struct RemoteCollaboration {
-    host: Host,
-    helper_dir: String,
-    pub(crate) helper_path: String,
     pub(crate) endpoint: String,
-    tunnel: Child,
+    tunnel: Option<Child>,
+}
+
+impl Drop for RemoteCollaboration {
+    fn drop(&mut self) {
+        if let Some(tunnel) = self.tunnel.as_mut() {
+            terminate_bounded(tunnel);
+        }
+    }
 }
 
 fn broker_port(endpoint: &str) -> Result<u16, String> {
@@ -2236,138 +2182,6 @@ fn broker_port(endpoint: &str) -> Result<u16, String> {
         return Err("Collaboration broker endpoint is invalid.".into());
     }
     Ok(port)
-}
-
-fn stage_remote_helper(
-    host: &Host,
-    helper: &PathBuf,
-    control: &RunControl,
-) -> Result<(String, String), String> {
-    let source =
-        fs::read(helper).map_err(|error| format!("Cannot read collaboration helper: {error}"))?;
-    let mut command = ssh_command(host);
-    add_ssh_options(&mut command, host);
-    command
-        .arg(ssh_target(host)?)
-        .arg("umask 077; d=$(mktemp -d /tmp/monitter-mcp.XXXXXXXX) || exit; cat > \"$d/monitter_mcp.py\" && chmod 700 \"$d/monitter_mcp.py\" && printf '__MONITTER_HELPER_DIR__%s\\n' \"$d\"")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    isolate_child(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not stage collaboration helper on SSH host: {error}"))?;
-    let Some(mut stdin) = child.stdin.take() else {
-        terminate_bounded(&mut child);
-        return Err("Could not open SSH helper staging input.".into());
-    };
-    let Some(mut stdout) = child.stdout.take() else {
-        terminate_bounded(&mut child);
-        return Err("Could not read SSH helper staging output.".into());
-    };
-    let Some(stderr) = child.stderr.take() else {
-        terminate_bounded(&mut child);
-        return Err("Could not read SSH helper staging diagnostics.".into());
-    };
-    let (write_sender, write_receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result = stdin
-            .write_all(&source)
-            .and_then(|_| stdin.flush())
-            .map_err(|error| error.to_string());
-        drop(stdin);
-        let _ = write_sender.send(result);
-    });
-    let (stdout_sender, stdout_receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut output = String::new();
-        let mut buffer = [0_u8; 8192];
-        let result = (|| {
-            loop {
-                let count = stdout
-                    .read(&mut buffer)
-                    .map_err(|error| error.to_string())?;
-                if count == 0 {
-                    break;
-                }
-                if output.len().saturating_add(count) <= 4096 {
-                    output.push_str(&String::from_utf8_lossy(&buffer[..count]));
-                } else {
-                    // Keep draining so a noisy remote process cannot block,
-                    // but do not accept a valid-looking prefix as staging.
-                    while stdout
-                        .read(&mut buffer)
-                        .map_err(|error| error.to_string())?
-                        != 0
-                    {}
-                    return Err("SSH helper staging output exceeded its limit.".into());
-                }
-            }
-            Ok::<_, String>(output)
-        })();
-        let _ = stdout_sender.send(result);
-    });
-    let stderr = title_reader(stderr, 16 * 1024);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let status = loop {
-        if control.cancelled.load(Ordering::SeqCst) {
-            terminate_bounded(&mut child);
-            return Err("Collaboration helper staging was cancelled.".into());
-        }
-        if Instant::now() >= deadline {
-            terminate_bounded(&mut child);
-            return Err("Timed out staging collaboration helper on SSH host.".into());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(Duration::from_millis(25)),
-            Err(error) => {
-                terminate_bounded(&mut child);
-                return Err(format!("Could not read SSH helper staging status: {error}"));
-            }
-        }
-    };
-    // Reader and writer threads must not retain staging after the SSH child exits.
-    let drain_timeout = deadline
-        .saturating_duration_since(Instant::now())
-        .max(Duration::from_millis(250))
-        .min(Duration::from_secs(1));
-    let diagnostics = stderr
-        .recv_timeout(drain_timeout)
-        .unwrap_or_else(|_| Ok(Vec::new()))?;
-    if !status.success() {
-        return Err(with_ssh_diagnostic(
-            format!(
-                "SSH helper staging exited with {}.",
-                status
-                    .code()
-                    .map_or("a signal".into(), |code| format!("status {code}"))
-            ),
-            &diagnostics,
-        ));
-    }
-    let output = stdout_receiver
-        .recv_timeout(drain_timeout)
-        .map_err(|_| "Could not read SSH helper staging output.".to_string())??;
-    write_receiver
-        .recv_timeout(drain_timeout)
-        .map_err(|_| "Could not send collaboration helper to SSH host.".to_string())?
-        .map_err(|error| format!("Could not send collaboration helper to SSH host: {error}"))?;
-    let directory = output
-        .strip_prefix("__MONITTER_HELPER_DIR__")
-        .and_then(|value| value.lines().next())
-        .unwrap_or_default();
-    let suffix = directory
-        .strip_prefix("/tmp/monitter-mcp.")
-        .unwrap_or_default();
-    if suffix.len() < 8 || !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return Err("SSH host returned an invalid collaboration helper path.".into());
-    }
-    if output != format!("__MONITTER_HELPER_DIR__{directory}\n") {
-        cleanup_remote_helper(host, directory);
-        return Err("SSH host returned unexpected collaboration helper output.".into());
-    }
-    Ok((directory.into(), format!("{directory}/monitter_mcp.py")))
 }
 
 fn start_reverse_tunnel(
@@ -2396,8 +2210,13 @@ fn start_reverse_tunnel(
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut allocated = false;
+        let mut diagnostics = Vec::new();
         for line in BufReader::new(stderr).lines() {
             if let Ok(line) = line {
+                if diagnostics.len() < 4096 {
+                    diagnostics.extend(line.as_bytes().iter().take(4096 - diagnostics.len()));
+                    diagnostics.push(b'\n');
+                }
                 if !allocated {
                     if let Some(port) = line
                         .split("Allocated port ")
@@ -2406,13 +2225,16 @@ fn start_reverse_tunnel(
                         .and_then(|value| value.parse::<u16>().ok())
                     {
                         allocated = true;
-                        let _ = sender.send(Some(port));
+                        let _ = sender.send(Ok(port));
                     }
                 }
             }
         }
         if !allocated {
-            let _ = sender.send(None);
+            let _ = sender.send(Err(with_ssh_diagnostic(
+                "Could not establish a loopback-only SSH collaboration tunnel.",
+                &diagnostics,
+            )));
         }
     });
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -2427,7 +2249,11 @@ fn start_reverse_tunnel(
             return Err("Could not establish a loopback-only SSH collaboration tunnel.".into());
         }
         match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
-            Ok(Some(port)) if port != 0 => return Ok((child, port)),
+            Ok(Ok(port)) if port != 0 => return Ok((child, port)),
+            Ok(Err(error)) => {
+                terminate_bounded(&mut child);
+                return Err(error);
+            }
             Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 terminate_bounded(&mut child);
                 return Err("Could not establish a loopback-only SSH collaboration tunnel.".into());
@@ -2440,80 +2266,25 @@ fn start_reverse_tunnel(
 pub(crate) fn prepare_remote_collaboration(
     host: &Host,
     endpoint: &str,
-    helper: &PathBuf,
     control: &RunControl,
 ) -> Result<RemoteCollaboration, String> {
-    let (helper_dir, helper_path) = stage_remote_helper(host, helper, control)?;
-    match start_reverse_tunnel(host, endpoint, control) {
-        Ok((tunnel, port)) => Ok(RemoteCollaboration {
-            host: host.clone(),
-            helper_dir,
-            helper_path,
-            endpoint: format!("http://127.0.0.1:{port}/rpc"),
-            tunnel,
-        }),
-        Err(error) => {
-            cleanup_remote_helper(host, &helper_dir);
-            Err(error)
-        }
-    }
+    let (tunnel, port) = start_reverse_tunnel(host, endpoint, control)?;
+    Ok(RemoteCollaboration {
+        endpoint: format!("http://127.0.0.1:{port}/mcp"),
+        tunnel: Some(tunnel),
+    })
 }
 
-/// Transfers SSH-only collaboration resources to the same owned run as the
-/// provider process. `RunControl` stops the reverse tunnel before removing the
-/// remote helper, and does both during its normal bounded teardown.
-pub(crate) fn attach_remote_collaboration(remote: RemoteCollaboration, control: &RunControl) {
-    let RemoteCollaboration {
-        host,
-        helper_dir,
-        tunnel,
-        ..
-    } = remote;
-    if let Ok(mut cleanups) = control.remote_helper_cleanups.lock() {
-        cleanups.push((host, helper_dir));
-        drop(cleanups);
-        // `add_auxiliary` checks cancellation itself. If cancellation won the
-        // race it terminates the tunnel, and the registered helper is removed
-        // by the same owned teardown path.
+/// The provider run owns its loopback reverse tunnel, including cancellation
+/// and bounded teardown. No helper file or process is installed remotely.
+pub(crate) fn attach_remote_collaboration(mut remote: RemoteCollaboration, control: &RunControl) {
+    if let Some(tunnel) = remote.tunnel.take() {
         control.add_auxiliary(tunnel);
-    } else {
-        let mut tunnel = tunnel;
-        terminate_bounded(&mut tunnel);
-        cleanup_remote_helper(&host, &helper_dir);
     }
 }
 
-pub(crate) fn abort_remote_collaboration(mut remote: RemoteCollaboration) {
-    terminate_bounded(&mut remote.tunnel);
-    cleanup_remote_helper(&remote.host, &remote.helper_dir);
-}
-
-fn cleanup_remote_helper(host: &Host, helper_dir: &str) {
-    let Ok(target) = ssh_target(host) else {
-        return;
-    };
-    let mut command = ssh_command(host);
-    add_ssh_options(&mut command, host);
-    command
-        .arg(target)
-        .arg(format!(
-            "rm -f -- {}/monitter_mcp.py && rmdir -- {}",
-            posix_quote(helper_dir),
-            posix_quote(helper_dir)
-        ))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Ok(mut child) = command.spawn() {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        terminate_bounded(&mut child);
-    }
+pub(crate) fn abort_remote_collaboration(remote: RemoteCollaboration) {
+    drop(remote);
 }
 
 pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunControl>) {
@@ -2597,19 +2368,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         } else {
             None
         };
-        let helper = match grant.as_ref() {
-            Some(_) => match service.collaboration_helper() {
-                Ok(path) => Some(path),
-                Err(error) => {
-                    service.finish(&task_id, "error", Some(error));
-                    return;
-                }
-            },
-            None => None,
-        };
-        let mut remote_collaboration = match (grant.as_ref(), helper.as_ref(), host.kind.as_str()) {
-            (Some(grant), Some(helper), "ssh") => {
-                match prepare_remote_collaboration(&host, &grant.endpoint, helper, &control) {
+        let mut remote_collaboration = match (grant.as_ref(), host.kind.as_str()) {
+            (Some(grant), "ssh") => {
+                match prepare_remote_collaboration(&host, &grant.endpoint, &control) {
                     Ok(remote) => Some(remote),
                     Err(error) => {
                         if control.cancelled.load(Ordering::SeqCst) {
@@ -2624,29 +2385,28 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             _ => None,
         };
         if control.cancelled.load(Ordering::SeqCst) {
-            if let Some(mut remote) = remote_collaboration.take() {
-                terminate_bounded(&mut remote.tunnel);
-                cleanup_remote_helper(&host, &remote.helper_dir);
+            if let Some(remote) = remote_collaboration.take() {
+                abort_remote_collaboration(remote);
             }
             service.finish(&task_id, "interrupted", None);
             return;
         }
-        let helper_for_command = remote_collaboration
-            .as_ref()
-            .map(|remote| remote.helper_path.as_str())
-            .or_else(|| helper.as_ref().and_then(|path| path.to_str()));
-        let grant_for_command = grant
-            .as_ref()
-            .zip(helper_for_command)
-            .map(|(grant, helper)| (grant, helper));
+        let command_grant = grant.as_ref().map(|grant| SessionGrant {
+            endpoint: remote_collaboration
+                .as_ref()
+                .map(|remote| remote.endpoint.clone())
+                .unwrap_or_else(|| grant.endpoint.clone()),
+            token: grant.token.clone(),
+        });
+        let grant_for_command = command_grant.as_ref();
         let mut claude_config_value = extensions.claude_config();
         if task.provider == "claude" {
-            if let Some((_, helper)) = grant_for_command {
+            if let Some(grant) = grant_for_command {
                 if let (Some(target), Some(builtin)) = (
                     claude_config_value
                         .pointer_mut("/mcpServers")
                         .and_then(Value::as_object_mut),
-                    serde_json::from_str::<Value>(&claude_mcp_config(helper))
+                    serde_json::from_str::<Value>(&claude_mcp_config(&grant.endpoint))
                         .ok()
                         .and_then(|value| value.pointer("/mcpServers/monitter").cloned()),
                 ) {
@@ -2677,9 +2437,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         ) {
             Ok(command) => command,
             Err(error) => {
-                if let Some(mut remote) = remote_collaboration.take() {
-                    terminate_bounded(&mut remote.tunnel);
-                    cleanup_remote_helper(&host, &remote.helper_dir);
+                if let Some(remote) = remote_collaboration.take() {
+                    abort_remote_collaboration(remote);
                 }
                 service.finish(&task_id, "error", Some(error));
                 return;
@@ -2688,9 +2447,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                if let Some(mut remote) = remote_collaboration.take() {
-                    terminate_bounded(&mut remote.tunnel);
-                    cleanup_remote_helper(&host, &remote.helper_dir);
+                if let Some(remote) = remote_collaboration.take() {
+                    abort_remote_collaboration(remote);
                 }
                 service.finish(
                     &task_id,
@@ -2703,9 +2461,6 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let remote_supervised = host.kind == "ssh";
-        let remote_helper_dir = remote_collaboration
-            .as_ref()
-            .map(|remote| remote.helper_dir.clone());
         let remote_endpoint = remote_collaboration
             .as_ref()
             .map(|remote| remote.endpoint.clone());
@@ -2722,9 +2477,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                         "token": &grant.token,
                     });
                     if task.provider == "opencode" {
-                        if let Some(helper) = helper_for_command {
-                            frame["opencodeHelper"] = Value::String(helper.into());
-                        }
+                        frame["opencodeHttp"] = Value::Bool(true);
                     }
                     frame.to_string()
                 });
@@ -2762,9 +2515,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             };
             if let Err(error) = write_result {
                 terminate_bounded(&mut child);
-                if let Some(mut remote) = remote_collaboration.take() {
-                    terminate_bounded(&mut remote.tunnel);
-                    cleanup_remote_helper(&host, &remote.helper_dir);
+                if let Some(remote) = remote_collaboration.take() {
+                    abort_remote_collaboration(remote);
                 }
                 service.finish(
                     &task_id,
@@ -2780,9 +2532,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             }
         } else {
             terminate_bounded(&mut child);
-            if let Some(mut remote) = remote_collaboration.take() {
-                terminate_bounded(&mut remote.tunnel);
-                cleanup_remote_helper(&host, &remote.helper_dir);
+            if let Some(remote) = remote_collaboration.take() {
+                abort_remote_collaboration(remote);
             }
             service.finish(
                 &task_id,
@@ -2793,15 +2544,12 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         };
 
         if let Some(remote) = remote_collaboration.take() {
-            control.add_auxiliary(remote.tunnel);
+            attach_remote_collaboration(remote, &control);
         }
 
         if let Err((mut child, _stdin)) = control.install(child, control_stdin) {
             terminate_bounded(&mut child);
             control.cleanup_auxiliary();
-            if let Some(directory) = remote_helper_dir.as_deref() {
-                cleanup_remote_helper(&host, directory);
-            }
             service.finish(&task_id, "interrupted", None);
             return;
         }
@@ -3041,9 +2789,6 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         if let Some(handle) = stderr_thread {
             let _ = handle.join();
         }
-        if let Some(directory) = remote_helper_dir.as_deref() {
-            cleanup_remote_helper(&host, directory);
-        }
         match result {
             Ok(_status) if control.cancelled.load(Ordering::SeqCst) => {
                 service.finish(&task_id, "interrupted", None)
@@ -3281,7 +3026,7 @@ mod tests {
 
     #[test]
     fn codex_collaboration_is_scoped_to_the_monitter_server() {
-        let args = codex_args(&task(None, ""), Some("/private/runtime/monitter-mcp.py"));
+        let args = codex_args(&task(None, ""), Some("http://127.0.0.1:4444/mcp"));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-c", "mcp_servers.monitter.required=true"]));
@@ -3298,8 +3043,13 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("ignore-user-config")));
         assert!(args
             .iter()
-            .any(|arg| arg
-                == "mcp_servers.monitter.env_vars=[\"MONITTER_ENDPOINT\",\"MONITTER_TOKEN\"]"));
+            .any(|arg| arg == "mcp_servers.monitter.bearer_token_env_var=\"MONITTER_TOKEN\""));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "mcp_servers.monitter.url=\"http://127.0.0.1:4444/mcp\""));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("python3") || arg.contains("monitter.command")));
         assert!(!args.iter().any(|arg| arg.contains("not-in-argv")));
     }
 
@@ -3308,15 +3058,11 @@ mod tests {
         let mut host = host("local");
         host.codex_path = std::env::current_exe().unwrap().display().to_string();
         let grant = SessionGrant {
-            endpoint: "http://127.0.0.1:4444/rpc".into(),
+            endpoint: "http://127.0.0.1:4444/mcp".into(),
             token: "not-in-argv".into(),
         };
-        let command = build_command_with_collaboration(
-            &host,
-            &task(None, ""),
-            Some((&grant, "/private/runtime/monitter-mcp.py")),
-        )
-        .unwrap();
+        let command =
+            build_command_with_collaboration(&host, &task(None, ""), Some(&grant)).unwrap();
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3340,7 +3086,7 @@ mod tests {
         assert!(environment
             .iter()
             .any(|(key, value)| key == "MONITTER_ENDPOINT"
-                && value.as_deref() == Some("http://127.0.0.1:4444/rpc")));
+                && value.as_deref() == Some("http://127.0.0.1:4444/mcp")));
     }
 
     #[test]
@@ -3351,15 +3097,10 @@ mod tests {
         task.provider = "claude".into();
         task.sandbox = "harness-configured".into();
         let grant = SessionGrant {
-            endpoint: "http://127.0.0.1:4444/rpc".into(),
+            endpoint: "http://127.0.0.1:4444/mcp".into(),
             token: "not-in-argv".into(),
         };
-        let command = build_command_with_collaboration(
-            &host,
-            &task,
-            Some((&grant, "/private/runtime/monitter-mcp.py")),
-        )
-        .unwrap();
+        let command = build_command_with_collaboration(&host, &task, Some(&grant)).unwrap();
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3367,7 +3108,7 @@ mod tests {
         let mcp = args.iter().position(|arg| arg == "--mcp-config").unwrap();
         assert_eq!(
             args[mcp + 1],
-            claude_mcp_config("/private/runtime/monitter-mcp.py")
+            claude_mcp_config("http://127.0.0.1:4444/mcp")
         );
         let allowed = args.iter().position(|arg| arg == "--allowedTools").unwrap();
         assert_eq!(args[allowed + 1], claude_tool_names());
@@ -3383,15 +3124,10 @@ mod tests {
         task.provider = "opencode".into();
         task.sandbox = "harness-configured".into();
         let grant = SessionGrant {
-            endpoint: "http://127.0.0.1:4444/rpc".into(),
+            endpoint: "http://127.0.0.1:4444/mcp".into(),
             token: "not-in-argv".into(),
         };
-        let command = build_command_with_collaboration(
-            &host,
-            &task,
-            Some((&grant, "/private/runtime/monitter-mcp.py")),
-        )
-        .unwrap();
+        let command = build_command_with_collaboration(&host, &task, Some(&grant)).unwrap();
         let environment = command
             .get_envs()
             .map(|(key, value)| {
@@ -3401,7 +3137,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let expected = merge_opencode_mcp_config(None, "/private/runtime/monitter-mcp.py").unwrap();
+        let expected = merge_opencode_mcp_config(None, "http://127.0.0.1:4444/mcp").unwrap();
         assert!(environment
             .iter()
             .any(|(key, value)| key == "OPENCODE_CONFIG_CONTENT"
@@ -3416,15 +3152,21 @@ mod tests {
     fn opencode_inline_config_preserves_existing_settings_and_servers() {
         let existing = r#"{"model":"provider/model","nested":{"keep":true},"mcp":{"context7":{"type":"remote","url":"https://example.test/mcp","enabled":true}}}"#;
         let merged: Value = serde_json::from_str(
-            &merge_opencode_mcp_config(Some(existing), "/private/runtime/monitter-mcp.py").unwrap(),
+            &merge_opencode_mcp_config(Some(existing), "http://127.0.0.1:4444/mcp").unwrap(),
         )
         .unwrap();
         assert_eq!(merged["model"], "provider/model");
         assert_eq!(merged["nested"]["keep"], true);
         assert_eq!(merged["mcp"]["context7"]["url"], "https://example.test/mcp");
         assert_eq!(
-            merged["mcp"]["monitter"]["command"][1],
-            "/private/runtime/monitter-mcp.py"
+            merged["mcp"]["monitter"]["url"],
+            "http://127.0.0.1:4444/mcp"
+        );
+        assert_eq!(merged["mcp"]["monitter"]["type"], "remote");
+        assert_eq!(merged["mcp"]["monitter"]["oauth"], false);
+        assert_eq!(
+            merged["mcp"]["monitter"]["headers"]["Authorization"],
+            "Bearer {env:MONITTER_TOKEN}"
         );
         assert!(merge_opencode_mcp_config(Some("not-json"), "helper").is_err());
     }
@@ -3467,7 +3209,7 @@ mod tests {
             .stderr(Stdio::null());
         let mut child = command.spawn().unwrap();
         let frame =
-            serde_json::json!({"endpoint":"http://127.0.0.1:4444/rpc","token":"not-in-argv"})
+            serde_json::json!({"endpoint":"http://127.0.0.1:4444/mcp","token":"not-in-argv"})
                 .to_string();
         let mut stdin = child.stdin.take().unwrap();
         stdin
@@ -3484,7 +3226,7 @@ mod tests {
             .unwrap();
         drop(stdin);
         assert!(child.wait().unwrap().success());
-        assert_eq!(output, "http://127.0.0.1:4444/rpc:not-in-argv");
+        assert_eq!(output, "http://127.0.0.1:4444/mcp:not-in-argv");
     }
 
     #[test]
@@ -3598,9 +3340,9 @@ mod tests {
             .stderr(Stdio::null());
         let mut child = command.spawn().unwrap();
         let frame = serde_json::json!({
-            "endpoint":"http://127.0.0.1:4444/rpc",
+            "endpoint":"http://127.0.0.1:4444/mcp",
             "token":"not-in-argv",
-            "opencodeHelper":"/tmp/monitter-mcp.example/monitter_mcp.py",
+            "opencodeHttp":true,
         })
         .to_string();
         let mut stdin = child.stdin.take().unwrap();
@@ -3627,9 +3369,15 @@ mod tests {
         assert_eq!(merged["nested"]["keep"], "value");
         assert_eq!(merged["mcp"]["existing"]["url"], "https://example.test/mcp");
         assert_eq!(
-            merged["mcp"]["monitter"]["command"][1],
-            "/tmp/monitter-mcp.example/monitter_mcp.py"
+            merged["mcp"]["monitter"]["url"],
+            "http://127.0.0.1:4444/mcp"
         );
+        assert_eq!(merged["mcp"]["monitter"]["type"], "remote");
+        assert_eq!(
+            merged["mcp"]["monitter"]["headers"]["Authorization"],
+            "Bearer {env:MONITTER_TOKEN}"
+        );
+        assert!(merged["mcp"]["monitter"].get("command").is_none());
     }
 
     #[test]
@@ -3757,36 +3505,24 @@ mod tests {
     }
 
     #[test]
-    fn helper_staging_reports_ssh_host_key_failure_before_stdin_error() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let shim = std::env::temp_dir().join(format!("monitter-ssh-stage-{}", id()));
-        let helper = std::env::temp_dir().join(format!("monitter-helper-{}", id()));
-        std::fs::write(
-            &shim,
-            "#!/bin/sh\nprintf '%s\\n' 'Host key verification failed.' >&2\nexit 255\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(&helper, "# helper fixture\n").unwrap();
+    fn collaboration_tunnel_reports_host_key_failure() {
+        let shim = fake_opencode("printf '%s\\n' 'Host key verification failed.' >&2; exit 255");
         let host = host("ssh");
         let _ssh = override_ssh_for_test(&host.id, &shim);
-        let error = stage_remote_helper(&host, &helper, &RunControl::new(false)).unwrap_err();
-        assert!(error.contains("status 255"));
-        assert!(error.contains("Host key verification failed."));
+        let error = prepare_remote_collaboration(
+            &host,
+            "http://127.0.0.1:1234/mcp",
+            &RunControl::new(false),
+        )
+        .err()
+        .expect("SSH failure must be visible");
+        assert!(error.contains("Host key verification failed"), "{error}");
         let _ = std::fs::remove_file(shim);
-        let _ = std::fs::remove_file(helper);
     }
 
     #[test]
-    fn helper_staging_cancellation_bounds_a_writer_blocked_on_ssh_stdin() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let shim = std::env::temp_dir().join(format!("monitter-ssh-stage-blocked-{}", id()));
-        let helper = std::env::temp_dir().join(format!("monitter-helper-blocked-{}", id()));
-        std::fs::write(&shim, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(&helper, vec![b'x'; 256 * 1024]).unwrap();
+    fn collaboration_tunnel_cancellation_is_bounded() {
+        let shim = fake_opencode("sleep 30");
         let host = host("ssh");
         let _ssh = override_ssh_for_test(&host.id, &shim);
         let control = RunControl::new(false);
@@ -3796,29 +3532,93 @@ mod tests {
                 thread::sleep(Duration::from_millis(75));
                 control.cancelled.store(true, Ordering::SeqCst);
             });
-            stage_remote_helper(&host, &helper, &control).unwrap_err()
+            prepare_remote_collaboration(&host, "http://127.0.0.1:1234/mcp", &control)
+                .err()
+                .expect("cancelled tunnel must fail")
         });
         assert!(error.contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(5));
         let _ = std::fs::remove_file(shim);
-        let _ = std::fs::remove_file(helper);
     }
 
     #[test]
-    fn helper_staging_rejects_oversized_output_instead_of_accepting_a_prefix() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let shim = std::env::temp_dir().join(format!("monitter-ssh-stage-output-{}", id()));
-        let helper = std::env::temp_dir().join(format!("monitter-helper-output-{}", id()));
-        std::fs::write(&shim, "#!/bin/sh\ncat >/dev/null\nhead -c 5000 /dev/zero\n").unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(&helper, "# helper fixture\n").unwrap();
+    fn collaboration_tunnel_guard_closes_on_early_failure() {
+        let shim = fake_opencode(
+            "echo 'Allocated port 45123 for remote forward to 127.0.0.1 port 1' >&2; sleep 30",
+        );
         let host = host("ssh");
         let _ssh = override_ssh_for_test(&host.id, &shim);
-        let error = stage_remote_helper(&host, &helper, &RunControl::new(false)).unwrap_err();
-        assert!(error.contains("output exceeded its limit"));
+        let remote = prepare_remote_collaboration(
+            &host,
+            "http://127.0.0.1:1234/mcp",
+            &RunControl::new(false),
+        )
+        .unwrap();
+        assert_eq!(remote.endpoint, "http://127.0.0.1:45123/mcp");
+        let pid = remote.tunnel.as_ref().unwrap().id();
+        drop(remote);
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
         let _ = std::fs::remove_file(shim);
-        let _ = std::fs::remove_file(helper);
+    }
+
+    #[test]
+    #[ignore = "requires MONITTER_TEST_SSH_HOST and an existing trusted SSH login with curl"]
+    fn http_mcp_over_real_ssh_tunnel() {
+        let mut host = host("ssh");
+        host.address = std::env::var("MONITTER_TEST_SSH_HOST").expect("set trusted SSH host alias");
+        host.user.clear();
+        host.identity_file.clear();
+        host.port = 0;
+        let broker = crate::collaboration_transport::Broker::start(Arc::new(|task, tool, _| {
+            Ok(serde_json::json!({"caller":task,"tool":tool}))
+        }))
+        .unwrap();
+        let grant = broker.session("ssh-proof");
+        let control = RunControl::new(false);
+        let remote = prepare_remote_collaboration(&host, &grant.endpoint, &control).unwrap();
+        let endpoint = remote.endpoint.clone();
+        let pid = remote.tunnel.as_ref().unwrap().id();
+        attach_remote_collaboration(remote, &control);
+        let request = |body: Value| {
+            let mut command = ssh_command(&host);
+            add_ssh_options(&mut command, &host);
+            command.arg(ssh_target(&host).unwrap()).arg(format!(
+                "curl --silent --show-error --max-time 10 --header @- --header 'Content-Type: application/json' --header 'Accept: application/json, text/event-stream' --data-binary {} {} --write-out '\\n%{{http_code}}'",
+                posix_quote(&body.to_string()), posix_quote(&endpoint),
+            )).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = command.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("Authorization: Bearer {}\n", grant.token).as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "SSH curl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let initialized = request(
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ssh-proof","version":"1"}}}),
+        );
+        assert!(initialized.ends_with("\n200"), "{initialized}");
+        assert!(initialized.contains("monitter-collaboration"));
+        let result = request(
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}),
+        );
+        assert!(
+            result.ends_with("\n200") && result.contains("ssh-proof"),
+            "{result}"
+        );
+        broker.revoke(&grant.token);
+        assert!(
+            request(serde_json::json!({"jsonrpc":"2.0","id":3,"method":"ping"})).ends_with("\n401")
+        );
+        control.cleanup_auxiliary();
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
 
     fn opencode_task(session: &str) -> Task {

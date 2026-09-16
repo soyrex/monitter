@@ -540,19 +540,9 @@ fn run(
             return;
         }
     };
-    let helper = match grant.as_ref() {
-        Some(_) => match service.collaboration_helper() {
-            Ok(helper) => Some(helper),
-            Err(error) => {
-                fail(&service, &task_id, &control, error);
-                return;
-            }
-        },
-        None => None,
-    };
-    let mut remote_collaboration = match (host.kind.as_str(), grant.as_ref(), helper.as_ref()) {
-        ("ssh", Some(grant), Some(helper)) => {
-            match runner::prepare_remote_collaboration(&host, &grant.endpoint, helper, &control) {
+    let mut remote_collaboration = match (host.kind.as_str(), grant.as_ref()) {
+        ("ssh", Some(grant)) => {
+            match runner::prepare_remote_collaboration(&host, &grant.endpoint, &control) {
                 Ok(remote) => Some(remote),
                 Err(error) => {
                     fail(&service, &task_id, &control, error);
@@ -562,10 +552,6 @@ fn run(
         }
         _ => None,
     };
-    let helper_for_session = remote_collaboration
-        .as_ref()
-        .map(|remote| remote.helper_path.as_str())
-        .or_else(|| helper.as_ref().and_then(|path| path.to_str()));
     // SSH's reverse forward allocates a remote loopback port. The ACP agent
     // must receive that endpoint, never the desktop-only broker address.
     let session_grant = grant.as_ref().map(|grant| {
@@ -575,8 +561,7 @@ fn run(
         }
         grant
     });
-    let mut mcp_servers =
-        crate::acp_collaboration::mcp_servers(helper_for_session, session_grant.as_ref());
+    let mut mcp_servers = crate::acp_collaboration::mcp_servers(session_grant.as_ref());
     let managed_mcp = match extensions.acp_servers() {
         Ok(Value::Array(servers)) => servers,
         Ok(_) => Vec::new(),
@@ -929,13 +914,13 @@ fn run(
                         return;
                     }
                 };
-                if extensions.has_http()
+                if (grant.is_some() || extensions.has_http())
                     && value
                         .pointer("/result/agentCapabilities/mcpCapabilities/http")
                         .and_then(Value::as_bool)
                         != Some(true)
                 {
-                    fail(&service, &task_id, &control, "This ACP agent does not advertise HTTP MCP support; Monitter did not ignore the assigned server.");
+                    fail(&service, &task_id, &control, "This ACP agent does not advertise HTTP MCP support; Monitter could not attach its collaboration server and did not silently ignore it.");
                     return;
                 }
                 let (method, params) = if let Some(native) = task.native_session_id.as_deref() {

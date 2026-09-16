@@ -116,7 +116,7 @@ host identity. Test the exact saved target noninteractively with
 For a new host, verify its fingerprint through a trusted channel before accepting
 it in Terminal; do not disable host-key checking or remove a changed key blindly.
 
-ACP discovery and collaboration-helper staging report bounded SSH failure details.
+ACP discovery and collaboration-tunnel startup report bounded SSH failure details.
 Host-key errors occur before the agent starts; authentication failures require the
 configured SSH key/agent, while a successful connection followed by “command not
 found” needs the remote executable path. No failed chat is automatically resent.
@@ -167,6 +167,10 @@ inbox is an acknowledgement of receipt, not a claim that its requested work is f
 
 The runtime also has scoped Claude and OpenCode tool injection. Hermes currently supports receiving
 routed tasks through its native adapter; callable Hermes collaboration tools are not yet exposed.
+The built-in collaboration MCP runs directly in Rust over loopback HTTP. Local harnesses connect
+to it directly; SSH harnesses connect through an owned reverse tunnel. No Python MCP relay is
+launched or uploaded. ACP agents must advertise HTTP MCP support when collaboration is enabled.
+Other Python integrations, including SSH process supervision and the Hermes bridge, are separate.
 Host authentication remains with each native CLI. This runs while Monitter is open; no hosted
 collaboration service, multiplayer sharing or iOS client is included.
 

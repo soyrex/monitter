@@ -27,6 +27,9 @@ mod app_server_tests;
 mod attachments;
 mod codex_app_server;
 mod collaboration;
+#[cfg(test)]
+mod collaboration_client_tests;
+mod collaboration_mcp;
 mod collaboration_runtime;
 mod collaboration_transport;
 mod deletion;
@@ -273,6 +276,7 @@ pub(crate) struct Service {
     collaboration_started: std::sync::atomic::AtomicBool,
     stopping: std::sync::atomic::AtomicBool,
     native_escape_shield: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
     runtime_dir: PathBuf,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
     quota_cache: Mutex<Option<(Instant, Vec<SubscriptionUsageSource>)>>,
@@ -485,6 +489,7 @@ impl Service {
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
             quota_cache: Mutex::new(None),
