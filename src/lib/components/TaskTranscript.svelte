@@ -157,7 +157,7 @@
   </div>
 {/if}
 <section class="conversation">
-    <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={computerTools} onstop={onStop} disabled={busy} />
+    <TaskActivity goal={null} onclear={onClearGoal} tools={computerTools} onstop={onStop} disabled={busy} />
     <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       <TranscriptVirtualList
         items={displayItems}
@@ -207,6 +207,7 @@
       </TranscriptVirtualList>
     </MessagePane>
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
+    <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />
   <div class="composer-area">
     <SparkleField active={task.status === 'running'}/>
     {@render composer()}

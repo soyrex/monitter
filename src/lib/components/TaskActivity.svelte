@@ -1,8 +1,8 @@
 <script lang="ts">
   import { Goal as GoalIcon, Monitor, Square, Trash2 } from '@lucide/svelte';
   import type { Goal, ComputerActivity } from '$lib/types';
-  let { goal, goalNote = "", tools, onstop, onclear, clearing = false, clearError = "", disabled = false }: {
-    goal: Goal | null; goalNote?: string; tools: ComputerActivity[]; onstop: () => unknown; onclear: () => unknown; clearing?: boolean; clearError?: string; disabled?: boolean;
+  let { goal, goalNote = "", docked = false, tools, onstop, onclear, clearing = false, clearError = "", disabled = false }: {
+    goal: Goal | null; goalNote?: string; docked?: boolean; tools: ComputerActivity[]; onstop: () => unknown; onclear: () => unknown; clearing?: boolean; clearError?: string; disabled?: boolean;
   } = $props();
   const number = (value: number) => new Intl.NumberFormat().format(value);
   const label = (status: string) => ({active:'Active',paused:'Paused',blocked:'Blocked',usageLimited:'Usage limit',budgetLimited:'Budget reached'}[status] ?? status);
@@ -14,7 +14,7 @@
 </script>
 
 {#if (goal && goal.status !== 'complete') || goalNote || tools.length}
-  <div class="task-activity">
+  <div class="task-activity" class:docked>
     {#if goal && goal.status !== 'complete'}
       <section class="goal-card clearable" class:in-progress={goal.status === 'active'} aria-label="Task goal">
         {#if goal.status === 'active'}<div class="goal-sparkles" aria-hidden="true">
@@ -47,6 +47,7 @@
 
 <style>
   .task-activity { flex: none; min-height: 0; max-height: 25%; overflow: auto; overscroll-behavior: contain; margin: 10px 20px 0; font-size: calc(12px * var(--interface-font-ratio, 1)); }
+  .task-activity.docked { width:min(var(--chat-content-max-width,900px),calc(100% - 20px)); box-sizing:border-box; margin:0 auto 8px; }
   section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 10px 12px; }
   section + section { margin-top: 8px; }
   .goal-card { position:relative; isolation:isolate; }
