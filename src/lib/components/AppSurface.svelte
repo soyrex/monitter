@@ -5470,7 +5470,9 @@
   .detail-tab-entry.active .detail-tab:hover { background: var(--sidebar); }
   .modern-tabs .detail-tabs { min-height:max(28px, calc(var(--density-detail-tabs-height) - 2px)); height:max(28px, calc(var(--density-detail-tabs-height) - 2px)); padding:0; gap:0; align-items:stretch; }
   .modern-tabs .detail-tab-entry { align-self:stretch; margin-bottom:0; border:0; border-right:1px solid var(--line); border-radius:0; }
-  .modern-tabs .detail-tab-entry.active { margin-bottom:-1px; }
+  /* Keep the divider inside the scrollport so the active tab can cover it. */
+  .modern-tabs .detail-tabs { border-bottom:0; box-shadow:inset 0 -1px 0 var(--line); }
+  .modern-tabs .detail-tab-entry.active { margin-bottom:0; }
   .modern-tabs .detail-tab { border-radius:0; }
   .detail-tabs .detail-close {
     position: sticky;
