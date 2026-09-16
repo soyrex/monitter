@@ -50,7 +50,7 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
  else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['permission','permission-no-allow'].includes(process.argv[2])){ const options=process.argv[2]==='permission-no-allow'?[{kind:'reject_once',optionId:'opaque-reject'}]:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]; console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
 });
@@ -156,6 +156,142 @@ fn resident_fixture_delivers_context_and_two_distinct_turns() {
         .map(|message| message.text)
         .collect::<Vec<_>>();
     assert_eq!(replies, vec!["reply-1", "reply-2"]);
+}
+
+#[test]
+fn unavailable_acp_yolo_uses_only_advertised_one_time_permissions() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-yolo-{}", crate::id()));
+    let fixture = fixture_with_args(
+        "no-bypass-mode",
+        vec!["permission".into(), capture.to_string_lossy().into_owned()],
+    );
+    fixture
+        .mutate(None, |snapshot| {
+            snapshot.agents[0].sandbox = "yolo".into();
+            Ok(())
+        })
+        .unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id.clone(),
+            title: "ACP YOLO compatibility".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let accepted = fixture
+        .accept_send(
+            task.id.clone(),
+            "continue with one-time ACP permissions".into(),
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "completed")
+    });
+    let snapshot = fixture.snapshot().unwrap();
+    assert_eq!(
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .unwrap()
+            .sandbox,
+        "yolo"
+    );
+    assert_eq!(
+        snapshot
+            .agents
+            .iter()
+            .find(|item| item.id == agent.id)
+            .unwrap()
+            .sandbox,
+        "yolo"
+    );
+    assert!(snapshot.approval_requests.is_empty());
+    assert!(snapshot.events.iter().any(|event| {
+        event.task_id == task.id
+            && event.title == "ACP YOLO compatibility"
+            && event.detail.contains("allow_once")
+    }));
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.title == "ACP YOLO permission"));
+    assert!(fs::read_to_string(&capture)
+        .unwrap_or_default()
+        .contains("outcome-opaque-allow"));
+    let _ = fs::remove_file(capture);
+}
+
+#[test]
+fn unavailable_acp_yolo_cancels_a_permission_without_allow_once() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-yolo-cancel-{}", crate::id()));
+    let fixture = fixture_with_args(
+        "no-allow-once",
+        vec![
+            "permission-no-allow".into(),
+            capture.to_string_lossy().into_owned(),
+        ],
+    );
+    fixture
+        .mutate(None, |snapshot| {
+            snapshot.agents[0].sandbox = "yolo".into();
+            Ok(())
+        })
+        .unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "ACP YOLO missing allow once".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let accepted = fixture
+        .accept_send(
+            task.id.clone(),
+            "do not broaden this permission".into(),
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "completed")
+    });
+    let snapshot = fixture.snapshot().unwrap();
+    assert!(snapshot.approval_requests.is_empty());
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.title == "ACP YOLO permission cancelled"));
+    assert!(fs::read_to_string(&capture)
+        .unwrap_or_default()
+        .contains("outcome-cancelled"));
+    let _ = fs::remove_file(capture);
 }
 
 #[test]

@@ -422,7 +422,10 @@ New ACP tasks copy the agent's launcher; editing the agent does not retarget an
 existing chat. Non-ACP tasks do not carry an ACP launcher. Session ownership
 distinguishes ACP launch configurations. ACP normally uses `harness-configured` permissions.
 An explicit `yolo` selection requests the live session's advertised `bypassPermissions` mode;
-if that exact option is absent the launch fails visibly. ACP remains a transport, not an OS sandbox.
+if that exact option is absent, each live `session/request_permission` may receive only the
+agent's advertised opaque `allow_once` option. Malformed, missing, duplicate, or broader-only
+options are cancelled; Monitter never selects an `allow_always` option. ACP remains a transport,
+not an OS sandbox.
 
 Agent settings offer searchable presets and a custom ACP launcher. The catalog
 is convenience metadata, not a restriction on which compatible executables can
