@@ -534,25 +534,46 @@
   );
   let goal = $state<Goal | null>(null);
   let goalError = $state("");
+  let clearingGoalTaskId = $state("");
+  let goalClearError = $state("");
+  let goalRequestRevision = 0;
+  async function clearSelectedGoal() {
+    const taskId = selectedTask?.id;
+    if (!taskId || clearingGoalTaskId) return;
+    const sessionId = selectedTask?.nativeSessionId;
+    clearingGoalTaskId = taskId;
+    goalClearError = "";
+    ++goalRequestRevision;
+    try {
+      await bridge.clearTaskGoal(taskId);
+      if (selectedTask?.id === taskId && selectedTask.nativeSessionId === sessionId) { goal = null; goalError = ""; }
+    } catch (reason) {
+      if (selectedTask?.id === taskId && selectedTask.nativeSessionId === sessionId) goalClearError = text(reason);
+    } finally {
+      clearingGoalTaskId = "";
+    }
+  }
   const goalKey = $derived(selectedTask?.nativeSessionId && selectedTask.provider === "codex"
     ? `${selectedTask.id}|${selectedTask.nativeSessionId}|${selectedTask.status}` : "");
   $effect(() => {
     const [taskId, , status] = goalKey.split("|");
     goal = null;
     goalError = "";
+    goalClearError = "";
     if (!taskId) return;
     let cancelled = false, pending = false;
     async function refreshGoal() {
-      if (pending) return;
+      if (pending || clearingGoalTaskId === taskId) return;
       pending = true;
+      const revision = goalRequestRevision;
       try {
         const result = await bridge.getTaskGoal(taskId);
-        if (!cancelled) { goal = result; goalError = ""; }
+        if (!cancelled && revision === goalRequestRevision) { goal = result; goalError = ""; }
       } catch (reason) {
-        if (!cancelled) goalError = text(reason);
+        if (!cancelled && revision === goalRequestRevision) goalError = text(reason);
       } finally { pending = false; }
     }
-    void refreshGoal();
+    untrack(() => { void refreshGoal(); });
     const interval = status === "running" ? setInterval(refreshGoal, 15000) : undefined;
     return () => { cancelled = true; if (interval) clearInterval(interval); };
   });
@@ -2757,9 +2778,11 @@
     } else if (item.id === "autoname") await autonameCurrentPane();
     else if (item.id === "stop" && task) await run(()=>bridge.cancelTask(task.id), "Stopping task…");
     else if (item.id === "goal" && task) {
+      if (clearingGoalTaskId === task.id) return;
+      const revision = goalRequestRevision;
       try {
         const result = await bridge.getTaskGoal(task.id);
-        if (selectedTaskId === task.id) { goal = result; notice = result ? "Goal updated." : "This task has no active Codex goal."; }
+        if (selectedTaskId === task.id && revision === goalRequestRevision) { goal = result; notice = result ? "Goal updated." : "This task has no active Codex goal."; }
       } catch(reason) { error = text(reason); }
     }
   }
@@ -3637,6 +3660,9 @@
           {selectedTaskStarting}
           {goal}
           {goalNote}
+          clearingGoal={!!clearingGoalTaskId}
+          {goalClearError}
+          onClearGoal={() => { void clearSelectedGoal(); }}
           computerTools={computerTools}
           {scrollRevision}
           {busy}

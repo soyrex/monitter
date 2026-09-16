@@ -93,6 +93,8 @@ No fake conversations, progress, token counts, host connections or model replies
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
+- `clear_task_goal { taskId: string }` -> void (Codex only; clears the native persisted goal without
+  resuming the thread, starting a turn, changing its transcript, or completing the goal)
 - `delete_task { id: string }` -> Snapshot (archived only; reject running; preserve native CLI history)
 - `send_message { taskId: string, text: string, attachmentIds?: string[] }` -> Snapshot (starts asynchronously)
 - `clear_task_context { taskId: string }` -> Snapshot (idle, unarchived tasks with no queued messages or pending requests only; preserves visible history, clears the native provider session, and appends a `Context Cleared` system boundary)
@@ -542,6 +544,11 @@ an interrupted or legacy lone record remains neutral rather than being described
 `get_task_goal` performs only the Codex app-server initialize/initialized/thread/goal/get handshake,
 with bounded cleanup. It neither resumes nor changes a thread. A null result hides the panel; API
 errors remain inspectable in run detail. Objective/status/token budget/usage come from the harness.
+`clear_task_goal` uses the same bounded app-server lifecycle and sends
+`thread/goal/clear { threadId }`. It is available only for Codex tasks with a native session ID;
+it does not simulate completion or hide a goal locally. Errors remain visible so the existing goal
+card stays available for retry. A native `{ cleared: false }` response is an idempotent success:
+there was already no persisted goal for that thread.
 Hermes goal notifications have free-form text and appear as the last reported update without
 fabricated objective/status/token metrics. OpenCode plans are not presented as native goals.
 

@@ -19,7 +19,7 @@ commands.allow = [
   "stop_channel_agent_conversation", "save_settings", "set_native_escape_shield", "load_dev_ui",
   "use_packaged_ui", "save_channel", "set_channel_membership", "send_channel_message",
   "send_channel_message_fast", "get_resume_command", "get_model_catalog", "set_task_model_settings",
-  "set_task_sandbox", "get_task_goal", "get_task_git_status", "wait_for_task_git_marker",
+  "set_task_sandbox", "get_task_goal", "clear_task_goal", "get_task_git_status", "wait_for_task_git_marker",
   "get_task_git_diff", "open_terminal", "list_terminals", "write_terminal", "resize_terminal",
   "read_terminal", "close_terminal"
 ]

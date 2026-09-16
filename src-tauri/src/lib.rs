@@ -904,6 +904,14 @@ impl Service {
                     value(goals::read_goal(&host, &task)?)
                 }
             }
+            "clear_task_goal" => {
+                let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
+                if task.provider != "codex" {
+                    return Err("Only Codex tasks have a native goal to clear.".into());
+                }
+                goals::clear_goal(&host, &task)?;
+                Ok(serde_json::Value::Null)
+            }
             "get_task_git_status" => {
                 let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
                 value(git::detect_status(
@@ -5800,6 +5808,17 @@ async fn get_task_goal(
 }
 
 #[tauri::command]
+async fn clear_task_goal(state: State<'_, AppState>, task_id: String) -> Result<(), String> {
+    let (task, host) = state.0.task_and_host(&task_id)?;
+    if task.provider != "codex" {
+        return Err("Only Codex tasks have a native goal to clear.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || goals::clear_goal(&host, &task))
+        .await
+        .map_err(|error| format!("Goal clear worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn get_model_catalog(
     state: State<'_, AppState>,
     target: ModelCatalogTarget,
@@ -6230,6 +6249,7 @@ pub fn run() {
             set_task_model_settings,
             set_task_sandbox,
             get_task_goal,
+            clear_task_goal,
             get_task_git_status,
             wait_for_task_git_marker,
             get_task_git_diff,

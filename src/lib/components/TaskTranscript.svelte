@@ -38,6 +38,9 @@
     selectedTaskStarting,
     goal,
     goalNote,
+    clearingGoal,
+    goalClearError,
+    onClearGoal,
     computerTools,
     scrollRevision,
     busy,
@@ -76,6 +79,9 @@
     selectedTaskStarting: boolean;
     goal: Goal | null;
     goalNote: string;
+    clearingGoal: boolean;
+    goalClearError: string;
+    onClearGoal: () => void;
     computerTools: ComputerActivity[];
     scrollRevision: number;
     busy: boolean;
@@ -146,7 +152,7 @@
   </div>
 {/if}
 <section class="conversation">
-    <TaskActivity {goal} {goalNote} tools={computerTools} onstop={onStop} disabled={busy} />
+    <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={computerTools} onstop={onStop} disabled={busy} />
     <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       {#if displayItems.length}<TranscriptVirtualList
         items={displayItems}

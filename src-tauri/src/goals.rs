@@ -29,6 +29,22 @@ pub(crate) fn read_goal(host: &Host, task: &Task) -> Result<Option<Value>, Strin
     result
 }
 
+/// Remove the persisted Codex `/goal` state without resuming the thread or
+/// starting a turn. The native transcript and Monitter task remain intact.
+pub(crate) fn clear_goal(host: &Host, task: &Task) -> Result<(), String> {
+    let thread_id = task
+        .native_session_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "A Codex session ID is required to clear its goal.".to_string())?;
+    let mut child = app_server_command(host)?.spawn().map_err(|error| {
+        format!("Could not start Codex app-server to clear the goal: {error}")
+    })?;
+    let result = clear_goal_from_child(&mut child, thread_id);
+    stop_child(&mut child);
+    result
+}
+
 fn app_server_command(host: &Host) -> Result<Command, String> {
     let mut command = if host.kind == "local" {
         let mut command = Command::new(resolve_local(&host.codex_path)?);
@@ -71,15 +87,42 @@ fn read_goal_from_child(child: &mut Child, thread_id: &str) -> Result<Option<Val
     let mut stdin = stdin;
 
     send(&mut stdin, initialize_request())?;
-    response(&lines, 1, deadline)
+    response(&lines, 1, deadline, "goal lookup")
         .and_then(|value| ensure_success(&value, "Codex app-server initialization"))?;
     send(&mut stdin, initialized_notification())?;
     send(&mut stdin, goal_request(thread_id))?;
-    let value = response(&lines, 2, deadline).and_then(|value| {
+    let value = response(&lines, 2, deadline, "goal lookup").and_then(|value| {
         ensure_success(&value, "Codex app-server thread/goal/get")?;
         normalize_goal(&value)
     })?;
     Ok(value)
+}
+
+fn clear_goal_from_child(child: &mut Child, thread_id: &str) -> Result<(), String> {
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdin.".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdout.".to_string())?;
+    let lines = spawn_reader(stdout);
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let mut stdin = stdin;
+
+    send(&mut stdin, initialize_request())?;
+    response(&lines, 1, deadline, "goal clear")
+        .and_then(|value| ensure_success(&value, "Codex app-server initialization"))?;
+    send(&mut stdin, initialized_notification())?;
+    send(&mut stdin, clear_goal_request(thread_id))?;
+    let value = response(&lines, 2, deadline, "goal clear")?;
+    ensure_success(&value, "Codex app-server thread/goal/clear")?;
+    // `cleared: false` is an idempotent success: there is already no
+    // persisted goal for this thread. It must still be a well-formed native
+    // response, never a locally assumed clear.
+    let _ = clear_result(&value)?;
+    Ok(())
 }
 
 fn initialize_request() -> Value {
@@ -94,6 +137,14 @@ fn goal_request(thread_id: &str) -> Value {
     json!({
         "id": 2,
         "method": "thread/goal/get",
+        "params": { "threadId": thread_id }
+    })
+}
+
+fn clear_goal_request(thread_id: &str) -> Value {
+    json!({
+        "id": 2,
+        "method": "thread/goal/clear",
         "params": { "threadId": thread_id }
     })
 }
@@ -133,18 +184,20 @@ fn response(
     lines: &Receiver<Result<Value, String>>,
     id: i64,
     deadline: Instant,
+    operation: &str,
 ) -> Result<Value, String> {
     loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or_else(|| {
-                "Timed out waiting for Codex app-server read-only goal response.".to_string()
+                format!("Timed out waiting for Codex app-server {operation} response.")
             })?;
         let value = lines
             .recv_timeout(remaining)
             .map_err(|_| {
-                "Codex app-server exited or timed out before responding to goal lookup; confirm this Codex version supports app-server and thread/goal/get."
-                    .to_string()
+                format!(
+                    "Codex app-server exited or timed out before responding to {operation}; confirm this Codex version supports app-server."
+                )
             })??;
         if value.get("id").and_then(Value::as_i64) == Some(id) {
             return Ok(value);
@@ -164,6 +217,13 @@ fn ensure_success(value: &Value, operation: &str) -> Result<(), String> {
         return Err(format!("{operation} returned an unsupported response."));
     }
     Ok(())
+}
+
+fn clear_result(value: &Value) -> Result<bool, String> {
+    value
+        .pointer("/result/cleared")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "Codex app-server goal clear response omitted result.cleared.".to_string())
 }
 
 fn normalize_goal(value: &Value) -> Result<Option<Value>, String> {
@@ -229,7 +289,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn emits_only_initialize_and_read_only_goal_requests() {
+    fn emits_goal_get_and_clear_requests() {
         assert_eq!(initialize_request()["method"], "initialize");
         assert_eq!(
             initialized_notification(),
@@ -237,6 +297,11 @@ mod tests {
         );
         assert_eq!(goal_request("thread-1")["method"], "thread/goal/get");
         assert_eq!(goal_request("thread-1")["params"]["threadId"], "thread-1");
+        assert_eq!(clear_goal_request("thread-1")["method"], "thread/goal/clear");
+        assert_eq!(
+            clear_goal_request("thread-1")["params"]["threadId"],
+            "thread-1"
+        );
     }
 
     #[test]
@@ -276,5 +341,12 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(goal.get("tokenBudget").is_none());
+    }
+
+    #[test]
+    fn accepts_a_native_idempotent_goal_clear_response() {
+        assert_eq!(clear_result(&json!({ "result": { "cleared": true } })).unwrap(), true);
+        assert_eq!(clear_result(&json!({ "result": { "cleared": false } })).unwrap(), false);
+        assert!(clear_result(&json!({ "result": {} })).is_err());
     }
 }
