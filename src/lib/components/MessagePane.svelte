@@ -16,6 +16,7 @@
   let followFrame: number | undefined;
   let touchY: number | undefined;
   const bottomThreshold = 50;
+  const bottomCorrectionTolerance = 3;
   let documentVisible = $state(true);
   let lastResetKey = $state<string | undefined>();
   let lastActive = $state<boolean | undefined>();
@@ -48,7 +49,9 @@
   function pinToLatest() {
     if (!viewport) return;
     const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    if (Math.abs(viewport.scrollTop - bottom) > 1) viewport.scrollTop = bottom;
+    // Ignore tiny layout/rounding changes instead of generating another scroll.
+    // Measure the full gap so several small updates still catch up once >3px.
+    if (Math.abs(viewport.scrollTop - bottom) > bottomCorrectionTolerance) viewport.scrollTop = bottom;
     showJump = false;
     // Keep programmatic scroll events from being mistaken for reader intent.
     rememberMetrics();

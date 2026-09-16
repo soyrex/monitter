@@ -62,7 +62,7 @@ try {
     await page.goto(`http://127.0.0.1:${address.port}/`);
     await expect.poll(() => page.evaluate(() => Boolean(window.__PANE_QA__))).toBe(true);
     const metrics = () => page.locator('.messages').evaluate(node => ({ top: node.scrollTop, height: node.clientHeight, total: node.scrollHeight }));
-    const atBottom = () => expect.poll(async () => { const m = await metrics(); return m.total - m.height - m.top; }).toBeLessThanOrEqual(2);
+    const atBottom = () => expect.poll(async () => { const m = await metrics(); return m.total - m.height - m.top; }).toBeLessThanOrEqual(3);
     const setBottomGap = gap => page.locator('.messages').evaluate((node, value) => {
       node.scrollTop = node.scrollHeight - node.clientHeight - value;
       node.dispatchEvent(new Event('scroll'));
@@ -72,6 +72,29 @@ try {
     const grow = async name => { const before = await metrics(); await invoke(name); await expect.poll(async () => (await metrics()).total).toBeGreaterThan(before.total + 8); };
 
     await atBottom();
+    // Count programmatic writes, not the synthetic reader position used to
+    // create each gap. Small corrections must cause no extra scroll activity.
+    for (const gap of [1, 2, 3, 4]) {
+      const correction = await page.locator('.messages').evaluate(async (node, gap) => {
+        const property = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
+        if (!property?.get || !property.set) throw new Error('Missing native scrollTop accessors');
+        node.scrollTop = node.scrollHeight - node.clientHeight - gap;
+        let writes = 0;
+        Object.defineProperty(node, 'scrollTop', {
+          configurable: true,
+          get() { return property.get.call(node); },
+          set(value) { writes += 1; property.set.call(node, value); },
+        });
+        try {
+          node.dispatchEvent(new Event('scroll'));
+          window.__PANE_QA__.tickTimer();
+          await new Promise(resolve => setTimeout(resolve, 80));
+          return { writes, gap: node.scrollHeight - node.clientHeight - node.scrollTop };
+        } finally { delete node.scrollTop; }
+      }, gap);
+      expect(correction.writes).toBe(gap <= 3 ? 0 : 1);
+      expect(correction.gap).toBe(gap <= 3 ? gap : 0);
+    }
     await page.locator('.messages').evaluate(node => {
       node.dispatchEvent(new WheelEvent('wheel', { deltaY: 12, bubbles: true }));
       node.dispatchEvent(new WheelEvent('wheel', { deltaX: 18, deltaY: 4, bubbles: true }));
@@ -145,7 +168,7 @@ try {
       };
       requestAnimationFrame(sample);
     }));
-    expect(timerTick.maximumGap).toBeLessThanOrEqual(2);
+    expect(timerTick.maximumGap).toBeLessThanOrEqual(3);
     expect(timerTick.minimumTop).toBeGreaterThanOrEqual(timerTick.top - 2);
     expect(Math.abs(timerTick.rowHeight - timerRowHeight)).toBeLessThanOrEqual(0.5);
     expect(timerTick.timerText).not.toBe(initialTimerText);
@@ -246,7 +269,7 @@ try {
     await expect(page.locator('article')).toContainText('Other conversation');
     await expect(jumpButton).toHaveAttribute('data-pending-updates', 'false');
     expect(errors).toEqual([]);
-    assertions.push(`${profile.name}: strict 50px intent threshold, stable elapsed timer, immediate live-text bottom correction, thinking-aware jump sparkle, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance, frozen updates, manual catch-up, visibility preservation, conversation isolation`);
+    assertions.push(`${profile.name}: 3px correction tolerance, strict 50px intent threshold, stable elapsed timer, immediate live-text bottom correction, thinking-aware jump sparkle, periodic absolute-bottom correction, animated jump, streaming growth, reader preservation, send, resize, final clearance, frozen updates, manual catch-up, visibility preservation, conversation isolation`);
     await context.close();
   }
   console.log(`${messagePaneRef ? `${messagePaneRef}: ` : 'working tree: '}${assertions.join('\n')}`);
