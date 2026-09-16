@@ -6,7 +6,7 @@
 use crate::{
     create_task_in_data,
     model::{id, now, Agent, Collaboration, CreateTaskInput, Message, RunEvent, Snapshot, Task},
-    Service,
+    AcceptedTurn, Service,
 };
 use serde_json::{json, Value};
 use std::{
@@ -315,10 +315,10 @@ impl Service {
                 Ok(next) => next,
                 Err(_) => return,
             };
-            let Some((task_id, prompt)) = next else {
+            let Some((task_id, accepted)) = next else {
                 return;
             };
-            if let Err(error) = self.launch(task_id.clone(), prompt) {
+            if let Err(error) = self.launch_preaccepted(task_id.clone(), accepted) {
                 if error.contains("active Monitter writer") || error.contains("active turn") {
                     let _ = self.requeue_busy_collaboration(&task_id);
                 } else {
@@ -382,11 +382,12 @@ impl Service {
                 });
                 !enabled
                     || task.archived
-                    || (task.status != "running" && !self.run_is_active(&task.id))
+                    || (task.status != "running"
+                        && (!self.run_is_active(&task.id) || self.has_resident_run(&task.id)))
             })
     }
 
-    fn prepare_next_collaboration(&self) -> Result<Option<(String, String)>, String> {
+    fn prepare_next_collaboration(&self) -> Result<Option<(String, AcceptedTurn)>, String> {
         self.mutate_data(None, |data| {
             let snapshot = &mut data.snapshot;
             if snapshot
@@ -440,7 +441,9 @@ impl Service {
                         .iter()
                         .find(|task| task.id == item.to_task_id)
                         .is_some_and(|task| {
-                            task.status != "running" && !self.run_is_active(&task.id)
+                            task.status != "running"
+                                && (!self.run_is_active(&task.id)
+                                    || self.has_resident_run(&task.id))
                         })
             }) else {
                 return Ok(None);
@@ -501,12 +504,15 @@ impl Service {
                 detail: item.id.clone(),
                 created_at: now(),
             });
-            Ok(Some((
-                item.to_task_id,
-                instructions
+            let accepted = AcceptedTurn {
+                receipt: id(),
+                prompt: instructions
                     .map(|instructions| format!("{instructions}\n\n{peer_context}"))
                     .unwrap_or(peer_context),
-            )))
+            };
+            data.accepted_turns
+                .insert(item.to_task_id.clone(), accepted.clone());
+            Ok(Some((item.to_task_id, accepted)))
         })
     }
 

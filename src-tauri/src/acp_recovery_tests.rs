@@ -150,7 +150,7 @@ fn send(f: &RecoveryFixture, t: &crate::model::Task, text: &str) {
         .accept_send(t.id.clone(), text.into(), vec![])
         .unwrap()
         .unwrap();
-    f.service.launch(t.id.clone(), p).unwrap();
+    f.service.launch_accepted(t.id.clone(), Some(p));
 }
 
 #[test]
@@ -333,7 +333,9 @@ fn successful_new_turn_resets_recovery_budget_for_a_second_process_loss() {
             .map(|x| x.len() >= 3)
             .unwrap_or(false)
     });
-    f.service.cancel(&t.id).unwrap();
+    if let Some(control) = f.service.runs.lock().unwrap().tasks.get(&t.id).cloned() {
+        control.terminate_owned();
+    }
     let starts = fs::read_to_string(&f.count).unwrap_or_default().len();
     assert_eq!(
         starts, 3,
@@ -372,7 +374,7 @@ fn queued_followup_after_ambiguous_eof_is_not_replayed() {
         .accept_send(t.id.clone(), "ambiguous first".into(), vec![])
         .unwrap()
         .unwrap();
-    f.service.launch(t.id.clone(), first).unwrap();
+    f.service.launch_accepted(t.id.clone(), Some(first));
     let queued = f
         .service
         .accept_send(t.id.clone(), "queued followup".into(), vec![])

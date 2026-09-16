@@ -107,9 +107,9 @@ fn direct_first_prompt_uses_saved_identity_once_and_keeps_user_message_unchanged
         .accept_send(task.id.clone(), "  ship it  ".into(), vec![])
         .unwrap()
         .unwrap();
-    assert!(prompt.contains("You are acting as Planner"));
-    assert!(prompt.contains("Agent settings and instructions:"));
-    assert!(prompt.ends_with("User request:\nship it"));
+    assert!(prompt.prompt.contains("You are acting as Planner"));
+    assert!(prompt.prompt.contains("Agent settings and instructions:"));
+    assert!(prompt.prompt.ends_with("User request:\nship it"));
     let stored = service
         .snapshot()
         .unwrap()
@@ -141,7 +141,7 @@ fn direct_first_prompt_uses_saved_identity_once_and_keeps_user_message_unchanged
         .accept_send(task.id, "follow up".into(), vec![])
         .unwrap()
         .unwrap();
-    assert_eq!(later, "follow up");
+    assert_eq!(later.prompt, "follow up");
 }
 
 #[test]

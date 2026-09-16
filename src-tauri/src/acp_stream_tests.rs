@@ -122,7 +122,9 @@ fn acp_message_id_chunks_remain_separate_and_preserve_order() {
         .accept_send(task.id.clone(), "group chunks".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.service.launch(task.id.clone(), prompt).unwrap();
+    fixture
+        .service
+        .launch_accepted(task.id.clone(), Some(prompt));
     wait_for(&fixture.service, &task.id);
     let messages = fixture
         .service
@@ -171,7 +173,9 @@ fn acp_anonymous_chunks_split_at_tool_activity() {
         .accept_send(task.id.clone(), "split anonymous chunks".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.service.launch(task.id.clone(), prompt).unwrap();
+    fixture
+        .service
+        .launch_accepted(task.id.clone(), Some(prompt));
     wait_for(&fixture.service, &task.id);
     let messages = fixture
         .service

@@ -47,10 +47,10 @@ const update=(text)=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/u
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
  if(frame.method==='initialize') reply(frame.id,{protocolVersion:1,agentCapabilities:process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}});
- else if(frame.method==='session/new') { if(process.argv[2]==='mcp' && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const env=(servers[0]?.env ?? []).map(item=>item.name).join(','); const endpoint=(servers[0]?.env ?? []).find(item=>item.name==='MONITTER_ENDPOINT')?.value ?? ''; fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.command ?? ''}-${env}-${endpoint}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); }
+ else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const env=(servers[0]?.env ?? []).map(item=>item.name).join(','); const endpoint=(servers[0]?.env ?? []).find(item=>item.name==='MONITTER_ENDPOINT')?.value ?? ''; fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.command ?? ''}-${env}-${endpoint}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
 });
@@ -121,8 +121,8 @@ fn resident_fixture_delivers_context_and_two_distinct_turns() {
         .accept_send(task.id.clone(), "first turn".into(), vec![])
         .unwrap()
         .unwrap();
-    assert!(first.contains("You are acting as"));
-    fixture.launch(task.id.clone(), first).unwrap();
+    assert!(first.prompt.contains("You are acting as"));
+    fixture.launch_accepted(task.id.clone(), Some(first));
     wait_for(&fixture, &task.id, |snapshot| {
         snapshot
             .tasks
@@ -193,7 +193,7 @@ fn acp_collaboration_uses_scoped_stdio_server_and_revokes_on_stop() {
             .accept_send(task.id.clone(), "mcp setup".into(), vec![])
             .unwrap()
             .unwrap();
-        fixture.launch(task.id.clone(), prompt).unwrap();
+        fixture.launch_accepted(task.id.clone(), Some(prompt));
         wait_for(&fixture, &task.id, |snapshot| {
             snapshot
                 .tasks
@@ -202,7 +202,6 @@ fn acp_collaboration_uses_scoped_stdio_server_and_revokes_on_stop() {
                 .is_some_and(|item| item.status == "completed")
         });
         let captured = fs::read_to_string(&capture).unwrap_or_default();
-        let _ = fs::remove_file(&capture);
         assert!(
             captured.lines().any(|line| line.starts_with(expected)),
             "{captured}"
@@ -212,7 +211,9 @@ fn acp_collaboration_uses_scoped_stdio_server_and_revokes_on_stop() {
             "fixture must not record a token: {captured}"
         );
 
-        fixture.cancel(&task.id).unwrap();
+        if let Some(control) = fixture.runs.lock().unwrap().tasks.get(&task.id).cloned() {
+            control.terminate_owned();
+        }
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline
             && fixture
@@ -229,6 +230,7 @@ fn acp_collaboration_uses_scoped_stdio_server_and_revokes_on_stop() {
                 .is_ok_and(|grants| !grants.contains_key(&task.id)),
             "scoped collaboration grant must be revoked after stop"
         );
+        let _ = fs::remove_file(&capture);
     }
 }
 
@@ -280,7 +282,7 @@ fn managed_mcp_and_skill_reach_acp_launch_without_rewriting_user_transcript() {
         .accept_send(task.id.clone(), "original user request".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.launch(task.id.clone(), prompt).unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(prompt));
     wait_for(&fixture, &task.id, |snapshot| {
         snapshot
             .tasks
@@ -358,7 +360,7 @@ fn managed_http_mcp_is_rejected_before_prompt_without_advertised_capability() {
         .accept_send(task.id.clone(), "must not prompt".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.launch(task.id.clone(), prompt).unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(prompt));
     wait_for(&fixture, &task.id, |snapshot| {
         snapshot
             .tasks
@@ -400,7 +402,7 @@ fn permission_fixture_returns_exact_one_time_option_for_approve_and_deny() {
             .accept_send(task.id.clone(), "permission turn".into(), vec![])
             .unwrap()
             .unwrap();
-        fixture.launch(task.id.clone(), prompt).unwrap();
+        fixture.launch_accepted(task.id.clone(), Some(prompt));
         wait_for(&fixture, &task.id, |snapshot| {
             snapshot
                 .approval_requests
@@ -454,7 +456,7 @@ fn cancelling_pending_permission_emits_cancelled_outcome_then_session_cancel() {
         .accept_send(task.id.clone(), "cancel permission".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.launch(task.id.clone(), prompt).unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(prompt));
     wait_for(&fixture, &task.id, |snapshot| {
         snapshot
             .approval_requests
@@ -494,7 +496,7 @@ fn load_and_resume_keep_saved_native_session_when_response_omits_id() {
             .accept_send(task.id.clone(), "recover".into(), vec![])
             .unwrap()
             .unwrap();
-        fixture.launch(task.id.clone(), prompt).unwrap();
+        fixture.launch_accepted(task.id.clone(), Some(prompt));
         wait_for(&fixture, &task.id, |snapshot| {
             snapshot
                 .tasks
@@ -551,7 +553,7 @@ fn resident_model_acknowledgement_precedes_each_prompt() {
         .accept_send(task.id.clone(), "first".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.launch(task.id.clone(), first).unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(first));
     wait_for(&fixture, &task.id, |s| {
         s.tasks
             .iter()
@@ -628,7 +630,7 @@ fn resident_acp_rejects_a_concurrent_turn_while_model_configuration_is_pending()
         .accept_send(task.id.clone(), "first".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.launch(task.id.clone(), first).unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(first));
     wait_for(&fixture, &task.id, |s| {
         s.tasks
             .iter()
@@ -670,7 +672,10 @@ fn ssh_shim_runs_real_supervisor_with_spaced_cwd_two_turns_and_cancel() {
     let capture = std::env::temp_dir().join(format!("monitter-acp-ssh-mcp-{}", crate::id()));
     let fixture = fixture_with_args(
         "ssh-supervisor",
-        vec!["mcp".into(), capture.to_string_lossy().into_owned()],
+        vec![
+            "mcp-hold-second".into(),
+            capture.to_string_lossy().into_owned(),
+        ],
     );
     let shim = fixture.root.join("ssh shim");
     fs::write(
@@ -716,7 +721,7 @@ fn ssh_shim_runs_real_supervisor_with_spaced_cwd_two_turns_and_cancel() {
         .accept_send(task.id.clone(), "one".into(), vec![])
         .unwrap()
         .unwrap();
-    fixture.launch(task.id.clone(), first).unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(first));
     wait_for(&fixture, &task.id, |s| {
         s.tasks
             .iter()
@@ -735,8 +740,18 @@ fn ssh_shim_runs_real_supervisor_with_spaced_cwd_two_turns_and_cancel() {
             .count()
             == 2
     });
+    assert_eq!(
+        fixture
+            .snapshot()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .map(|item| item.status.as_str()),
+        Some("running"),
+        "the second ACP prompt must remain active until Stop"
+    );
     let captured = fs::read_to_string(&capture).unwrap_or_default();
-    let _ = fs::remove_file(&capture);
     assert!(
         captured.contains("mcp-1-python3-MONITTER_ENDPOINT,MONITTER_TOKEN-http://127.0.0.1:45123/rpc"),
         "SSH ACP must receive the reverse-tunnel endpoint, not the desktop broker endpoint: {captured}"
@@ -748,5 +763,20 @@ fn ssh_shim_runs_real_supervisor_with_spaced_cwd_two_turns_and_cancel() {
             .find(|t| t.id == task.id)
             .is_some_and(|t| t.status == "interrupted")
     });
+    let cancel_deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < cancel_deadline
+        && !fs::read_to_string(&capture)
+            .unwrap_or_default()
+            .contains("cancel")
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        fs::read_to_string(&capture)
+            .unwrap_or_default()
+            .contains("cancel"),
+        "Stop must cancel the active ACP session"
+    );
+    let _ = fs::remove_file(&capture);
     let _ = fs::remove_file(&shim);
 }

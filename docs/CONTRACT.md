@@ -417,8 +417,8 @@ Use real CLI account/config; do not copy auth or change global config. Resolve l
 when launched by Finder with limited PATH (user local bin, Homebrew, standard dirs).
 Claude uses one resident `--print --input-format stream-json --output-format stream-json --verbose`
 process per local desktop chat. It receives subsequent user turns and permission decisions over the
-same JSON-lines stdin, retaining its native context; `--resume` is only a controlled process-recovery
-or explicit handoff bootstrap, never the normal next-message path. OpenCode uses
+same JSON-lines stdin, retaining its native context; `--resume` bootstraps controlled process recovery,
+restoration after idle retirement, or an explicit handoff. OpenCode uses
 `run --format json --thinking --dir <folder>` and `--session`. Before resuming OpenCode,
 a bounded read-only `export <session>` lookup verifies the native ID and restores the original
 session folder into the task snapshot, before collaboration setup. This prevents inherited PWD
@@ -432,7 +432,29 @@ Provider stderr is diagnostic-only: routine trace, debug, info and warning outpu
 At most one concise actionable provider error may appear in a chat's activity, while process/event
 failures remain visible through their normal task status.
 
+A service-owned collector checks resident runtimes every 60 seconds, filtering by idle age before inspecting processes. Eligible local macOS
+Codex app-server, Claude stream-json and resumable ACP processes retire after more than five
+minutes continuously idle following a durably completed turn. Task history, settings and native
+session IDs stay saved. The next accepted message silently starts the same native session and
+submits that message once; it may take longer because the process must start again. Retirement
+never submits a continuation prompt and never replays a failed turn. One-shot providers already
+exit after each turn. SSH runtimes remain resident because local process inspection cannot prove
+that remote background work has ended.
+
+Active turns, pending approvals/input, queued messages, protocol requests, and unidentified live
+descendants prevent collection. A saved session and negotiated cold-resume support are required.
+The collector verifies process identities against the infrastructure process tree captured before
+the first prompt and refreshed only after tool-free completion, until any tool work is observed. It closes owned pipes,
+and uses bounded termination of the owned process group and verified captured helpers, including
+helpers that detach or reparent. PID and start time are checked before signalling those helpers.
+The old native-session writer remains
+reserved until teardown completes. Accepted sends wait for that reservation; cancellation
+invalidates their dispatch receipt. Successful retirement adds no visible chat status or messages;
+teardown or native-restoration failures remain visible. Process-scoped approval grants expire at
+retirement; remembered rules keep their existing scope. See `IDLE-RUNTIME-RETIREMENT.md`.
+
 An owned ACP stdio transport that closes after a native session has been saved is repaired once,
+with a fixed 60-second runtime initialize deadline to accommodate cold provider/plugin startup,
 without client intervention: Monitter replaces the dead process, repeats the bounded initialize and
 `session/load` or `session/resume` handshake advertised by that ACP agent, and leaves the replacement
 resident for the next desktop, web or Android send. A successful idle repair is silent. If a prompt
@@ -511,9 +533,10 @@ errors.
 The resident Monitter Admin transport is a separate, single-occupant lane that the runtime owns for
 its own use (currently `autoname`): the bootstrap migration creates exactly one internal agent named
 "Monitter Admin" on `Service::open` and hides it from every user-facing surface. The internal task is
-created lazily on first use, never archived, and never projected into ordinary chat lists. There is no
-idle timeout: the resident transport stays live for the lifetime of the process so repeated `autoname`
-calls reuse it without restarting the native session. The transport stops on app quit, on admin
+created lazily on first use, never archived, and never projected into ordinary chat lists. Repeated
+`autoname` calls reuse its resident transport. It follows the same five-minute idle retirement
+policy, with an active broker request preventing collection; the next request restores its saved
+native session silently. The transport also stops on app quit, on admin
 reconfiguration that changes its provider/host/cwd/sandbox (so the next use launches a fresh resident
 session), and on transport failure. A restart resumes the saved native session id from the persisted
 task; no silent retries are attempted after a failed, timed-out, or interrupted turn, and concurrent

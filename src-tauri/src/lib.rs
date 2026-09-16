@@ -1,11 +1,17 @@
 #[cfg(test)]
+mod accepted_dispatch_tests;
+#[cfg(test)]
 mod acp_boundary_tests;
 mod acp_collaboration;
 mod acp_discovery;
+#[cfg(test)]
+mod acp_idle_runtime_tests;
 mod acp_probe;
 mod acp_protocol;
 #[cfg(test)]
 mod acp_recovery_tests;
+#[cfg(test)]
+mod acp_resume_failure_tests;
 mod acp_runtime;
 #[cfg(test)]
 mod acp_runtime_tests;
@@ -14,6 +20,8 @@ mod acp_session_config;
 mod acp_stream_tests;
 mod acp_transport;
 mod adapters;
+#[cfg(test)]
+mod admin_idle_runtime_tests;
 mod admin_turn_broker;
 #[cfg(test)]
 mod admin_turn_integration_tests;
@@ -25,6 +33,8 @@ mod app_server_service;
 #[cfg(test)]
 mod app_server_tests;
 mod attachments;
+#[cfg(test)]
+mod claude_idle_runtime_tests;
 mod codex_app_server;
 mod collaboration;
 mod collaboration_runtime;
@@ -36,6 +46,8 @@ mod extensions_runtime;
 mod git;
 mod goals;
 #[cfg(test)]
+mod idle_runtime_live_tests;
+#[cfg(test)]
 mod internal_agent_tests;
 mod lan;
 mod lan_sync;
@@ -44,6 +56,9 @@ pub mod model;
 mod models;
 mod process_metrics;
 mod runner;
+mod runtime_gc;
+#[cfg(test)]
+mod runtime_gc_tests;
 mod store;
 mod terminal;
 mod usage_quota;
@@ -90,9 +105,19 @@ struct ServiceData {
     // while cancellation reaches it. This is deliberately runtime-only: after a
     // restart no owned process survives, so there is no stale delivery to block.
     blocked_channel_deliveries: HashSet<String>,
+    // Runtime-only receipt for an accepted prompt awaiting dispatch. It
+    // prevents a delayed retirement wait from attaching an old prompt to a
+    // later owner after cancellation or another state transition.
+    accepted_turns: HashMap<String, AcceptedTurn>,
     // Runtime-only revision counter. It advances only after a durable store
     // write succeeds while this same data lock is held.
     revision: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AcceptedTurn {
+    receipt: String,
+    prompt: String,
 }
 
 #[derive(Default)]
@@ -246,12 +271,14 @@ fn approval_session_scope(input: &CreateApprovalRequest) -> Option<String> {
             input.tool.as_str(),
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
         ),
-        "acp" => input
-            .raw_input
-            .as_ref()
-            .and_then(|value| value.get("kind"))
-            .and_then(serde_json::Value::as_str)
-            == Some("edit"),
+        "acp" => {
+            input
+                .raw_input
+                .as_ref()
+                .and_then(|value| value.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some("edit")
+        }
         _ => false,
     };
     file_change.then(|| "file_changes".into())
@@ -264,6 +291,9 @@ pub(crate) struct Service {
     extension_writes: Mutex<()>,
     data: Mutex<ServiceData>,
     runs: Mutex<RunRegistry>,
+    // Serializes only the admin accept/reserve/register/dispatch window.
+    // The caller drops this before waiting for its reply.
+    admin_dispatch: Mutex<()>,
     // A real CUA image result is held only until the same run emits its next
     // assistant message. It is never a path reader or a persisted capability.
     pending_codex_images: Mutex<HashMap<String, Vec<attachments::Attachment>>>,
@@ -272,6 +302,9 @@ pub(crate) struct Service {
     collaboration_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     collaboration_started: std::sync::atomic::AtomicBool,
     stopping: std::sync::atomic::AtomicBool,
+    idle_collector_started: std::sync::atomic::AtomicBool,
+    idle_collection: Mutex<()>,
+    idle_retirement_failures: Mutex<HashSet<(String, usize)>>,
     native_escape_shield: std::sync::atomic::AtomicBool,
     runtime_dir: PathBuf,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
@@ -475,15 +508,20 @@ impl Service {
                 task_hosts,
                 attachments,
                 blocked_channel_deliveries: HashSet::new(),
+                accepted_turns: HashMap::new(),
                 revision: 0,
             }),
             runs: Mutex::new(RunRegistry::default()),
+            admin_dispatch: Mutex::new(()),
             pending_codex_images: Mutex::new(HashMap::new()),
             app_server_message_ids: Mutex::new(HashMap::new()),
             collaboration: Mutex::new(None),
             collaboration_grants: Mutex::new(HashMap::new()),
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
+            idle_collector_started: std::sync::atomic::AtomicBool::new(false),
+            idle_collection: Mutex::new(()),
+            idle_retirement_failures: Mutex::new(HashSet::new()),
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
@@ -669,15 +707,15 @@ impl Service {
         task_id: &str,
         status: &str,
         native_session_id: Option<&str>,
-    ) {
-        let _ = self.mutate_data(Some(task_id.into()), |data| {
+    ) -> Result<(), String> {
+        self.mutate_data(Some(task_id.into()), |data| {
             let Some(task) = data
                 .snapshot
                 .tasks
                 .iter_mut()
                 .find(|task| task.id == task_id)
             else {
-                return Ok(());
+                return Err("Monitter Admin task was not found.".into());
             };
             task.status = status.into();
             task.updated_at = now();
@@ -693,7 +731,7 @@ impl Service {
                 }
             }
             Ok(())
-        });
+        })
     }
 
     /// Centralized agent validation used by both the Tauri command and the
@@ -2228,7 +2266,23 @@ impl Service {
     }
 
     fn reserve_run(&self, task_id: &str) -> Result<Arc<runner::RunControl>, String> {
-        let (task, host) = self.task_and_host(task_id)?;
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let task = data
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .ok_or("Task was not found.")?;
+        let host = data
+            .task_hosts
+            .get(task_id)
+            .ok_or("Task host was not found.")?;
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Monitter is shutting down.".into());
+        }
         if task.status != "running" {
             return Err("Task was cancelled before its process started.".into());
         }
@@ -2297,13 +2351,7 @@ impl Service {
     /// task has no resident transport and should take the ordinary launch path;
     /// it never means "start a one-shot --resume process".
     fn send_to_resident(&self, task_id: &str, prompt: &str) -> Result<bool, String> {
-        let control = self
-            .runs
-            .lock()
-            .map_err(|_| "Monitter run registry lock failed.".to_string())?
-            .tasks
-            .get(task_id)
-            .cloned();
+        let control = self.available_runtime(task_id)?;
         let Some(control) = control else {
             return Ok(false);
         };
@@ -2614,6 +2662,10 @@ impl Service {
         if prompt.trim().is_empty() {
             return Err("Monitter Admin prompt cannot be empty.".into());
         }
+        let dispatch = self
+            .admin_dispatch
+            .try_lock()
+            .map_err(|_| "Monitter Admin is busy with another interface request.".to_string())?;
         let task_id = self.ensure_internal_admin_task()?;
         // Single-writer guarantee: at most one admin turn is active at a time.
         if let Some(active) = self.admin_turn_broker.active_task_id() {
@@ -2622,16 +2674,50 @@ impl Service {
             }
         }
         let admin = self.internal_admin()?;
-        let is_first_turn = !self.has_resident_run(&task_id);
-        let control = if is_first_turn {
+        // Claim an idle owner while holding the established data -> runs lock
+        // order. `available_runtime` is only a read, so retirement can win
+        // between that method returning and a later `begin_run`.
+        let release_deadline = Instant::now() + runtime_gc::RUNTIME_RELEASE_TIMEOUT;
+        let existing = loop {
+            let current = {
+                let data = self
+                    .data
+                    .lock()
+                    .map_err(|_| "Monitter state lock failed.".to_string())?;
+                let runs = self
+                    .runs
+                    .lock()
+                    .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+                if !data.snapshot.tasks.iter().any(|task| task.id == task_id) {
+                    return Err("Monitter Admin task was not found.".into());
+                }
+                let control = runs.tasks.get(&task_id).cloned();
+                if let Some(control) = control.as_ref().filter(|control| !control.is_retiring()) {
+                    control.begin_run()?;
+                }
+                control
+            };
+            let Some(control) = current else { break None };
+            if control.is_retiring() {
+                control.wait_for_teardown(
+                    release_deadline.saturating_duration_since(Instant::now()),
+                )?;
+                continue;
+            }
+            break Some(control);
+        };
+        let (control, is_first_turn) = if let Some(control) = existing {
+            if !control.is_resident() {
+                return Err("Monitter Admin resident transport was lost.".into());
+            }
+            self.mark_internal_admin_task_running(&task_id)?;
+            (control, false)
+        } else {
             // Mark the task as running so `reserve_run` accepts the new
             // resident control. This is the only place the task enters the
             // running state.
             self.mark_internal_admin_task_running(&task_id)?;
-            self.reserve_run(&task_id)?
-        } else {
-            self.resident_control(&task_id)?
-                .ok_or_else(|| "Monitter Admin resident transport was lost.".to_string())?
+            (self.reserve_run(&task_id)?, true)
         };
         let request_id = id();
         let deadline = Instant::now() + ADMIN_TURN_TIMEOUT;
@@ -2676,14 +2762,22 @@ impl Service {
             );
             Ok::<(), String>(())
         } else {
-            self.send_to_resident(&task_id, &prompt).map(|_| ())
+            self.send_to_resident(&task_id, &prompt).and_then(|sent| {
+                sent.then_some(())
+                    .ok_or("Monitter Admin resident transport was lost.".into())
+            })
         };
         if let Err(error) = send_result {
             // The send failed before any turn started. Cancel the broker
             // entry silently and surface the error to the caller.
             self.admin_turn_broker.cancel_silently(&task_id);
+            control.terminate_owned();
+            let _ = self.finalise_internal_admin_turn(&task_id, "error", None);
             return Err(error);
         }
+        // Holding this guard while waiting would serialize callers for up to
+        // the watchdog deadline. The broker now owns the active-turn gate.
+        drop(dispatch);
         // Wait for the broker reply until the deadline elapses. The
         // watchdog will deliver a Timeout error if the transport does not
         // complete in time.
@@ -2697,6 +2791,7 @@ impl Service {
             Err(_) => {
                 // The transport ended without finalising the broker. Mark
                 // the task as interrupted so the next mini-task restarts.
+                let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
                 let _ = admin;
                 Err("Monitter Admin transport closed before replying.".into())
             }
@@ -2724,12 +2819,15 @@ impl Service {
             event,
             failed: _,
         } = parsed;
-        // The resident Monitter Admin lane must never persist assistant
-        // text, native-session metadata, computer images, or events into the
-        // snapshot. Route the streamed assistant text into the process-local
-        // broker and return; the broker finalises the accumulated reply when
-        // the owning resident control terminates the turn.
+        // The resident Monitter Admin lane never persists prompt/reply text
+        // or activity, but it must retain its native session before a later
+        // idle retirement can restore the same transport.
         if self.is_internal_admin_task(task_id) {
+            if let Some(native) = native_session_id.as_deref() {
+                let (task, host) = self.task_and_host(task_id)?;
+                self.claim_native_session(task_id, &task, &host, native)?;
+                self.finalise_internal_admin_turn(task_id, &task.status, Some(native))?;
+            }
             if let Some(text) = assistant.filter(|text| !text.trim().is_empty()) {
                 self.admin_turn_broker
                     .capture_assistant_text(task_id, &text);
@@ -2867,13 +2965,11 @@ impl Service {
                 .find(|task| task.id == task_id)
                 .cloned()
                 .ok_or("Task was not found.")?;
-            let control = self
+            let runs = self
                 .runs
                 .lock()
-                .map_err(|_| "Monitter run registry lock failed.".to_string())?
-                .tasks
-                .get(task_id)
-                .cloned();
+                .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+            let control = runs.tasks.get(task_id).cloned();
             (task, control)
         };
         let classification = if task.provider == "opencode" {
@@ -3133,24 +3229,59 @@ impl Service {
     /// its next stdin user frame. Do not release the process or native-session
     /// writer lock here: doing so would turn the following message into a
     /// separate `--resume` invocation.
-    pub(crate) fn complete_resident_turn(self: &Arc<Self>, task_id: &str) {
+    pub(crate) fn complete_resident_turn(
+        self: &Arc<Self>,
+        task_id: &str,
+        control: &Arc<runner::RunControl>,
+    ) {
+        let _ = control.refresh_runtime_process_baseline_if_no_tool_work();
+        // Claude can also back the internal admin. Its normalized text was
+        // already routed through `apply_event`; complete only the broker and
+        // durable task state, retaining this resident owner for idle GC.
+        if self.is_internal_admin_task(task_id) {
+            if self
+                .finalise_internal_admin_turn(task_id, "completed", None)
+                .is_ok()
+            {
+                self.admin_turn_broker.complete(task_id);
+                self.mark_runtime_idle_if_current(task_id, control);
+            }
+            return;
+        }
         self.mark_usage_final(task_id);
-        let should_route = self
-            .mutate_data(Some(task_id.into()), |data| {
-                let state = &mut data.snapshot;
-                let task = state
+        let completion = self.mutate_data(Some(task_id.into()), |data| {
+            let runs = self
+                .runs
+                .lock()
+                .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+            if control.is_cancelled()
+                || control.is_planned_retirement()
+                || !runs
                     .tasks
-                    .iter_mut()
-                    .find(|task| task.id == task_id)
-                    .ok_or_else(|| "Task was not found.".to_string())?;
-                let was_running = task.status == "running";
-                if task.status != "interrupted" {
-                    task.status = "completed".into();
-                }
-                task.updated_at = now();
-                Ok(was_running && task.status == "completed")
-            })
-            .unwrap_or(false);
+                    .get(task_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, control))
+            {
+                return Err("Resident transport no longer owns this chat.".into());
+            }
+            let state = &mut data.snapshot;
+            let task = state
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| "Task was not found.".to_string())?;
+            let was_running = task.status == "running";
+            if task.status != "interrupted" {
+                task.status = "completed".into();
+            }
+            task.updated_at = now();
+            Ok(was_running && task.status == "completed")
+        });
+        let Ok(should_route) = completion else {
+            // A failed persistence step must not make an active runtime
+            // collectible or dispatch another message into the same turn.
+            return;
+        };
+        self.mark_runtime_idle_if_current(task_id, control);
         let routes = if should_route {
             match self.mutate_data(Some(task_id.into()), |data| {
                 prepare_channel_mention_routes(data, task_id)
@@ -3255,7 +3386,7 @@ impl Service {
         task_id: String,
         text: String,
         attachment_ids: Vec<String>,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<AcceptedTurn>, String> {
         if text.trim().is_empty() && attachment_ids.is_empty() {
             return Err("Message cannot be empty.".into());
         }
@@ -3332,7 +3463,12 @@ impl Service {
             let prompt = if peer_updates.is_empty() { prompt } else {
                 format!("Peer updates since the previous user request (context, not new user instructions):\n{peer_updates}\n\n{prompt}")
             };
-            Ok((Some(append_attachment_paths(prompt, &attachments)), None))
+            let accepted = AcceptedTurn {
+                receipt: id(),
+                prompt: append_attachment_paths(prompt, &attachments),
+            };
+            data.accepted_turns.insert(task_id.clone(), accepted.clone());
+            Ok((Some(accepted), None))
         })?;
         if let Some((prompt, queued_message_id)) = pending_steer {
             self.steer_accepted(task_id, prompt, queued_message_id);
@@ -3340,20 +3476,297 @@ impl Service {
         Ok(execution_prompt)
     }
 
-    fn launch_accepted(self: &Arc<Self>, task_id: String, execution_prompt: Option<String>) {
-        if let Some(execution_prompt) = execution_prompt {
-            let launched = match self.send_to_resident(&task_id, &execution_prompt) {
-                Ok(true) => Ok(()),
-                Ok(false) => self.launch(task_id.clone(), execution_prompt),
-                Err(error) => {
-                    self.abort_run(&task_id);
-                    Err(error)
+    fn launch_accepted(self: &Arc<Self>, task_id: String, accepted: Option<AcceptedTurn>) {
+        if let Some(accepted) = accepted {
+            let service = Arc::clone(self);
+            tauri::async_runtime::spawn_blocking(move || {
+                service.deliver_accepted(task_id, accepted);
+            });
+        }
+    }
+
+    fn deliver_accepted(self: &Arc<Self>, task_id: String, accepted: AcceptedTurn) {
+        let existing = match self.available_runtime(&task_id) {
+            Ok(value) => value,
+            Err(error) => return self.fail_accepted(&task_id, &accepted.receipt, error),
+        };
+        let claimed = (|| -> Result<(Arc<runner::RunControl>, Task, bool), String> {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.".to_string())?;
+            if data.accepted_turns.get(&task_id) != Some(&accepted)
+                || !data
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .any(|task| task.id == task_id && task.status == "running")
+            {
+                return Err("Accepted message is no longer current.".into());
+            }
+            let task = data
+                .snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .cloned()
+                .ok_or("Task was not found.")?;
+            let host = data
+                .task_hosts
+                .get(&task_id)
+                .cloned()
+                .ok_or("Task host was not found.")?;
+            let mut runs = self
+                .runs
+                .lock()
+                .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+            let control = if let Some(control) = existing {
+                if !runs
+                    .tasks
+                    .get(&task_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &control))
+                    || !control.is_resident()
+                {
+                    return Err("Accepted message lost its resident owner.".into());
                 }
+                control.begin_run()?;
+                (control, false)
+            } else {
+                if runs.tasks.contains_key(&task_id) {
+                    return Err("Accepted message is waiting for its current owner.".into());
+                }
+                if let Some(native) = task.native_session_id.as_deref() {
+                    let key = native_session_key(&task, &host, native);
+                    if runs
+                        .native_sessions
+                        .get(&key)
+                        .is_some_and(|owner| owner != &task_id)
+                    {
+                        return Err(
+                            "This native Codex session already has an active Monitter writer."
+                                .into(),
+                        );
+                    }
+                }
+                let control = runner::RunControl::new(host.kind == "ssh");
+                control.begin_run()?;
+                runs.tasks.insert(task_id.clone(), control.clone());
+                if let Some(native) = task.native_session_id.as_deref() {
+                    runs.native_sessions
+                        .insert(native_session_key(&task, &host, native), task_id.clone());
+                }
+                (control, true)
             };
-            if let Err(error) = launched {
-                self.finish(&task_id, "error", Some(error));
+            Ok((control.0, task, control.1))
+        })();
+        let (control, task, first) = match claimed {
+            Ok(value) => value,
+            Err(error) => return self.fail_accepted(&task_id, &accepted.receipt, error),
+        };
+        if first {
+            if self.take_accepted(&task_id, &accepted.receipt) {
+                runner::start(Arc::clone(self), task_id, accepted.prompt, control);
+            } else {
+                // Cancellation won after reservation but before launch. This
+                // owner has no child yet, so release only this abandoned slot.
+                control.cancel();
+                self.release_run_if_current(&task_id, &control);
+            }
+            return;
+        }
+        let run_id = control.current_run_id().unwrap_or_default();
+        let result = if task.provider == "codex" {
+            control.send_user_turn_with_task(&accepted.prompt, Some(&task))
+        } else if task.provider == "acp" {
+            acp_runtime::send_turn(&control, &accepted.prompt, &task)
+        } else {
+            control.send_user_turn(&accepted.prompt)
+        };
+        match result {
+            Ok(()) => {
+                self.take_accepted(&task_id, &accepted.receipt);
+            }
+            Err(error) => self.fail_accepted_with_control(
+                &task_id,
+                &accepted.receipt,
+                &control,
+                &run_id,
+                error,
+            ),
+        }
+    }
+
+    fn take_accepted(&self, task_id: &str, receipt: &str) -> bool {
+        self.mutate_data(None, |data| {
+            Ok(data
+                .accepted_turns
+                .get(task_id)
+                .is_some_and(|value| value.receipt == receipt)
+                && data.accepted_turns.remove(task_id).is_some())
+        })
+        .unwrap_or(false)
+    }
+
+    fn fail_accepted(&self, task_id: &str, receipt: &str, error: String) {
+        let expired = self
+            .mutate_data(Some(task_id.into()), |data| {
+                if !data
+                    .accepted_turns
+                    .get(task_id)
+                    .is_some_and(|value| value.receipt == receipt)
+                {
+                    return Ok(vec![]);
+                }
+                data.accepted_turns.remove(task_id);
+                if let Some(task) = data
+                    .snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == task_id)
+                {
+                    task.status = "error".into();
+                    task.updated_at = now();
+                }
+                Service::complete_collaborations(
+                    &mut data.snapshot,
+                    task_id,
+                    "error",
+                    Some(&error),
+                );
+                let expired = data
+                    .snapshot
+                    .approval_requests
+                    .iter_mut()
+                    .filter(|request| request.task_id == task_id && request.status == "pending")
+                    .map(|request| {
+                        request.status = "expired".into();
+                        request.resolved_at = Some(now());
+                        request.id.clone()
+                    })
+                    .collect::<Vec<_>>();
+                data.snapshot.events.push(RunEvent {
+                    id: id(),
+                    task_id: task_id.into(),
+                    kind: "error".into(),
+                    title: "Accepted message could not start".into(),
+                    detail: error,
+                    created_at: now(),
+                });
+                Ok(expired)
+            })
+            .unwrap_or_default();
+        for approval_id in expired {
+            self.notify_approval_waiters(
+                &approval_id,
+                Err("Approval request expired because delivery failed.".into()),
+            );
+            self.notify_input_waiter(&approval_id, Err("Delivery failed.".into()));
+        }
+    }
+
+    fn fail_accepted_with_control(
+        &self,
+        task_id: &str,
+        receipt: &str,
+        control: &Arc<runner::RunControl>,
+        run_id: &str,
+        error: String,
+    ) {
+        let (expired, cancelled_control) = self
+            .mutate_data(Some(task_id.into()), |data| {
+                if !data
+                    .accepted_turns
+                    .get(task_id)
+                    .is_some_and(|value| value.receipt == receipt)
+                {
+                    return Ok((vec![], None));
+                }
+                let runs = self
+                    .runs
+                    .lock()
+                    .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+                if !runs
+                    .tasks
+                    .get(task_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, control))
+                    || control.current_run_id().ok().as_deref() != Some(run_id)
+                {
+                    return Ok((vec![], None));
+                }
+                data.accepted_turns.remove(task_id);
+                if let Some(task) = data
+                    .snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == task_id)
+                {
+                    task.status = "error".into();
+                    task.updated_at = now();
+                }
+                Service::complete_collaborations(
+                    &mut data.snapshot,
+                    task_id,
+                    "error",
+                    Some(&error),
+                );
+                let expired = data
+                    .snapshot
+                    .approval_requests
+                    .iter_mut()
+                    .filter(|request| request.task_id == task_id && request.status == "pending")
+                    .map(|request| {
+                        request.status = "expired".into();
+                        request.resolved_at = Some(now());
+                        request.id.clone()
+                    })
+                    .collect::<Vec<_>>();
+                data.snapshot.events.push(RunEvent {
+                    id: id(),
+                    task_id: task_id.into(),
+                    kind: "error".into(),
+                    title: "Accepted message could not start".into(),
+                    detail: error,
+                    created_at: now(),
+                });
+                // Fence the exact failed owner while data -> runs are held.
+                // Process and pipe teardown waits until persistence and
+                // approval waiter notifications have completed.
+                control.reserve_cancellation();
+                Ok((expired, Some(Arc::clone(control))))
+            })
+            .unwrap_or_default();
+        for approval_id in expired {
+            self.notify_approval_waiters(
+                &approval_id,
+                Err("Approval request expired because delivery failed.".into()),
+            );
+            self.notify_input_waiter(&approval_id, Err("Delivery failed.".into()));
+        }
+        if let Some(control) = cancelled_control {
+            control.cancel();
+        }
+    }
+
+    fn release_run_if_current(&self, task_id: &str, control: &Arc<runner::RunControl>) {
+        if let Ok(mut runs) = self.runs.lock() {
+            if runs
+                .tasks
+                .get(task_id)
+                .is_some_and(|current| Arc::ptr_eq(current, control))
+            {
+                runs.tasks.remove(task_id);
+                runs.native_sessions.retain(|_, owner| owner != task_id);
             }
         }
+    }
+
+    pub(crate) fn launch_preaccepted(
+        self: &Arc<Self>,
+        task_id: String,
+        accepted: AcceptedTurn,
+    ) -> Result<(), String> {
+        self.launch_accepted(task_id, Some(accepted));
+        Ok(())
     }
 
     fn restore_unsteered_message(
@@ -3436,48 +3849,8 @@ impl Service {
         text: String,
         attachment_ids: Vec<String>,
     ) -> Result<(), String> {
-        let execution_prompt = self.accept_send(task_id.clone(), text, attachment_ids)?;
-        let Some(prompt) = execution_prompt else {
-            return Ok(());
-        };
-        // Reserve the exact run before acknowledging. Cancellation addresses
-        // this control directly, so an old background launch cannot attach to
-        // a later send for the same task.
-        if let Some(control) = self.resident_control(&task_id)? {
-            let service = Arc::clone(self);
-            tauri::async_runtime::spawn_blocking(move || {
-                let result = service.task_and_host(&task_id).and_then(|(task, _)| {
-                    if task.provider == "codex" {
-                        control.begin_run()?;
-                        control.send_user_turn_with_task(&prompt, Some(&task))
-                    } else if task.provider == "acp" {
-                        control.begin_run()?;
-                        acp_runtime::send_turn(&control, &prompt, &task)
-                    } else {
-                        control.begin_run()?;
-                        control.send_user_turn(&prompt)
-                    }
-                });
-                if let Err(error) = result {
-                    service.finish_if_current_run(&task_id, &control, error);
-                }
-            });
-        } else {
-            match self.reserve_run(&task_id) {
-                Ok(control) => {
-                    let service = Arc::clone(self);
-                    tauri::async_runtime::spawn_blocking(move || {
-                        runner::start(service, task_id, prompt, control);
-                    });
-                }
-                Err(error) => {
-                    // Acceptance is already durable. Surface launch failure in
-                    // the task rather than turning it into a false transport
-                    // rejection after the message was accepted.
-                    self.finish(&task_id, "error", Some(error));
-                }
-            }
-        }
+        let accepted = self.accept_send(task_id.clone(), text, attachment_ids)?;
+        self.launch_accepted(task_id, accepted);
         Ok(())
     }
 
@@ -3690,19 +4063,15 @@ impl Service {
                 Some(instructions) => format!("{instructions}\n\n{prompt}"),
                 None => prompt,
             };
-            Ok(append_attachment_paths(prompt, &attachments))
+            let accepted = AcceptedTurn {
+                receipt: id(),
+                prompt: append_attachment_paths(prompt, &attachments),
+            };
+            data.accepted_turns
+                .insert(queued.task_id.clone(), accepted.clone());
+            Ok(accepted)
         })?;
-        let launched = match self.send_to_resident(&queued.task_id, &prompt) {
-            Ok(true) => Ok(()),
-            Ok(false) => self.launch(queued.task_id.clone(), prompt),
-            Err(error) => {
-                self.abort_run(&queued.task_id);
-                Err(error)
-            }
-        };
-        if let Err(error) = launched {
-            self.finish(&queued.task_id, "error", Some(error));
-        }
+        self.launch_accepted(queued.task_id.clone(), Some(prompt));
         self.snapshot()
     }
 
@@ -3739,84 +4108,121 @@ impl Service {
                 return Err("This task's provider or sandbox policy is invalid.".into());
             }
         }
-        if self.run_is_active(&task_id) {
+        // A resident process can be idle after an error or transport repair.
+        // Sending through it (or waiting for planned teardown) is safe; only
+        // a still-starting owner without a resident session blocks Resume.
+        if self
+            .runs
+            .lock()
+            .map_err(|_| "Monitter run registry lock failed.".to_string())?
+            .tasks
+            .get(&task_id)
+            .is_some_and(|control| {
+                !control.is_resident() && !control.is_retiring() && !control.is_cancelled()
+            })
+        {
             return Err("This task already has an active turn.".into());
         }
         self.send(task_id, CONTINUATION.into(), vec![])
     }
 
     fn cancel(&self, task_id: &str) -> Result<Snapshot, String> {
-        let resident = self.has_resident_run(task_id);
-        let expired_approvals = self.mutate(Some(task_id.into()), |state| {
-            let ix = state
-                .tasks
-                .iter()
-                .position(|task| task.id == task_id)
-                .ok_or_else(|| "Task was not found.".to_string())?;
-            // A repeated Stop after the task is already interrupted, idle, or
-            // completed must not append another transcript event. An errored
-            // task can still have an owned resident process to stop.
-            if state.tasks[ix].status != "running"
-                && !(state.tasks[ix].status == "error" && resident)
-            {
-                return Err("Task is not running.".into());
-            }
-            let cancelled_at = now();
-            state.tasks[ix].status = "interrupted".into();
-            state.tasks[ix].updated_at = cancelled_at;
-            for message in state
-                .messages
-                .iter_mut()
-                .filter(|m| m.task_id == task_id && m.stream_status.as_deref() == Some("streaming"))
-            {
-                message.stream_status = Some("interrupted".into());
-            }
-            // Unlike activity, messages are never compacted out of the chat
-            // transcript. This system record preserves the user's Stop action
-            // without fabricating assistant content.
-            state.messages.push(Message {
-                stream_status: None,
-                phase: None,
-                id: id(),
-                task_id: task_id.into(),
-                role: "system".into(),
-                text: "You cancelled this run.".into(),
-                created_at: cancelled_at,
-                sender_agent_id: None,
-                collaboration_id: None,
-                attachments: vec![],
-            });
-            state.events.push(RunEvent {
-                id: id(),
-                task_id: task_id.into(),
-                kind: "status".into(),
-                // This is a durable user decision, not fabricated agent text.
-                // It remains available in the diagnostic timeline.
-                title: "You cancelled this run.".into(),
-                detail: String::new(),
-                created_at: cancelled_at,
-            });
-            for message in &mut state.queued_messages {
-                if message.task_id == task_id && message.status == "queued" {
-                    message.status = "error".into();
-                    message.error = Some(
-                        "Cancelled with the active task; retry it manually if still needed.".into(),
-                    );
+        let (expired_approvals, cancelled_control) =
+            self.mutate_data(Some(task_id.into()), |data| {
+                // A delayed send waiting behind retirement must never attach its
+                // already-accepted prompt after this cancellation.
+                data.accepted_turns.remove(task_id);
+                let state = &mut data.snapshot;
+                let ix = state
+                    .tasks
+                    .iter()
+                    .position(|task| task.id == task_id)
+                    .ok_or_else(|| "Task was not found.".to_string())?;
+                // A repeated Stop after the task is already interrupted, idle, or
+                // completed must not append another transcript event. An errored
+                // task can still have an owned resident process to stop.
+                // Acceptance and dispatch claim data before taking the run
+                // registry. Keep that order while capturing and cancelling this
+                // exact owner, so a new receipt cannot reuse the same resident
+                // Arc after this Stop has released the data lock.
+                let runs = self
+                    .runs
+                    .lock()
+                    .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+                let control = runs.tasks.get(task_id).cloned();
+                // Recovery has already durably interrupted the uncertain turn,
+                // but its replacement owner is actively handshaking and still
+                // must be stoppable. Idle completed residents remain no-ops.
+                let active_recovery = control
+                    .as_ref()
+                    .is_some_and(|control| control.is_resident() && control.is_active());
+                let may_stop_resident = (state.tasks[ix].status == "error"
+                    && control
+                        .as_ref()
+                        .is_some_and(|control| control.is_resident()))
+                    || (state.tasks[ix].status == "interrupted" && active_recovery);
+                if state.tasks[ix].status != "running" && !may_stop_resident {
+                    return Err("Task is not running.".into());
                 }
-            }
-            let resolved_at = now();
-            let expired = state
-                .approval_requests
-                .iter_mut()
-                .filter(|request| request.task_id == task_id && request.status == "pending")
-                .map(|request| {
-                    request.status = "expired".into();
-                    request.resolved_at = Some(resolved_at);
-                    request.id.clone()
-                })
-                .collect::<Vec<_>>();
-            Ok(expired)
-        })?;
+                let cancelled_at = now();
+                state.tasks[ix].status = "interrupted".into();
+                state.tasks[ix].updated_at = cancelled_at;
+                for message in state.messages.iter_mut().filter(|m| {
+                    m.task_id == task_id && m.stream_status.as_deref() == Some("streaming")
+                }) {
+                    message.stream_status = Some("interrupted".into());
+                }
+                // Unlike activity, messages are never compacted out of the chat
+                // transcript. This system record preserves the user's Stop action
+                // without fabricating assistant content.
+                state.messages.push(Message {
+                    stream_status: None,
+                    phase: None,
+                    id: id(),
+                    task_id: task_id.into(),
+                    role: "system".into(),
+                    text: "You cancelled this run.".into(),
+                    created_at: cancelled_at,
+                    sender_agent_id: None,
+                    collaboration_id: None,
+                    attachments: vec![],
+                });
+                state.events.push(RunEvent {
+                    id: id(),
+                    task_id: task_id.into(),
+                    kind: "status".into(),
+                    // This is a durable user decision, not fabricated agent text.
+                    // It remains available in the diagnostic timeline.
+                    title: "You cancelled this run.".into(),
+                    detail: String::new(),
+                    created_at: cancelled_at,
+                });
+                for message in &mut state.queued_messages {
+                    if message.task_id == task_id && message.status == "queued" {
+                        message.status = "error".into();
+                        message.error = Some(
+                            "Cancelled with the active task; retry it manually if still needed."
+                                .into(),
+                        );
+                    }
+                }
+                let resolved_at = now();
+                let expired = state
+                    .approval_requests
+                    .iter_mut()
+                    .filter(|request| request.task_id == task_id && request.status == "pending")
+                    .map(|request| {
+                        request.status = "expired".into();
+                        request.resolved_at = Some(resolved_at);
+                        request.id.clone()
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(control) = &control {
+                    control.reserve_cancellation();
+                }
+                drop(runs);
+                Ok((expired, control))
+            })?;
         for approval_id in expired_approvals {
             self.notify_input_waiter(&approval_id, Err("Request cancelled.".into()));
             self.notify_approval_waiters(
@@ -3824,10 +4230,8 @@ impl Service {
                 Err("Approval request expired because its task was cancelled.".into()),
             );
         }
-        if let Ok(runs) = self.runs.lock() {
-            if let Some(control) = runs.tasks.get(task_id) {
-                control.cancel();
-            }
+        if let Some(control) = cancelled_control {
+            control.cancel();
         }
         self.cancel_collaboration_children(task_id);
         self.snapshot()
@@ -5700,10 +6104,7 @@ fn load_dev_ui(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn use_packaged_ui(
-    app: AppHandle,
-    state: State<'_, dev_ui::DevUiState>,
-) -> Result<(), String> {
+fn use_packaged_ui(app: AppHandle, state: State<'_, dev_ui::DevUiState>) -> Result<(), String> {
     dev_ui::leave(&app, &state)
 }
 
@@ -6606,6 +7007,7 @@ pub fn run() {
             install_macos_escape_shield(app.handle().clone(), Arc::clone(&service));
             service.initialize_collaboration()?;
             service.dispatch_startup_queues();
+            service.start_idle_collector();
             app.manage(dev_ui_state);
             app.manage(AppState(service));
             // The listener may immediately dispatch through app.state(), so it
@@ -7621,39 +8023,33 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             host.opencode_path,
             task_snapshot.cwd
         );
-        service
-            .model_catalogs
-            .lock()
-            .unwrap()
-            .insert(
-                key,
-                (
-                    Instant::now(),
-                    ModelCatalog {
-                        models: vec![CatalogModel {
-                            id: "gpt-test".into(),
-                            name: "Test".into(),
+        service.model_catalogs.lock().unwrap().insert(
+            key,
+            (
+                Instant::now(),
+                ModelCatalog {
+                    models: vec![CatalogModel {
+                        id: "gpt-test".into(),
+                        name: "Test".into(),
+                        description: String::new(),
+                        reasoning_efforts: vec![ReasoningEffortOption {
+                            id: "high".into(),
                             description: String::new(),
-                            reasoning_efforts: vec![
-                                ReasoningEffortOption {
-                                    id: "high".into(),
-                                    description: String::new(),
-                                },
-                            ],
-                            default_effort: Some("high".into()),
-                            supports_fast: false,
-                            fast_description: None,
                         }],
-                        current: ModelCatalogCurrent {
-                            model: "gpt-test".into(),
-                            reasoning_effort: Some("high".into()),
-                            fast_mode: None,
-                        },
-                        source: "fixture".into(),
-                        warning: None,
+                        default_effort: Some("high".into()),
+                        supports_fast: false,
+                        fast_description: None,
+                    }],
+                    current: ModelCatalogCurrent {
+                        model: "gpt-test".into(),
+                        reasoning_effort: Some("high".into()),
+                        fast_mode: None,
                     },
-                ),
-            );
+                    source: "fixture".into(),
+                    warning: None,
+                },
+            ),
+        );
         service
             .set_task_model_settings(
                 &task.id,
@@ -9772,7 +10168,28 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 vec![]
             )
             .is_ok());
-        let snapshot = service.snapshot().unwrap();
+        // Accepted delivery now waits for a usable resident runtime outside
+        // the request path. The native-session conflict therefore becomes a
+        // durable terminal failure asynchronously, after the message has
+        // been persisted.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let snapshot = loop {
+            let snapshot = service.snapshot().unwrap();
+            if snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == second.id)
+                .map(|task| task.status.as_str())
+                == Some("error")
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "accepted delivery did not reach its terminal native-session error"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
         assert!(snapshot
             .messages
             .iter()

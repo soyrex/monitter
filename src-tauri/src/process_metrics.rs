@@ -24,6 +24,65 @@ pub struct ProcessMetricsProcess {
     pub resident_memory_bytes: u64,
 }
 
+/// Process identities used to fence idle retirement, without reading command
+/// arguments or environments. A child which appeared after the provider's
+/// handshake may be a live background tool and must not be killed by GC.
+/// Unlike the UI's best-effort sample, incomplete inspection fails closed.
+#[cfg(target_os = "macos")]
+pub(crate) fn retirement_process_tree(
+    root: libc::pid_t,
+) -> Result<Vec<(libc::pid_t, i64)>, String> {
+    let capacity = process_list_capacity()?;
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    let mut identities = Vec::new();
+    while let Some(pid) = pending.pop() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        let (_, _, started_at) = process_identity(pid)
+            .ok_or_else(|| "Could not verify the idle runtime's process ownership.".to_string())?;
+        identities.push((pid, started_at));
+        pending.extend(child_pids(pid, capacity)?);
+    }
+    Ok(identities)
+}
+
+/// Checks that a previously captured `(pid, started_at)` still identifies the
+/// same process. A PID alone is never safe to signal because macOS may have
+/// reused it for an unrelated process after a provider helper exited.
+#[cfg(target_os = "macos")]
+pub(crate) fn retirement_process_identity_alive(
+    pid: libc::pid_t,
+    started_at: i64,
+) -> Result<bool, String> {
+    if let Some((_, _, current_started_at)) = process_identity(pid) {
+        return Ok(current_started_at == started_at);
+    }
+    let exists = unsafe { libc::kill(pid, 0) } == 0;
+    if !exists && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(format!(
+        "Could not verify whether idle runtime process identity {pid} is still alive."
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn retirement_process_identity_alive(
+    _pid: libc::pid_t,
+    _started_at: i64,
+) -> Result<bool, String> {
+    Err("Idle runtime process ownership inspection is unavailable on this platform.".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn retirement_process_tree(
+    _root: libc::pid_t,
+) -> Result<Vec<(libc::pid_t, i64)>, String> {
+    Err("Idle runtime process ownership inspection is unavailable on this platform.".into())
+}
+
 #[cfg(target_os = "macos")]
 fn process_list_capacity() -> Result<usize, String> {
     let estimate = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };

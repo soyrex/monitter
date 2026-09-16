@@ -29,6 +29,7 @@
 //! it rejects any operation that does not identify an active entry.
 
 use std::{
+    collections::HashMap,
     sync::{
         mpsc::{self, Receiver, Sender},
         Arc, Mutex, Weak,
@@ -60,6 +61,11 @@ struct AdminTurnRequest {
     completion: Sender<AdminTurnReply>,
     deadline: Instant,
     buffer: String,
+    // Full text last seen for each Codex app-server item. This is runtime
+    // only and lets completed items replace their preceding deltas exactly.
+    app_server_items: HashMap<String, String>,
+    app_server_item_order: Vec<String>,
+    app_server_prefix_len: Option<usize>,
     closed: bool,
 }
 
@@ -132,6 +138,9 @@ impl AdminTurnBroker {
             completion: tx,
             deadline,
             buffer: String::new(),
+            app_server_items: HashMap::new(),
+            app_server_item_order: Vec::new(),
+            app_server_prefix_len: None,
             closed: false,
         });
         Ok(rx)
@@ -168,6 +177,60 @@ impl AdminTurnBroker {
             return false;
         }
         request.buffer.push_str(delta);
+        true
+    }
+
+    /// Capture the current full text for one Codex app-server item. Unlike
+    /// raw harness deltas, Codex may emit both incremental text and a final
+    /// completed-item snapshot; use the opaque item id to replace the
+    /// authoritative text while preserving first-seen item order.
+    pub(crate) fn capture_app_server_item(&self, task_id: &str, item_id: &str, text: &str) -> bool {
+        let mut guard = match self.state.current.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        let Some(request) = guard.as_mut() else {
+            return false;
+        };
+        if request.task_id != task_id || request.closed || request.owner.strong_count() == 0 {
+            return false;
+        }
+        if !request.app_server_items.contains_key(item_id) {
+            if request.app_server_item_order.len() >= 256 {
+                let _ = request.completion.send(AdminTurnReply::Error(
+                    "Monitter Admin reply contained too many message items.".into(),
+                ));
+                *guard = None;
+                return false;
+            }
+            request
+                .app_server_prefix_len
+                .get_or_insert(request.buffer.len());
+            request.app_server_item_order.push(item_id.into());
+        }
+        request.app_server_items.insert(item_id.into(), text.into());
+        let prefix = request
+            .app_server_prefix_len
+            .unwrap_or(request.buffer.len());
+        let item_bytes = request
+            .app_server_item_order
+            .iter()
+            .filter_map(|id| request.app_server_items.get(id))
+            .map(String::len)
+            .sum::<usize>();
+        if prefix.saturating_add(item_bytes) > MAX_BUFFER_BYTES {
+            let _ = request.completion.send(AdminTurnReply::Error(
+                "Monitter Admin reply exceeded the supported size.".into(),
+            ));
+            *guard = None;
+            return false;
+        }
+        request.buffer.truncate(prefix);
+        for id in &request.app_server_item_order {
+            request
+                .buffer
+                .push_str(request.app_server_items.get(id).expect("registered item"));
+        }
         true
     }
 
@@ -400,6 +463,36 @@ mod tests {
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
             AdminTurnReply::Text("hello world".into())
+        );
+    }
+
+    #[test]
+    fn codex_item_snapshots_deduplicate_by_item_without_dropping_repeated_deltas() {
+        let broker = AdminTurnBroker::new();
+        let owner: Arc<RunControl> = RunControl::new(false);
+        let receiver = broker
+            .try_register(
+                fresh_request_id("items"),
+                "task-items".into(),
+                Arc::downgrade(&owner),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+        // Raw harness output must preserve repeated tokens.
+        assert!(broker.capture_assistant_text("task-items", "ha"));
+        assert!(broker.capture_assistant_text("task-items", "ha"));
+        // Codex sends cumulative snapshots for the same item, then a second item.
+        assert!(broker.capture_app_server_item("task-items", "one", " first"));
+        assert!(broker.capture_app_server_item("task-items", "one", " first item"));
+        assert!(broker.capture_app_server_item("task-items", "one", " first item"));
+        assert!(broker.capture_app_server_item("task-items", "two", " second"));
+        // A later authoritative completion can shorten/rewrite an earlier
+        // item after another item exists; it replaces in place, not appends.
+        assert!(broker.capture_app_server_item("task-items", "one", " first"));
+        assert!(broker.complete("task-items"));
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AdminTurnReply::Text("haha first second".into())
         );
     }
 

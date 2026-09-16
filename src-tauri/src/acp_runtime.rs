@@ -28,8 +28,11 @@ const SESSION_ID: i64 = 2;
 const FIRST_PROMPT_ID: i64 = 3;
 const MODEL_CONFIG_ID: i64 = 4;
 const PERMISSION_CONFIG_ID: i64 = 5;
-const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(20);
-const SESSION_TIMEOUT: Duration = Duration::from_secs(20);
+// OpenCode may initialize its configured providers/plugins before answering
+// ACP initialize (the installed CLI takes >20 seconds on a cold launch).
+// Keep a fixed deadline, without mistaking healthy cold startup for failure.
+pub(crate) const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_PERMISSION_HISTORY: usize = 4096;
 const MAX_PENDING_PERMISSIONS: usize = 16;
 const MAX_TOOL_ACTIVITY_ITEMS: usize = 1024;
@@ -63,7 +66,10 @@ mod tests {
         let (_, first) = normalized_activity(&first, "tool_call", &mut updates)
             .unwrap()
             .expect("tool update");
-        assert_eq!(serde_json::from_str::<Value>(&first).unwrap()["update"]["title"], "Read package manifest");
+        assert_eq!(
+            serde_json::from_str::<Value>(&first).unwrap()["update"]["title"],
+            "Read package manifest"
+        );
 
         let final_update = json!({
             "sessionId": "claude-session",
@@ -111,6 +117,13 @@ struct OwnedRun {
 
 impl Drop for OwnedRun {
     fn drop(&mut self) {
+        // The collector owns a planned retirement through reaping and the
+        // pointer-checked registry release. Do not turn that deliberate EOF
+        // into ordinary cancellation or let this stale reader release a
+        // successor that is waking the same task.
+        if self.control.is_planned_retirement() {
+            return;
+        }
         self.control.terminate_owned();
         self.service
             .release_app_server_run(&self.task_id, &self.control);
@@ -173,6 +186,13 @@ fn recover_transport(
     control: &Arc<RunControl>,
     detail: impl Into<String>,
 ) {
+    // The collector has already fenced this owner and is deliberately closing
+    // its stdio. A planned retirement is neither a provider crash nor an
+    // ambiguous user turn, so it must never start a replacement transport or
+    // write a reconnect warning into the chat.
+    if control.is_planned_retirement() {
+        return;
+    }
     let mut detail = detail.into();
     if let Some(exit) = control.acp_exit_diagnostic() {
         detail = format!("{detail} {exit}");
@@ -317,7 +337,10 @@ fn normalized_activity(
         };
         object.insert("sessionUpdate".into(), Value::String("plan".into()));
         let title = activity_title(&update, "ACP plan");
-        return Ok(Some((title, json!({"sessionId": session, "update": update}).to_string())));
+        return Ok(Some((
+            title,
+            json!({"sessionId": session, "update": update}).to_string(),
+        )));
     }
 
     let tool_call_id = patch
@@ -328,19 +351,18 @@ fn normalized_activity(
     let Some(tool_call_id) = tool_call_id else {
         return Ok(None);
     };
-    let tool_call_id = tool_call_id
-        .to_string();
+    let tool_call_id = tool_call_id.to_string();
     let key = (session.clone(), tool_call_id.clone());
     if !tool_updates.contains_key(&key) && tool_updates.len() >= MAX_TOOL_ACTIVITY_ITEMS {
         return Err("Too many ACP tool calls in one turn.".into());
     }
     let (title, detail) = {
-        let update = tool_updates
-            .entry(key)
-            .or_insert_with(|| json!({
+        let update = tool_updates.entry(key).or_insert_with(|| {
+            json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": tool_call_id,
-            }));
+            })
+        });
         merge_activity_patch(update, patch);
         let Some(object) = update.as_object_mut() else {
             return Ok(None);
@@ -351,7 +373,10 @@ fn normalized_activity(
         let detail = json!({"sessionId": session, "update": update}).to_string();
         (title, detail)
     };
-    let activity_bytes: usize = tool_updates.values().map(|value| value.to_string().len()).sum();
+    let activity_bytes: usize = tool_updates
+        .values()
+        .map(|value| value.to_string().len())
+        .sum();
     if activity_bytes > MAX_TOOL_ACTIVITY_BYTES {
         return Err("ACP tool activity exceeds 2 MiB in one turn.".into());
     }
@@ -367,6 +392,9 @@ fn handle_permission_request(
     turn: String,
     pending: Arc<AtomicUsize>,
 ) {
+    // A permission request itself proves the provider has reached a tool
+    // boundary, even if its options are invalid or later denied.
+    control.mark_tool_work_observed();
     // Validate the opaque one-time options before showing a control. Invalid
     // or perpetual-only requests are cancelled rather than broadened.
     if acp_protocol::permission_outcome(&params, false).is_err() {
@@ -389,6 +417,7 @@ fn handle_permission_request(
         return;
     }
     let slot = PermissionSlot(pending);
+    control.acp_permission_wait_started();
     thread::spawn(move || {
         let _slot = slot;
         let tool = params
@@ -449,6 +478,7 @@ fn handle_permission_request(
             Err(_) => acp_protocol::cancelled_permission(),
         };
         let _ = send(&control, acp_protocol::response(id, outcome));
+        control.acp_permission_wait_finished();
     });
 }
 
@@ -643,13 +673,16 @@ fn run(
     control.set_acp_control(control_tx);
     thread::spawn(move || {
         let mut stdin = stdin;
-        while let Ok(frame) = control_rx.recv() {
-            if stdin
-                .write_all(frame.as_bytes())
+        while let Ok(control_frame) = control_rx.recv() {
+            let result = stdin
+                .write_all(control_frame.frame.as_bytes())
                 .and_then(|_| stdin.write_all(b"\n"))
                 .and_then(|_| stdin.flush())
-                .is_err()
-            {
+                .map_err(|error| format!("Could not flush ACP control frame: {error}"));
+            if let Some(flushed) = control_frame.flushed {
+                let _ = flushed.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
+            }
+            if result.is_err() {
                 break;
             }
         }
@@ -736,8 +769,23 @@ fn run(
     let mut seen_permission_ids = HashSet::<String>::new();
     let pending_permissions = Arc::new(AtomicUsize::new(0));
     loop {
+        // Retirement only wins after the lifecycle guard proved there is no
+        // turn, configuration request, approval, or owned background work.
+        // Return before ordinary cancellation/EOF paths can repair it.
+        if control.is_planned_retirement() {
+            return;
+        }
         if control.is_cancelled() {
-            thread::sleep(Duration::from_millis(150));
+            // Approval waiters must first write their explicit cancelled
+            // outcomes. Only then cancel the provider session, and wait until
+            // its writer has actually flushed that frame before teardown.
+            let _ = control.wait_for_acp_permission_waits(Duration::from_secs(1));
+            if let Some(session) = control.current_app_server_thread() {
+                let frame =
+                    acp_protocol::notification("session/cancel", json!({"sessionId": session}));
+                let _ =
+                    control.send_acp_control_flushed(&frame.to_string(), Duration::from_secs(1));
+            }
             let _ = service.complete_app_server_turn(&task_id, &control, None, "interrupted", None);
             return;
         }
@@ -781,9 +829,16 @@ fn run(
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(100))
         };
-        let value = match frames_rx.recv_timeout(wait) {
+        let received = frames_rx.recv_timeout(wait);
+        let Some(_event) = control.begin_event_processing() else {
+            return;
+        };
+        let value = match received {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
+                if control.is_planned_retirement() {
+                    return;
+                }
                 if !recovery_budget_exhausted {
                     recover_transport(&service, &task_id, &control, error);
                 } else {
@@ -792,6 +847,9 @@ fn run(
                 return;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if control.is_planned_retirement() {
+                    return;
+                }
                 if !recovery_budget_exhausted {
                     recover_transport(&service, &task_id, &control, "ACP output closed.");
                 } else {
@@ -929,6 +987,12 @@ fn run(
                         return;
                     }
                 };
+                // A cold-resume promise is valid only when this exact ACP
+                // transport advertised a protocol recovery method. Persist
+                // that negotiation so the collector never guesses from the
+                // provider label alone.
+                let recovery_method = capabilities.recovery_method();
+                control.set_resume_supported(recovery_method.is_ok());
                 if extensions.has_http()
                     && value
                         .pointer("/result/agentCapabilities/mcpCapabilities/http")
@@ -939,7 +1003,7 @@ fn run(
                     return;
                 }
                 let (method, params) = if let Some(native) = task.native_session_id.as_deref() {
-                    match capabilities.recovery_method() {
+                    match recovery_method {
                         Ok(method) => (
                             method,
                             json!({"cwd":resolved_cwd,"mcpServers":mcp_servers,"sessionId": native}),
@@ -994,6 +1058,22 @@ fn run(
                 // its model/configuration advertisement are available to a
                 // concurrently accepted explicit send.
                 control.set_app_server_thread(session.clone());
+                // Capture the process tree before any prompt can create
+                // provider-owned background work. The collector only retires
+                // an ACP owner when later descendants still match this safe
+                // baseline.
+                // Process inspection only governs whether GC may retire this
+                // owner. It must never turn a usable ACP session into a
+                // failed turn on hosts where process-tree sampling is
+                // unavailable or transiently fails.
+                let _ = control.capture_runtime_process_baseline();
+                // A prompt-free transport repair has restored the saved
+                // native session, but has not started a model turn. Return
+                // the replacement to Idle so it remains reusable and can be
+                // collected again; never manufacture or replay a prompt.
+                if initial_prompt.is_none() {
+                    service.mark_runtime_idle_if_current(&task_id, &control);
+                }
                 if initial_prompt.is_some() {
                     if let Err(error) = service.app_server_event(
                         &task_id,
@@ -1260,6 +1340,12 @@ fn run(
                     ),
                     other => ("error", Some(format!("ACP prompt stopped with {other}."))),
                 };
+                // Release only the reservation owned by this completed
+                // response before publishing the durable completed state.
+                // `complete_app_server_turn` can wake queued work; clearing
+                // afterwards lets that later send reserve itself and then be
+                // incorrectly cleared by this old response.
+                control.clear_acp_turn_reservation();
                 // A matching prompt response is the authoritative completion boundary.
                 let _ = service.complete_app_server_turn(
                     &task_id,
@@ -1268,7 +1354,6 @@ fn run(
                     status,
                     error,
                 );
-                control.clear_acp_turn_reservation();
                 if status == "completed" {
                     recovery_budget_exhausted = false;
                 }
@@ -1432,7 +1517,8 @@ fn run(
                                 .as_str()
                                 .ok_or_else(|| "ACP image data is missing.".to_string())
                                 .and_then(|data| {
-                                    service.acp_message_image(&task_id, &control, &turn, &item, data)
+                                    service
+                                        .acp_message_image(&task_id, &control, &turn, &item, data)
                                 });
                             if let Err(error) = result {
                                 fail(&service, &task_id, &control, error);
@@ -1451,6 +1537,9 @@ fn run(
                     pending_reasoning.push_str(delta);
                 }
             } else if matches!(kind, "tool_call" | "tool_call_update" | "plan") {
+                if matches!(kind, "tool_call" | "tool_call_update") {
+                    control.mark_tool_work_observed();
+                }
                 anonymous_message_item = anonymous_message_item.saturating_add(1).max(1);
                 let params = value.get("params").unwrap_or(&Value::Null);
                 let normalized = match normalized_activity(params, kind, &mut tool_updates) {
@@ -1464,7 +1553,11 @@ fn run(
                     // A malformed activity update must remain visible rather
                     // than becoming a misleading generic tool row.
                     let detail = params.to_string();
-                    let title = if kind == "plan" { "ACP plan" } else { "ACP tool activity" };
+                    let title = if kind == "plan" {
+                        "ACP plan"
+                    } else {
+                        "ACP tool activity"
+                    };
                     let result = service.app_server_event(
                         &task_id,
                         &control,
@@ -1489,11 +1582,7 @@ fn run(
                     Parsed {
                         native_session_id: None,
                         assistant: None,
-                        event: Some((
-                            "tool".into(),
-                            title,
-                            detail,
-                        )),
+                        event: Some(("tool".into(), title, detail)),
                         failed: false,
                     },
                 );

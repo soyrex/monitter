@@ -115,6 +115,9 @@ struct OwnedRun {
 
 impl Drop for OwnedRun {
     fn drop(&mut self) {
+        if self.control.is_planned_retirement() {
+            return;
+        }
         self.control.terminate_owned();
         self.service
             .release_app_server_run(&self.task_id, &self.control);
@@ -239,14 +242,24 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     if let Some(stderr) = stderr {
         let service = service.clone();
         let task = task_id.clone();
+        let control = control.clone();
         thread::spawn(move || {
             let mut emitted = false;
             let mut reader = BufReader::new(stderr);
             while let Ok(Some(line)) = read_bounded_line(&mut reader, 64 * 1024) {
+                let Some(_event) = control.begin_event_processing() else {
+                    break;
+                };
                 if !emitted {
                     if let Some(line) = crate::runner::provider_stderr_diagnostic(&line) {
                         emitted = true;
-                        service.record(&task, "error", "Codex app-server diagnostic", line);
+                        // The internal admin has no durable transcript or
+                        // activity surface. Keep provider diagnostics inside
+                        // its process-local caller path rather than leaking
+                        // an invisible mini-turn into the task timeline.
+                        if !service.is_internal_admin_task(&task) {
+                            service.record(&task, "error", "Codex app-server diagnostic", line);
+                        }
                     }
                 }
             }
@@ -283,6 +296,10 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         }
     });
     loop {
+        if control.is_planned_retirement() {
+            terminal = true;
+            break;
+        }
         if control.is_cancelled() {
             terminal = true;
             break;
@@ -330,6 +347,10 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     continue;
                 }
             }
+        };
+        let Some(_event) = control.begin_event_processing() else {
+            terminal = true;
+            break;
         };
         let line = match received {
             Ok(Ok(line)) => line,
@@ -495,6 +516,10 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     break;
                 };
                 control.set_app_server_thread(thread_id.into());
+                control.set_resume_supported(true);
+                // The initialized process tree contains provider/MCP helpers;
+                // later children may be live user background jobs and pin GC.
+                let _ = control.capture_runtime_process_baseline();
                 if let Err(error) = service.app_server_event(
                     &task_id,
                     &control,
@@ -1083,7 +1108,8 @@ fn thread_context_usage_detail(params: &Value, fallback_turn_id: &str) -> String
             "used": usage.and_then(|value| value.pointer("/last/totalTokens")),
             "size": usage.and_then(|value| value.get("modelContextWindow")),
         },
-    }).to_string()
+    })
+    .to_string()
 }
 
 fn handle_notification(
@@ -1143,7 +1169,10 @@ fn handle_notification(
     }
     if matches!(
         method,
-        "item/agentMessage/delta" | "item/completed" | "turn/completed" | "thread/tokenUsage/updated"
+        "item/agentMessage/delta"
+            | "item/completed"
+            | "turn/completed"
+            | "thread/tokenUsage/updated"
     ) && (thread_id.is_empty() || turn_id.is_empty())
     {
         service.record(
@@ -1170,12 +1199,17 @@ fn handle_notification(
                         }
                     }
                 }
-                if let Err(error) = service.app_server_event(
-                    task_id,
-                    control,
-                    Some(turn_id),
-                    parse_item(item, true),
-                ) {
+                let parsed = parse_item(item, true);
+                if parsed
+                    .event
+                    .as_ref()
+                    .is_some_and(|(kind, _, _)| matches!(kind.as_str(), "tool" | "computer"))
+                {
+                    control.mark_tool_work_observed();
+                }
+                if let Err(error) =
+                    service.app_server_event(task_id, control, Some(turn_id), parsed)
+                {
                     service.complete_app_server_turn(
                         task_id,
                         control,
@@ -1318,6 +1352,13 @@ fn handle_notification(
                         }
                     }
                     let parsed = parse_item(item, false);
+                    if parsed
+                        .event
+                        .as_ref()
+                        .is_some_and(|(kind, _, _)| matches!(kind.as_str(), "tool" | "computer"))
+                    {
+                        control.mark_tool_work_observed();
+                    }
                     if let Err(error) =
                         service.app_server_event(task_id, control, Some(turn_id), parsed)
                     {
@@ -1824,7 +1865,8 @@ mod tests {
                 },
             }),
             "fallback-turn",
-        )).unwrap();
+        ))
+        .unwrap();
         assert_eq!(detail["providerTurnId"], "turn-1");
         assert_eq!(detail.pointer("/usage/used"), Some(&json!(12_345)));
         assert_eq!(detail.pointer("/usage/size"), Some(&json!(114_688)));

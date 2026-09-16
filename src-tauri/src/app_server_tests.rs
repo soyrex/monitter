@@ -371,7 +371,11 @@ mod tests {
                 .count(),
             1
         );
-        service.cancel(&task.id).unwrap();
+        // The completed fixture task cannot be cancelled through the service
+        // API. Stop only its owned runtime before exercising cold resume.
+        if let Some(control) = service.runs.lock().unwrap().tasks.get(&task.id).cloned() {
+            control.terminate_owned();
+        }
         let stop_deadline = Instant::now() + Duration::from_secs(5);
         while service.runs.lock().unwrap().tasks.contains_key(&task.id) {
             assert!(

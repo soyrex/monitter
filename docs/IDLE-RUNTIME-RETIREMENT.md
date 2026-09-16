@@ -1,6 +1,7 @@
 # Idle runtime retirement
 
-Status: proposed design; runtime behavior is not changed by this document.
+Status: implemented in the native service. Source validation is described below;
+installing a new app build is a separate operation.
 
 ## Outcome
 
@@ -16,15 +17,18 @@ independent chats and processes.
 
 ## Lifecycle and collector
 
-Use one service-owned collector, sweeping every 30 seconds. Use monotonic time
+Use one service-owned collector, sweeping every 60 seconds. Use monotonic time
 for the five-minute threshold; UI reads and protocol keepalives do not reset it.
 Record `idle_since` only once a turn has ended and its durable updates have been
 saved. Clear it when a send reserves the next turn. A continuously idle eligible
-runtime is normally collected between five and five-and-a-half minutes later.
+runtime is normally collected between five and six minutes later. Check the idle
+timestamp before inspecting process ownership, so younger idle runtimes incur
+only an in-memory eligibility check. Already-retiring owners remain eligible for
+cleanup retries.
 
 Track process lifecycle separately from task outcome:
 
-`Dormant -> Starting -> Active -> Idle -> Retiring -> Dormant`
+`Dormant -> Active (includes starting/recovering) -> Idle -> Retiring -> Dormant`
 
 `Idle -> Active` reuses a healthy process. A failed turn may leave a healthy idle
 transport, or require transport teardown; task error status alone does not tell
@@ -35,12 +39,23 @@ candidates. Each owner has a generation identity.
 Retirement requires all of the following:
 
 - More than five minutes continuously idle, with a saved native session ID.
-- A provider with verified cold-resume support for this transport and host.
+- A local macOS provider with cold-resume support: Codex app-server, Claude
+  stream-json, or ACP advertising session resume/load. SSH processes remain
+  pinned because local process inspection cannot verify remote background work.
 - No accepted send awaiting dispatch, queued/sending message, pending start,
   steer/configuration request, approval or user-input request.
 - No active tool work, continuation or owned background job that shutdown would
   interrupt. Where background ownership cannot be established, skip collection.
 - No active internal-admin broker request for the internal admin runtime.
+
+Process identities are captured before the first prompt. A successful completion
+can refresh that infrastructure baseline only while the transport has never
+reported tool work, accounting for MCP helpers that start lazily. Idle sweeps
+also capture late startup helpers while holding the lifecycle reservation, so
+a new turn cannot start during that capture. The baseline
+freezes once any tool invocation is observed; unknown live descendants then pin
+the runtime. This is intentionally conservative and may retain an idle runtime
+whose helper starts late after tool use.
 
 A silent tool, long reasoning turn, human approval wait or delegation wait is
 still active. Never use time since the last output token as evidence of idleness.
@@ -57,14 +72,19 @@ send and wait for teardown, then restore exactly once. Keep the native-session
 writer reservation until the old process is reaped; a retiring owner is not an
 absent owner. Coalesce concurrent wake requests so only one process starts.
 An old reader may release or mutate only its own generation, never its successor.
+Accepted prompts carry runtime-only receipts created with the durable running
+transition. Cancellation invalidates the receipt before a waiting dispatcher can
+start a process. A restart treats an accepted but unfinished turn as interrupted;
+it does not replay it.
 
 Retirement needs its own stop reason, distinct from user cancellation and a
 crash. Mark the owner retiring before closing pipes. Otherwise ACP's existing
 automatic transport repair could immediately relaunch a process GC just stopped.
 
-Ask the adapter to close gracefully, with a bounded deadline, then escalate
+Close the adapter's owned stdin/control queue, with a bounded deadline, then escalate
 termination only for its owned process group and disposable helpers. Confirm
-exit, reap children, release streams, waiters and temporary resources, revoke
+exit (including verified helper identities that detach or reparent), reap children,
+release streams, waiters and temporary resources, revoke
 owner-scoped grants, and finally release the registry entry. Never stop standalone
 Monitter terminals, shared servers or independently owned jobs. Cleanup failure
 keeps ownership fenced and produces a bounded diagnostic.
@@ -86,41 +106,39 @@ do not silently promote them to permanent grants. Durable remembered rules retai
 their existing exact scope. Provider in-memory state and unsaved background jobs
 are not equivalent to native conversation history and need separate handling.
 
-## Current implementation anchors
+## Implementation anchors
 
-- `src-tauri/src/runner.rs`: `RunControl`, process ownership and bounded cleanup;
-  add lifecycle, idle clock, stop reason and turn/retirement reservation here or
-  in a dedicated runtime lifecycle module.
-- `src-tauri/src/lib.rs`: `send_to_resident`, `launch_accepted`, queue dispatch,
-  `resume`, `run_is_active`, `reserve_run` and internal admin; unify reservation
-  and start/stop the collector with the service.
+- `src-tauri/src/runtime_gc.rs`: periodic weakly owned collector, durable
+  eligibility checks, owner-checked release, and bounded dispatch wait.
+- `src-tauri/src/runner.rs`: `RunControl`, lifecycle clock, event-processing
+  permits, ownership inspection and bounded process-group cleanup.
+- `src-tauri/src/lib.rs`: accepted dispatch receipts, queue dispatch, `resume`
+  and internal admin reservation. Startup starts the collector once.
 - `src-tauri/src/app_server_service.rs`: durable turn completion and owner-checked
   registry release; record idle only after successful completion persistence.
 - `src-tauri/src/codex_app_server.rs`: already chooses `thread/resume` when a
   native session ID exists. Do not use the user-facing Resume command to wake it.
 - `src-tauri/src/acp_runtime.rs`: negotiate recovery support and distinguish
   planned retirement from unexpected pipe closure.
-- `docs/CONTRACT.md`: currently promises the internal admin has no idle timeout;
-  implementation must explicitly revise this rule if the admin is collected too.
-  Recommended policy is to include it with the broker reservation guard above.
+- `docs/CONTRACT.md`: includes internal admin retirement with an active broker
+  request guard. Prompts and replies remain runtime-only.
 
 ## OpenCode failure recovery
 
-Investigate and validate this before enabling GC for OpenCode. Monitter has two
+Monitter has two
 paths: legacy `opencode run --session` and OpenCode through ACP. The legacy runner
 already exports session metadata to restore the original working directory.
 ACP must use the recovery method advertised by the actual installed launcher.
 
-One confirmed code-level mismatch is that `resume()` rejects `run_is_active()`,
-while that function tests only whether the task exists in the run registry.
-An idle resident owner, including one restored after transport loss, therefore
-blocks explicit Resume. This is a candidate for the reported symptom, not a
-verified diagnosis of Alex's particular failed chat.
+Previously, `resume()` rejected `run_is_active()`, which only tested whether the
+task existed in the run registry. An idle resident owner, including one restored
+after transport loss, therefore blocked explicit Resume. This was a confirmed
+code defect; it does not prove the cause of every historical failed chat.
 
-Replace this check with lifecycle-aware reservation: reuse a healthy idle owner;
+Resume now uses lifecycle-aware reservation: reuse a healthy idle owner;
 wait for an owned teardown/recovery; cold-resume when absent; reject genuinely
 active turns. Do not simply remove the guard, because that could permit two
-writers. Verify failed-chat native IDs remain saved and distinguish native
+writers. Failed-chat native IDs remain saved; distinguish native
 recovery errors from Monitter's own state/ownership rejection.
 
 ## Validation before rollout
@@ -139,6 +157,29 @@ recovery errors from Monitter's own state/ownership rejection.
    internal admin wakes correctly, and existing permission scopes are preserved.
 7. Measure process-tree resident memory before retirement, after exit, and after
    wake using `get_process_metrics`; also record wake latency and failure count.
+
+## Native validation measurements
+
+The integrated Rust regression suite passed 379 tests, with zero failures and
+six opt-in tests skipped. The native smoke test was then explicitly exercised
+for both providers below. Formatting passes for all changed Rust files.
+
+Isolated local smoke checks on 2026-09-16 exercised real Codex and OpenCode ACP
+sessions using existing CLI configuration. Both retained the native session ID,
+recalled a random token after cold restoration, left the saved chat snapshot
+unchanged during retirement, and verified the captured process identities exited.
+
+| Adapter | Summed process RSS released | Wake through completed reply |
+| --- | ---: | ---: |
+| Codex app-server | 1,649,541,120 bytes (about 1.65 GB) | 13.6 seconds |
+| OpenCode ACP | 858,341,376 bytes (about 858 MB) | 7.5 seconds |
+
+These are individual samples, not guaranteed savings or startup-only latency:
+reply time includes model generation, and summed RSS can double-count shared
+pages. Claude restoration, failure recovery, cancellation and lifecycle races
+are covered by deterministic fixtures; no live Claude measurement was taken.
+OpenCode initialization now allows 60 seconds because a native startup exceeded
+the previous 20-second handshake limit during validation.
 
 ## Expected memory effect
 

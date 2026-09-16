@@ -12,8 +12,8 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc, Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -1421,6 +1421,27 @@ fn parse_codex_events(value: &Value) -> Vec<Parsed> {
 
 pub struct RunControl {
     cancelled: AtomicBool,
+    // Process lifecycle is deliberately independent from the task's durable
+    // status. A completed task may retain a healthy resident transport, while
+    // a failed task may have no transport at all.
+    lifecycle: Mutex<RuntimeLifecycle>,
+    lifecycle_changed: Condvar,
+    // This is a stop reason, not cancellation. Readers use it to suppress
+    // automatic transport repair after the collector intentionally closes a
+    // resident process.
+    planned_retirement: AtomicBool,
+    teardown_started: AtomicBool,
+    owned_process_group: std::sync::atomic::AtomicI32,
+    // A runtime with work Monitter cannot prove it owns must remain resident.
+    // Adapters may hold this pin around owned background/tool work.
+    acp_permission_waits: AtomicUsize,
+    // Captured once the resident session is ready, before a model turn. A
+    // later descendant is conservatively treated as unowned background work.
+    runtime_process_baseline: Mutex<Option<HashSet<(libc::pid_t, i64)>>>,
+    // Once provider activity has shown an actual tool invocation, descendants
+    // must retain the original session-ready baseline. This prevents a tool
+    // from making its own background child look like infrastructure.
+    tool_work_observed: AtomicBool,
     // A Claude stream-json process survives between user turns. It remains in
     // the registry while its task is completed so a later message can use the
     // same native context rather than creating a --resume subprocess.
@@ -1452,10 +1473,49 @@ pub struct RunControl {
     acp_session_result: Mutex<Option<Value>>,
     app_server_instance_id: String,
     acp_transport: AtomicBool,
-    acp_control: Mutex<Option<mpsc::SyncSender<String>>>,
+    acp_control: Mutex<Option<mpsc::SyncSender<AcpControlFrame>>>,
     auxiliary: Mutex<Vec<Child>>,
     remote_helper_cleanups: Mutex<Vec<(Host, String)>>,
     remote_supervised: bool,
+}
+
+/// A control frame for the ACP-owned stdin writer.  Most frames only need
+/// queueing; cancellation can request a bounded flush acknowledgement before
+/// the reader tears down the transport.
+pub(crate) struct AcpControlFrame {
+    pub(crate) frame: String,
+    pub(crate) flushed: Option<mpsc::SyncSender<Result<(), String>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimePhase {
+    Dormant,
+    Active,
+    Idle { since: Instant },
+    Retiring,
+}
+
+#[derive(Debug)]
+struct RuntimeLifecycle {
+    phase: RuntimePhase,
+    resume_supported: bool,
+    retiring_idle_since: Option<Instant>,
+    inflight_events: usize,
+}
+
+/// Keeps one reader record inside its ownership fence until all durable event
+/// writes for that record have returned. Retirement cannot claim in between.
+pub(crate) struct RuntimeEventPermit {
+    control: Arc<RunControl>,
+}
+
+impl Drop for RuntimeEventPermit {
+    fn drop(&mut self) {
+        if let Ok(mut lifecycle) = self.control.lifecycle.lock() {
+            lifecycle.inflight_events = lifecycle.inflight_events.saturating_sub(1);
+            self.control.lifecycle_changed.notify_all();
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1468,6 +1528,19 @@ impl RunControl {
     pub fn new(remote_supervised: bool) -> Arc<Self> {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
+            lifecycle: Mutex::new(RuntimeLifecycle {
+                phase: RuntimePhase::Dormant,
+                resume_supported: false,
+                retiring_idle_since: None,
+                inflight_events: 0,
+            }),
+            lifecycle_changed: Condvar::new(),
+            planned_retirement: AtomicBool::new(false),
+            teardown_started: AtomicBool::new(false),
+            owned_process_group: std::sync::atomic::AtomicI32::new(0),
+            acp_permission_waits: AtomicUsize::new(0),
+            runtime_process_baseline: Mutex::new(None),
+            tool_work_observed: AtomicBool::new(false),
             resident: AtomicBool::new(false),
             run_id: Mutex::new(crate::model::id()),
             run_started_at: Mutex::new(crate::model::now()),
@@ -1506,23 +1579,11 @@ impl RunControl {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        self.reserve_cancellation();
         if self.acp_transport.load(Ordering::SeqCst) {
-            let session = self
-                .app_server_thread
-                .try_lock()
-                .ok()
-                .and_then(|v| v.clone());
-            if let Some(session) = session {
-                let frame = crate::acp_protocol::notification(
-                    "session/cancel",
-                    serde_json::json!({"sessionId":session}),
-                );
-                let _ = self.send_control(&frame.to_string());
-            }
-            // The ACP writer owns stdin. Give already-notified permission
-            // waiters a short chance to enqueue their cancelled outcome; the
-            // reader then performs ordinary owned bounded teardown.
+            // ACP's reader owns session/cancel. It waits for outstanding
+            // permission workers to write their mandatory cancelled response
+            // before it emits that native cancellation and tears down.
             return;
         }
         // Never hold a service/run lock behind a potentially blocked pipe
@@ -1574,7 +1635,38 @@ impl RunControl {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
+
+    /// Fence this exact runtime from later turns without performing I/O.
+    /// Service mutations use this while holding data -> runs, then invoke
+    /// `cancel` only after their durable write and waiter notifications.
+    pub(crate) fn reserve_cancellation(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Reserve this owner for a new provider turn. Existing startup paths may
+    /// call this while already active; the important atomic boundary is that a
+    /// collector which has claimed retirement cannot be overtaken by a send.
     pub(crate) fn begin_run(&self) -> Result<(String, i64), String> {
+        if self.is_cancelled() {
+            return Err("This runtime has been cancelled.".into());
+        }
+        {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .map_err(|_| "Monitter runtime lifecycle lock failed.".to_string())?;
+            if lifecycle.phase == RuntimePhase::Retiring {
+                return Err(
+                    "This runtime is retiring; wait for its owned teardown before sending again."
+                        .into(),
+                );
+            }
+            if self.is_cancelled() {
+                return Err("This runtime has been cancelled.".into());
+            }
+            lifecycle.phase = RuntimePhase::Active;
+            lifecycle.retiring_idle_since = None;
+        }
         let started_at = crate::model::now();
         *self
             .run_id
@@ -1585,6 +1677,371 @@ impl RunControl {
             .lock()
             .map_err(|_| "Monitter run identity lock failed.".to_string())? = started_at;
         Ok((self.current_run_id()?, started_at))
+    }
+
+    /// Record idleness after the caller has durably completed the turn. The
+    /// first timestamp wins so read-only polling cannot extend collection.
+    pub(crate) fn mark_idle(&self) {
+        if let Ok(mut lifecycle) = self.lifecycle.lock() {
+            if lifecycle.phase == RuntimePhase::Active {
+                lifecycle.phase = RuntimePhase::Idle {
+                    since: Instant::now(),
+                };
+            }
+        }
+    }
+
+    pub(crate) fn set_resume_supported(&self, supported: bool) {
+        if let Ok(mut lifecycle) = self.lifecycle.lock() {
+            lifecycle.resume_supported = supported;
+        }
+    }
+
+    pub(crate) fn begin_event_processing(self: &Arc<Self>) -> Option<RuntimeEventPermit> {
+        let mut lifecycle = self.lifecycle.lock().ok()?;
+        if lifecycle.phase == RuntimePhase::Retiring || self.is_planned_retirement() {
+            return None;
+        }
+        lifecycle.inflight_events = lifecycle.inflight_events.saturating_add(1);
+        Some(RuntimeEventPermit {
+            control: Arc::clone(self),
+        })
+    }
+
+    pub(crate) fn acp_permission_wait_started(&self) {
+        self.acp_permission_waits.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn acp_permission_wait_finished(&self) {
+        let _ =
+            self.acp_permission_waits
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_sub(1)
+                });
+    }
+
+    /// Lets the ACP reader preserve required permission responses before it
+    /// sends session/cancel. This is intentionally bounded and uses no
+    /// service locks; cancellation itself remains fenced immediately.
+    pub(crate) fn wait_for_acp_permission_waits(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.acp_permission_waits.load(Ordering::SeqCst) == 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Capture the exact owned process tree while the harness is session-ready
+    /// and before its first prompt. Sampling failures fail closed: a runtime
+    /// without a verified baseline is never idle-collected.
+    pub(crate) fn capture_runtime_process_baseline(&self) -> Result<(), String> {
+        let root = self
+            .child
+            .lock()
+            .map_err(|_| "Monitter provider child lock failed.".to_string())?
+            .as_ref()
+            .map(Child::id)
+            .map(|pid| pid as libc::pid_t)
+            .ok_or("Resident provider process is not available for ownership capture.")?;
+        self.capture_runtime_process_baseline_for_pid(root)
+    }
+
+    fn capture_runtime_process_baseline_for_pid(&self, root: libc::pid_t) -> Result<(), String> {
+        let baseline = crate::process_metrics::retirement_process_tree(root)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        *self
+            .runtime_process_baseline
+            .lock()
+            .map_err(|_| "Monitter runtime ownership lock failed.".to_string())? = Some(baseline);
+        Ok(())
+    }
+
+    /// Freeze descendant ownership after the provider reports tool work. The
+    /// baseline lock serializes this with a no-tool infrastructure refresh.
+    pub(crate) fn mark_tool_work_observed(&self) {
+        let Ok(_baseline) = self.runtime_process_baseline.lock() else {
+            // A poisoned ownership lock already fails retirement closed.
+            return;
+        };
+        self.tool_work_observed.store(true, Ordering::SeqCst);
+    }
+
+    /// Some configured MCP/provider helpers start lazily after session setup.
+    /// A completed no-tool turn may refresh that infrastructure baseline. Once
+    /// any tool activity is observed this permanently refuses to refresh, so a
+    /// tool-created descendant continues to pin the resident runtime.
+    ///
+    /// This performs process inspection and callers must invoke it outside
+    /// service/data/run-registry locks.
+    pub(crate) fn refresh_runtime_process_baseline_if_no_tool_work(&self) -> Result<bool, String> {
+        let root = self
+            .child
+            .lock()
+            .map_err(|_| "Monitter provider child lock failed.".to_string())?
+            .as_ref()
+            .map(Child::id)
+            .map(|pid| pid as libc::pid_t)
+            .ok_or("Resident provider process is not available for ownership capture.")?;
+        let mut baseline = self
+            .runtime_process_baseline
+            .lock()
+            .map_err(|_| "Monitter runtime ownership lock failed.".to_string())?;
+        if self.tool_work_observed.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let refreshed = crate::process_metrics::retirement_process_tree(root)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        // Keep earlier identities as well: a verified startup helper may
+        // have detached since capture, but teardown still owns its lifetime.
+        baseline.get_or_insert_with(HashSet::new).extend(refreshed);
+        Ok(true)
+    }
+
+    /// Adopt lazily initialized provider infrastructure only while this owner
+    /// remains conclusively idle. Holding the lifecycle lock across the
+    /// sample prevents a later send from changing the owner to Active between
+    /// the no-tool check and ownership capture. This is deliberately stricter
+    /// than the completed-turn refresh above: collectors run concurrently
+    /// with new accepted sends.
+    pub(crate) fn refresh_runtime_process_baseline_while_idle_if_no_tool_work(
+        &self,
+    ) -> Result<bool, String> {
+        if self.is_cancelled()
+            || self.acp_permission_waits.load(Ordering::SeqCst) != 0
+            || self.has_app_server_turn_request()
+            || self.has_pending_runtime_request()
+        {
+            return Ok(false);
+        }
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| "Monitter runtime lifecycle lock failed.".to_string())?;
+        if !matches!(lifecycle.phase, RuntimePhase::Idle { .. })
+            || lifecycle.inflight_events != 0
+            || self.tool_work_observed.load(Ordering::SeqCst)
+        {
+            return Ok(false);
+        }
+        let root = self
+            .child
+            .lock()
+            .map_err(|_| "Monitter provider child lock failed.".to_string())?
+            .as_ref()
+            .map(Child::id)
+            .map(|pid| pid as libc::pid_t)
+            .ok_or("Resident provider process is not available for ownership capture.")?;
+        let mut baseline = self
+            .runtime_process_baseline
+            .lock()
+            .map_err(|_| "Monitter runtime ownership lock failed.".to_string())?;
+        // `mark_tool_work_observed` serializes on this same lock. Checking
+        // again immediately before extending prevents an observed tool from
+        // being adopted if it arrived while this method waited for ownership.
+        if self.tool_work_observed.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let refreshed = crate::process_metrics::retirement_process_tree(root)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        baseline.get_or_insert_with(HashSet::new).extend(refreshed);
+        drop(baseline);
+        drop(lifecycle);
+        Ok(true)
+    }
+
+    /// This deliberately does OS I/O and must be called outside service/data
+    /// locks. New descendants or a failed sample mean retirement is unsafe.
+    pub(crate) fn retirement_process_tree_is_safe(&self) -> bool {
+        let root = match self.child.lock() {
+            Ok(child) => child.as_ref().map(Child::id).map(|pid| pid as libc::pid_t),
+            Err(_) => return false,
+        };
+        let Some(root) = root else {
+            return cfg!(test);
+        };
+        let baseline = match self.runtime_process_baseline.lock() {
+            Ok(value) => value.clone(),
+            Err(_) => return false,
+        };
+        let Some(baseline) = baseline else {
+            return false;
+        };
+        match crate::process_metrics::retirement_process_tree(root) {
+            Ok(current) => current
+                .into_iter()
+                .all(|identity| baseline.contains(&identity)),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retirement_diagnostic(&self) -> String {
+        let root = self.child.lock().unwrap().as_ref().map(Child::id);
+        format!(
+            "phase={:?} cancelled={} permissions={} pending={} tool_work={} baseline={:?} current={:?}",
+            self.lifecycle.lock().unwrap(),
+            self.is_cancelled(),
+            self.acp_permission_waits.load(Ordering::SeqCst),
+            self.has_pending_runtime_request(),
+            self.tool_work_observed.load(Ordering::SeqCst),
+            self.runtime_process_baseline.lock().unwrap(),
+            root.map(|pid| crate::process_metrics::retirement_process_tree(pid as libc::pid_t)),
+        )
+    }
+
+    /// Atomically claim an eligible idle runtime for planned retirement. The
+    /// service still performs durable queue/request checks under its
+    /// data-then-runs lock; these local checks fence in-flight protocol work.
+    pub(crate) fn try_retire_idle(&self, now: Instant, timeout: Duration) -> bool {
+        if self.is_cancelled()
+            || self.acp_permission_waits.load(Ordering::SeqCst) != 0
+            || self.has_app_server_turn_request()
+            || self.has_pending_runtime_request()
+        {
+            return false;
+        }
+        let Ok(mut lifecycle) = self.lifecycle.lock() else {
+            return false;
+        };
+        let RuntimePhase::Idle { since } = lifecycle.phase else {
+            return false;
+        };
+        if lifecycle.inflight_events != 0
+            || !lifecycle.resume_supported
+            || now.saturating_duration_since(since) <= timeout
+        {
+            return false;
+        }
+        lifecycle.phase = RuntimePhase::Retiring;
+        lifecycle.retiring_idle_since = Some(since);
+        self.teardown_started.store(false, Ordering::SeqCst);
+        self.planned_retirement.store(true, Ordering::SeqCst);
+        true
+    }
+
+    fn has_pending_runtime_request(&self) -> bool {
+        self.current_app_server_turn().is_some()
+            || self
+                .acp_turn_reserved
+                .lock()
+                .map(|value| *value)
+                .unwrap_or(true)
+            || self
+                .acp_prompt_after_config
+                .lock()
+                .map(|value| value.is_some())
+                .unwrap_or(true)
+            || self
+                .acp_config_requests
+                .lock()
+                .map(|value| !value.is_empty())
+                .unwrap_or(true)
+            || self
+                .app_server_steer_requests
+                .lock()
+                .map(|value| !value.is_empty())
+                .unwrap_or(true)
+    }
+
+    pub(crate) fn is_retiring(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .map(|lifecycle| lifecycle.phase == RuntimePhase::Retiring)
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .map(|lifecycle| matches!(lifecycle.phase, RuntimePhase::Idle { .. }))
+            .unwrap_or(false)
+    }
+
+    /// Cheap prefilter before process inspection. Retirement still rechecks
+    /// the clock and all lifecycle guards when it claims this owner.
+    pub(crate) fn idle_timeout_elapsed(&self, now: Instant, timeout: Duration) -> bool {
+        self.lifecycle
+            .lock()
+            .map(|lifecycle| match lifecycle.phase {
+                RuntimePhase::Idle { since } => now.saturating_duration_since(since) > timeout,
+                _ => false,
+            })
+            .unwrap_or(false)
+    }
+
+    /// A resident transport may be retained after an interrupted durable task
+    /// while its replacement session/resume handshake is still active.
+    pub(crate) fn is_active(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .map(|lifecycle| lifecycle.phase == RuntimePhase::Active)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn is_planned_retirement(&self) -> bool {
+        self.planned_retirement.load(Ordering::SeqCst)
+    }
+
+    /// Wait outside service locks for a collector-owned teardown/release.
+    pub(crate) fn wait_for_teardown(&self, timeout: Duration) -> Result<(), String> {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| "Monitter runtime lifecycle lock failed.".to_string())?;
+        let (lifecycle, _) = self
+            .lifecycle_changed
+            .wait_timeout_while(lifecycle, timeout, |value| {
+                value.phase == RuntimePhase::Retiring
+            })
+            .map_err(|_| "Monitter runtime lifecycle wait failed.".to_string())?;
+        if lifecycle.phase == RuntimePhase::Retiring {
+            return Err("Runtime teardown is still in progress.".into());
+        }
+        Ok(())
+    }
+
+    /// Must be called only after the service has pointer-checked registry
+    /// release and `retire_owned` has reaped all owned resources. A teardown
+    /// failure intentionally leaves the runtime fenced in Retiring.
+    pub(crate) fn finish_retirement(&self) {
+        if let Ok(mut lifecycle) = self.lifecycle.lock() {
+            if lifecycle.phase == RuntimePhase::Retiring {
+                lifecycle.phase = RuntimePhase::Dormant;
+                lifecycle.retiring_idle_since = None;
+                self.lifecycle_changed.notify_all();
+            }
+        }
+    }
+
+    /// Undo a reservation only before pipes/processes are touched. This keeps
+    /// an ownership-inspection race conservative without fencing a healthy
+    /// runtime forever; its original continuous-idle timestamp is retained.
+    pub(crate) fn abort_retirement(&self) -> bool {
+        if self.teardown_started.load(Ordering::SeqCst) {
+            return false;
+        }
+        let Ok(mut lifecycle) = self.lifecycle.lock() else {
+            return false;
+        };
+        if lifecycle.phase != RuntimePhase::Retiring {
+            return false;
+        }
+        let since = lifecycle
+            .retiring_idle_since
+            .take()
+            .unwrap_or_else(Instant::now);
+        lifecycle.phase = RuntimePhase::Idle { since };
+        self.planned_retirement.store(false, Ordering::SeqCst);
+        self.lifecycle_changed.notify_all();
+        true
     }
     pub(crate) fn current_run_id(&self) -> Result<String, String> {
         self.run_id
@@ -1611,7 +2068,10 @@ impl RunControl {
                 .clone()
                 .ok_or("ACP control channel is closed.")?;
             return sender
-                .try_send(frame.into())
+                .try_send(AcpControlFrame {
+                    frame: frame.into(),
+                    flushed: None,
+                })
                 .map_err(|_| "ACP control channel is busy or closed.".into());
         }
         if self.cancelled.load(Ordering::SeqCst) {
@@ -1629,6 +2089,32 @@ impl RunControl {
             .and_then(|_| stdin.write_all(b"\n"))
             .and_then(|_| stdin.flush())
             .map_err(|error| format!("Could not send approval response to provider: {error}"))
+    }
+
+    /// Queue an ACP control frame and wait only for its writer to flush it.
+    /// This is used for the final session/cancel after pending permission
+    /// outcomes have been emitted.
+    pub(crate) fn send_acp_control_flushed(
+        &self,
+        frame: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let sender = self
+            .acp_control
+            .lock()
+            .map_err(|_| "ACP control queue unavailable.".to_string())?
+            .clone()
+            .ok_or("ACP control channel is closed.")?;
+        let (flushed, receiver) = mpsc::sync_channel(1);
+        sender
+            .try_send(AcpControlFrame {
+                frame: frame.into(),
+                flushed: Some(flushed),
+            })
+            .map_err(|_| "ACP control channel is busy or closed.".to_string())?;
+        receiver
+            .recv_timeout(timeout)
+            .map_err(|_| "ACP cancellation frame was not flushed in time.".to_string())?
     }
 
     /// Start another turn on an already initialized app-server transport.  The
@@ -1794,20 +2280,24 @@ impl RunControl {
         // session. A newly accepted explicit user send waits through the
         // bounded handshake rather than falling through to a competing run or
         // writing to the retired stdin queue.
-        let mut session_id = None;
-        // ACP initializes and loads with separate bounded 20-second phases;
-        // allow that full recovery window on this background sender.
-        for _ in 0..2600 {
-            session_id = self
+        // Recovery can consume a cold provider initialization plus saved
+        // session loading. Share ACP's phase bounds instead of encoding a
+        // shorter loop count that rejects a healthy 60-second initialize.
+        let deadline = Instant::now()
+            + crate::acp_runtime::INITIALIZE_TIMEOUT
+            + crate::acp_runtime::SESSION_TIMEOUT
+            + Duration::from_secs(5);
+        let session_id = loop {
+            let session_id = self
                 .app_server_thread
                 .lock()
                 .map_err(|_| "ACP session state lock failed.".to_string())?
                 .clone();
-            if self.is_cancelled() || session_id.is_some() {
-                break;
+            if self.is_cancelled() || session_id.is_some() || Instant::now() >= deadline {
+                break session_id;
             }
             thread::sleep(Duration::from_millis(25));
-        }
+        };
         if self.is_cancelled() {
             return Err("ACP session recovery was cancelled before it became ready.".into());
         }
@@ -1937,7 +2427,7 @@ impl RunControl {
         self.acp_transport.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn set_acp_control(&self, sender: mpsc::SyncSender<String>) {
+    pub(crate) fn set_acp_control(&self, sender: mpsc::SyncSender<AcpControlFrame>) {
         if let Ok(mut slot) = self.acp_control.lock() {
             *slot = Some(sender);
         }
@@ -2078,7 +2568,9 @@ impl RunControl {
     }
 
     pub(crate) fn is_resident(&self) -> bool {
-        self.resident.load(Ordering::SeqCst) && !self.cancelled.load(Ordering::SeqCst)
+        self.resident.load(Ordering::SeqCst)
+            && !self.cancelled.load(Ordering::SeqCst)
+            && !self.is_planned_retirement()
     }
 
     fn add_auxiliary(&self, mut child: Child) {
@@ -2123,6 +2615,8 @@ impl RunControl {
             Ok(slot) => slot,
             Err(_) => return Err((child, control_stdin)),
         };
+        self.owned_process_group
+            .store(child.id() as i32, Ordering::SeqCst);
         *slot = Some(child);
         *stdin_slot = control_stdin;
         drop(stdin_slot);
@@ -2182,6 +2676,190 @@ impl RunControl {
     pub(crate) fn terminate_owned(&self) {
         self.cancel();
         let _ = self.wait();
+    }
+
+    /// Close only this runtime's owned streams and process group for an idle
+    /// collector. This never calls `cancel()`: planned retirement is distinct
+    /// from a user interrupt and ACP readers must not repair it as a crash.
+    /// The service retains the registry fence until this has succeeded.
+    pub(crate) fn retire_owned(&self) -> Result<(), String> {
+        if !self.is_retiring() || !self.is_planned_retirement() {
+            return Err("Runtime retirement was not reserved.".into());
+        }
+        if !self.teardown_started.load(Ordering::SeqCst) {
+            if !self.retirement_process_tree_is_safe() {
+                self.abort_retirement();
+                return Err(
+                    "Idle retirement skipped because owned process descendants changed.".into(),
+                );
+            }
+            self.teardown_started.store(true, Ordering::SeqCst);
+        }
+        let baseline = self
+            .runtime_process_baseline
+            .lock()
+            .map_err(|_| "Monitter runtime ownership lock failed.".to_string())?
+            .clone()
+            .ok_or("Idle runtime has no verified owned process baseline.")?;
+
+        // EOF is the graceful shutdown request for the persistent stdio
+        // transports. Dropping all control senders closes ACP's writer queue.
+        self.control_stdin
+            .lock()
+            .map_err(|_| "Monitter provider control lock failed.".to_string())?
+            .take();
+        self.acp_control
+            .lock()
+            .map_err(|_| "ACP control queue unavailable.".to_string())?
+            .take();
+
+        let graceful_deadline = Instant::now() + Duration::from_secs(1);
+        if self.wait_for_owned_exit_until(graceful_deadline, &baseline, false)? {
+            self.cleanup_auxiliary();
+            return Ok(());
+        }
+        self.signal_owned(libc::SIGTERM)?;
+        self.signal_verified_baseline(&baseline, libc::SIGTERM)?;
+        if self.wait_for_owned_exit_until(
+            Instant::now() + Duration::from_secs(2),
+            &baseline,
+            false,
+        )? {
+            self.cleanup_auxiliary();
+            return Ok(());
+        }
+        self.signal_owned(libc::SIGKILL)?;
+        self.signal_verified_baseline(&baseline, libc::SIGKILL)?;
+        if self.wait_for_owned_exit_until(
+            Instant::now() + Duration::from_secs(1),
+            &baseline,
+            true,
+        )? {
+            self.cleanup_auxiliary();
+            return Ok(());
+        }
+        Err("Idle runtime did not exit within the owned teardown deadline.".into())
+    }
+
+    fn signal_owned(&self, signal: i32) -> Result<(), String> {
+        let process_group = self.owned_process_group.load(Ordering::SeqCst);
+        #[cfg(unix)]
+        if process_group > 0 {
+            // Every launched harness is isolated into this process group.
+            // Signalling it covers a helper which survived after its direct
+            // parent consumed EOF, without reaching any unrelated terminal.
+            unsafe {
+                libc::kill(-process_group, signal);
+            }
+            return Ok(());
+        }
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| "Codex child lock failed.".to_string())?;
+        if let Some(child) = child.as_mut() {
+            signal_child(child, signal);
+        }
+        Ok(())
+    }
+
+    fn signal_verified_baseline(
+        &self,
+        baseline: &HashSet<(libc::pid_t, i64)>,
+        signal: i32,
+    ) -> Result<(), String> {
+        for &(pid, started_at) in baseline {
+            match crate::process_metrics::retirement_process_identity_alive(pid, started_at) {
+                Ok(true) => {
+                    // The identity check above prevents signalling a reused
+                    // PID. These are captured provider helpers, which may
+                    // have called setsid or reparented after their owned root
+                    // exited.
+                    unsafe {
+                        libc::kill(pid, signal);
+                    }
+                }
+                Ok(false) | Err(_) => {
+                    // An incomplete macOS process lookup must never broaden
+                    // a signal to a PID we cannot still prove we own. The
+                    // bounded exit wait retries this identity shortly.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_for_owned_exit_until(
+        &self,
+        deadline: Instant,
+        baseline: &HashSet<(libc::pid_t, i64)>,
+        report_final_identity_error: bool,
+    ) -> Result<bool, String> {
+        let mut last_identity_error = None;
+        loop {
+            let mut slot = self
+                .child
+                .lock()
+                .map_err(|_| "Codex child lock failed.".to_string())?;
+            let root_exited = match slot.as_mut() {
+                Some(child) => child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .is_some(),
+                None => true,
+            };
+            if root_exited {
+                slot.take();
+            }
+            drop(slot);
+            if root_exited && self.owned_process_group_exited() {
+                match self.verified_baseline_exited(baseline) {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => {}
+                    Err(error) => last_identity_error = Some(error),
+                }
+            }
+            if Instant::now() >= deadline {
+                if report_final_identity_error {
+                    if let Some(error) = last_identity_error {
+                        return Err(error);
+                    }
+                }
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn verified_baseline_exited(
+        &self,
+        baseline: &HashSet<(libc::pid_t, i64)>,
+    ) -> Result<bool, String> {
+        for &(pid, started_at) in baseline {
+            if crate::process_metrics::retirement_process_identity_alive(pid, started_at)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn owned_process_group_exited(&self) -> bool {
+        let process_group = self.owned_process_group.load(Ordering::SeqCst);
+        if process_group <= 0 {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            // kill(pid, 0) checks existence without changing process state.
+            // A surviving process group remains our owned teardown target.
+            let result = unsafe { libc::kill(-process_group, 0) };
+            return result != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
     }
 }
 
@@ -2702,6 +3380,12 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         };
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        // Capture Claude's owned tree before its first prompt. Later unknown
+        // descendants conservatively pin the runtime rather than being killed
+        // by idle GC. An unavailable sample merely disables GC for this owner.
+        if task.provider == "claude" {
+            let _ = control.capture_runtime_process_baseline_for_pid(child.id() as libc::pid_t);
+        }
         let remote_supervised = host.kind == "ssh";
         let remote_helper_dir = remote_collaboration
             .as_ref()
@@ -2807,6 +3491,10 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         }
         if task.provider == "claude" {
             control.mark_resident();
+            // Claude's stream-json session can cold-resume through its saved
+            // native session ID. The collector additionally requires that ID
+            // to be durable before it can claim this resident owner.
+            control.set_resume_supported(true);
         }
 
         let failed_event = Arc::new(AtomicBool::new(false));
@@ -2821,6 +3509,16 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             let assistant_seen = assistant_seen.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
+                    // `retire_owned` can reap the process before this reader
+                    // has drained its final pipe buffer. Those late records
+                    // belong to the retired owner and must never be applied
+                    // after the registry releases a cold-resumed successor.
+                    if control.is_planned_retirement() {
+                        break;
+                    }
+                    let Some(_event_permit) = control.begin_event_processing() else {
+                        break;
+                    };
                     match line {
                         Ok(line) => match serde_json::from_str::<Value>(&line) {
                             Ok(value) => {
@@ -2830,6 +3528,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                     if let Some((request_id, tool, input, summary, detail, risk)) =
                                         claude_approval(&value)
                                     {
+                                        control.mark_tool_work_observed();
                                         let request = service.create_approval_request(
                                             CreateApprovalRequest {
                                                 task_id: task.clone(),
@@ -2890,6 +3589,11 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                     }
                                 }
                                 for parsed in parse_events(&provider, &value) {
+                                    if parsed.event.as_ref().is_some_and(|(kind, _, _)| {
+                                        matches!(kind.as_str(), "tool" | "computer")
+                                    }) {
+                                        control.mark_tool_work_observed();
+                                    }
                                     if provider == "hermes" {
                                         if let Some((request_id, tool, summary, detail)) =
                                             hermes_approval(&parsed)
@@ -2982,7 +3686,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                 // current run before making the resident
                                 // transport eligible for its next prompt.
                                 if complete_claude_turn {
-                                    service.complete_resident_turn(&task);
+                                    service.complete_resident_turn(&task, &control);
                                 }
                             }
                             Err(error) => {
@@ -3011,9 +3715,16 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         let stderr_thread = stderr.map(|stderr| {
             let service = service.clone();
             let task = task_id.clone();
+            let control = control.clone();
             thread::spawn(move || {
                 let mut diagnostic_recorded = false;
                 for line in BufReader::new(stderr).lines() {
+                    if control.is_planned_retirement() {
+                        break;
+                    }
+                    let Some(_event_permit) = control.begin_event_processing() else {
+                        break;
+                    };
                     match line {
                         Ok(line) => {
                             if !diagnostic_recorded {
@@ -3043,6 +3754,12 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         }
         if let Some(directory) = remote_helper_dir.as_deref() {
             cleanup_remote_helper(&host, directory);
+        }
+        // The collector owns planned retirement and performs the pointer-
+        // checked registry release once all resources have been reaped. Do
+        // not turn its intentional EOF into a task interruption or error.
+        if control.is_planned_retirement() {
+            return;
         }
         match result {
             Ok(_status) if control.cancelled.load(Ordering::SeqCst) => {
@@ -3104,6 +3821,282 @@ mod tests {
             project_id: None,
             acp: None,
         }
+    }
+
+    #[test]
+    fn retirement_requires_strict_timeout_and_no_reader_in_flight() {
+        let control = RunControl::new(false);
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_idle();
+        let since = match control.lifecycle.lock().unwrap().phase {
+            RuntimePhase::Idle { since } => since,
+            _ => panic!("expected idle"),
+        };
+        let timeout = Duration::from_secs(300);
+        assert!(!control.idle_timeout_elapsed(since, timeout));
+        assert!(!control.idle_timeout_elapsed(since + timeout, timeout));
+        assert!(control.idle_timeout_elapsed(since + timeout + Duration::from_nanos(1), timeout));
+        assert!(!control.try_retire_idle(since + timeout, timeout));
+        let permit = control.begin_event_processing().unwrap();
+        assert!(!control.try_retire_idle(since + timeout + Duration::from_nanos(1), timeout));
+        drop(permit);
+        assert!(control.try_retire_idle(since + timeout + Duration::from_nanos(1), timeout));
+        assert!(!control.idle_timeout_elapsed(since + timeout + Duration::from_nanos(1), timeout));
+        assert!(control.begin_event_processing().is_none());
+        control.finish_retirement();
+        // Buffered output remains stale even after the registry barrier opens.
+        assert!(control.begin_event_processing().is_none());
+    }
+
+    #[test]
+    fn idle_retirement_is_atomic_against_a_later_turn_reservation() {
+        let control = RunControl::new(false);
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_idle();
+
+        assert!(control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+        assert!(control.is_retiring());
+        assert!(control.is_planned_retirement());
+        assert!(control.begin_run().is_err());
+
+        control.finish_retirement();
+        assert!(control.wait_for_teardown(Duration::ZERO).is_ok());
+        assert!(control.begin_run().is_ok());
+    }
+
+    #[test]
+    fn idle_timestamp_is_not_extended_and_pending_permission_blocks_retirement() {
+        let control = RunControl::new(false);
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_idle();
+        // A second completion/read-only observation must retain the original
+        // monotonic timestamp rather than extending the GC deadline.
+        control.mark_idle();
+        control.acp_permission_wait_started();
+        assert!(!control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+        control.acp_permission_wait_finished();
+        assert!(control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+    }
+
+    #[test]
+    fn active_app_server_turn_blocks_idle_retirement() {
+        let control = RunControl::new(false);
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_resident();
+        control.set_app_server_turn("turn-1".into());
+        control.mark_idle();
+        assert!(!control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+        control.clear_app_server_turn();
+        assert!(control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+        assert!(!control.is_resident());
+        assert!(control.abort_retirement());
+        assert!(control.is_idle());
+    }
+
+    #[test]
+    fn cancellation_does_not_unfence_a_planned_retirement() {
+        let control = RunControl::new(false);
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_resident();
+        control.mark_idle();
+        assert!(control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+        control.cancel();
+        assert!(control.is_cancelled());
+        assert!(control.is_retiring());
+        assert!(control.is_planned_retirement());
+        assert!(!control.is_resident());
+        assert!(control.begin_run().is_err());
+    }
+
+    #[test]
+    fn cancellation_reservation_blocks_a_later_turn_before_teardown() {
+        let control = RunControl::new(false);
+        control.reserve_cancellation();
+        assert!(control.is_cancelled());
+        assert!(control.begin_run().is_err());
+    }
+
+    #[test]
+    fn planned_retirement_reaps_an_isolated_owned_process_group() {
+        let mut command = Command::new("sh");
+        command
+            // The shell is the owned root captured in the baseline. EOF makes
+            // it leave a background helper behind, exercising the exact race
+            // where waiting only for the root would leak a process.
+            .args(["-c", "read ignored; sleep 30 & exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        isolate_child(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let control = RunControl::new(false);
+        control.install(child, stdin).unwrap();
+        control.capture_runtime_process_baseline().unwrap();
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_idle();
+        assert!(control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+        control.retire_owned().unwrap();
+        assert!(control.owned_process_group_exited());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn planned_retirement_reaps_a_verified_helper_that_left_its_process_group() {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "python3 -c 'import os,time; os.setsid(); time.sleep(30)' & echo $!; read ignored; exit 0",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        isolate_child(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let helper_pid = {
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            line.trim().parse::<libc::pid_t>().unwrap()
+        };
+        let unrelated = Command::new("sleep").arg("30").spawn().unwrap();
+        let unrelated_identity =
+            crate::process_metrics::retirement_process_tree(unsafe { libc::getpid() })
+                .unwrap()
+                .into_iter()
+                .find(|(pid, _)| *pid == unrelated.id() as libc::pid_t)
+                .unwrap();
+        let control = RunControl::new(false);
+        control.install(child, stdin).unwrap();
+        control.capture_runtime_process_baseline().unwrap();
+        let helper_identity = control
+            .runtime_process_baseline
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|(pid, _)| *pid == helper_pid)
+            .copied()
+            .expect("helper must be captured before it re-parents");
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_idle();
+        assert!(control.try_retire_idle(
+            Instant::now() + Duration::from_secs(6),
+            Duration::from_secs(5),
+        ));
+        control.retire_owned().unwrap();
+        assert!(!crate::process_metrics::retirement_process_identity_alive(
+            helper_identity.0,
+            helper_identity.1,
+        )
+        .unwrap());
+        assert!(crate::process_metrics::retirement_process_identity_alive(
+            unrelated_identity.0,
+            unrelated_identity.1,
+        )
+        .unwrap());
+        let _ = unsafe { libc::kill(unrelated.id() as libc::pid_t, libc::SIGKILL) };
+        let _ = unrelated.wait_with_output();
+    }
+
+    fn lazy_helper_control() -> Arc<RunControl> {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "read ignored; sleep 30 & wait"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        isolate_child(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let control = RunControl::new(false);
+        control.install(child, stdin).unwrap();
+        control.capture_runtime_process_baseline().unwrap();
+        control
+    }
+
+    #[test]
+    fn no_tool_turn_can_adopt_a_delayed_provider_helper() {
+        let control = lazy_helper_control();
+        control.begin_run().unwrap();
+        control.mark_idle();
+        let mut stdin = control.control_stdin.lock().unwrap().take().unwrap();
+        stdin.write_all(b"ready\n").unwrap();
+        drop(stdin);
+        thread::sleep(Duration::from_millis(60));
+
+        assert!(control
+            .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
+            .unwrap());
+        assert!(control.retirement_process_tree_is_safe());
+        control.cancel();
+        let _ = control.wait();
+    }
+
+    #[test]
+    fn active_turn_cannot_adopt_a_delayed_provider_helper() {
+        let control = lazy_helper_control();
+        control.begin_run().unwrap();
+        let mut stdin = control.control_stdin.lock().unwrap().take().unwrap();
+        stdin.write_all(b"ready\n").unwrap();
+        drop(stdin);
+        thread::sleep(Duration::from_millis(60));
+
+        assert!(!control
+            .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
+            .unwrap());
+        assert!(!control.retirement_process_tree_is_safe());
+        control.cancel();
+        let _ = control.wait();
+    }
+
+    #[test]
+    fn tool_work_keeps_a_later_unknown_child_pinned() {
+        let control = lazy_helper_control();
+        let mut stdin = control.control_stdin.lock().unwrap().take().unwrap();
+        stdin.write_all(b"tool\n").unwrap();
+        drop(stdin);
+        thread::sleep(Duration::from_millis(60));
+
+        control.mark_tool_work_observed();
+        assert!(!control
+            .refresh_runtime_process_baseline_if_no_tool_work()
+            .unwrap());
+        assert!(!control.retirement_process_tree_is_safe());
+        control.cancel();
+        let _ = control.wait();
     }
 
     #[test]

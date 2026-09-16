@@ -437,6 +437,28 @@ fn app_server_event_redirection_skips_snapshot_events_for_admin_task() {
     let fixture = fixture("app-server-event-redirect");
     let task_id = fixture.service.ensure_internal_admin_task().unwrap();
     let control: Arc<crate::runner::RunControl> = crate::runner::RunControl::new(false);
+    control.mark_resident();
+    control.set_app_server_thread("native-session-1".into());
+    control.set_app_server_turn("turn-1".into());
+    fixture
+        .service
+        .mutate_data(None, |data| {
+            data.snapshot
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .unwrap()
+                .status = "running".into();
+            Ok(())
+        })
+        .unwrap();
+    fixture
+        .service
+        .runs
+        .lock()
+        .unwrap()
+        .tasks
+        .insert(task_id.clone(), Arc::clone(&control));
     let parsed = Parsed {
         native_session_id: Some("native-session-1".into()),
         assistant: Some("would-have-been-persisted".into()),
@@ -457,13 +479,14 @@ fn app_server_event_redirection_skips_snapshot_events_for_admin_task() {
         .messages
         .iter()
         .all(|message| message.task_id != task_id));
-    // The native session id must also be left untouched.
+    // The invisible admin still retains its native session for a later cold
+    // wake; only transcript/activity projection is suppressed.
     let task = snapshot
         .tasks
         .iter()
         .find(|task| task.id == task_id)
         .expect("internal task must still exist");
-    assert!(task.native_session_id.is_none());
+    assert_eq!(task.native_session_id.as_deref(), Some("native-session-1"));
 }
 
 #[test]
