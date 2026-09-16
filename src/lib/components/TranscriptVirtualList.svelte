@@ -1,167 +1,135 @@
 <script lang="ts" generics="T">
-  import { onMount, tick, untrack, type Snippet } from 'svelte';
+  import { createVirtualizer, defaultRangeExtractor, type VirtualizerOptions } from '@tanstack/svelte-virtual';
+  import { flushSync, untrack, type Snippet } from 'svelte';
+  import { useTranscriptScrollController } from '$lib/transcript-scroll-owner';
 
-  /** Bounded renderer for rich MessagePane rows. */
-  let { items, getKey, children, estimateHeight = 120, overscan = 6, stickyKey, active = true }: {
+  /** Bounded renderer with one virtualizer owning transcript geometry and scrolling. */
+  let { items, getKey, children, footer, estimateHeight = 120, overscan = 6, stickyKey, active = true }: {
     items: T[];
     getKey: (item: T, index: number) => string;
     children: Snippet<[item: T, index: number]>;
+    /** Height-contributing content after the rows, such as thinking and channel waiting states. */
+    footer?: Snippet;
     estimateHeight?: number;
     overscan?: number;
-    /** Keeps the latest user request mounted for its existing sticky CSS. */
+    /** Kept mounted by callers for their existing sticky CSS. */
     stickyKey?: string | null;
-    /** Pass the owning pane's selected state. */
     active?: boolean;
   } = $props();
 
   let root = $state<HTMLDivElement>();
-  let scrollParent = $state<HTMLElement>();
-  let documentVisible = $state(true);
-  let range = $state({ start: 0, end: 0 });
-  const heights = new Map<string, number>();
-  type Metrics = { keys: string[]; indexByKey: Map<string, number>; values: number[]; tree: number[] };
-  let metrics: Metrics = { keys: [], indexByKey: new Map(), values: [], tree: [0] };
-  // Fenwick-tree writes are intentionally imperative; this revision makes the
-  // spacer derived values react once for each ResizeObserver batch.
-  let metricsRevision = $state(0);
-  let resizeObserver: ResizeObserver | undefined;
-  let frame: number | undefined;
+  let footerElement = $state<HTMLDivElement>();
+  let scrollParent: HTMLElement | null = null;
+  let footerHeight = $state(0);
+  let scrollMargin = $state(0);
+  let footerObserver: ResizeObserver | undefined;
+  let unregisterOwner: (() => void) | undefined;
+  const controller = useTranscriptScrollController();
 
-  const heightFor = (item: T, index: number) => heights.get(getKey(item, index)) ?? estimateHeight;
-  function add(metric: Metrics, index: number, delta: number) {
-    for (let node = index + 1; node < metric.tree.length; node += node & -node) metric.tree[node] += delta;
-  }
-  function offsetFor(end: number) {
-    metricsRevision;
-    let total = 0;
-    for (let node = Math.max(0, Math.min(end, metrics.values.length)); node > 0; node -= node & -node) total += metrics.tree[node];
-    return total;
-  }
-  function indexAtOffset(offset: number) {
-    metricsRevision;
-    const count = metrics.values.length;
-    if (!count || offset <= 0) return 0;
-    let index = 0, sum = 0, step = 1;
-    while (step << 1 <= count) step <<= 1;
-    for (; step; step >>= 1) {
-      const next = index + step;
-      if (next <= count && sum + metrics.tree[next] <= offset) { index = next; sum += metrics.tree[next]; }
-    }
-    return Math.min(count - 1, index);
-  }
-  function rebuildMetrics() {
-    const keys = items.map(getKey);
-    const liveKeys = new Set(keys);
-    for (const key of heights.keys()) if (!liveKeys.has(key)) heights.delete(key);
-    const next: Metrics = { keys, indexByKey: new Map(), values: [], tree: Array(keys.length + 1).fill(0) };
-    for (let index = 0; index < keys.length; index += 1) {
-      next.indexByKey.set(keys[index], index);
-      const value = heightFor(items[index], index);
-      next.values.push(value);
-      add(next, index, value);
-    }
-    metrics = next;
-    // This runs inside an effect keyed by the item inputs. Avoid subscribing
-    // that effect to the revision it increments, which would self-trigger.
-    metricsRevision = untrack(() => metricsRevision) + 1;
-  }
-  const totalHeight = $derived(offsetFor(metrics.values.length));
-  const stickyIndex = $derived(stickyKey ? metrics.indexByKey.get(stickyKey) ?? -1 : -1);
-  const stickyBeforeWindow = $derived(stickyIndex >= 0 && stickyIndex < range.start);
-  const topSpacer = $derived(offsetFor(stickyBeforeWindow ? stickyIndex : range.start));
-  const stickyGap = $derived(stickyBeforeWindow ? Math.max(0, offsetFor(range.start) - offsetFor(stickyIndex + 1)) : 0);
-  const bottomSpacer = $derived(Math.max(0, totalHeight - offsetFor(range.end)));
-  const rendered = $derived(items.slice(range.start, range.end));
-
-  function updateRange() {
-    frame = undefined;
-    if (!root || !scrollParent || !active || !documentVisible) return;
-    const visibleTop = Math.max(0, scrollParent.scrollTop - root.offsetTop);
-    const visibleBottom = visibleTop + scrollParent.clientHeight;
-    let start = indexAtOffset(visibleTop);
-    let end = Math.min(items.length, indexAtOffset(visibleBottom) + 1);
-    start = Math.max(0, start - overscan);
-    end = Math.min(items.length, end + overscan);
-    range = { start, end };
-  }
-  function scheduleRange() {
-    if (frame !== undefined || !active || !documentVisible) return;
-    frame = requestAnimationFrame(updateRange);
-  }
-  function measured(node: HTMLElement, { key, index }: { key: string; index: number }) {
-    node.dataset.transcriptKey = key; node.dataset.transcriptIndex = String(index);
-    resizeObserver?.observe(node);
-    return { destroy: () => resizeObserver?.unobserve(node) };
-  }
-  function receiveMeasurements(entries: ResizeObserverEntry[]) {
-    let changedAboveViewport = 0;
-    for (const entry of entries) {
-      const element = entry.target as HTMLElement, key = element.dataset.transcriptKey;
-      if (!key) continue;
-      const index = metrics.indexByKey.get(key);
-      if (index === undefined) continue;
-      const next = Math.max(1, Math.ceil(entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height));
-      const previous = heights.get(key) ?? estimateHeight;
-      if (next === previous) continue;
-      heights.set(key, next);
-      metrics.values[index] = next;
-      add(metrics, index, next - previous);
-      if (index < range.start) changedAboveViewport += next - previous;
-    }
-    metricsRevision += 1;
-    if (changedAboveViewport && scrollParent) scrollParent.scrollTop += changedAboveViewport;
-    scheduleRange();
-  }
-
-  $effect(() => {
-    items; estimateHeight;
-    rebuildMetrics();
-    scheduleRange();
+  const virtualizer = createVirtualizer<HTMLElement, HTMLDivElement>({
+    count: 0,
+    getScrollElement: () => scrollParent,
+    estimateSize: () => estimateHeight,
+    getItemKey: index => getKey(items[index], index),
+    overscan,
+    scrollMargin: 0,
+    paddingEnd: 0,
+    // Chat is end-anchored: prepending preserves the reader's row and a
+    // streamed final row remains pinned only for an already-following reader.
+    anchorTo: 'end',
+    followOnAppend: 'instant',
+    scrollEndThreshold: 50,
+    // The adapter publishes before this callback. Flush the measured range
+    // before core applies a synchronous end-anchor adjustment.
+    onChange: (_instance, sync) => { if (sync) flushSync(); },
   });
+
+  function setVirtualizerOptions(options: Partial<VirtualizerOptions<HTMLElement, HTMLDivElement>>) {
+    // The Svelte adapter publishes on every setOptions call. Effects that both
+    // read its store and write options loop forever, so option writes are
+    // deliberately untracked and keyed only by component inputs.
+    untrack(() => $virtualizer.setOptions(options));
+  }
+
+  function updateFooterHeight() {
+    const next = Math.ceil(footerElement?.getBoundingClientRect().height ?? 0);
+    if (next === footerHeight) return;
+    footerHeight = next;
+    setVirtualizerOptions({ paddingEnd: next });
+    // Footer measurements use the same virtualizer-owned scroll write.
+    if (controller && controller.isFollowing()) $virtualizer.scrollToEnd({ behavior: 'instant' });
+  }
+
+  function measureRow(node: HTMLDivElement) {
+    $virtualizer.measureElement(node);
+  }
+
   $effect(() => {
-    // An inactive split has no reader. Unmount its rich rows (including any
-    // nested activity widgets) while retaining only spacer geometry, then
-    // calculate the visible window again when that pane becomes active.
-    if (!active || !documentVisible) { range = { start: 0, end: 0 }; return; }
-    scheduleRange();
+    const stickyIndex = stickyKey ? items.findIndex((item, index) => getKey(item, index) === stickyKey) : -1;
+    setVirtualizerOptions({
+      count: items.length,
+      estimateSize: () => estimateHeight,
+      getItemKey: index => getKey(items[index], index),
+      overscan,
+      scrollMargin,
+      paddingEnd: footerHeight,
+      rangeExtractor: range => {
+        const indexes = defaultRangeExtractor(range);
+        return stickyIndex >= 0 && !indexes.includes(stickyIndex) ? [...indexes, stickyIndex].sort((a, b) => a - b) : indexes;
+      },
+      // A deliberate upward read disables both append follow and end anchoring;
+      // being within the threshold must never silently recapture that reader.
+      anchorTo: controller?.isFollowing() === false ? 'start' : 'end',
+      followOnAppend: controller?.isFollowing() === false ? false : 'instant',
+    });
   });
+
   $effect(() => {
-    if (!root || !active || !documentVisible) return;
-    scrollParent = root.closest<HTMLElement>('.messages') ?? undefined;
-    if (!scrollParent) return;
-    resizeObserver = new ResizeObserver(receiveMeasurements);
-    const onScroll = () => scheduleRange();
-    scrollParent.addEventListener('scroll', onScroll, { passive: true });
-    scheduleRange();
-    return () => {
-      scrollParent?.removeEventListener('scroll', onScroll); resizeObserver?.disconnect(); resizeObserver = undefined;
-      if (frame !== undefined) cancelAnimationFrame(frame); frame = undefined;
+    if (!root) return;
+    scrollParent = root.closest<HTMLElement>('.messages');
+    setVirtualizerOptions({ getScrollElement: () => scrollParent });
+    const measureMargin = () => {
+      if (!scrollParent) return;
+      scrollMargin = root.getBoundingClientRect().top - scrollParent.getBoundingClientRect().top + scrollParent.scrollTop;
     };
+    measureMargin();
+    const observer = new ResizeObserver(measureMargin);
+    observer.observe(root);
+    if (scrollParent) observer.observe(scrollParent);
+    unregisterOwner = controller?.register({
+      scrollToLatest: () => $virtualizer.scrollToEnd({ behavior: 'instant' }),
+      isAtLatest: () => $virtualizer.isAtEnd(50),
+      setFollowing: following => setVirtualizerOptions({ anchorTo: following ? 'end' : 'start', followOnAppend: following ? 'instant' : false }),
+    });
+    return () => { observer.disconnect(); unregisterOwner?.(); unregisterOwner = undefined; scrollParent = null; };
   });
-  onMount(() => {
-    const visibilityChanged = () => { documentVisible = document.visibilityState !== 'hidden'; if (documentVisible) void tick().then(scheduleRange); };
-    documentVisible = document.visibilityState !== 'hidden';
-    document.addEventListener('visibilitychange', visibilityChanged);
-    return () => document.removeEventListener('visibilitychange', visibilityChanged);
+
+  $effect(() => {
+    if (!footerElement) return;
+    footerObserver = new ResizeObserver(updateFooterHeight);
+    footerObserver.observe(footerElement);
+    updateFooterHeight();
+    return () => { footerObserver?.disconnect(); footerObserver = undefined; };
   });
+
 </script>
 
+{@const rows = $virtualizer.getVirtualItems().toSorted((left, right) => left.index - right.index)}
 <div class="transcript-virtual-list" bind:this={root} role="feed" aria-busy={!active} aria-label="Conversation transcript">
-  <div aria-hidden="true" style:height={`${topSpacer}px`}></div>
-  {#if stickyBeforeWindow}
-    {@const stickyItem = items[stickyIndex]}
-    <div class="transcript-row" use:measured={{ key: getKey(stickyItem, stickyIndex), index: stickyIndex }}>
-      {@render children(stickyItem, stickyIndex)}
-    </div>
-    <div aria-hidden="true" style:height={`${stickyGap}px`}></div>
-  {/if}
-  {#each rendered as item, relativeIndex (getKey(item, range.start + relativeIndex))}
-    {@const index = range.start + relativeIndex}
-    <div class="transcript-row" use:measured={{ key: getKey(item, index), index }}>
-      {@render children(item, index)}
+  {#if rows.length}<div aria-hidden="true" style:height={`${Math.max(0, rows[0].start - scrollMargin)}px`}></div>{/if}
+  {#each rows as row, index (row.key)}
+    {@const item = items[row.index]}
+    {#if index > 0}<div aria-hidden="true" style:height={`${Math.max(0, row.start - rows[index - 1].end)}px`}></div>{/if}
+    <div class="transcript-row" data-index={row.index} use:measureRow>
+      {@render children(item, row.index)}
     </div>
   {/each}
-  <div aria-hidden="true" style:height={`${bottomSpacer}px`}></div>
+  {@const renderedEnd = rows.length ? rows.at(-1)!.end - scrollMargin : 0}
+  <div aria-hidden="true" style:height={`${Math.max(0, $virtualizer.getTotalSize() - footerHeight - renderedEnd)}px`}></div>
+  {#if footer}<div class="transcript-footer" bind:this={footerElement}>{@render footer()}</div>{/if}
 </div>
 
-<style>.transcript-virtual-list,.transcript-row{min-width:0}.transcript-row{overflow-anchor:none}</style>
+<style>
+  .transcript-virtual-list,.transcript-row,.transcript-footer { min-width:0; }
+  .transcript-row { overflow-anchor:none; }
+</style>

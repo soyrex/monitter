@@ -158,7 +158,7 @@
         items={displayItems}
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
         stickyKey={displayLatestUserRequest?.id ?? null}
-        active={true}>
+        {active}>
         {#snippet children(item, _index)}
           {#if item.type === 'activity'}
             {@const collaboration=item.value.kind==='collaboration' ? displayCollaborations.find(value => value.id === item.value.detail) : null}
@@ -192,8 +192,12 @@
             {/if}
           {/if}
         {/snippet}
-      </TranscriptVirtualList>{:else if !display.hasPendingApprovals}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
-      {#if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}
+        {#snippet footer()}
+          {#if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}
+            <ThinkingStatus active={active && !transcriptBuffer.held()} starting={displayTask.status!=='running'} running={displayTask.status==='running'} startedAt={displayLatestUserRequest?.createdAt}>{#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}</ThinkingStatus>
+          {/if}
+        {/snippet}
+      </TranscriptVirtualList>{:else if !display.hasPendingApprovals}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{:else if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}
         <ThinkingStatus active={active && !transcriptBuffer.held()} starting={displayTask.status!=='running'} running={displayTask.status==='running'} startedAt={displayLatestUserRequest?.createdAt}>{#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}</ThinkingStatus>
       {/if}
     </MessagePane>

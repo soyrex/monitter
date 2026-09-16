@@ -2,29 +2,38 @@
   import { messageArrival } from '$lib/navigation-motion';
   import { onMount, type Snippet } from 'svelte';
   import { ArrowDown } from '@lucide/svelte';
+  import { provideTranscriptScrollController, type TranscriptScrollOwner } from '$lib/transcript-scroll-owner';
 
   let { resetKey, children, header, stickyRequest = false, active = true, thinking = false, pendingUpdates = false, onfollowchange }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean; thinking?: boolean; pendingUpdates?: boolean; onfollowchange?: (following: boolean) => void } = $props();
   let viewport = $state<HTMLDivElement>();
-  let content = $state<HTMLDivElement>();
-  let heading = $state<HTMLDivElement>();
   let showJump = $state(false);
   let followingLatest = true;
   let readerDetached = false;
   let detachedScrollTop = 0;
-  let lastViewportHeight = 0;
-  let lastScrollHeight = 0;
-  let followFrame: number | undefined;
   let touchY: number | undefined;
   const bottomThreshold = 50;
-  const bottomCorrectionTolerance = 3;
   let documentVisible = $state(true);
   let lastResetKey = $state<string | undefined>();
-  let lastActive = $state<boolean | undefined>();
+  let owner: TranscriptScrollOwner | undefined;
+  let pendingLatestRequest = false;
   const jumpVisible = $derived(showJump || pendingUpdates);
+
+  provideTranscriptScrollController({
+    register(nextOwner) {
+      owner = nextOwner;
+      if (pendingLatestRequest) {
+        pendingLatestRequest = false;
+        owner.scrollToLatest();
+      }
+      return () => { if (owner === nextOwner) owner = undefined; };
+    },
+    isFollowing: () => followingLatest,
+  });
 
   function setFollowing(value: boolean) {
     if (followingLatest === value) return;
     followingLatest = value;
+    owner?.setFollowing(value);
     onfollowchange?.(value);
   }
 
@@ -40,32 +49,12 @@
     return distanceFromLatest() <= 1;
   }
 
-  function rememberMetrics() {
-    if (!viewport || !active || !documentVisible) return;
-    lastViewportHeight = viewport.clientHeight;
-    lastScrollHeight = viewport.scrollHeight;
-  }
-
-  function pinToLatest() {
-    if (!viewport) return;
-    const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    // Ignore tiny layout/rounding changes instead of generating another scroll.
-    // Measure the full gap so several small updates still catch up once >3px.
-    if (Math.abs(viewport.scrollTop - bottom) > bottomCorrectionTolerance) viewport.scrollTop = bottom;
-    showJump = false;
-    // Keep programmatic scroll events from being mistaken for reader intent.
-    rememberMetrics();
-  }
-
   function detachFromLatest() {
     if (!viewport || !active) return;
     readerDetached = true;
     setFollowing(false);
     detachedScrollTop = viewport.scrollTop;
     showJump = !atAbsoluteLatest() || pendingUpdates;
-    if (followFrame !== undefined) cancelAnimationFrame(followFrame);
-    followFrame = undefined;
-    rememberMetrics();
   }
 
   function handleScrollKey(event: KeyboardEvent) {
@@ -98,34 +87,15 @@
     if (event.pointerType !== 'touch' && event.clientX >= right - 14) detachFromLatest();
   }
 
-  function followLayout() {
-    pinToLatest();
-    // Svelte children, font/image layout and composer resizing can settle after
-    // the first measurement. Coalesce a final correction without smooth-scroll
-    // animations that would constantly lag behind streamed replies.
-    if (followFrame !== undefined || !active || !documentVisible) return;
-    followFrame = requestAnimationFrame(() => {
-      followFrame = undefined;
-      if (followingLatest) pinToLatest();
-    });
-  }
-
   function jumpToLatest() {
     readerDetached = false;
     setFollowing(true);
-    followLayout();
+    showJump = false;
+    if (owner) owner.scrollToLatest();
+    else pendingLatestRequest = true;
   }
 
   function handleScroll() {
-    // Scroll anchoring/clamping can emit before ResizeObserver for CONTENT
-    // growth as well as viewport resizing. Preserve the pre-layout follow state
-    // instead of measuring the new, larger bottom gap as a reader scrolling up.
-    if (viewport && (viewport.clientHeight !== lastViewportHeight || viewport.scrollHeight !== lastScrollHeight)) {
-      if (followingLatest) followLayout();
-      else showJump = !atAbsoluteLatest() || pendingUpdates;
-      rememberMetrics();
-      return;
-    }
     if (readerDetached && viewport) {
       const moved = Math.abs(viewport.scrollTop - detachedScrollTop) > 0.5;
       detachedScrollTop = viewport.scrollTop;
@@ -137,21 +107,17 @@
         setFollowing(false);
         showJump = !atAbsoluteLatest() || pendingUpdates;
       }
-      rememberMetrics();
       return;
     }
     setFollowing(nearLatest());
     showJump = !followingLatest || pendingUpdates;
-    rememberMetrics();
-    if (followingLatest) followLayout();
   }
 
   // A conversation activation or explicit send requests a jump after Svelte
   // has rendered that conversation. Background updates do not change this key.
   $effect(() => {
-    const changed = resetKey !== lastResetKey || active !== lastActive;
+    const changed = resetKey !== lastResetKey;
     lastResetKey = resetKey;
-    lastActive = active;
     if (changed && active && documentVisible) jumpToLatest();
   });
 
@@ -159,48 +125,21 @@
     const visibilityChanged = () => {
       documentVisible = document.visibilityState !== 'hidden';
       // Returning to a visible window must not discard a reader's held place.
-      if (documentVisible && active) { rememberMetrics(); if (followingLatest) followLayout(); }
+      if (documentVisible && active && followingLatest) jumpToLatest();
     };
     documentVisible = document.visibilityState !== 'hidden';
     document.addEventListener('visibilitychange', visibilityChanged);
     return () => document.removeEventListener('visibilitychange', visibilityChanged);
   });
 
-  $effect(() => {
-    if (!viewport || !active || !documentVisible) return;
-    rememberMetrics();
-    const observer = new ResizeObserver(() => {
-      // Covers streamed content, expanded tools, images/fonts and pane resizing.
-      // Readers who scrolled up keep their place as new content arrives.
-      if (followingLatest) followLayout();
-      else showJump = !atAbsoluteLatest() || pendingUpdates;
-      rememberMetrics();
-    });
-    if (viewport) observer.observe(viewport);
-    if (content) observer.observe(content);
-    if (heading) observer.observe(heading);
-    const liveTextObserver = new MutationObserver(() => {
-      // Elapsed timers and streamed text can update an existing text node
-      // without adding an element. Correct the followed position in the same
-      // microtask so that update cannot flash a small bottom gap for one frame.
-      if (followingLatest) followLayout();
-    });
-    if (content) liveTextObserver.observe(content, { characterData: true, subtree: true });
-    return () => {
-      observer.disconnect();
-      liveTextObserver.disconnect();
-      if (followFrame !== undefined) cancelAnimationFrame(followFrame);
-      followFrame = undefined;
-    };
-  });
 </script>
 
 <div class="message-pane" class:has-sticky-request={stickyRequest}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (the scroll pane must support keyboard scrolling) -->
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (wheel, touch and scrollbar intent must detach follow mode before scroll) -->
   <div class="messages" bind:this={viewport} onscroll={handleScroll} onwheel={handleWheel} ontouchstart={handleTouchStart} ontouchmove={handleTouchMove} onkeydown={handleScrollKey} onpointerdown={handleScrollPointer} role="region" aria-label="Messages" tabindex="0">
-    {#if header}<div class="message-header" bind:this={heading}>{@render header()}</div>{/if}
-    <div class="message-content" use:messageArrival bind:this={content}>{@render children()}</div>
+    {#if header}<div class="message-header">{@render header()}</div>{/if}
+    <div class="message-content" use:messageArrival>{@render children()}</div>
   </div>
   <button class="jump-latest" class:visible={jumpVisible} class:thinking data-pending-updates={pendingUpdates} aria-label="Jump to latest message" title={pendingUpdates ? 'Jump to latest message — new updates waiting' : 'Jump to latest message'} aria-hidden={!jumpVisible} tabindex={jumpVisible ? 0 : -1} disabled={!jumpVisible} onclick={() => {
       jumpToLatest();

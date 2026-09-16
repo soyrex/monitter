@@ -3515,7 +3515,7 @@
           {#if displayedChannelTranscript.messages.length || displayedChannelTranscript.optimisticMessages.length}<TranscriptVirtualList
               items={displayedChannelTranscript.messages}
               getKey={(message) => message.id}
-              active={true}>
+              active={embedded ? active : activePaneId === 'main'}>
               {#snippet children(message, _index)}<article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && displayedChannelTranscript.tintUserMessages}
@@ -3528,23 +3528,29 @@
                 </MessageMeta>
                 <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
               </article>{/snippet}
-            </TranscriptVirtualList>
+              {#snippet footer()}
               {#each displayedChannelTranscript.optimisticMessages as message (message.id)}
                 <article class="message user optimistic-message" data-delivery-status={message.status}>
                   <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
                   <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
                 </article>
-              {/each}{:else}<div class="blank-conversation">
+              {/each}
+              {#each displayedChannelTranscript.waiting as waiting}
+                {@render agentWaiting(displayedChannelTranscript.agents.find(agent=>agent.id===waiting.agentId), waiting.starting)}
+              {/each}
+              {/snippet}
+            </TranscriptVirtualList>{:else}<div class="blank-conversation">
               <MessageSquare size={24} />
               <h2>Start this channel</h2>
               <p>
                 Pick the agents who should receive your message. Each gets an
                 explicit linked task.
               </p>
-            </div>{/if}
-          {#each displayedChannelTranscript.waiting as waiting}
-            {@render agentWaiting(displayedChannelTranscript.agents.find(agent=>agent.id===waiting.agentId), waiting.starting)}
-          {/each}
+            </div>
+              {#each displayedChannelTranscript.waiting as waiting}
+                {@render agentWaiting(displayedChannelTranscript.agents.find(agent=>agent.id===waiting.agentId), waiting.starting)}
+              {/each}
+            {/if}
         </MessagePane>
         {#if channelTranscriptBuffer.held() && channelLiveErrors.length}<div class="live-channel-status" aria-live="polite">
           {#each channelLiveErrors as task}<p class="live-transcript-notice" role="status">{(events.filter(event=>event.taskId===task.id&&event.kind==='error').at(-1)?.detail || 'A channel task stopped with an error.').slice(0, 500)}</p>{/each}
