@@ -1,4 +1,5 @@
 import { animateMotion } from './motion';
+import { activeModal } from './active-modal';
 /** Put transient menus in the browser's top layer, outside pane overflow. */
 export function floating(
   node: HTMLElement,
@@ -7,6 +8,8 @@ export function floating(
   const anchor = options.anchor;
   node.setAttribute('popover', 'manual');
   node.showPopover();
+  // Dialog popovers are active surfaces too; plain menus keep their own styling.
+  const highlight = node.getAttribute('role') === 'dialog' ? activeModal(node, true) : null;
 
   function position() {
     const rect = anchor.getBoundingClientRect();
@@ -31,6 +34,7 @@ export function floating(
   if (options.focus !== false) node.querySelector<HTMLElement>('button:not(:disabled)')?.focus();
   return {
     destroy() {
+      highlight?.destroy();
       entrance?.cancel();
       observer.disconnect();
       window.removeEventListener('resize', position);

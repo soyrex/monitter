@@ -363,6 +363,7 @@
         </section>
         <section class="setting-card" aria-labelledby="panes-heading">
           <div class="card-heading"><h2 id="panes-heading">Pane appearance</h2><p>Keep the active workspace easy to identify.</p></div>
+          <label class="switch-row"><span><strong>Highlight active pane</strong><small>Draw an accent-colour border around the active pane.</small></span><input type="checkbox" role="switch" aria-label="Highlight active pane" checked={settings.showActivePaneBorder ?? true} onchange={(event) => void save({ showActivePaneBorder: event.currentTarget.checked })} /></label>
           <label class="switch-row"><span><strong>Dim inactive panes</strong><small>Reduce visual weight for panes that are not active.</small></span><input type="checkbox" role="switch" aria-label="Dim inactive panes" checked={settings.dimInactivePanes ?? true} onchange={(event) => void save({ dimInactivePanes: event.currentTarget.checked })} /></label>
           <label class:disabled={settings.dimInactivePanes === false} class="range-setting">Inactive pane opacity <strong>{Math.round((settings.inactivePaneOpacity ?? 0.6) * 100)}%</strong><input class="range" type="range" use:rangeFill={(settings.inactivePaneOpacity ?? 0.6) * 100} aria-label="Inactive pane opacity" min="10" max="90" step="5" disabled={settings.dimInactivePanes === false} value={(settings.inactivePaneOpacity ?? 0.6) * 100} onchange={(event) => void save({ inactivePaneOpacity: Number(event.currentTarget.value) / 100 })} /></label>
         </section>

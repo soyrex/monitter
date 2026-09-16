@@ -104,3 +104,11 @@ svg.lucide { stroke-width: 1.5px; }
     scroll-behavior: auto !important;
   }
 }
+
+/* The active-surface preference follows the foremost modal while it is open.
+   Outline preserves dialog geometry, rounded corners and the existing shadow. */
+:root:has(.pane-grid-root[data-active-pane-border="true"]) [data-active-modal] {
+  /* This is a surface indicator, so it must survive the app focus-ring reset. */
+  outline: 2px solid var(--accent) !important;
+  outline-offset: -2px;
+}

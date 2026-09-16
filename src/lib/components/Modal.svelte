@@ -2,6 +2,7 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { X } from "@lucide/svelte";
   import { animateMotion } from "$lib/motion";
+  import { activeModal } from "$lib/active-modal";
   let {
     title,
     open = false,
@@ -157,7 +158,7 @@
     onclick={(event) => event.currentTarget === event.target && requestClose()}
   >
     <div
-      bind:this={dialog}
+      bind:this={dialog} use:activeModal
       class="modal"
       class:wide
       data-motion-closing={closing ? 'true' : undefined}

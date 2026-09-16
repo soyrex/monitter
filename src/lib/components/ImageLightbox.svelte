@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { activeModal } from '$lib/active-modal';
   import { X } from '@lucide/svelte';
 
   let { image = $bindable<{ src: string; alt: string; title?: string } | null>(null), returnFocus = null }: {
@@ -36,7 +37,7 @@
 </script>
 
 {#if image}
-  <dialog bind:this={dialog} class="image-lightbox" aria-label={image.title || image.alt || 'Image preview'} oncancel={event=>{event.preventDefault();close();}} onclose={()=>image&&close()} onclick={event=>event.target===dialog&&close()}>
+  <dialog bind:this={dialog} use:activeModal={true} class="image-lightbox" aria-label={image.title || image.alt || 'Image preview'} oncancel={event=>{event.preventDefault();close();}} onclose={()=>image&&close()} onclick={event=>event.target===dialog&&close()}>
     <header><span>{image.title || image.alt || 'Image preview'}</span><div><button data-autofocus aria-label={actualSize ? 'Fit image to window' : 'View actual size'} onclick={()=>actualSize=!actualSize}>{actualSize ? 'Fit image' : 'Actual size'}</button><button aria-label="Close image preview" onclick={close}><X size={18}/></button></div></header>
     <div class="image-frame"><img class:actual-size={actualSize} src={image.src} alt={image.alt}/></div>
   </dialog>

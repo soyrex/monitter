@@ -2,6 +2,7 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { Archive, Bot, Brain, Columns2, Command, CornerDownLeft, Folder, Grid2X2, MessageSquare, Monitor, Moon, MousePointer2, PanelRight, Radio, Search, Settings2, Sparkles, Square, SquareTerminal, Sun, Users, Wrench, X, ZoomIn, ZoomOut } from "@lucide/svelte";
   import { animateMotion } from "$lib/motion";
+  import { activeModal } from "$lib/active-modal";
 
   function itemIcon(id: string) {
     const kind = id.split(':')[0];
@@ -26,7 +27,7 @@
     if (id === 'theme:light') return Sun;
     if (id === 'theme:dark') return Moon;
     if (id === 'hosts' || id === 'theme:system' || id === 'scale-reset') return Monitor;
-    if (kind === 'sidebar' || id === 'detail' || id === 'dim-panes') return PanelRight;
+    if (kind === 'sidebar' || id === 'detail' || id === 'active-pane-border' || id === 'dim-panes') return PanelRight;
     return Command;
   }
 
@@ -281,7 +282,7 @@
     role="presentation"
     onclick={(event) => event.currentTarget === event.target && requestClose()}
   >
-    <dialog bind:this={dialog} class="palette" inert={closing} data-motion-closing={closing ? 'true' : undefined} open aria-modal="true" aria-label={title} tabindex="-1">
+    <dialog bind:this={dialog} use:activeModal class="palette" inert={closing} data-motion-closing={closing ? 'true' : undefined} open aria-modal="true" aria-label={title} tabindex="-1">
       <header>
         <span class="title"><Command size={15} strokeWidth={2.1} /> {title}</span>
         <button class="close" type="button" aria-label="Close command palette" onclick={requestClose}>

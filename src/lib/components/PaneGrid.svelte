@@ -3,8 +3,8 @@
   import { animateMotion, motionEnabled } from '$lib/motion';
   import { paneIds, type PaneLayout, type PaneSplit, type PaneTabTransfer } from '$lib/panes';
   type Edge = 'center' | 'left' | 'right' | 'top' | 'bottom';
-  let { layout, activePaneId, expandedPaneId=null, dimInactivePanes=true, inactivePaneOpacity=.6, focusFollowsMouse=false, pointerDrag=null, onPointerDragEnd, onactivate, onresize, ondropTab, children }: {
-    layout: PaneLayout; activePaneId: string; expandedPaneId?:string|null; dimInactivePanes?:boolean;inactivePaneOpacity?:number; focusFollowsMouse?:boolean; onactivate: (id: string) => void;
+  let { layout, activePaneId, expandedPaneId=null, showActivePaneBorder=true, dimInactivePanes=true, inactivePaneOpacity=.6, focusFollowsMouse=false, pointerDrag=null, onPointerDragEnd, onactivate, onresize, ondropTab, children }: {
+    layout: PaneLayout; activePaneId: string; expandedPaneId?:string|null; showActivePaneBorder?:boolean; dimInactivePanes?:boolean;inactivePaneOpacity?:number; focusFollowsMouse?:boolean; onactivate: (id: string) => void;
     onresize: (id: string, ratio: number) => void;
     pointerDrag?: {tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null; onPointerDragEnd?:()=>void; ondropTab: (id: string, edge: Edge, data: PaneTabTransfer, before?: {kind:PaneTabTransfer['kind'];id:string}) => void;
     children: import('svelte').Snippet<[string]>;
@@ -178,7 +178,7 @@
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (contains independently interactive chat controls) -->
-    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
+    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:show-active-border={showActivePaneBorder} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
       {@render children(item.id)}
       <div class="pane-dim-overlay" aria-hidden="true"></div>
       {#if over?.id===item.id}<div class="pane-drop" data-edge={over.edge}><span>{over.edge==='center'?'Move tab here':`Split ${over.edge}`}</span></div>{/if}
@@ -186,7 +186,7 @@
   {/if}
   {/each}
 {/snippet}
-<div class="pane-grid-root" bind:this={gridRoot}>{@render branch(layout)}</div>
+<div class="pane-grid-root" data-active-pane-border={showActivePaneBorder} bind:this={gridRoot}>{@render branch(layout)}</div>
 <style>
   :global([data-tab-insert="before"]){box-shadow:inset 2px 0 var(--accent)!important}
   :global([data-tab-insert="after"]){box-shadow:inset -2px 0 var(--accent)!important}
@@ -196,6 +196,8 @@
   .pane-grid-root,.pane-split,.split-child,.pane-leaf{display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
   .focus-hidden{display:none!important}
   .pane-split.column{flex-direction:column}.pane-leaf{position:relative;background:var(--paper)}.pane-leaf.active{outline:none}
+  .pane-leaf.active.show-active-border::after{content:"";position:absolute;inset:0;z-index:25;border:2px solid var(--accent);pointer-events:none}
+  :global(:root:has([data-active-modal])) .pane-leaf.active.show-active-border::after{content:none}
   .pane-dim-overlay{position:absolute;inset:0;z-index:20;pointer-events:none;opacity:var(--pane-dim-visible);background:color-mix(in srgb,#f4f4f4 calc(var(--pane-dim-strength) * 100%),transparent);transition:opacity .14s ease}
   :global(:root[data-theme="dark"]) .pane-dim-overlay{background:color-mix(in srgb,#000 calc(var(--pane-dim-strength) * 100%),transparent)}
   @media(prefers-color-scheme:dark){:global(:root[data-theme="system"]) .pane-dim-overlay{background:color-mix(in srgb,#000 calc(var(--pane-dim-strength) * 100%),transparent)}}

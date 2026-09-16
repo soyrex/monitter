@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { appThemes } from '$lib/app-theme';
   import type { Message, Snapshot, Task } from '$lib/types';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { createMobileSession } from '$lib/controller/remote-client';
@@ -128,39 +129,25 @@
     invite = fragment.get('invite') || rawFragmentInvite || new URLSearchParams(url.search).get('invite') || '';
     const accentParam = fragment.get('accent') || '';
     const themeParam = fragment.get('theme') || '';
-    // Apply sharer's theme
-    if (/^#[0-9a-f]{6}$/i.test(accentParam)) {
-      const hex = accentParam.toLowerCase();
-      const colour = hexToRgb(hex);
-      const lightInk = readable(colour, hexToRgb('#f2ede3'), 0);
-      const darkInk = readable(colour, hexToRgb('#1f1f23'), 255);
-      const white = [255, 255, 255], black = [0, 0, 0];
-      const root = document.documentElement;
-      root.style.setProperty('--accent', hex);
-      root.style.setProperty('--accent-rgb', colour.join(', '));
-      root.style.setProperty('--accent-ink', `rgb(${lightInk.join(', ')})`);
-      root.style.setProperty('--accent-dark-ink', `rgb(${darkInk.join(', ')})`);
-      root.style.setProperty('--accent-dark-rgb', darkInk.join(', '));
-      root.style.setProperty('--on-accent', contrast(colour, white) >= contrast(colour, black) ? '#ffffff' : '#000000');
-    }
-    const isDark = themeParam === 'dark';
-    if (isDark) {
-      document.documentElement.style.setProperty('--bg', '#141416');
-      document.documentElement.style.setProperty('--surface', '#1a1a1d');
-      document.documentElement.style.setProperty('--surface-raised', '#222226');
-      document.documentElement.style.setProperty('--border', 'rgba(255,255,255,0.09)');
-      document.documentElement.style.setProperty('--text', '#e8e8ea');
-      document.documentElement.style.setProperty('--text-muted', '#86868e');
-      document.documentElement.style.setProperty('--text-faint', '#6c6c74');
-    } else {
-      document.documentElement.style.setProperty('--bg', '#f6f7f3');
-      document.documentElement.style.setProperty('--surface', '#fbf8f2');
-      document.documentElement.style.setProperty('--surface-raised', '#f2ede3');
-      document.documentElement.style.setProperty('--border', '#dce1d8');
-      document.documentElement.style.setProperty('--text', '#18201c');
-      document.documentElement.style.setProperty('--text-muted', '#57625b');
-      document.documentElement.style.setProperty('--text-faint', '#667169');
-    }
+    const isDark = themeParam === 'dark' || (themeParam === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    const palette = appThemes.find(item => item.id === 'monitter')![isDark ? 'dark' : 'light'];
+    const root = document.documentElement;
+    root.style.colorScheme = isDark ? 'dark' : 'light';
+    const colours = {
+      '--bg': palette.sidebar, '--surface': palette.paper, '--surface-raised': palette.panel,
+      '--border': palette.line, '--text': palette.ink, '--text-muted': palette.muted, '--text-faint': palette.muted,
+    };
+    for (const [property, value] of Object.entries(colours)) root.style.setProperty(property, value);
+    // Keep the shared accent, with readable text for the selected Monitter palette.
+    const hex = /^#[0-9a-f]{6}$/i.test(accentParam) ? accentParam.toLowerCase() : palette.accent;
+    const colour = hexToRgb(hex);
+    const ink = readable(colour, hexToRgb(palette.paper), isDark ? 255 : 0);
+    const white = [255, 255, 255], black = [0, 0, 0];
+    root.style.setProperty('--accent', hex);
+    root.style.setProperty('--accent-rgb', colour.join(', '));
+    root.style.setProperty('--accent-ink', `rgb(${ink.join(', ')})`);
+    root.style.setProperty('--accent-dark-ink', `rgb(${ink.join(', ')})`);
+    root.style.setProperty('--on-accent', contrast(colour, white) >= contrast(colour, black) ? '#ffffff' : '#000000');
     if (invite) { url.searchParams.delete('invite'); url.hash = ''; window.history.replaceState({}, '', url); }
     const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 2500);
     return () => { window.clearInterval(timer); generation++; unlisten?.(); session?.close(); };
@@ -169,6 +156,7 @@
 
 <svelte:head><title>Join Monitter</title><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" /></svelte:head>
 
+<div class="share-stage">
 <main class="share">
   <header><a href="/share" aria-label="Monitter shared workspace">monitter</a>{#if session}<button class="quiet" onclick={leave}>Leave</button>{/if}</header>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -190,37 +178,42 @@
     <section class="conversation" aria-label={task.title || 'Shared chat'}><div class="top"><button class="back" onclick={() => selectedId = null} aria-label="Back to shared chats">‹</button><div><p class="eyebrow">SHARED CHAT</p><h1>{task.title || 'Untitled chat'}</h1></div></div><div class="messages" bind:this={messagesPane} aria-live="polite">{#each visibleMessages as item (item.id ?? `${item.timestamp}-${item.text}`)}<article class:mine={item.name === name.trim()}><span class="avatar">{initials(item.name)}</span><div><header><b>{item.name}</b><time>{formatTime(item.timestamp)}</time></header><p>{item.text}</p>{#if item.delivery}<small class:uncertain={item.delivery === 'uncertain'}>{item.delivery === 'sending' ? 'Sending…' : item.delivery === 'sent' ? 'Sent' : 'Not confirmed'}</small>{/if}</div></article>{:else}<p class="empty">No messages are shared in this chat.</p>{/each}</div><form onsubmit={event => { event.preventDefault(); void send(); }}><label class="sr" for="message">Message</label><textarea id="message" bind:value={draft} rows="2" maxlength="32000" placeholder="Write a message…"></textarea><button class="send" disabled={!draft.trim() || sending || status !== 'connected'}>{sending ? 'Sending…' : 'Send'}</button></form></section>
   {/if}
 </main>
+</div>
 
 <style>
   :global(*){box-sizing:border-box}
-  :global(body){margin:0;background:var(--bg,#f6f7f3);color:var(--text,#18201c)}
-  .share{height:100dvh;max-width:760px;margin:auto;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);font:400 16px/1.5 'IBM Plex Sans',system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+  :global(body){margin:0;background:var(--bg,#e9e3d8);color:var(--text,#262119)}
+  .share-stage{height:100dvh;display:grid;place-items:center;padding:24px;overflow:hidden}
+  .share{width:100%;max-width:620px;height:min(800px,100%);min-height:0;background:var(--surface,#fbf8f2);border:1px solid var(--border,#dce1d8);border-radius:12px;box-shadow:0 16px 56px #00000020,0 2px 8px #0000000a;font:400 14px/1.5 'IBM Plex Sans',system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+  .share>header{flex:none;min-height:46px;background:var(--surface-raised,#f2ede3)}
   header{min-height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid var(--border,#dce1d8)}
-  header a{color:inherit;font-size:21px;font-weight:600;text-decoration:none}
+  header a{color:inherit;font-size:16px;font-weight:600;text-decoration:none}
   h1,h2,p{margin:0}
   h1{font-size:clamp(28px,7vw,42px);line-height:1.08;letter-spacing:-1.3px}
   h2{font-size:19px}
   .eyebrow{color:var(--accent-ink,#45775c);font-size:11px;font-weight:600;letter-spacing:1.2px;margin-bottom:8px}
-  .join,.workspace,.conversation{width:100%;flex:1;padding:48px 20px 24px;overflow:hidden}
+  .join,.workspace,.conversation{width:100%;flex:1;min-height:0;padding:28px 20px 24px;overflow:auto}
   .conversation{display:flex;flex-direction:column;padding:0;overflow:hidden}
-  .join{max-width:460px;margin:auto;display:flex;flex-direction:column;justify-content:center;gap:17px;padding:48px 20px}
+  .join{max-width:460px;margin:auto;display:flex;flex-direction:column;gap:17px;padding:32px 24px}
   .join>p,.project>p,.empty{color:var(--text-muted,#57625b)}
   label{display:grid;gap:7px;color:var(--text,#344239);font-weight:500;font-size:14px}
-  input,textarea{width:100%;border:1px solid var(--border,#bfc9be);border-radius:12px;padding:13px 14px;background:var(--surface,#fff);color:inherit;font:inherit}
+  input,textarea{width:100%;border:1px solid var(--border,#bfc9be);border-radius:6px;padding:11px 12px;background:var(--surface,#fff);color:inherit;font:inherit}
   input:focus,textarea:focus,button:focus-visible{outline:3px solid var(--accent-dark-ink,#8ac7a4);outline-offset:2px}
   small{color:var(--text-faint,#667169);font-size:12px}
   button{font:inherit;cursor:pointer}
   button:disabled{cursor:not-allowed;opacity:.5}
-  .primary,.secondary,.send{min-height:48px;border-radius:12px;padding:10px 16px;font-weight:600}
+  .primary,.secondary,.send{min-height:40px;border-radius:6px;padding:10px 16px;font-weight:600}
   .primary,.send{border:0;background:var(--accent,#367a52);color:var(--on-accent,#fff)}
   .secondary{border:1px solid var(--border,#9eaba1);background:transparent;color:inherit}
-  .quiet,.back{border:0;background:transparent;color:var(--accent-ink,#275f40);padding:8px}
+  .quiet,.back{border:0;background:transparent;color:var(--text-muted,#6f6656);padding:8px}
   .notice,.verification{padding:12px 14px;border-radius:10px;background:color-mix(in srgb, var(--accent) 15%, transparent);color:var(--accent-ink)!important}
   .verification{display:block;padding:20px;font:600 38px/1 'IBM Plex Mono',monospace;letter-spacing:6px;text-align:center}
   .loading{color:var(--accent,#367a52)}
-  .error{margin:14px 0;padding:12px 14px;border-radius:10px;background:#f8ded9;color:#802b20;font-size:14px}
+  .error{flex:none;max-height:54px;overflow:auto;overflow-wrap:anywhere;margin:10px 16px 0;padding:10px 12px;border-radius:10px;background:#f8ded9;color:#802b20;font-size:14px}
   .top{display:flex;align-items:center;justify-content:space-between;padding:0 20px;min-height:56px;border-bottom:1px solid var(--border,#dce1d8)}
-  .top h1{font-size:clamp(20px,4vw,28px)}
+  .top h1{font-size:16px;line-height:1.35;letter-spacing:-.2px;overflow-wrap:anywhere}
+  .top>div{min-width:0}
+  .top .eyebrow{font:500 9px 'IBM Plex Mono',monospace;margin-bottom:3px;letter-spacing:.08em;color:var(--text-faint,#667169)}
   .project{margin:24px 0;padding-top:16px;border-top:1px solid var(--border,#dce1d8)}
   .project h2{margin-bottom:6px}
   .chat{width:100%;display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border,#dce1d8);border-radius:12px;background:var(--surface-raised,#f2ede3);cursor:pointer;text-align:left;color:inherit;margin-top:8px}
@@ -230,21 +223,29 @@
   .chat span:last-child{margin-left:auto;color:var(--text-faint,#667169);font-size:18px}
   .avatar{width:36px;height:36px;border-radius:8px;background:var(--accent,#367a52);color:var(--on-accent,#fff);display:flex;align-items:center;justify-content:center;font:600 13px 'IBM Plex Mono',monospace;flex:none}
   /* Conversation: fixed topbar, scrollable messages, pinned input */
-  .conversation .top{flex:none}
-  .conversation .messages{flex:1;min-height:0;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px}
-  .conversation article{display:flex;gap:10px;max-width:85%}
-  .conversation article.mine{align-self:flex-end;flex-direction:row-reverse}
+  .conversation .top{flex:none;justify-content:flex-start;gap:10px;padding:12px 16px}
+  .back{flex:none;font-size:22px;line-height:1}
+  .conversation .messages{flex:1;min-height:500px;max-height:80vh;overflow-y:auto;overscroll-behavior:contain;padding:24px;display:flex;flex-direction:column;gap:24px}
+  .conversation article{display:flex;gap:10px;min-width:0;width:100%;flex:none}
   .conversation article .avatar{width:28px;height:28px;font-size:11px;border-radius:6px}
-  .conversation article div{display:flex;flex-direction:column;gap:4px}
-  .conversation article header{display:flex;align-items:baseline;gap:8px;border:0;min-height:auto;padding:0}
+  .conversation article div{min-width:0;flex:1;display:flex;flex-direction:column;gap:4px}
+  .conversation article header{display:flex;align-items:baseline;justify-content:flex-start;flex-wrap:wrap;gap:8px;border:0;min-height:auto;padding:0}
   .conversation article header b{font-size:13px;font-weight:600}
   .conversation article header time{font:400 11px 'IBM Plex Mono',monospace;color:var(--text-faint,#6c6c74)}
-  .conversation article p{background:var(--surface-raised,#f2ede3);padding:10px 14px;border-radius:10px 10px 3px 10px;font-size:14px;line-height:1.55;word-break:break-word}
-  .conversation article.mine p{background:var(--accent,#367a52);color:var(--on-accent,#fff);border-radius:10px 10px 10px 3px}
+  .conversation article p{font-size:14px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
+  .conversation article.mine .avatar{background:var(--surface-raised,#f2ede3);color:var(--text-muted,#6f6656);border:1px solid var(--border,#dce1d8)}
   .conversation article small{font-size:11px;color:var(--text-faint,#6c6c74)}
   .conversation article small.uncertain{color:#b87a3a}
-  .conversation form{flex:none;display:flex;gap:10px;padding:12px 20px;border-top:1px solid var(--border,#dce1d8);background:var(--surface,#fbf8f2);align-items:end}
-  .conversation form textarea{flex:1;min-height:42px;max-height:120px;resize:none;border-radius:10px;padding:10px 14px}
-  .conversation form .send{min-height:42px;border-radius:10px;padding:0 20px}
+  .conversation form{flex:none;display:flex;gap:10px;padding:16px;border-top:1px solid var(--border,#dce1d8);background:var(--surface,#fbf8f2);align-items:end}
+  .conversation form textarea{flex:1;min-width:0;min-height:64px;max-height:120px;resize:none;border-radius:6px;padding:10px 14px}
+  .conversation form .send{min-height:36px;border-radius:6px;padding:0 20px}
+  @media(max-width:640px){
+    .share-stage{padding:12px}
+    .share{height:100%;border-radius:10px;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+    input,.conversation form textarea{font-size:16px}
+    .conversation .messages{padding:20px 16px}
+  }
+  @media(max-height:850px){.conversation .messages{min-height:0}}
+  @media(max-height:500px){.share-stage{padding:8px}.join{padding:20px}.conversation .top{padding:8px 16px}}
   .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 </style>

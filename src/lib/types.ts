@@ -160,7 +160,7 @@ export interface Settings {
   terminalFontSize?: number; chatFontSize?: number; interfaceFontSize?: number;
   chatLineHeight?: number; terminalLineHeight?: number;
   terminalFont?: string; chatFont?: string; interfaceFont?: string;
-  dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
+  showActivePaneBorder?: boolean; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
   /** Legacy migration seed; active sidebar selection is client-local UI state. */

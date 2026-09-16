@@ -29,6 +29,9 @@ try{
  passed.push('composer uses bottom-left attachment, author avatar and capability-driven model/effort/Fast controls without losing draft or native session');
  await page.keyboard.press('Meta+p');await page.getByRole('dialog',{name:'Controls'}).getByText('Two columns',{exact:true}).click();
  const second=page.locator('.pane-leaf').last();
+ await expect.poll(()=>main.evaluate(el=>Number.parseFloat(getComputedStyle(el,'::after').borderTopWidth)>0)).toBe(true);
+ const accentColour=await page.evaluate(()=>{const probe=document.createElement('span');probe.style.color='var(--accent)';document.body.append(probe);const colour=getComputedStyle(probe).color;probe.remove();return colour});
+ await expect.poll(()=>main.evaluate(el=>getComputedStyle(el,'::after').borderTopColor)).toBe(accentColour);
  await expect.poll(()=>second.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(.6);
  const resize=page.getByRole('separator',{name:'Resize panes'});expect((await resize.boundingBox()).width).toBe(1);expect(await resize.evaluate(el=>getComputedStyle(el,'::after').left)).toBe('-4px');
  await page.evaluate(()=>document.querySelector('main.app-shell').classList.add('native-mac'));
@@ -36,10 +39,11 @@ try{
  await page.evaluate(()=>{document.querySelector('main.app-shell').classList.remove('native-mac');document.documentElement.style.setProperty('--interface-scale','1.25');});
  await second.locator('.topbar').click();await expect.poll(()=>second.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(1);await expect.poll(()=>main.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(.6);
  passed.push('panes share native-scaled header height; visible dividers are 1px with wider drag targets; inactive panes dim and focus restores brightness');
- await page.keyboard.press('Meta+,');let settings=second.getByRole('region',{name:'Settings',exact:true});await expect(settings.getByRole('switch',{name:'Dim inactive panes',exact:true})).toBeChecked();
+ await page.keyboard.press('Meta+,');let settings=second.getByRole('region',{name:'Settings',exact:true});const highlight=settings.getByRole('switch',{name:'Highlight active pane',exact:true}),dim=settings.getByRole('switch',{name:'Dim inactive panes',exact:true});await expect(highlight).toBeChecked();expect(await highlight.evaluate(node=>node.closest('label')?.nextElementSibling?.querySelector('input')?.getAttribute('aria-label'))).toBe('Dim inactive panes');
+ await highlight.uncheck();await expect.poll(()=>second.evaluate(el=>getComputedStyle(el,'::after').borderTopWidth)).toBe('0px');await highlight.check();await expect.poll(()=>second.evaluate(el=>Number.parseFloat(getComputedStyle(el,'::after').borderTopWidth)>0)).toBe(true);
  const opacity=settings.getByLabel('Inactive pane opacity',{exact:true});await opacity.press('Home');for(let i=0;i<3;i++)await opacity.press('ArrowRight');await expect.poll(()=>page.evaluate(()=>window.__MONITTER_QA__.snapshot().settings.inactivePaneOpacity)).toBe(.25);
- await settings.getByRole('switch',{name:'Dim inactive panes',exact:true}).uncheck();await expect.poll(()=>main.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(1);await second.getByRole('button',{name:'Close Settings tab',exact:true}).click();
- passed.push('dimming opacity and enable toggle persist through Preferences');
+ await dim.uncheck();await expect.poll(()=>main.evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(1);await second.getByRole('button',{name:'Close Settings tab',exact:true}).click();
+ passed.push('active-pane border and dimming controls persist through Preferences in the requested order');
  await second.locator('.topbar').click();await page.keyboard.press('Meta+p');await page.getByRole('dialog',{name:'Controls'}).getByText('New chat',{exact:true}).click();
  await second.getByRole('button',{name:'Model: QA Balanced',exact:true}).click();menu=page.getByRole('dialog',{name:'Model and reasoning'});await menu.getByRole('radio',{name:/QA Simple/}).click();await menu.getByRole('button',{name:'Close model picker'}).click();
  await second.getByLabel('Access permissions',{exact:true}).selectOption('workspace-write');

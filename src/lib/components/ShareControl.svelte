@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { activeModal } from "$lib/active-modal";
   import { onDestroy, untrack } from 'svelte';
   import { Check, Copy, Link2, X } from '@lucide/svelte';
   import QRCode from 'qrcode';
@@ -145,7 +146,7 @@
   onDestroy(() => { clearInterval(timer); stop(); });
 </script>
 
-{#if open}<dialog class="share-panel" open aria-label={scopedRequest ? 'Share this chat' : 'Share workspace'}>
+{#if open}<dialog use:activeModal class="share-panel" open aria-label={scopedRequest ? 'Share this chat' : 'Share workspace'}>
   <header><div><strong>{scopedRequest ? 'Share this chat' : 'Share with a collaborator'}</strong><small>{scopedRequest ? 'One visitor, one exact chat, one-use encrypted link.' : 'One visitor, one-use encrypted link.'}</small></div><button aria-label="Close sharing" onclick={() => open = false}><X size={18}/></button></header>
   {#if !session}
     {#if taskId}<p class="scope-note">This invite will be limited to the selected direct chat. It cannot include its project or any other chat.</p>{/if}

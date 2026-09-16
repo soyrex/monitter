@@ -111,6 +111,7 @@
   import { contrastForeground } from '$lib/accent-contrast';
   import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage } from '$lib/operator-sharing';
   import Modal from "$lib/components/Modal.svelte";
+  import { activeModal } from "$lib/active-modal";
   import Markdown from "$lib/components/Markdown.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import { activeComputerTools } from "$lib/activity";
@@ -3076,6 +3077,7 @@
     {id:"reasoning",label:"Show reasoning summaries",checked:snapshot?.settings.showReasoningSummaries !== false,group:"Toggles"},
     {id:"steer-busy",label:"Steer busy agents when supported",checked:snapshot?.settings.busyMessageMode==='steer',group:"Toggles"},
     {id:"focus-mouse",label:"Focus follows mouse",checked:snapshot?.settings.focusFollowsMouse ?? false,group:"Toggles"},
+    {id:"active-pane-border",label:"Highlight active pane",checked:snapshot?.settings.showActivePaneBorder ?? true,group:"Toggles"},
     {id:"dim-panes",label:"Dim inactive panes",checked:snapshot?.settings.dimInactivePanes ?? true,group:"Toggles"},
     {id:"enter",label:"Enter to send",checked:snapshot?.settings.sendWithEnter ?? false,group:"Toggles"},
     {id:"detail",label:"Show run detail",checked:showDetail,group:"Toggles"},
@@ -3121,6 +3123,7 @@
     else if (id === "reasoning") await run(()=>saveSettingsPatch({showReasoningSummaries:!settings.showReasoningSummaries}));
     else if (id === "steer-busy") await run(()=>saveSettingsPatch({busyMessageMode:settings.busyMessageMode==='steer'?'queue':'steer'}));
     else if (id === "focus-mouse") await run(()=>saveSettingsPatch({focusFollowsMouse:!settings.focusFollowsMouse}));
+    else if (id === "active-pane-border") await run(()=>saveSettingsPatch({showActivePaneBorder:!(settings.showActivePaneBorder ?? true)}));
     else if (id === "dim-panes") await run(()=>saveSettingsPatch({dimInactivePanes:!(settings.dimInactivePanes ?? true)}));
     else if (id === "enter") await run(()=>saveSettingsPatch({sendWithEnter:!settings.sendWithEnter}));
     else if (id === "detail") showDetail = !showDetail;
@@ -3199,7 +3202,7 @@
 <svelte:window onkeydown={handleShortcuts} onkeyup={event=>tabIndexModifier=macPlatform?event.metaKey:event.ctrlKey} onblur={()=>{tabIndexModifier=false;cancelPaneFocusChord()}} onpointerdown={dismissMonitterMenu} />
 
 {#if vimCommandOpen}
-  <div class="vim-commandbar" role="dialog" aria-label="Monitter Vim command">
+  <div use:activeModal class="vim-commandbar" role="dialog" aria-label="Monitter Vim command">
     <form onsubmit={event=>{event.preventDefault();submitVimCommand();}}>
       <label><span aria-hidden="true">:</span><input aria-label="Monitter command" bind:this={vimCommandInput} bind:value={vimCommandText} onkeydown={handleVimCommandKeydown} autocomplete="off" spellcheck="false" /></label>
     </form>
@@ -3914,7 +3917,7 @@
     </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
-    <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
+    <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} showActivePaneBorder={snapshot?.settings.showActivePaneBorder ?? true} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
         <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
