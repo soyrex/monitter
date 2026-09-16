@@ -568,7 +568,7 @@ fn normalize_claude_usage(value: Value, attempted_at: i64) -> Result<Vec<Allowan
 fn claude_line_regex(slot: &'static OnceLock<Regex>, heading: &str) -> &'static Regex {
     slot.get_or_init(|| {
         Regex::new(&format!(
-            r"(?im)^\s*(?:[-*#>]+\s*)?{heading}\s*(?:[:*_-]+\s*)*(?<percent>\d{{1,3}}(?:\.\d+)?)\s*%\s*used\b.*?\bresets?\s+(?<month>[A-Za-z]{{3,9}})\s+(?<day>\d{{1,2}})(?:\s*,?\s*(?<year>\d{{4}}))?\s+at\s+(?<hour>\d{{1,2}})(?::(?<minute>\d{{2}}))?\s*(?<meridiem>am|pm)\s*\(\s*(?<zone>[A-Za-z0-9_+\-/]+)\s*\)\s*$"
+            r"(?im)^\s*(?:[-*#>]+\s*)?{heading}\s*(?:[:*_-]+\s*)*(?<percent>\d{{1,3}}(?:\.\d+)?)\s*%\s*used\b(?:.*?\bresets?\s+(?<month>[A-Za-z]{{3,9}})\s+(?<day>\d{{1,2}})(?:\s*,?\s*(?<year>\d{{4}}))?\s+at\s+(?<hour>\d{{1,2}})(?::(?<minute>\d{{2}}))?\s*(?<meridiem>am|pm)\s*\(\s*(?<zone>[A-Za-z0-9_+\-/]+)\s*\))?\s*$"
         ))
         .expect("constant Claude usage regex is valid")
     })
@@ -591,19 +591,23 @@ fn claude_window(
     if !(0.0..=100.0).contains(&used_percent) {
         return Err(());
     }
-    let zone = captures.name("zone").ok_or(())?.as_str();
-    let initial_year = match captures.name("year") {
+    let resets_at = if captures.name("month").is_none() {
+        None
+    } else {
+        let zone = captures.name("zone").ok_or(())?.as_str();
+        let initial_year = match captures.name("year") {
         Some(year) => year.as_str().parse::<i16>().map_err(|_| ())?,
         None => Timestamp::from_millisecond(attempted_at)
             .and_then(|timestamp| timestamp.in_tz(zone))
             .map(|zoned| zoned.year())
             .map_err(|_| ())?,
-    };
-    let timestamp = claude_reset_timestamp(&captures, initial_year)?;
-    let resets_at = if captures.name("year").is_none() && timestamp < attempted_at {
-        claude_reset_timestamp(&captures, initial_year.checked_add(1).ok_or(())?)?
-    } else {
-        timestamp
+        };
+        let timestamp = claude_reset_timestamp(&captures, initial_year)?;
+        Some(if captures.name("year").is_none() && timestamp < attempted_at {
+            claude_reset_timestamp(&captures, initial_year.checked_add(1).ok_or(())?)?
+        } else {
+            timestamp
+        })
     };
     Ok(AllowanceWindow {
         key: key.into(),
@@ -613,7 +617,7 @@ fn claude_window(
         used: None,
         limit: None,
         unit: "unknown".into(),
-        resets_at: Some(resets_at),
+        resets_at,
     })
 }
 
