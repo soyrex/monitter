@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ChevronDown } from '@lucide/svelte';
   import { onMount } from 'svelte';
+  import ProviderIcon from './ProviderIcon.svelte';
 
   /**
    * A display-only projection of provider allowance data. The owner is
@@ -239,26 +240,29 @@
           aria-label={providerTitle(provider, data)}
           title={providerTitle(provider, data)}
         >
-          <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`} style={`--ring-active-color:${usageColor(active)};--ring-weekly-color:${usageColor(weekly)}`}>
-            <circle class="ring-track" cx="20" cy="20" r={radius} />
-            <circle
-              class="ring-active"
-              cx="20" cy="20" r={radius}
-              pathLength="100"
-              stroke-dasharray="100"
-              stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
-            />
-            {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
+          <div class="usage-ring-wrap">
+            <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`} style={`--ring-active-color:${usageColor(active)};--ring-weekly-color:${usageColor(weekly)}`}>
+              <circle class="ring-track" cx="20" cy="20" r={radius} />
               <circle
-                class="ring-weekly"
-                cx="20" cy="20" r="11.5"
+                class="ring-active"
+                cx="20" cy="20" r={radius}
                 pathLength="100"
                 stroke-dasharray="100"
-                stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
+                stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
               />
-            {/if}
-            <text class="ring-value" x="20" y="20" text-anchor="middle" dominant-baseline="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
-          </svg>
+              {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
+                <circle
+                  class="ring-weekly"
+                  cx="20" cy="20" r="11.5"
+                  pathLength="100"
+                  stroke-dasharray="100"
+                  stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
+                />
+              {/if}
+              <text class="ring-value" x="20" y="20" text-anchor="middle" dominant-baseline="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
+            </svg>
+            <span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={12} /></span>
+          </div>
           <small class="usage-ring-label">{provider.label}</small>
           <div class="usage-copy">
             <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
@@ -331,7 +335,10 @@
   .usage-body { display:grid; gap:4px; padding:4px; border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
   .usage-provider { display:grid; grid-template-columns:40px minmax(0,1fr); align-items:center; gap:8px; min-width:0; padding:5px 6px; border:1px solid transparent; border-radius:8px; }
   .usage-provider:hover { background:color-mix(in srgb,var(--accent) 5%,transparent); border-color:color-mix(in srgb,var(--accent) 12%,transparent); }
+  .usage-ring-wrap { position:relative; width:40px; height:40px; }
   .usage-ring { display:block; width:40px; height:40px; overflow:visible; transform:rotate(-90deg); }
+  .usage-provider-icon { position:absolute; top:-3px; right:-3px; display:grid; width:16px; height:16px; place-items:center; color:var(--ink); border:1px solid var(--line); border-radius:5px; background:var(--panel); box-shadow:0 1px 2px color-mix(in srgb,var(--ink) 12%,transparent); }
+  .usage-provider-icon :global(.provider-icon) { width:12px; height:12px; }
   .usage-ring circle { fill:none; stroke-linecap:round; }
   .ring-track { stroke:color-mix(in srgb,var(--muted) 20%,transparent); stroke-width:3; }
   .ring-active { stroke:var(--ring-active-color,var(--accent)); stroke-width:3; transition:stroke-dashoffset .2s ease,stroke .2s ease; }

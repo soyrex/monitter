@@ -88,6 +88,7 @@
     Host,
     ProbeResult,
     Project,
+    Provider,
     SidebarView,
     Snapshot,
     Settings,
@@ -118,6 +119,7 @@
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import UsageRings from '$lib/components/UsageRings.svelte';
+  import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   import { usageRingMap } from '$lib/usage-ring-data';
   import ContextUsageBar from '$lib/components/ContextUsageBar.svelte';
   import { composerContextUsage } from '$lib/context-usage-data';
@@ -3713,11 +3715,11 @@
               {#each taskSubagents as collaboration (collaboration.id)}<SubagentActivity {collaboration} agent={visibleAgents.find(agent=>agent.id===collaboration.toAgentId)} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<p class="detail-empty">No subagents have run from this chat.</p>{/each}
             </section>
             <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || detailTab==='subagents' || (detailTab==='git' && gitState.repository===true)}>
-              <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
+              <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small><ProviderIcon provider={selectedTask.provider} size={12} />{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
               <dl>
                 <div>
                   <dt>harness</dt>
-                  <dd>{selectedTask.provider}</dd>
+                  <dd><span class="provider-value"><ProviderIcon provider={selectedTask.provider} size={12} />{selectedTask.provider}</span></dd>
                 </div>
                 <div>
                   <dt>model</dt>
@@ -3810,8 +3812,8 @@
                 aria-pressed={activeWorkspaceKey === `agent:${agent.id}`}
                 aria-controls={`agent-chats-${agent.id}`}
                 onclick={() => { collapsedAgents[agent.id]=false; void switchWorkspace(`agent:${agent.id}`); }}
-                ><b>{agent.name}{#if approvalCount(`agent:${agent.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`agent:${agent.id}`)} pending approvals`}>{approvalCount(`agent:${agent.id}`)}</span>{/if}</b><small
-                  ><span class="agent-runtime">{agent.provider}{agent.model ? ` · ${agent.model}` : ""}</span><span class="agent-location" data-host-kind={agentHost?.kind ?? 'local'} role="img" aria-label={agentHost?.kind === 'ssh' ? `Remote host: ${agentHost.name}` : `Local host: ${agentHost?.name ?? 'This Mac'}`} title={agentHost?.kind === 'ssh' ? `Remote · ${agentHost.name}` : `Local · ${agentHost?.name ?? 'This Mac'}`}>{#if agentHost?.kind === 'ssh'}<Cloud size={10} aria-hidden="true"/>{:else}<HardDrive size={10} aria-hidden="true"/>{/if}</span></small
+                  ><b>{agent.name}{#if approvalCount(`agent:${agent.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`agent:${agent.id}`)} pending approvals`}>{approvalCount(`agent:${agent.id}`)}</span>{/if}</b><small
+                  ><span class="agent-runtime"><ProviderIcon provider={agent.provider} size={11} />{agent.provider}{agent.model ? ` · ${agent.model}` : ""}</span><span class="agent-location" data-host-kind={agentHost?.kind ?? 'local'} role="img" aria-label={agentHost?.kind === 'ssh' ? `Remote host: ${agentHost.name}` : `Local host: ${agentHost?.name ?? 'This Mac'}`} title={agentHost?.kind === 'ssh' ? `Remote · ${agentHost.name}` : `Local · ${agentHost?.name ?? 'This Mac'}`}>{#if agentHost?.kind === 'ssh'}<Cloud size={10} aria-hidden="true"/>{:else}<HardDrive size={10} aria-hidden="true"/>{/if}</span></small
                 ></button
               ><button
                 class="quiet agent-new-chat"
@@ -3950,7 +3952,7 @@
   </div>{/if}
 </Modal>
 
-{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each visibleAgents.filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small>{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
+{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each visibleAgents.filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small><ProviderIcon provider={agent.provider} size={12} />{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
 
 {#snippet agentEditor()}
   <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each visibleAgents as agent}<option value={agent.id}>{agent.name}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
@@ -4651,7 +4653,7 @@
     white-space: nowrap;
     font: calc(9.5px * var(--interface-font-ratio, 1)) var(--mono);
   }
-  .agent-runtime { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .agent-runtime { display:inline-flex; min-width:0; align-items:center; gap:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .agent-location { display:inline-flex; flex:none; align-items:center; }
   .quiet {
     display: grid;
@@ -5926,6 +5928,8 @@
   }
   .agent-identity b, .agent-identity small { display: block; }
   .agent-identity small { color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); margin-top: 2px; }
+  .agent-identity small :global(.provider-icon), .provider-value :global(.provider-icon) { display:inline-grid; margin-right:4px; vertical-align:middle; }
+  .provider-value { display:inline-flex; align-items:center; gap:4px; }
   .identity-actions { padding: 9px 0 0 41px; }
   .identity-actions p { margin: 6px 0 0; color: var(--muted); font-size: calc(11px * var(--interface-font-ratio, 1)); }
   .avatar-preview { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
@@ -5961,6 +5965,7 @@
   .agent-directory article { display: flex; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
   .agent-directory article > div { display: grid; flex: 1; min-width: 0; gap: 2px; }
   .agent-directory small, .agent-directory p { margin: 0; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); }
+  .agent-directory small { display:flex; align-items:center; gap:4px; }
   .agent-directory article.disabled { opacity: .58; }
   .app-shell.embedded { height: 100%; width: 100%; grid-template-columns: minmax(0,1fr); }
   .embedded .topbar { height: var(--pane-tabbar-height,52px); min-height: 32px; padding: 0.5em 0.5em 0; }
