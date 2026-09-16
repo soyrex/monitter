@@ -7,6 +7,7 @@
   import { floating } from '$lib/floating';
   import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, showThinkingFallback, type ConversationActivityItem } from '$lib/activity-grouping';
   import { splitOperatorMessage } from '$lib/operator-sharing';
+  import { participantColour } from '$lib/shared-chat';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
   import MessagePane from '$lib/components/MessagePane.svelte';
@@ -180,9 +181,10 @@
               {@const optimistic=displayOptimisticMessages.find(item=>item.id===message.id)}
               {@const confirmed=displayConfirmedDeliveryIds[message.id]}
               {@const operator=message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}
-              <article class:user={message.role==='user'} class:tinted={message.role==='user' && display.settings.tintUserMessages} class:sticky-user-request={message.role==='user' && message.id===displayLatestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={optimistic?.status} aria-label={message.role==='user' && message.id===displayLatestUserRequest?.id ? 'Latest user request' : undefined}>
+              {@const humanName=operator?.name ?? (message.role==='user' ? senderName(message) : null)}
+              <article class:user={message.role==='user'} class:tinted={message.role==='user' && (display.settings.tintUserMessages || !!humanName)} style:--participant-colour={humanName ? participantColour(humanName) : undefined} data-participant={humanName ?? undefined} class:sticky-user-request={message.role==='user' && message.id===displayLatestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={optimistic?.status} aria-label={message.role==='user' && message.id===displayLatestUserRequest?.id ? 'Latest user request' : undefined}>
                 <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (displayAgent?.name ?? 'Agent') : 'System')} createdAt={message.createdAt}>
-                  {#snippet avatar()}{#if operator?.name}<span class="avatar message-avatar human-avatar" title={operator.name}>{operator.name.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null)}{/if}{/snippet}
+                  {#snippet avatar()}{#if humanName}<span class="avatar message-avatar human-avatar" title={humanName}>{humanName.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null)}{/if}{/snippet}
                   {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
                 {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>{:else}<Markdown text={message.role==='user' ? operatorMessageText(message.text) : message.text}/>{/if}
@@ -240,7 +242,8 @@
   .approval-inline:hover,.approval-inline:focus-visible { color:var(--ink); text-decoration:underline; text-decoration-color:var(--accent); text-underline-offset:3px; }
   .approval-inline time { margin-left:auto; flex:none; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); }
   .approval-inline.denied { color:#a54c44; }
-  .message.user.tinted { background:color-mix(in srgb,var(--accent) 16%,var(--panel)); }
+  .message[data-participant] .human-avatar { background:color-mix(in srgb,var(--participant-colour) 25%,var(--panel));color:var(--ink); }
+  .message.user.tinted { background:color-mix(in srgb,var(--participant-colour,var(--accent)) 16%,var(--panel)); }
   .message.user { margin-left:auto; padding:12px 14px; border-radius:10px 10px 3px 10px; background:var(--soft); }
   .message.final-answer { width:fit-content; padding:12px 14px; border:1px solid color-mix(in srgb,#4f9d69 18%,var(--line)); border-radius:10px 10px 10px 3px; background:color-mix(in srgb,#4f9d69 7%,var(--panel)); }
   .message.system { padding-left:12px; border-left:2px solid var(--line); color:var(--muted); }

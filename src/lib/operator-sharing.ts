@@ -1,7 +1,8 @@
 import { writable } from 'svelte/store';
-import type { Agent, Message, Project, Snapshot, Task } from '$lib/types';
+import type { Agent, Attachment, AttachmentFileData, Message, Project, Snapshot, Task } from '$lib/types';
 import type { MonitterBridge } from './bridge';
 import type { DesktopBridge } from './controller/remote-client';
+import { sharedAppearanceVariables, type SharedChatAppearance, type SharedChatSnapshot } from './shared-chat';
 
 export type OperatorRole = 'primary user' | 'visitor';
 export interface OperatorIdentity { name: string; role: OperatorRole; }
@@ -71,28 +72,56 @@ function safeTask(task: Task): Task {
     archived: task.archived, status: task.status, createdAt: task.createdAt,
     updatedAt: task.updatedAt, parentTaskId: null,
     channelId: null, projectId: task.projectId,
-    provider: task.provider, model: task.model, modelSettings: task.modelSettings,
-    cwd: '', hostId: '', nativeSessionId: null, sandbox: 'read-only',
+    provider: task.provider, model: task.model,
+    ...(task.modelSettings ? { modelSettings: { model: task.modelSettings.model, reasoningEffort: task.modelSettings.reasoningEffort, fastMode: task.modelSettings.fastMode } } : {}),
+    cwd: '', hostId: '', nativeSessionId: null, sandbox: task.sandbox,
   };
 }
 
-function safeMessage(message: Message): Message {
+const MAX_SHARED_PREVIEW_BYTES = 512 * 1024;
+function safeAttachment(attachment: Attachment, budget: { remaining: number }): Attachment {
+  // Snapshot compatibility retains the field, with an explicit redacted value.
+  const preview = safePreview(attachment.previewDataUrl) && attachment.previewDataUrl!.length <= budget.remaining ? attachment.previewDataUrl : undefined;
+  if (preview) budget.remaining -= preview.length;
+  return { id: attachment.id, name: attachment.name, mimeType: attachment.mimeType, size: attachment.size, path: '',
+    ...(preview ? { previewDataUrl: preview } : {}) } as Attachment;
+}
+
+function safePreview(value: string | null | undefined): boolean {
+  return typeof value === 'string' && value.length <= 350_000 && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value);
+}
+
+function safeMessage(message: Message, budget: { remaining: number }): Message {
   return { id: message.id, taskId: message.taskId, role: message.role,
     text: message.text, createdAt: message.createdAt, streamStatus: message.streamStatus,
     phase: message.phase,
-    senderAgentId: message.senderAgentId, attachments: [] };
+    senderAgentId: message.senderAgentId,
+    ...(message.attachments?.length ? { attachments: message.attachments.map(attachment => safeAttachment(attachment, budget)) } : {}) };
 }
 
 /**
  * The visitor receives only explicitly selected task/project data. Local paths,
- * agent instructions, attachment references, events, approvals, queues and terminal data
- * are intentionally absent from the remote view.
+ * agent instructions, attachment paths/source IDs, events, approvals, queues and terminal data
+ * are intentionally absent from the remote view. Shared attachment metadata and bounded previews
+ * are explicitly redacted projections, never attachment-reader capability.
  */
-export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorShare, 'taskIds' | 'projectIds'> & Partial<Pick<ActiveOperatorShare, 'primary'>>): Snapshot {
+function safeAppearance(value: SharedChatAppearance | undefined): SharedChatAppearance | undefined {
+  if (!value || (value.theme !== 'light' && value.theme !== 'dark') || !value.variables || typeof value.variables !== 'object') return undefined;
+  const variables: SharedChatAppearance['variables'] = {};
+  for (const key of sharedAppearanceVariables) {
+    const token = value.variables[key];
+    if (typeof token === 'string' && token.length > 0 && token.length <= 512) variables[key] = token;
+  }
+  return Object.keys(variables).length ? { theme: value.theme, variables } : undefined;
+}
+
+export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorShare, 'taskIds' | 'projectIds'> & Partial<Pick<ActiveOperatorShare, 'primary' | 'visitor'>>, appearance?: SharedChatAppearance, uploadsAvailable = true): SharedChatSnapshot {
   const ids = sharedTaskIds(snapshot, share);
   const tasks = snapshot.tasks.filter(task => ids.has(task.id)).map(safeTask);
   const agentIds = new Set(tasks.map(task => task.agentId));
   const projectIds = new Set(tasks.flatMap(task => task.projectId ? [task.projectId] : []));
+  const previewBudget = { remaining: MAX_SHARED_PREVIEW_BYTES };
+  const projectedAppearance = safeAppearance(appearance);
   return {
     // Explicit projection: new owner-only Snapshot fields must never become
     // visitor-visible just because they were added to the desktop protocol.
@@ -109,7 +138,7 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
       // Keep peer-attributed system records, which are part of a shared chat.
       .filter(message => message.role !== 'system' || !!message.senderAgentId)
       .map(message => {
-        const projected = safeMessage(message);
+        const projected = safeMessage(message, previewBudget);
         // Existing untagged user turns were authored by the owner, not the
         // newly joined visitor. This is display projection, never a rewrite
         // of the owner's persisted transcript or native agent history.
@@ -125,7 +154,8 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
     queuedMessages: [],
     approvalRequests: [],
     approvalRules: [],
-  };
+    ...(share.primary && share.visitor ? { sharing: { primary: { name: share.primary.name, role: 'primary user' }, visitor: { name: share.visitor.name, role: 'visitor' }, ...(projectedAppearance ? { appearance: projectedAppearance } : {}), ...(uploadsAvailable ? { uploads: { maxFileBytes: 8 * 1024 * 1024, maxFiles: 8 } } : {}) } } : {}),
+  } as SharedChatSnapshot;
 }
 
 /** The remote dispatcher receives this capability, never the owner's full bridge.
@@ -133,9 +163,14 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
  * Revoking or changing it invalidates in-flight reads before any dispatch/response.
  */
 export function createOperatorScopedBridge(
-  bridge: Pick<MonitterBridge, 'getSnapshot' | 'sendMessage'>,
+  bridge: Pick<MonitterBridge, 'getSnapshot' | 'sendMessage'> & Partial<Pick<MonitterBridge, 'storeAttachment'>>,
   getShare: () => ActiveOperatorShare | null,
+  getAppearance?: () => SharedChatAppearance | undefined,
 ): DesktopBridge {
+  const visitorAttachments = new Map<string, { share: ActiveOperatorShare; taskId: string }>();
+  const cleanAttachments = (share: ActiveOperatorShare) => {
+    for (const [id, attachment] of visitorAttachments) if (attachment.share !== share) visitorAttachments.delete(id);
+  };
   const current = () => {
     const share = getShare();
     if (!share) throw new Error('Sharing has ended or has not been approved.');
@@ -145,27 +180,57 @@ export function createOperatorScopedBridge(
     if (getShare() !== share) throw new Error('Sharing was revoked or changed.');
   };
   const denied = async (): Promise<never> => { throw new Error('Only reading and messaging the shared chat is permitted.'); };
+  const storeAttachment = bridge.storeAttachment ? async (taskId: string, file: AttachmentFileData, previewDataUrl?: string) => {
+    const share = current();
+    cleanAttachments(share);
+    if (visitorAttachments.size >= 64) throw new Error('Send or end sharing before uploading more files.');
+    if (!validAttachment(file)) throw new Error('Attachment must be a valid file up to 8 MiB.');
+    const snapshot = await bridge.getSnapshot();
+    check(share);
+    if (!sharedTaskIds(snapshot, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
+    if (previewDataUrl !== undefined && (previewDataUrl.length > 48_000 || !safePreview(previewDataUrl))) throw new Error('Attachment preview must be a safe raster image.');
+    const attachment = await bridge.storeAttachment!({ taskId }, file, previewDataUrl);
+    check(share);
+    visitorAttachments.set(attachment.id, { share, taskId });
+    return safeAttachment(attachment, { remaining: MAX_SHARED_PREVIEW_BYTES });
+  } : undefined;
   return {
     async getSnapshot() {
       const share = current();
       const snapshot = await bridge.getSnapshot();
       check(share);
-      return sharedSnapshot(snapshot, share);
+      return sharedSnapshot(snapshot, share, getAppearance?.(), !!storeAttachment);
     },
-    async sendMessage(taskId, text) {
+    async sendMessage(taskId, text, attachmentIds = []) {
       const share = current();
-      if (typeof text !== 'string' || !text.trim() || text.length > 32000) throw new Error('Enter a message of at most 32,000 characters.');
+      cleanAttachments(share);
+      if (typeof text !== 'string' || text.length > 32000 || (!text.trim() && attachmentIds.length === 0)) throw new Error('Enter a message or attach a file; text is limited to 32,000 characters.');
+      if (!Array.isArray(attachmentIds) || attachmentIds.length > 8 || attachmentIds.some(id => {
+        const stored = visitorAttachments.get(id);
+        return typeof id !== 'string' || !stored || stored.share !== share || stored.taskId !== taskId;
+      })) throw new Error('Attachments must be uploaded by this visitor for this shared chat.');
       const snapshot = await bridge.getSnapshot();
       check(share);
       if (!sharedTaskIds(snapshot, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
       // No await between this final permission check and invoking durable send.
       // The peer supplies only text, never its own author identity or scope.
-      const result = await bridge.sendMessage(taskId, formatOperatorMessage([share.primary, share.visitor], share.visitor, text));
+      const result = await bridge.sendMessage(taskId, formatOperatorMessage([share.primary, share.visitor], share.visitor, text), attachmentIds);
+      // A durable send accepted these IDs. They are one-use visitor capabilities;
+      // retaining them would permit an unbounded in-memory replay set.
+      for (const attachmentId of attachmentIds) visitorAttachments.delete(attachmentId);
       check(share);
       const next = 'tasks' in result ? result : await bridge.getSnapshot();
       check(share);
-      return sharedSnapshot(next, share);
+      return sharedSnapshot(next, share, getAppearance?.(), !!storeAttachment);
     },
+    ...(storeAttachment ? { storeAttachment } : {}),
     cancelTask: denied, resumeTask: denied, listTerminals: denied, readTerminal: denied,
   };
+}
+
+function validAttachment(file: AttachmentFileData): boolean {
+  if (!file || typeof file.filename !== 'string' || !file.filename.trim() || file.filename.length > 255 || /[\\/\0]/.test(file.filename) ||
+    typeof file.mimeType !== 'string' || file.mimeType.length > 255 || typeof file.dataBase64 !== 'string' ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(file.dataBase64) || file.dataBase64.length % 4 === 1) return false;
+  try { return atob(file.dataBase64).length > 0 && atob(file.dataBase64).length <= 8 * 1024 * 1024; } catch { return false; }
 }

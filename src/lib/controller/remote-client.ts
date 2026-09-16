@@ -1,7 +1,7 @@
 import { ControllerDispatcher } from './dispatcher';
-import { CONTROLLER_PROTOCOL_VERSION, parseControllerRequest, type ControllerRequest, type ControllerResponse, type ControllerResult, type ControllerSendReceipt } from './protocol';
+import { CONTROLLER_MAX_UPLOAD_BYTES, CONTROLLER_MAX_UPLOAD_PREVIEW_CHARS, CONTROLLER_PROTOCOL_VERSION, CONTROLLER_UPLOAD_CHUNK_BYTES, parseControllerRequest, type ControllerRequest, type ControllerResponse, type ControllerResult, type ControllerSendReceipt } from './protocol';
 import { SecureChannel, base64urlToBytes, bytesToBase64url, deriveDirectionalKeys, deriveEcdhSecret, exportPairingPublicKey, generatePairingKeyPair, pairingCommitment, randomBytes, verificationCode, type SecureEnvelope } from './secure-session';
-import type { Snapshot, TerminalRead, TerminalSession } from '../types';
+import type { Attachment, AttachmentFileData, Snapshot, TerminalRead, TerminalSession } from '../types';
 import type { ControllerClient } from './protocol';
 
 export type RemoteConnectionStatus = 'connecting' | 'waiting_for_peer' | 'pending' | 'awaiting_approval' | 'connected' | 'rejected' | 'closed' | 'error';
@@ -41,7 +41,7 @@ export interface MobileSession {
   supportsRememberedDevices(): boolean;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   getSnapshot(): Promise<Snapshot>;
-  sendMessage(taskId: string, text: string): Promise<Snapshot | ControllerSendReceipt>;
+  sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | ControllerSendReceipt>;
   cancelTask(taskId: string): Promise<Snapshot>;
   resumeTask(taskId: string): Promise<Snapshot>;
   listTerminals(): Promise<TerminalSession[]>;
@@ -50,7 +50,9 @@ export interface MobileSession {
 }
 /** Collaboration visitors never negotiate controller send receipts. */
 export interface CollaboratorMobileSession extends Omit<MobileSession, 'sendMessage'> {
-  sendMessage(taskId: string, text: string): Promise<Snapshot>;
+  sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot>;
+  /** Bounded encrypted upload, stored only against this visitor's shared task. */
+  storeAttachment(taskId: string, file: AttachmentFileData & { previewDataUrl?: string | null }): Promise<Attachment>;
 }
 
 type Role = 'desktop' | 'mobile';
@@ -309,7 +311,7 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
         if (controllerKey && validRequest) await options?.onControllerAccess?.(controllerKey);
         if (controllerKey && options?.isTrustedController && !(await options.isTrustedController(controllerKey))) { this.close(); return; }
         if (!stillApproved()) return;
-        const response = await this.dispatcher.dispatchJson(json, { authenticated: true, subject: `paired-room:${invitationData.room}` }, { allowSendReceipt: this.peerSupportsSendReceipt });
+        const response = await this.dispatcher.dispatchJson(json, { authenticated: true, subject: `paired-room:${invitationData.room}` }, { allowSendReceipt: this.peerSupportsSendReceipt, allowUploads: !!this.peer });
         if (stillApproved()) await this.sendSecure({ type: 'response', json: response });
       })()
         // A close/revocation must never revive the socket. A failed response
@@ -360,7 +362,20 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       });
     }
     async getSnapshot() { return this.call('getSnapshot', {}) as Promise<Snapshot>; }
-    async sendMessage(taskId: string, text: string) { return this.call('sendMessage', { taskId, text }) as Promise<Snapshot | ControllerSendReceipt>; }
+    async sendMessage(taskId: string, text: string, attachmentIds?: string[]) { return this.call('sendMessage', { taskId, text, ...(attachmentIds?.length ? { attachmentIds } : {}) }) as Promise<Snapshot | ControllerSendReceipt>; }
+    async storeAttachment(taskId: string, file: AttachmentFileData & { previewDataUrl?: string | null }): Promise<Attachment> {
+      if (typeof file?.filename !== 'string' || typeof file.mimeType !== 'string' || typeof file.dataBase64 !== 'string') throw new Error('Attachment data is invalid.');
+      const bytes = decodeBase64(file.dataBase64);
+      if (bytes.byteLength === 0 || bytes.byteLength > CONTROLLER_MAX_UPLOAD_BYTES) throw new Error(`Attachments must be between 1 byte and ${CONTROLLER_MAX_UPLOAD_BYTES} bytes.`);
+      if (file.previewDataUrl != null && !validPreview(file.previewDataUrl)) throw new Error('Attachment preview must be a small PNG, JPEG, or WebP image.');
+      const started = await this.call('beginAttachmentUpload', { taskId, filename: file.filename, mimeType: file.mimeType, size: bytes.byteLength, ...(file.previewDataUrl ? { previewDataUrl: file.previewDataUrl } : {}) });
+      if (!isUploadReceipt(started)) throw new Error('Attachment upload could not start.');
+      for (let offset = 0; offset < bytes.byteLength; offset += CONTROLLER_UPLOAD_CHUNK_BYTES) {
+        const chunk = encodeBase64(bytes.subarray(offset, Math.min(offset + CONTROLLER_UPLOAD_CHUNK_BYTES, bytes.byteLength)));
+        await this.call('appendAttachmentUpload', { uploadId: started.uploadId, dataBase64: chunk });
+      }
+      return this.call('finishAttachmentUpload', { uploadId: started.uploadId }) as Promise<Attachment>;
+    }
     async cancelTask(taskId: string) { return this.call('cancelTask', { taskId }) as Promise<Snapshot>; }
     async resumeTask(taskId: string) { return this.call('resumeTask', { taskId }) as Promise<Snapshot>; }
     async listTerminals() { return this.call('listTerminals', {}) as Promise<TerminalSession[]>; }
@@ -389,6 +404,28 @@ function requestIdFromJson(json: string): string | null {
 function validPersistentKeyPair(keyPair: CryptoKeyPair): boolean {
   return keyPair.privateKey.type === 'private' && keyPair.publicKey.type === 'public' &&
     keyPair.privateKey.algorithm.name === 'ECDH' && keyPair.publicKey.algorithm.name === 'ECDH';
+}
+
+function isUploadReceipt(value: ControllerResult): value is { uploadId: string } {
+  return !!value && typeof value === 'object' && 'uploadId' in value && typeof value.uploadId === 'string';
+}
+
+function decodeBase64(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 === 1) throw new Error('Attachment data is not valid Base64.');
+  let binary: string; try { binary = atob(value); } catch { throw new Error('Attachment data is not valid Base64.'); }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let index = 0; index < bytes.byteLength; index += 1) binary += String.fromCharCode(bytes[index]);
+  return btoa(binary);
+}
+
+function validPreview(value: string): boolean {
+  return value.length <= CONTROLLER_MAX_UPLOAD_PREVIEW_CHARS && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value);
 }
 
 /**

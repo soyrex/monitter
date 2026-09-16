@@ -1116,16 +1116,25 @@ Each visitor request is authorized at execution time, not merely when received. 
 desktop re-reads the authoritative snapshot and rechecks the live share generation,
 approved peer identity, and exact selected chat immediately before invoking a command.
 Revocation during an asynchronous check therefore denies the command. The visitor
-command surface contains only the scoped snapshot read and sending a text message to
-an allowed, unarchived, non-channel chat. It does not expose task cancellation/resume,
-channels, terminals, approvals, settings changes, filesystem or Git operations,
-attachments, agent setup, or any other owner command.
+command surface contains only the scoped snapshot read, bounded file upload, and
+sending a message to an allowed, unarchived, non-channel chat. A visitor may upload
+at most eight files per message, each at most 8 MiB, using encrypted 32 KiB chunks.
+The visitor may include one optional client-generated PNG, JPEG or WebP thumbnail
+per upload; it is a validated data URL capped at 48,000 characters, never a file
+path or remotely fetched URL.
+Pending encrypted chunks are peer- and task-scoped, expire when incomplete, and have
+a bounded aggregate memory budget. Before the desktop stores an upload, and again
+before it sends a message, it rechecks the immutable live share and exact selected
+task; it accepts only attachment IDs created by that visitor for that task. Attachment-only
+messages are valid. It does not expose task cancellation/resume, channels, terminals,
+approvals, settings changes, filesystem or Git operations, attachment reads, agent
+setup, or any other owner command.
 
 Visitor snapshots are constructed as an explicit allowlist. They contain only the
 selected tasks, their ordinary shared transcript, and the minimum agent/project display
 records needed to render those chats. They omit hosts and local paths, native session
-IDs, launch commands and arguments, saved instructions, attachment metadata, system
-profile messages, activity and diagnostic events, collaborations, queued messages,
+IDs, launch commands and arguments, saved instructions, attachment source IDs and
+paths, system profile messages, activity and diagnostic events, collaborations, queued messages,
 approval requests and remembered approval rules. Adding a field to `Snapshot` does not
 make it visitor-visible automatically.
 
@@ -1165,7 +1174,10 @@ grants no workspace access.
 After approval, the owner selects individual chats and/or projects. The visitor
 can view and send messages only within that current selection; they cannot stop
 or resume agents, create chats, access terminals, inspect hosts, folders,
-attachments, agent instructions, activity, approval details, queues or other workspace records.
+agent instructions, activity, approval details, queues or other workspace records.
+They can upload only through the bounded per-share chat upload flow and can see
+shared attachment filename, MIME type, size and a bounded raster preview; local
+paths, source IDs and attachment-reading APIs remain private.
 Visitor snapshots use an explicit field projection; new desktop snapshot fields
 must be reviewed before they are exposed to visitors. Harness approvals remain
 with the desktop owner, even for a shared chat.
@@ -1178,4 +1190,10 @@ Shared user messages are stored and sent to the model with visible attribution:
 `@(Alex): message`. The execution prompt also names the two operators, such as
 `Alex (primary user)` and `Luke (visitor)`, so attribution is model context
 rather than an implicit authority change. The UI renders the operator name and
-avatar separately from the message text.
+avatar separately from the message text. Shared transcript attachments expose only a
+redacted `path: ''`, filename, MIME type, byte size and a bounded safe image preview;
+they never expose native locations, source IDs, attachment readers, terminals or
+filesystem capability. The shared chat snapshot includes the approved primary and
+visitor display identities, the owner's safe appearance projection, and the upload
+limits so the visitor can render the ordinary read-only chat surface without reading
+owner settings.

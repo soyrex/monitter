@@ -4,7 +4,7 @@
   import QRCode from 'qrcode';
   import { getBridge } from '$lib/bridge';
   import { createResumableDesktopSession, type ResumableDesktopSession } from '$lib/controller/resumable-session';
-  import type { RemoteConnectionState } from '$lib/controller/remote-client';
+  import type { DesktopBridge, RemoteConnectionState } from '$lib/controller/remote-client';
   import { clearDesktopPairing, deviceExpiresAt, isRememberedController, MAX_INACTIVITY_DAYS, newDesktopPairing, saveDesktopPairing, loadDesktopPairing, type DesktopPairingRecord, type RememberedController } from '$lib/controller/pairing-store';
   import { DEFAULT_RELAY, registerPairingCode, revokePairingCode, type PairingRegistration } from '$lib/controller/pairing-code';
   import { remoteControlTarget } from '$lib/workspace-panels';
@@ -34,7 +34,18 @@
   function statusLabel(value:string){return ({connecting:error?'Reconnecting to the relay…':'Connecting to the relay…',waiting_for_peer:'Ready for a phone',pending:'Waiting for phone approval',connected:'Phone connected',closed:'Listener stopped',rejected:'Phone pairing rejected',error:'Remote access needs attention'} as Record<string,string>)[value]??value.replaceAll('_',' ');}
   function clearRegistration(){const old=registration;registration=null;if(old)void revokePairingCode(relay,old).catch(()=>{});}
   function clone(source:DesktopPairingRecord):DesktopPairingRecord{return {version:1,relayUrl:source.relayUrl,enabled:source.enabled,inactivityDays:source.inactivityDays,identity:{room:source.identity.room,keyPair:source.identity.keyPair},devices:source.devices.map(device=>({...device}))};}
-  function controllerBridge(){const bridge=getBridge();return {...bridge,sendMessage:(taskId:string,text:string)=>bridge.sendMessage(taskId,text)};}
+  // General mobile control deliberately excludes visitor-only file upload.
+  function controllerBridge():DesktopBridge{
+    const bridge=getBridge();
+    return {
+      getSnapshot:()=>bridge.getSnapshot(),
+      sendMessage:(taskId,text,attachmentIds)=>bridge.sendMessage(taskId,text,attachmentIds),
+      cancelTask:taskId=>bridge.cancelTask(taskId),
+      resumeTask:taskId=>bridge.resumeTask(taskId),
+      listTerminals:()=>bridge.listTerminals(),
+      readTerminal:(id,afterSeq)=>bridge.readTerminal(id,afterSeq),
+    };
+  }
   async function persist(next:DesktopPairingRecord,current=generation){
     if(current!==generation)return;
     // Install synchronously: an older completed write must never restore revoked trust.

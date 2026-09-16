@@ -100,6 +100,26 @@ assert.equal(legacyReceipt.ok, true); assert.ok('tasks' in legacyReceipt.result)
 const negotiatedReceipt = JSON.parse(await new ControllerDispatcher(receiptClient).dispatchJson(receiptRequest, context, { allowSendReceipt: true }));
 assert.deepEqual(negotiatedReceipt.result, { accepted: true });
 
+// Large files never need a single relay frame: the controller accepts bounded
+// chunks and only hands a complete, declared-size file to the scoped bridge.
+let uploaded: { taskId: string; dataBase64: string; preview?: string } | null = null;
+const uploadClient: ControllerClient = { ...client, storeAttachment: async (taskId, file, preview) => {
+  uploaded = { taskId, dataBase64: file.dataBase64, ...(preview ? { preview } : {}) };
+  return { id: 'abababab-abab-4bab-8bab-abababababab', name: file.filename, mimeType: file.mimeType, size: atob(file.dataBase64).length, path: '' };
+} };
+const uploadDispatcher = new ControllerDispatcher(uploadClient);
+const uploadOptions = { allowUploads: true };
+const preview = 'data:image/png;base64,aGVsbG8=';
+const begin = JSON.parse(await uploadDispatcher.dispatchJson(request('13131313-1313-4313-8313-131313131313', 'beginAttachmentUpload', { taskId: task, filename: 'hello.txt', mimeType: 'text/plain', size: 5, previewDataUrl: preview }), context, uploadOptions));
+assert.equal(begin.ok, true); const uploadId = begin.result.uploadId;
+assert.equal(JSON.parse(await uploadDispatcher.dispatchJson(request('14141414-1414-4414-8414-141414141414', 'appendAttachmentUpload', { uploadId, dataBase64: 'aGVsbG8=' }), context, uploadOptions)).ok, true);
+const finished = JSON.parse(await uploadDispatcher.dispatchJson(request('15151515-1515-4515-8515-151515151515', 'finishAttachmentUpload', { uploadId }), context, uploadOptions));
+assert.equal(finished.result.name, 'hello.txt'); assert.deepEqual(uploaded, { taskId: task, dataBase64: 'aGVsbG8=', preview });
+const traversal = JSON.parse(await uploadDispatcher.dispatchJson(request('16161616-1616-4616-8616-161616161616', 'beginAttachmentUpload', { taskId: task, filename: '../secret', mimeType: 'text/plain', size: 1 }), context, uploadOptions));
+assert.equal(traversal.error.code, 'invalid_request');
+const incomplete = JSON.parse(await uploadDispatcher.dispatchJson(request('17171717-1717-4717-8717-171717171717', 'beginAttachmentUpload', { taskId: task, filename: 'short.txt', mimeType: 'text/plain', size: 2 }), context, uploadOptions));
+assert.equal(JSON.parse(await uploadDispatcher.dispatchJson(request('18181818-1818-4818-8818-181818181818', 'finishAttachmentUpload', { uploadId: incomplete.result.uploadId }), context, uploadOptions)).error.code, 'bridge_error');
+
 // This is the loopback transport proof: both directions are JSON strings and
 // the authenticated context remains an in-process transport assertion.
 let raw = await dispatcher.dispatchJson(request('33333333-3333-4333-8333-333333333333', 'getSnapshot', {}), context);

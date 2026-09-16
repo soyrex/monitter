@@ -8,6 +8,7 @@
   import { DEFAULT_RELAY, registerPairingCode, revokePairingCode, type PairingRegistration } from '$lib/controller/pairing-code';
   import { activeOperatorShare, createOperatorScopedBridge, sharedTaskIds, type ActiveOperatorShare } from '$lib/operator-sharing';
   import type { Snapshot, Task } from '$lib/types';
+  import { captureSharedAppearance } from '$lib/shared-chat';
 
   let { open = $bindable(false), taskId = null }: { open?: boolean; taskId?: string | null } = $props();
   let relay = $state(DEFAULT_RELAY), primaryName = $state('');
@@ -24,7 +25,9 @@
   let unsubscribe: (() => void) | undefined, generation = 0, creating = $state(false), profileLoad = 0;
   const timer = setInterval(() => now = Date.now(), 1000);
   const key = $derived(registration && registration.expiresAt > now ? registration.code.match(/.{3}/g)?.join(' ') : '');
-  const visitor = $derived(session?.getPeer()?.name ?? 'Visitor');
+  // Peer identity changes inside the session object; connection status is the
+  // reactive signal that makes the approved display name refresh.
+  const visitor = $derived.by(() => { status; return session?.getPeer()?.name ?? 'Visitor'; });
   const internalAgentIds = $derived(snapshot ? new Set(snapshot.agents.filter(agent => agent.internal === true).map(agent => agent.id)) : new Set<string>());
   const shareableSnapshotTasks = $derived(snapshot ? snapshot.tasks.filter(task => !task.archived && !task.channelId && !internalAgentIds.has(task.agentId)) : []);
   const effectiveTaskIds = $derived(lockedTaskId ? [lockedTaskId] : taskIds.filter(id => shareableSnapshotTasks.some(task => task.id === id)));
@@ -39,7 +42,13 @@
   }
   function captureSessionShare(): ActiveOperatorShare {
     const primary = Object.freeze({ name: primaryName.trim(), role: 'primary user' as const });
-    const peer = Object.freeze({ name: visitor, role: 'visitor' as const });
+    const peerName = session?.getPeer()?.name;
+    if (!peerName) throw new Error('The visitor identity is not available yet.');
+    const peer = Object.freeze({ name: peerName, role: 'visitor' as const });
+    const existing = untrack(() => sessionShare);
+    if (existing && existing.primary.name === primary.name && existing.visitor.name === peer.name &&
+      JSON.stringify(existing.taskIds) === JSON.stringify(effectiveTaskIds) &&
+      JSON.stringify(existing.projectIds) === JSON.stringify(effectiveProjectIds)) return existing;
     const tasks = Object.freeze([...effectiveTaskIds]) as unknown as string[];
     const projects = Object.freeze([...effectiveProjectIds]) as unknown as string[];
     return sessionShare = Object.freeze({ primary, visitor: peer, taskIds: tasks, projectIds: projects });
@@ -98,7 +107,7 @@
     try {
       let candidate: typeof session = null;
       const next = await createDesktopSession(relay, createOperatorScopedBridge(getBridge(), () =>
-        generation === current && session === candidate && status === 'connected' ? sessionShare : null));
+        generation === current && session === candidate && status === 'connected' ? sessionShare : null, captureSharedAppearance));
       candidate = next;
       if (current !== generation) { next.close(); return; }
       session = next;
@@ -111,7 +120,10 @@
       });
       // The invite is a fragment so it is never sent to the hosted web server
       // or leaked through its request logs/referrers.
-      link = `${publicUrl}#invite=${encodeURIComponent(next.invitation)}&accent=${encodeURIComponent(snapshot.settings.accent ?? '#3f9d6a')}&theme=${snapshot.settings.theme ?? 'light'}`;
+      const appearance = captureSharedAppearance();
+      const fragment = new URLSearchParams({ invite: next.invitation, accent: appearance?.variables['--accent'] ?? snapshot.settings.accent, theme: appearance?.theme ?? snapshot.settings.theme });
+      if (appearance) fragment.set('appearance', JSON.stringify(appearance));
+      link = `${publicUrl}#${fragment}`;
       qr = await QRCode.toDataURL(link, { width: 260, margin: 2 });
       if (current !== generation) { next.close(); return; }
       const created = await registerPairingCode(next.invitation);
@@ -169,7 +181,7 @@
         <div class="share-list"><h3>Chats</h3>{#each shareableSnapshotTasks as task}<label class="scope"><input type="checkbox" checked={taskIds.includes(task.id)} onchange={() => taskIds = toggle(taskIds, task.id)}/><span><b>{task.title || 'Untitled chat'}</b><small>{snapshot?.agents.find(agent => agent.id === task.agentId)?.name ?? 'Agent'}</small></span></label>{:else}<small>No shareable chats yet.</small>{/each}</div>
         <div class="share-list"><h3>Projects</h3>{#each snapshot?.projects ?? [] as project}<label class="scope"><input type="checkbox" checked={projectIds.includes(project.id)} onchange={() => projectIds = toggle(projectIds, project.id)}/><span><b>{project.name}</b><small>Shares its current chats</small></span></label>{:else}<small>No projects yet.</small>{/each}</div>
       {/if}
-      <small>{selectedTaskIds.length} chat{selectedTaskIds.length === 1 ? '' : 's'} shared. The visitor can send messages only; they cannot stop agents, use terminals, or view local paths, attachments, instructions, hosts or activity.</small>
+      <small>{selectedTaskIds.length} chat{selectedTaskIds.length === 1 ? '' : 's'} shared. The visitor can send messages, upload files and view attachments in shared chats, but cannot change models, stop agents, use terminals, or view local paths, instructions, hosts or private activity.</small>
     {:else if ['closed', 'error', 'rejected'].includes(status)}<button class="primary" onclick={start}>Create a fresh share link</button>{/if}
     <button class="danger" onclick={stop}>End sharing and revoke access</button>
   {/if}

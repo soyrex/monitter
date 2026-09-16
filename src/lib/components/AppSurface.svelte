@@ -109,7 +109,7 @@
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
   import { contrastForeground } from '$lib/accent-contrast';
-  import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage } from '$lib/operator-sharing';
+  import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage, sharedTaskIds } from '$lib/operator-sharing';
   import Modal from "$lib/components/Modal.svelte";
   import { activeModal } from "$lib/active-modal";
   import Markdown from "$lib/components/Markdown.svelte";
@@ -1444,14 +1444,14 @@
   const profileList = (value: string[] | undefined) => (value ?? []).join("\n");
   const parseProfileList = (value: string) => value.split(/\n/);
   const senderName = (message: (typeof messages)[number]) => {
-    if (message.role === 'user') return splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')).name;
+    if (message.role === 'user') return splitOperatorMessage(message.text).name ?? operatorShareFor(message.taskId)?.primary.name ?? null;
     const sender = (message as typeof message & { senderAgentId?: string | null }).senderAgentId;
     return sender ? visibleAgents.find(agent => agent.id === sender)?.name ?? "Agent" : null;
   };
   const operatorMessageText = (value: string) => splitOperatorMessage(value.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')).text;
   const operatorShareFor = (taskId: string) => {
     const share = $activeOperatorShare;
-    return share?.taskIds.includes(taskId) ? share : null;
+    return share && snapshot && sharedTaskIds(snapshot, share).has(taskId) ? share : null;
   };
   const operatorPrompt = (taskId: string, value: string) => {
     const share = operatorShareFor(taskId);

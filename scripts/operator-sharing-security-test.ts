@@ -65,7 +65,7 @@ assert.deepEqual(splitOperatorMessage('@(Sam): hello'), { name: 'Sam', text: 'he
 const visitor = sharedSnapshot(source, grant());
 assert.deepEqual(visitor.tasks.map(item => item.id), [selectedId]);
 assert.deepEqual(visitor.messages.map(item => item.id), ['visible']);
-assert.deepEqual(visitor.messages[0].attachments, []);
+assert.deepEqual(visitor.messages[0].attachments, [{ id: 'attachment', name: 'secret.txt', mimeType: 'text/plain', size: 10, path: '' }]);
 assert.equal(visitor.messages[0].phase, 'final_answer');
 assert.deepEqual(visitor.hosts, []);
 assert.deepEqual(visitor.events, []);
@@ -102,6 +102,8 @@ const bridge = createOperatorScopedBridge({
   getSnapshot: async () => source,
   sendMessage: async (_taskId, text) => { sent += 1; sentText = text; return source; },
 }, () => active);
+assert.equal('storeAttachment' in bridge, false, 'Older bridges without attachment storage must not advertise uploads.');
+assert.equal((await bridge.getSnapshot()).sharing?.uploads, undefined, 'Older bridges must not advertise upload limits.');
 await bridge.sendMessage(selectedId, 'hello');
 assert.equal(sent, 1);
 assert.ok(sentText.endsWith('@(Sam): hello'));
@@ -113,6 +115,44 @@ await assert.rejects(bridge.listTerminals(), /only reading and messaging/i);
 await assert.rejects(bridge.readTerminal('terminal', 0), /only reading and messaging/i);
 await assert.rejects(bridge.cancelTask(selectedId), /only reading and messaging/i);
 await assert.rejects(bridge.resumeTask(selectedId), /only reading and messaging/i);
+
+// Attachment IDs are minted only by this visitor's scoped upload and are tied
+// to the exact immutable share object and task; owner IDs never become usable.
+let storedUploads = 0, attachmentSend: string[] = [];
+active = grant();
+const uploadBridge = createOperatorScopedBridge({
+  getSnapshot: async () => source,
+  sendMessage: async (_taskId, text, ids) => { sentText = text; attachmentSend = ids ?? []; return source; },
+  storeAttachment: async (_target, file) => {
+    storedUploads += 1;
+    return { id: `33333333-3333-4333-8333-${String(storedUploads).padStart(12, '0')}`, name: file.filename, mimeType: file.mimeType, size: atob(file.dataBase64).length, path: '/private/new-upload' };
+  },
+}, () => active);
+await assert.rejects(uploadBridge.storeAttachment!(selectedId, { filename: '../escape.txt', mimeType: 'text/plain', dataBase64: 'eA==' }), /valid file/i);
+assert.equal(storedUploads, 0, 'Traversal must be rejected before native storage.');
+await assert.rejects(uploadBridge.sendMessage(selectedId, 'owner ID', ['44444444-4444-4444-8444-444444444444']), /uploaded by this visitor/i);
+const owned = await uploadBridge.storeAttachment!(selectedId, { filename: 'visitor.txt', mimeType: 'text/plain', dataBase64: 'eA==' });
+await uploadBridge.sendMessage(selectedId, '', [owned.id]);
+assert.deepEqual(attachmentSend, [owned.id]);
+assert.ok(sentText.endsWith('@(Sam): '), 'Attachment-only delivery still uses the approved visitor identity.');
+await assert.rejects(uploadBridge.sendMessage(selectedId, 'replay', [owned.id]), /uploaded by this visitor/i);
+active = grant();
+await assert.rejects(uploadBridge.sendMessage(selectedId, 'stale share', [owned.id]), /uploaded by this visitor/i);
+
+let uploadNativeCalls = 0;
+let releaseUpload!: () => void;
+const uploadGate = new Promise<void>(resolve => { releaseUpload = resolve; });
+active = grant();
+const delayedUpload = createOperatorScopedBridge({
+  getSnapshot: async () => { await uploadGate; return source; },
+  sendMessage: async () => source,
+  storeAttachment: async () => { uploadNativeCalls += 1; throw new Error('must not store'); },
+}, () => active);
+const uploadInFlight = delayedUpload.storeAttachment!(selectedId, { filename: 'waiting.txt', mimeType: 'text/plain', dataBase64: 'eA==' });
+active = null;
+releaseUpload();
+await assert.rejects(uploadInFlight, /revoked|not shared/i);
+assert.equal(uploadNativeCalls, 0, 'Revocation during upload authorization must prevent native storage.');
 
 let release!: () => void;
 const gate = new Promise<void>(resolve => { release = resolve; });
