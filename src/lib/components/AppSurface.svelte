@@ -133,6 +133,7 @@
   import PaneGrid from '$lib/components/PaneGrid.svelte';
   import PaneSurface from '$lib/components/PaneSurface.svelte';
   import RootSurfaceLifecycle from '$lib/components/RootSurfaceLifecycle.svelte';
+  import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import TaskTranscript from '$lib/components/TaskTranscript.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import AppSurface from './AppSurface.svelte';
@@ -1449,6 +1450,8 @@
     return sender ? visibleAgents.find(agent => agent.id === sender)?.name ?? "Agent" : null;
   };
   const operatorMessageText = (value: string) => splitOperatorMessage(value.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')).text;
+  const observedTaskIds = $derived(snapshot && $activeOperatorShare ? sharedTaskIds(snapshot, $activeOperatorShare) : new Set<string>());
+  const observerNames = $derived($activeOperatorShare ? [$activeOperatorShare.visitor.name] : []);
   const operatorShareFor = (taskId: string) => {
     const share = $activeOperatorShare;
     return share && snapshot && sharedTaskIds(snapshot, share).has(taskId) ? share : null;
@@ -3234,6 +3237,7 @@
         {#if detail}<span class="chat-meta">{visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
       </span>
     </button>
+    <ObserverIndicator names={observedTaskIds.has(task.id) ? observerNames : []}/>
     {#if task.status === 'running'}
       <small><AnimatedTitle text="live" active={true} activeTooltip="Live run" /></small>
     {:else}
@@ -3662,6 +3666,7 @@
           </div>
         {/snippet}
         <TaskTranscript
+          observers={observedTaskIds.has(selectedTask.id) ? observerNames : []}
           active={embedded ? active : activePaneId === 'main'}
           task={selectedTask}
           agent={selectedAgent}

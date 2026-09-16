@@ -47,6 +47,40 @@ try {
     const { activeOperatorShare } = await import('/src/lib/operator-sharing.ts');
     activeOperatorShare.set({ primary: { name: 'Alex', role: 'primary user' }, visitor: { name: 'Riley', role: 'visitor' }, taskIds: [], projectIds: ['shared-project'] });
   });
+  const eye = page.locator('.pane-task-header').getByRole('button',{name:'Observers: Riley',exact:true});
+  await expect(eye).toBeVisible();
+  await eye.hover();
+  await expect(page.getByRole('tooltip')).toContainText('Watching this chat');
+  await expect(page.getByRole('tooltip')).toContainText('Riley');
+  await eye.focus();
+  await eye.press('Escape');
+  await expect(page.getByRole('tooltip')).toHaveCount(0);
+  await page.emulateMedia({reducedMotion:'reduce'});
+  expect(await eye.locator('.sparkle').first().evaluate(node=>getComputedStyle(node).animationName)).toBe('none');
+  await eye.blur();
+  await eye.focus();
+  await expect(page.getByRole('tooltip')).toContainText('Riley');
+  await page.screenshot({path:'/tmp/monitter-observer-header.png'});
+  await page.evaluate(async()=>{
+    const {activeOperatorShare}=await import('/src/lib/operator-sharing.ts');
+    activeOperatorShare.update(share=>({...share,taskIds:[],projectIds:[]}));
+  });
+  await expect(page.getByRole('button',{name:'Observers: Riley',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('tooltip')).toHaveCount(0);
+  await page.evaluate(async()=>{
+    const {activeOperatorShare}=await import('/src/lib/operator-sharing.ts');
+    activeOperatorShare.update(share=>({...share,taskIds:['shared-owner-chat'],visitor:{name:'Roger',role:'visitor'}}));
+  });
+  await expect(page.locator('.pane-task-header').getByRole('button',{name:'Observers: Roger',exact:true})).toBeVisible();
+  await page.evaluate(async()=>{
+    const {activeOperatorShare}=await import('/src/lib/operator-sharing.ts');
+    activeOperatorShare.set(null);
+  });
+  await expect(page.getByRole('button',{name:'Observers: Roger',exact:true})).toHaveCount(0);
+  await page.evaluate(async()=>{
+    const {activeOperatorShare}=await import('/src/lib/operator-sharing.ts');
+    activeOperatorShare.set({primary:{name:'Alex',role:'primary user'},visitor:{name:'Riley',role:'visitor'},taskIds:[],projectIds:['shared-project']});
+  });
   const owner = page.locator('article.message[data-participant="Alex"]').filter({ hasText: 'Earlier owner message' });
   const visitor = page.locator('article.message[data-participant="Riley"]');
   await expect(owner).toBeVisible();
@@ -61,7 +95,7 @@ try {
   const sent = await page.evaluate(() => window.__MONITTER_QA__.calls.find(call => call.method === 'sendMessage').args.text);
   expect(sent).toContain('Alex (primary user), Riley (visitor)');
   expect(sent).toContain('@(Alex): Owner follow-up');
-  console.log('Shared owner UI: project-only prompt attribution and distinct participant tints passed.');
+  console.log('Shared owner UI: project-only prompt attribution and distinct participant tints, observer hover/focus, scope and disconnect passed.');
 } finally {
   await browser.close();
   await server.close();

@@ -8,6 +8,7 @@
   import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, showThinkingFallback, type ConversationActivityItem } from '$lib/activity-grouping';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
+  import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
   import MessagePane from '$lib/components/MessagePane.svelte';
@@ -46,6 +47,7 @@
     scrollRevision,
     busy,
     canShare,
+    observers = [],
     showHeader,
     avatarVisual,
     messageAvatar,
@@ -87,6 +89,7 @@
     scrollRevision: number;
     busy: boolean;
     canShare: boolean;
+    observers?: string[];
     showHeader: boolean;
     avatarVisual: Avatar;
     messageAvatar: Snippet<[Agent | null | undefined]>;
@@ -141,6 +144,7 @@
       <h1 class="task-title"><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={onEditTask}><Pencil size={14}/></button></h1>
     </div>
     <div class="task-actions">
+      <ObserverIndicator names={observers}/>
       <div class="task-overflow">
         <button bind:this={taskMenuAnchor} class="icon" aria-label="Chat actions" aria-haspopup="menu" aria-expanded={menuOpen} onclick={()=>onMenuChange(!menuOpen)}><MoreHorizontal size={17}/></button>
         {#if menuOpen && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Chat actions">
