@@ -4,16 +4,19 @@ mod acp_collaboration;
 mod acp_discovery;
 mod acp_probe;
 mod acp_protocol;
+#[cfg(test)]
+mod acp_recovery_tests;
 mod acp_runtime;
 #[cfg(test)]
 mod acp_runtime_tests;
-#[cfg(test)]
-mod acp_recovery_tests;
 mod acp_session_config;
 #[cfg(test)]
 mod acp_stream_tests;
 mod acp_transport;
 mod adapters;
+mod admin_turn_broker;
+#[cfg(test)]
+mod admin_turn_integration_tests;
 #[cfg(test)]
 mod agent_identity_tests;
 #[cfg(test)]
@@ -32,6 +35,8 @@ mod extensions;
 mod extensions_runtime;
 mod git;
 mod goals;
+#[cfg(test)]
+mod internal_agent_tests;
 mod lan;
 mod lan_sync;
 mod menu;
@@ -43,6 +48,7 @@ mod store;
 mod terminal;
 mod usage_quota;
 
+use admin_turn_broker::{spawn_admin_turn_watchdog, AdminTurnBroker, AdminTurnReply};
 use model::*;
 use runner::Parsed;
 use sha2::{Digest, Sha256};
@@ -281,9 +287,38 @@ pub(crate) struct Service {
     app_server_approvals: Mutex<HashMap<String, std::sync::Weak<runner::RunControl>>>,
     session_approval_grants: Mutex<Vec<SessionApprovalGrant>>,
     input_waiters: Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, String>>>>,
+    /// Cached startup bootstrap of the resident Monitter Admin agent. It is
+    /// resolved once at `Service::open`; later reads go through
+    /// `Service::internal_admin` so the count remains authoritative. Used by
+    /// the resident-worker lane that consumes `internal_admin`.
+    #[allow(dead_code)]
+    internal_admin_state: InternalAdminState,
+    /// Process-local broker for mini-LLM turns routed to the resident Monitter
+    /// Admin agent. The broker ensures exactly one active admin turn at a
+    /// time and never persists prompts or replies into the snapshot.
+    #[allow(dead_code)]
+    admin_turn_broker: AdminTurnBroker,
+}
+
+/// Outcome of the one-shot `ensure_internal_admin` migration. The bootstrap
+/// either creates the admin, leaves an existing one untouched, refuses to
+/// fabricate a host when nothing is configured, or records that the saved
+/// state contains multiple internal agents so a later read can surface the
+/// configuration error without silently picking one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InternalAdminState {
+    Created,
+    Existing,
+    Unconfigured,
+    Multiple,
 }
 
 const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Maximum wall-clock duration for a single Monitter Admin mini-LLM turn.
+/// Matches the user-facing 45-second interface deadline; the broker watchdog
+/// terminates the resident transport on expiry.
+const ADMIN_TURN_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
     // ACP sessions are valid only for their immutable launcher snapshot as
@@ -329,10 +364,107 @@ fn task_descendants(snapshot: &Snapshot, roots: &[String]) -> Vec<String> {
     descendants
 }
 
+/// Bootstrap the resident Monitter Admin agent. Exactly one internal agent
+/// is allowed; the migration appends one after any existing agents so the
+/// previous `agents[0]` references stay stable. It prefers cloning the first
+/// Codex agent, then any other agent, then a read-only Codex configured for
+/// the local host. When none of those sources exist it deliberately leaves
+/// the admin unconfigured rather than fabricating a host. Multiple internal
+/// agents in the saved state are reported through `Multiple`; callers using
+/// the admin must surface the configuration error themselves rather than
+/// letting one record be silently preferred.
+fn ensure_internal_admin(snapshot: &mut Snapshot) -> InternalAdminState {
+    let internals = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.internal)
+        .count();
+    if internals > 1 {
+        return InternalAdminState::Multiple;
+    }
+    if internals == 1 {
+        return InternalAdminState::Existing;
+    }
+
+    if let Some(codex) = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.provider == "codex")
+        .cloned()
+    {
+        let mut admin = codex;
+        admin.id = id();
+        admin.name = model::INTERNAL_AGENT_NAME.to_string();
+        admin.description = "Resident Monitter Admin agent".into();
+        admin.instructions.clear();
+        admin.expertise.clear();
+        admin.responsibilities.clear();
+        admin.skills.clear();
+        admin.avatar = None;
+        admin.collaboration_enabled = false;
+        admin.acp = None;
+        admin.internal = true;
+        snapshot.agents.push(admin);
+        return InternalAdminState::Created;
+    }
+    if let Some(first) = snapshot.agents.first().cloned() {
+        let mut admin = first;
+        admin.id = id();
+        admin.name = model::INTERNAL_AGENT_NAME.to_string();
+        admin.description = "Resident Monitter Admin agent".into();
+        admin.instructions.clear();
+        admin.expertise.clear();
+        admin.responsibilities.clear();
+        admin.skills.clear();
+        admin.avatar = None;
+        admin.collaboration_enabled = false;
+        admin.acp = None;
+        admin.internal = true;
+        snapshot.agents.push(admin);
+        return InternalAdminState::Created;
+    }
+    if let Some(local_host) = snapshot
+        .hosts
+        .iter()
+        .find(|host| host.kind == "local")
+        .cloned()
+    {
+        let admin = Agent {
+            id: id(),
+            name: model::INTERNAL_AGENT_NAME.to_string(),
+            description: "Resident Monitter Admin agent".into(),
+            instructions: String::new(),
+            provider: "codex".into(),
+            model: String::new(),
+            host_id: local_host.id,
+            cwd: local_host.default_cwd.clone(),
+            color: "#3f9d6a".into(),
+            sandbox: "read-only".into(),
+            avatar: None,
+            expertise: vec![],
+            responsibilities: vec![],
+            skills: vec![],
+            collaboration_enabled: false,
+            acp: None,
+            internal: true,
+        };
+        snapshot.agents.push(admin);
+        return InternalAdminState::Created;
+    }
+
+    InternalAdminState::Unconfigured
+}
+
 impl Service {
     fn open(app: Option<AppHandle>, dir: PathBuf) -> Result<Arc<Self>, String> {
-        let (store, snapshot, task_hosts, attachments) = store::Store::open(dir.clone())?;
+        let (store, mut snapshot, task_hosts, attachments) = store::Store::open(dir.clone())?;
         let extensions = extensions::ExtensionStore::open(&dir)?;
+        let internal_admin_state = ensure_internal_admin(&mut snapshot);
+        // The bootstrap may have appended the resident Monitter Admin agent.
+        // Persist that change so the next launch sees it as a normal agent.
+        if internal_admin_state == InternalAdminState::Created {
+            store.save(&snapshot, &task_hosts, &attachments)?;
+        }
         let service = Arc::new(Self {
             app,
             store,
@@ -364,8 +496,302 @@ impl Service {
             app_server_approvals: Mutex::new(HashMap::new()),
             session_approval_grants: Mutex::new(Vec::new()),
             input_waiters: Mutex::new(HashMap::new()),
+            internal_admin_state,
+            admin_turn_broker: AdminTurnBroker::new(),
         });
         Ok(service)
+    }
+
+    /// Returns a clone of the resident Monitter Admin agent that this lane
+    /// reserved for the future mini-LLM worker. Multiple persisted internal
+    /// agents surface a configuration error here instead of letting callers
+    /// pick one; an unconfigured admin means no host and no source agent
+    /// were available at bootstrap and callers must surface that to the
+    /// user. The clone is intentional: the data lock is released before the
+    /// result escapes this method.
+    #[allow(dead_code)] // Consumed by the resident-worker lane that follows this one.
+    pub(crate) fn internal_admin(&self) -> Result<Agent, String> {
+        if let InternalAdminState::Unconfigured = self.internal_admin_state {
+            return Err(
+                "Monitter Admin is not configured. Add a local host or Codex agent and restart."
+                    .into(),
+            );
+        }
+        if let InternalAdminState::Multiple = self.internal_admin_state {
+            return Err("Multiple Monitter Admin agents are saved. Remove duplicates so exactly one Monitter Admin agent remains.".into());
+        }
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        data.snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.internal)
+            .cloned()
+            .ok_or_else(|| "The Monitter Admin agent was lost from saved state.".to_string())
+    }
+
+    /// Canonical title used for the lazy internal admin task. The frontend
+    /// already hides internal agents and their tasks; this title is only
+    /// visible through diagnostics and must stay stable for the bootstrap
+    /// contract.
+    pub(crate) const INTERNAL_ADMIN_TASK_TITLE: &'static str = "Monitter Admin resident task";
+
+    /// Returns the task id of the lazy internal admin task, creating it on
+    /// first use. The task is never archived, never projected into
+    /// `openTaskIds`, and never reused for ordinary chat sends. Repeated or
+    /// concurrent calls always observe exactly one task with `agent_id`
+    /// belonging to the resident admin agent.
+    ///
+    /// This intentionally bypasses the public `create_task` path because
+    /// `create_task` rejects the internal admin agent as a chat recipient.
+    #[allow(dead_code)] // Consumed by the resident-worker lane that follows this one.
+    pub(crate) fn ensure_internal_admin_task(&self) -> Result<String, String> {
+        let admin = self.internal_admin()?;
+        let admin_id = admin.id.clone();
+        let mut created_task: Option<Task> = None;
+        let task_id = self.mutate_data(None, |data| {
+            if let Some(existing) = data
+                .snapshot
+                .tasks
+                .iter()
+                .find(|task| {
+                    task.agent_id == admin_id
+                        && task.title == Self::INTERNAL_ADMIN_TASK_TITLE
+                        && !task.archived
+                })
+                .cloned()
+            {
+                return Ok(existing.id);
+            }
+            let host = data
+                .snapshot
+                .hosts
+                .iter()
+                .find(|host| host.id == admin.host_id)
+                .cloned()
+                .ok_or_else(|| "Monitter Admin host was not found.".to_string())?;
+            if !known_provider(&admin.provider) {
+                return Err(format!(
+                    "Monitter Admin provider '{}' is not implemented in Monitter.",
+                    admin.provider
+                ));
+            }
+            if !valid_sandbox_for_provider(&admin.provider, &admin.sandbox) {
+                return Err("Monitter Admin sandbox policy is invalid for its provider.".into());
+            }
+            let task = Task {
+                id: id(),
+                agent_id: admin.id.clone(),
+                title: Self::INTERNAL_ADMIN_TASK_TITLE.into(),
+                native_session_id: None,
+                status: "idle".into(),
+                archived: false,
+                created_at: now(),
+                updated_at: now(),
+                parent_task_id: None,
+                channel_id: None,
+                host_id: admin.host_id.clone(),
+                cwd: if admin.cwd.trim().is_empty() {
+                    host.default_cwd.clone()
+                } else {
+                    admin.cwd.clone()
+                },
+                provider: admin.provider.clone(),
+                model: admin.model.clone(),
+                model_settings: None,
+                sandbox: admin.sandbox.clone(),
+                project_id: None,
+                acp: (admin.provider == "acp")
+                    .then(|| admin.acp.clone())
+                    .flatten(),
+            };
+            data.task_hosts.insert(task.id.clone(), host);
+            data.snapshot.tasks.push(task.clone());
+            created_task = Some(task.clone());
+            Ok(task.id)
+        })?;
+        // Persist immediately so the next reader sees the task even if the
+        // app exits before any turn completes.
+        if created_task.is_some() {
+            let _ = self.changed(None);
+        }
+        Ok(task_id)
+    }
+
+    /// Returns true when `task_id` identifies the lazy internal admin task.
+    /// This is the single gate the resident-worker lane uses to keep admin
+    /// prompts/replies out of the durable snapshot.
+    #[allow(dead_code)]
+    pub(crate) fn is_internal_admin_task(&self, task_id: &str) -> bool {
+        let admin_id = match self.internal_admin() {
+            Ok(agent) => agent.id,
+            Err(_) => return false,
+        };
+        let data = match self.data.lock() {
+            Ok(data) => data,
+            Err(_) => return false,
+        };
+        data.snapshot
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.agent_id == admin_id)
+    }
+
+    /// Mark the lazy internal admin task as `running` so the next
+    /// `reserve_run` call can publish its control. This is intentionally
+    /// separate from the task-creation path: it must only run when a turn
+    /// is about to start, not when the lazy task is first observed.
+    #[allow(dead_code)]
+    fn mark_internal_admin_task_running(&self, task_id: &str) -> Result<(), String> {
+        self.mutate_data(Some(task_id.into()), |data| {
+            let task = data
+                .snapshot
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| "Monitter Admin task was not found.".to_string())?;
+            if task.status != "running" {
+                task.status = "running".into();
+                task.updated_at = now();
+            }
+            Ok(())
+        })
+    }
+
+    /// Restart a lazy internal admin task after a turn ends. The task stays
+    /// resident — only the durable status/session metadata is updated. No
+    /// new `Message` or `RunEvent` is recorded.
+    #[allow(dead_code)]
+    fn finalise_internal_admin_turn(
+        &self,
+        task_id: &str,
+        status: &str,
+        native_session_id: Option<&str>,
+    ) {
+        let _ = self.mutate_data(Some(task_id.into()), |data| {
+            let Some(task) = data
+                .snapshot
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+            else {
+                return Ok(());
+            };
+            task.status = status.into();
+            task.updated_at = now();
+            if let Some(native) = native_session_id {
+                match task.native_session_id.as_deref() {
+                    Some(existing) if existing != native => {
+                        // A second resident admin transport changed the
+                        // session id. Treat it as a recovery boundary: the
+                        // next explicit mini-task starts a fresh transport.
+                    }
+                    None => task.native_session_id = Some(native.into()),
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// Centralized agent validation used by both the Tauri command and the
+    /// LAN dispatcher. It enforces the resident Monitter Admin invariants:
+    /// a generic save cannot mark a non-internal agent as internal, and an
+    /// edit that targets the existing admin preserves `internal: true` plus
+    /// the canonical "Monitter Admin" name. Collaboration discovery,
+    /// channels, and extensions read the resulting snapshot unchanged.
+    fn save_agent(&self, mut agent: Agent) -> Result<Snapshot, String> {
+        validate_agent_avatar(agent.avatar.as_deref())?;
+        validate_collaboration_profile(&agent)?;
+        if agent.provider == "acp" && !agent.acp.as_ref().is_some_and(model::valid_acp_launch) {
+            return Err("ACP requires a valid executable and bounded argument list.".into());
+        }
+        if agent.provider != "acp" {
+            agent.acp = None;
+        }
+        if agent.name.trim().is_empty() {
+            return Err("Agent name is required.".into());
+        }
+        if !known_provider(&agent.provider) {
+            return Err(format!(
+                "Provider '{}' is not implemented in Monitter.",
+                agent.provider
+            ));
+        }
+        if !valid_sandbox_for_provider(&agent.provider, &agent.sandbox) {
+            return Err(if agent.provider == "codex" {
+                "Codex sandbox must be read-only or workspace-write.".into()
+            } else {
+                "This provider must use the harness-configured sandbox policy.".into()
+            });
+        }
+        self.mutate(None, |snapshot| {
+            if agent.id.trim().is_empty() {
+                agent.id = id();
+            }
+            if !snapshot.hosts.iter().any(|host| host.id == agent.host_id) {
+                return Err("Agent host was not found.".into());
+            }
+            // Editing the existing admin preserves its internal identity.
+            // Creating a new internal agent, or renaming an existing one
+            // away from the canonical name, is rejected: only the bootstrap
+            // migration can produce an internal record.
+            let existing_internal = snapshot
+                .agents
+                .iter()
+                .find(|current| current.id == agent.id)
+                .map(|current| current.internal);
+            match existing_internal {
+                Some(true) => {
+                    agent.internal = true;
+                    agent.name = model::INTERNAL_AGENT_NAME.to_string();
+                    agent.collaboration_enabled = false;
+                }
+                Some(false) | None => {
+                    if agent.internal {
+                        return Err(
+                            "The Monitter Admin agent can only be created by Monitter's bootstrap migration."
+                                .into(),
+                        );
+                    }
+                }
+            }
+            if let Some(current) = snapshot
+                .agents
+                .iter_mut()
+                .find(|current| current.id == agent.id)
+            {
+                *current = agent;
+            } else {
+                snapshot.agents.push(agent);
+            }
+            Ok(snapshot.clone())
+        })
+    }
+
+    /// Centralized agent deletion. Refuses to remove the resident Monitter
+    /// Admin so the bootstrap migration cannot be undone by accident.
+    fn delete_agent(&self, id: &str) -> Result<Snapshot, String> {
+        self.mutate(None, |snapshot| {
+            if snapshot.tasks.iter().any(|task| task.agent_id == id) {
+                return Err("Agent has tasks and cannot be deleted.".into());
+            }
+            let target = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .ok_or_else(|| "Agent was not found.".to_string())?;
+            if target.internal {
+                return Err("The Monitter Admin agent cannot be deleted.".into());
+            }
+            snapshot.agents.retain(|agent| agent.id != id);
+            for channel in &mut snapshot.channels {
+                channel.agent_ids.retain(|member| member != id);
+            }
+            Ok(snapshot.clone())
+        })
     }
 
     fn snapshot(&self) -> Result<Snapshot, String> {
@@ -379,15 +805,7 @@ impl Service {
     /// LAN/controller/visitor projections cannot accidentally expose MCP
     /// headers, environment values, or skill text.
     pub(crate) fn extension_config(&self) -> Result<extensions::ExtensionConfig, String> {
-        let agent_ids = self
-            .data
-            .lock()
-            .map_err(|_| "Monitter state lock failed.".to_string())?
-            .snapshot
-            .agents
-            .iter()
-            .map(|agent| agent.id.clone())
-            .collect::<HashSet<_>>();
+        let agent_ids = self.eligible_agent_ids()?;
         self.extensions.load(&agent_ids)
     }
 
@@ -399,15 +817,7 @@ impl Service {
             .extension_writes
             .lock()
             .map_err(|_| "Extension configuration lock failed.".to_string())?;
-        let agent_ids = self
-            .data
-            .lock()
-            .map_err(|_| "Monitter state lock failed.".to_string())?
-            .snapshot
-            .agents
-            .iter()
-            .map(|agent| agent.id.clone())
-            .collect::<HashSet<_>>();
+        let agent_ids = self.eligible_agent_ids()?;
         let previous = self.extensions.load(&agent_ids)?;
         if !extensions::revision_matches(&config, &previous) {
             return Err("Extension configuration changed in another Settings pane. Refresh it before saving; your draft was not overwritten.".into());
@@ -428,6 +838,23 @@ impl Service {
             })?;
         }
         self.extensions.save(saved, &agent_ids)
+    }
+
+    /// Saved agent IDs eligible to be referenced by an MCP server or managed
+    /// skill. The resident Monitter Admin agent is hidden from this set so it
+    /// cannot be targeted by user-facing extension configuration.
+    fn eligible_agent_ids(&self) -> Result<HashSet<String>, String> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        Ok(data
+            .snapshot
+            .agents
+            .iter()
+            .filter(|agent| !agent.internal)
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>())
     }
 
     fn ui_snapshot(&self, revision: Option<&str>) -> Result<lan_sync::UiSnapshot, String> {
@@ -584,9 +1011,9 @@ impl Service {
                         .map_err(|_| "Invalid limit.")?,
                 )?,
             ),
-            "get_usage_overview" => value(self.usage_overview(
-                args.get("policy").and_then(serde_json::Value::as_str),
-            )?),
+            "get_usage_overview" => {
+                value(self.usage_overview(args.get("policy").and_then(serde_json::Value::as_str))?)
+            }
             "save_host" => {
                 let mut host: Host = arg(&args, "host")?;
                 self.mutate(None, |s| {
@@ -643,57 +1070,12 @@ impl Service {
                 .and_then(snapshot_value)
             }
             "save_agent" => {
-                let mut agent: Agent = arg(&args, "agent")?;
-                validate_agent_avatar(agent.avatar.as_deref())?;
-                validate_collaboration_profile(&agent)?;
-                if agent.provider == "acp"
-                    && !agent.acp.as_ref().is_some_and(model::valid_acp_launch)
-                {
-                    return Err("ACP requires a valid executable and bounded argument list.".into());
-                }
-                if agent.provider != "acp" {
-                    agent.acp = None;
-                }
-                self.mutate(None, |s| {
-                    if agent.id.trim().is_empty() {
-                        agent.id = id()
-                    }
-                    if agent.name.trim().is_empty() {
-                        return Err("Agent name is required.".into());
-                    }
-                    if !known_provider(&agent.provider)
-                        || !valid_sandbox_for_provider(&agent.provider, &agent.sandbox)
-                    {
-                        return Err("Agent provider or sandbox is not supported.".into());
-                    }
-                    if !s.hosts.iter().any(|h| h.id == agent.host_id) {
-                        return Err("Agent host was not found.".into());
-                    }
-                    if let Some(current) = s.agents.iter_mut().find(|x| x.id == agent.id) {
-                        *current = agent
-                    } else {
-                        s.agents.push(agent)
-                    }
-                    Ok(s.clone())
-                })
-                .and_then(snapshot_value)
+                let agent: Agent = arg(&args, "agent")?;
+                self.save_agent(agent).and_then(snapshot_value)
             }
             "delete_agent" => {
                 let id: String = arg(&args, "id")?;
-                self.mutate(None, |s| {
-                    if s.tasks.iter().any(|t| t.agent_id == id) {
-                        return Err("Agent has tasks and cannot be deleted.".into());
-                    }
-                    if !s.agents.iter().any(|a| a.id == id) {
-                        return Err("Agent was not found.".into());
-                    }
-                    s.agents.retain(|a| a.id != id);
-                    for c in &mut s.channels {
-                        c.agent_ids.retain(|a| a != &id)
-                    }
-                    Ok(s.clone())
-                })
-                .and_then(snapshot_value)
+                self.delete_agent(&id).and_then(snapshot_value)
             }
             "create_task" => value(self.create_task(arg(&args, "input")?)?),
             "autoname" => value(self.autoname(arg(&args, "target")?)?),
@@ -748,9 +1130,9 @@ impl Service {
                         .unwrap_or_default(),
                 )?,
             ),
-            "clear_task_context" => snapshot_value(
-                self.clear_task_context(&arg::<String>(&args, "taskId")?)?,
-            ),
+            "clear_task_context" => {
+                snapshot_value(self.clear_task_context(&arg::<String>(&args, "taskId")?)?)
+            }
             "send_message_fast" => {
                 self.send_fast(
                     arg(&args, "taskId")?,
@@ -1090,7 +1472,7 @@ impl Service {
             )
             .ok_or("Approval host scope is too large.")?,
             launcher_fingerprint: approval_fingerprint(&launcher_scope)
-            .ok_or("Approval launcher scope is too large.")?,
+                .ok_or("Approval launcher scope is too large.")?,
             action_fingerprint: match approval_fingerprint(&strip_known_approval_envelope(raw)) {
                 Some(value) => value,
                 None => return Ok(None),
@@ -1175,7 +1557,14 @@ impl Service {
     fn apply_matching_approval_rule(&self, approval_id: &str) -> Result<bool, String> {
         // Most users have no remembered rules. Do not add a disk write to
         // ordinary approval delivery; any actual match is rechecked atomically.
-        if self.data.lock().map_err(|_| "Monitter state lock failed.")?.snapshot.approval_rules.is_empty() {
+        if self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.")?
+            .snapshot
+            .approval_rules
+            .is_empty()
+        {
             return Ok(false);
         }
         let matched = self.mutate(None, |snapshot| {
@@ -1343,8 +1732,10 @@ impl Service {
             if matches!(
                 decision,
                 ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways
-            )
-                && !snapshot.tasks.iter().any(|task| task.id == candidate.task_id && task.status == "running")
+            ) && !snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == candidate.task_id && task.status == "running")
             {
                 return Err("This request no longer has a live response channel.".into());
             }
@@ -1478,14 +1869,16 @@ impl Service {
         // Monitter policy, never a native/provider persistent permission.
         self.notify_approval_waiters(
             approval_id,
-            Ok(if matches!(
-                decision,
-                ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways
-            ) {
-                ApprovalDecision::ApproveOnce
-            } else {
-                decision
-            }),
+            Ok(
+                if matches!(
+                    decision,
+                    ApprovalDecision::ApproveSession | ApprovalDecision::ApproveAlways
+                ) {
+                    ApprovalDecision::ApproveOnce
+                } else {
+                    decision
+                },
+            ),
         );
         if decision == ApprovalDecision::Deny {
             self.notify_input_waiter(approval_id, Err("Request denied.".into()));
@@ -2146,14 +2539,22 @@ impl Service {
                 return Err("Stop this running task before clearing its context.".into());
             }
             if snapshot.queued_messages.iter().any(|message| {
-                message.task_id == task_id && matches!(message.status.as_str(), "queued" | "sending")
+                message.task_id == task_id
+                    && matches!(message.status.as_str(), "queued" | "sending")
             }) {
-                return Err("Cancel or send this chat's queued messages before clearing its context.".into());
+                return Err(
+                    "Cancel or send this chat's queued messages before clearing its context."
+                        .into(),
+                );
             }
-            if snapshot.approval_requests.iter().any(|request| {
-                request.task_id == task_id && request.status == "pending"
-            }) {
-                return Err("Resolve this chat's pending request before clearing its context.".into());
+            if snapshot
+                .approval_requests
+                .iter()
+                .any(|request| request.task_id == task_id && request.status == "pending")
+            {
+                return Err(
+                    "Resolve this chat's pending request before clearing its context.".into(),
+                );
             }
             let cleared_at = now();
             snapshot.tasks[task_index].native_session_id = None;
@@ -2190,6 +2591,118 @@ impl Service {
         Ok(())
     }
 
+    /// Drive a single mini-LLM turn through the resident Monitter Admin task.
+    ///
+    /// The lane:
+    /// 1. Lazily ensures the canonical internal task exists (see
+    ///    [`Self::ensure_internal_admin_task`]).
+    /// 2. Registers exactly one request in [`Self::admin_turn_broker`].
+    /// 3. Sends the prompt to the resident transport; if no resident
+    ///    transport exists yet, the same admin task is launched through a
+    ///    resident-capable adapter — never a one-shot provider fallback.
+    /// 4. Waits for the buffered assistant text up to a 45-second deadline.
+    /// 5. On timeout the owned resident control is terminated, the broker
+    ///    entry is cleared, and the next explicit mini-task starts a fresh
+    ///    resident transport. The transport is never replayed.
+    ///
+    /// This lane never persists the prompt or the assistant text into the
+    /// snapshot: the ingestion hooks in `apply_event` and `app_server_message`
+    /// redirect the streamed text into the broker and skip the durable
+    /// transcript path.
+    #[allow(dead_code)] // Consumed by the resident-worker lane that follows this one.
+    pub(crate) fn send_admin_turn(self: &Arc<Self>, prompt: String) -> Result<String, String> {
+        if prompt.trim().is_empty() {
+            return Err("Monitter Admin prompt cannot be empty.".into());
+        }
+        let task_id = self.ensure_internal_admin_task()?;
+        // Single-writer guarantee: at most one admin turn is active at a time.
+        if let Some(active) = self.admin_turn_broker.active_task_id() {
+            if active == task_id {
+                return Err("Monitter Admin is busy with another interface request.".into());
+            }
+        }
+        let admin = self.internal_admin()?;
+        let is_first_turn = !self.has_resident_run(&task_id);
+        let control = if is_first_turn {
+            // Mark the task as running so `reserve_run` accepts the new
+            // resident control. This is the only place the task enters the
+            // running state.
+            self.mark_internal_admin_task_running(&task_id)?;
+            self.reserve_run(&task_id)?
+        } else {
+            self.resident_control(&task_id)?
+                .ok_or_else(|| "Monitter Admin resident transport was lost.".to_string())?
+        };
+        let request_id = id();
+        let deadline = Instant::now() + ADMIN_TURN_TIMEOUT;
+        let receiver = self.admin_turn_broker.try_register(
+            request_id,
+            task_id.clone(),
+            std::sync::Arc::downgrade(&control),
+            deadline,
+        )?;
+        // Watchdog: times out the request, terminates the resident transport,
+        // and refuses to replay a late reply. The closure runs only after the
+        // broker entry has been closed with [`AdminTurnReply::Timeout`], so
+        // the resident control can be terminated safely without a double
+        // finalise race.
+        let broker_weak = self.admin_turn_broker.downgrade();
+        let owner_weak = std::sync::Arc::downgrade(&control);
+        let timeout_control = std::sync::Arc::clone(&control);
+        let timeout_task_id = task_id.clone();
+        spawn_admin_turn_watchdog(broker_weak, task_id.clone(), owner_weak, move || {
+            timeout_control.terminate_owned();
+            // The OwnedRun drop guard inside the adapter will run
+            // `release_app_server_run` for us, which clears the
+            // app_server_turn. We still need to mark the lazy internal
+            // admin task as interrupted so the next mini-task starts a
+            // fresh resident transport instead of inheriting a dead
+            // thread id.
+            let _ = timeout_task_id;
+        });
+        // Send the prompt. The first turn must use the resident-capable
+        // adapter; subsequent turns reuse the live resident control.
+        let send_result = if is_first_turn {
+            // The Codex app-server adapter (and ACP) initialise their
+            // transport here, mark the control resident, and fire the first
+            // turn. The prompt goes through the same adapter that owns the
+            // single-writer claim on the transport.
+            let task_id_for_send = task_id.clone();
+            runner::start(
+                Arc::clone(self),
+                task_id_for_send,
+                prompt,
+                std::sync::Arc::clone(&control),
+            );
+            Ok::<(), String>(())
+        } else {
+            self.send_to_resident(&task_id, &prompt).map(|_| ())
+        };
+        if let Err(error) = send_result {
+            // The send failed before any turn started. Cancel the broker
+            // entry silently and surface the error to the caller.
+            self.admin_turn_broker.cancel_silently(&task_id);
+            return Err(error);
+        }
+        // Wait for the broker reply until the deadline elapses. The
+        // watchdog will deliver a Timeout error if the transport does not
+        // complete in time.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok(AdminTurnReply::Text(text)) => Ok(text),
+            Ok(AdminTurnReply::Timeout) => {
+                Err("Monitter Admin request exceeded its 45-second interface deadline.".into())
+            }
+            Ok(AdminTurnReply::Error(error)) => Err(error),
+            Err(_) => {
+                // The transport ended without finalising the broker. Mark
+                // the task as interrupted so the next mini-task restarts.
+                let _ = admin;
+                Err("Monitter Admin transport closed before replying.".into())
+            }
+        }
+    }
+
     pub(crate) fn record(&self, task: &str, kind: &str, title: &str, detail: String) {
         let _ = self.mutate(Some(task.into()), |state| {
             state.events.push(RunEvent {
@@ -2211,6 +2724,18 @@ impl Service {
             event,
             failed: _,
         } = parsed;
+        // The resident Monitter Admin lane must never persist assistant
+        // text, native-session metadata, computer images, or events into the
+        // snapshot. Route the streamed assistant text into the process-local
+        // broker and return; the broker finalises the accumulated reply when
+        // the owning resident control terminates the turn.
+        if self.is_internal_admin_task(task_id) {
+            if let Some(text) = assistant.filter(|text| !text.trim().is_empty()) {
+                self.admin_turn_broker
+                    .capture_assistant_text(task_id, &text);
+            }
+            return Ok(());
+        }
         if let Some((kind, _, detail)) = event.as_ref() {
             if kind == "usage" {
                 self.capture_usage(task_id, detail)?;
@@ -2320,19 +2845,49 @@ impl Service {
         let value: serde_json::Value = match serde_json::from_str(detail) {
             Ok(value) => value,
             Err(_) => {
-                self.record(task_id, "error", "Usage capture warning", "The provider reported usage in an unsupported format; the run continued.".into());
+                self.record(
+                    task_id,
+                    "error",
+                    "Usage capture warning",
+                    "The provider reported usage in an unsupported format; the run continued."
+                        .into(),
+                );
                 return Ok(());
             }
         };
         let (task, control) = {
-            let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
-            let task = data.snapshot.tasks.iter().find(|task| task.id == task_id).cloned().ok_or("Task was not found.")?;
-            let control = self.runs.lock().map_err(|_| "Monitter run registry lock failed.".to_string())?.tasks.get(task_id).cloned();
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.".to_string())?;
+            let task = data
+                .snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .cloned()
+                .ok_or("Task was not found.")?;
+            let control = self
+                .runs
+                .lock()
+                .map_err(|_| "Monitter run registry lock failed.".to_string())?
+                .tasks
+                .get(task_id)
+                .cloned();
             (task, control)
         };
-        let classification = if task.provider == "opencode" { "delta" } else { "cumulative" };
-        let provider_turn_id = value.get("providerTurnId").and_then(serde_json::Value::as_str).map(str::to_owned);
-        let Some(normalized) = runner::normalize_usage(&value, classification, provider_turn_id.clone()) else {
+        let classification = if task.provider == "opencode" {
+            "delta"
+        } else {
+            "cumulative"
+        };
+        let provider_turn_id = value
+            .get("providerTurnId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let Some(normalized) =
+            runner::normalize_usage(&value, classification, provider_turn_id.clone())
+        else {
             self.record(task_id, "error", "Usage capture warning", "The provider usage payload did not contain supported numeric fields; the run continued.".into());
             return Ok(());
         };
@@ -2340,16 +2895,32 @@ impl Service {
             Some(control) => (control.current_run_id()?, control.run_started_at()?),
             None => return Ok(()), // Never infer old runs from timestamps/events.
         };
-        let stable = format!("{run_id}:{}:{}:{}", normalized.classification, normalized.provider_turn_id.clone().unwrap_or_default(), detail);
+        let stable = format!(
+            "{run_id}:{}:{}:{}",
+            normalized.classification,
+            normalized.provider_turn_id.clone().unwrap_or_default(),
+            detail
+        );
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::{Hash, Hasher}; stable.hash(&mut hasher);
+        use std::hash::{Hash, Hasher};
+        stable.hash(&mut hasher);
         self.store.stage_usage(RunUsageSample {
-            sample_id: format!("{run_id}:{:x}", hasher.finish()), run_id, task_id: task_id.into(), provider: task.provider.clone(),
-            configured_model: (!task.model.trim().is_empty()).then_some(task.model), started_at, observed_at: now(),
+            sample_id: format!("{run_id}:{:x}", hasher.finish()),
+            run_id,
+            task_id: task_id.into(),
+            provider: task.provider.clone(),
+            configured_model: (!task.model.trim().is_empty()).then_some(task.model),
+            started_at,
+            observed_at: now(),
             final_sample: matches!(task.provider.as_str(), "claude" | "hermes" | "codex"),
-            classification: normalized.classification, provider_turn_id: normalized.provider_turn_id, tokens: normalized.tokens,
-            cost_usd: normalized.cost_usd, duration_ms: normalized.duration_ms, api_duration_ms: normalized.api_duration_ms,
-            provider_turns: normalized.provider_turns, context: normalized.context,
+            classification: normalized.classification,
+            provider_turn_id: normalized.provider_turn_id,
+            tokens: normalized.tokens,
+            cost_usd: normalized.cost_usd,
+            duration_ms: normalized.duration_ms,
+            api_duration_ms: normalized.api_duration_ms,
+            provider_turns: normalized.provider_turns,
+            context: normalized.context,
         })
     }
 
@@ -2394,15 +2965,50 @@ impl Service {
     fn mark_usage_final(&self, task_id: &str) {
         let result = (|| -> Result<(), String> {
             let (task, control) = {
-                let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
-                let task = data.snapshot.tasks.iter().find(|task| task.id == task_id).cloned().ok_or("Task was not found.")?;
-                let control = self.runs.lock().map_err(|_| "Monitter run registry lock failed.".to_string())?.tasks.get(task_id).cloned().ok_or("Run no longer active.")?;
+                let data = self
+                    .data
+                    .lock()
+                    .map_err(|_| "Monitter state lock failed.".to_string())?;
+                let task = data
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .cloned()
+                    .ok_or("Task was not found.")?;
+                let control = self
+                    .runs
+                    .lock()
+                    .map_err(|_| "Monitter run registry lock failed.".to_string())?
+                    .tasks
+                    .get(task_id)
+                    .cloned()
+                    .ok_or("Run no longer active.")?;
                 (task, control)
             };
             let run_id = control.current_run_id()?;
-            self.store.stage_usage(RunUsageSample { sample_id: format!("{run_id}:final"), run_id, task_id: task_id.into(), provider: task.provider, configured_model: (!task.model.trim().is_empty()).then_some(task.model), started_at: control.run_started_at()?, observed_at: now(), final_sample: true, classification: "cumulative".into(), provider_turn_id: None, tokens: UsageTokens::default(), cost_usd: None, duration_ms: None, api_duration_ms: None, provider_turns: None, context: None })
+            self.store.stage_usage(RunUsageSample {
+                sample_id: format!("{run_id}:final"),
+                run_id,
+                task_id: task_id.into(),
+                provider: task.provider,
+                configured_model: (!task.model.trim().is_empty()).then_some(task.model),
+                started_at: control.run_started_at()?,
+                observed_at: now(),
+                final_sample: true,
+                classification: "cumulative".into(),
+                provider_turn_id: None,
+                tokens: UsageTokens::default(),
+                cost_usd: None,
+                duration_ms: None,
+                api_duration_ms: None,
+                provider_turns: None,
+                context: None,
+            })
         })();
-        if let Err(error) = result { self.record(task_id, "error", "Usage capture warning", error); }
+        if let Err(error) = result {
+            self.record(task_id, "error", "Usage capture warning", error);
+        }
     }
 
     pub(crate) fn restore_opencode_task_directory(
@@ -3350,8 +3956,13 @@ impl Service {
     ) -> Result<Snapshot, String> {
         if member {
             return self.mutate(None, |snapshot| {
-                if !snapshot.agents.iter().any(|agent| agent.id == agent_id) {
-                    return Err("Agent was not found.".into());
+                let agent = snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == agent_id)
+                    .ok_or_else(|| "Agent was not found.".to_string())?;
+                if agent.internal {
+                    return Err("The Monitter Admin agent cannot join a channel.".into());
                 }
                 let channel = snapshot
                     .channels
@@ -3368,8 +3979,15 @@ impl Service {
 
         let running = self.mutate_data(None, |data| {
             let snapshot = &mut data.snapshot;
-            if !snapshot.agents.iter().any(|agent| agent.id == agent_id) {
-                return Err("Agent was not found.".into());
+            let agent = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .ok_or_else(|| "Agent was not found.".to_string())?;
+            if agent.internal {
+                return Err(
+                    "The Monitter Admin agent is not a channel member.".into(),
+                );
             }
             let channel = snapshot
                 .channels
@@ -3437,11 +4055,13 @@ impl Service {
         let channel_id = channel.id.clone();
         let desired_members = channel.agent_ids.clone();
         let removed_members = self.mutate(None, |snapshot| {
-            if desired_members
-                .iter()
-                .any(|id| !snapshot.agents.iter().any(|agent| agent.id == *id))
-            {
-                return Err("Channel contains an unknown agent.".into());
+            if desired_members.iter().any(|id| {
+                !snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| agent.id == *id && !agent.internal)
+            }) {
+                return Err("Channel contains an unknown or reserved Monitter Admin agent.".into());
             }
             if let Some(current) = snapshot
                 .channels
@@ -3633,6 +4253,7 @@ impl Service {
         if let Ok(mut broker) = self.collaboration.lock() {
             broker.take();
         }
+        self.admin_turn_broker.reset();
         let controls = self
             .runs
             .lock()
@@ -3820,7 +4441,7 @@ fn prepare_channel_mention_routes(
             data.snapshot
                 .agents
                 .iter()
-                .find(|agent| &agent.id == agent_id)
+                .find(|agent| &agent.id == agent_id && !agent.internal)
                 .cloned()
         })
         .collect::<Vec<_>>();
@@ -3832,6 +4453,14 @@ fn prepare_channel_mention_routes(
     let targets = explicit_mentions(&text, &handles)
         .into_iter()
         .filter(|agent_id| agent_id != &origin.id)
+        .filter(|agent_id| {
+            // The resident Monitter Admin is never a mention target. Stale
+            // handles referring to it are filtered at this boundary.
+            data.snapshot
+                .agents
+                .iter()
+                .any(|agent| &agent.id == agent_id && !agent.internal)
+        })
         .collect::<Vec<_>>();
     let mut routes = Vec::new();
     for target_agent_id in targets {
@@ -3946,6 +4575,9 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
         .find(|agent| agent.id == input.agent_id)
         .cloned()
         .ok_or_else(|| "Agent was not found.".to_string())?;
+    if agent.internal {
+        return Err("The Monitter Admin agent cannot be selected as a chat recipient.".into());
+    }
     let sandbox = input.sandbox.as_deref().unwrap_or(&agent.sandbox);
     if !known_provider(&agent.provider) || !valid_sandbox_for_provider(&agent.provider, sandbox) {
         return Err("Agent provider or sandbox policy is invalid.".into());
@@ -4503,49 +5135,8 @@ async fn verify_acp_agent(
 }
 
 #[tauri::command]
-fn save_agent(state: State<'_, AppState>, mut agent: Agent) -> Result<Snapshot, String> {
-    state.0.mutate(None, |snapshot| {
-        if agent.id.trim().is_empty() {
-            agent.id = id();
-        }
-        if agent.name.trim().is_empty() {
-            return Err("Agent name is required.".into());
-        }
-        validate_agent_avatar(agent.avatar.as_deref())?;
-        validate_collaboration_profile(&agent)?;
-        if !known_provider(&agent.provider) {
-            return Err(format!(
-                "Provider '{}' is not implemented in Monitter.",
-                agent.provider
-            ));
-        }
-        if agent.provider == "acp" && !agent.acp.as_ref().is_some_and(model::valid_acp_launch) {
-            return Err("ACP agents need a valid command and argument vector.".into());
-        }
-        if agent.provider != "acp" {
-            agent.acp = None;
-        }
-        if !valid_sandbox_for_provider(&agent.provider, &agent.sandbox) {
-            return Err(if agent.provider == "codex" {
-                "Codex sandbox must be read-only or workspace-write.".into()
-            } else {
-                "This provider must use the harness-configured sandbox policy.".into()
-            });
-        }
-        if !snapshot.hosts.iter().any(|host| host.id == agent.host_id) {
-            return Err("Agent host was not found.".into());
-        }
-        if let Some(current) = snapshot
-            .agents
-            .iter_mut()
-            .find(|current| current.id == agent.id)
-        {
-            *current = agent;
-        } else {
-            snapshot.agents.push(agent);
-        }
-        Ok(snapshot.clone())
-    })
+fn save_agent(state: State<'_, AppState>, agent: Agent) -> Result<Snapshot, String> {
+    state.0.save_agent(agent)
 }
 
 const MAX_AVATAR_DATA_URL_BYTES: usize = 3 * 1024 * 1024;
@@ -4603,19 +5194,7 @@ fn validate_agent_avatar(avatar: Option<&str>) -> Result<(), String> {
 
 #[tauri::command]
 fn delete_agent(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
-    state.0.mutate(None, |snapshot| {
-        if snapshot.tasks.iter().any(|task| task.agent_id == id) {
-            return Err("Agent has tasks and cannot be deleted.".into());
-        }
-        if !snapshot.agents.iter().any(|agent| agent.id == id) {
-            return Err("Agent was not found.".into());
-        }
-        snapshot.agents.retain(|agent| agent.id != id);
-        for channel in &mut snapshot.channels {
-            channel.agent_ids.retain(|agent| agent != &id);
-        }
-        Ok(snapshot.clone())
-    })
+    state.0.delete_agent(&id)
 }
 
 #[tauri::command]
@@ -4774,7 +5353,11 @@ fn clean_generated_title(value: &str) -> Result<String, String> {
 }
 
 impl Service {
-    fn autoname(&self, target: AutonameTarget) -> Result<Snapshot, String> {
+    fn autoname(self: &Arc<Self>, target: AutonameTarget) -> Result<Snapshot, String> {
+        // The resident Monitter Admin lane owns naming. Surface its
+        // configuration errors before any target mutation so callers see the
+        // same readable error as every other admin entry point.
+        self.internal_admin()?;
         let (task_id, terminal_id, channel_id) = (
             target.task_id.as_deref(),
             target.terminal_id.as_deref(),
@@ -4784,54 +5367,14 @@ impl Service {
         {
             return Err("Choose one chat, channel, or terminal to name.".into());
         }
-        let (host, mut task, content) = if let Some(task_id) = task_id {
+        let content = if let Some(task_id) = task_id {
             let data = self
                 .data
                 .lock()
                 .map_err(|_| "Monitter state lock failed.".to_string())?;
-            data.snapshot
-                .tasks
-                .iter()
-                .find(|task| task.id == task_id)
-                .ok_or("Task was not found.")?;
-            let agent = data
-                .snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.provider == "codex")
-                .or_else(|| data.snapshot.agents.first())
-                .cloned()
-                .ok_or("Add a Codex agent before using Auto-name.")?;
-            if agent.provider != "codex" {
-                return Err("Auto-name currently requires a configured Codex agent.".into());
+            if !data.snapshot.tasks.iter().any(|task| task.id == task_id) {
+                return Err("Task was not found.".into());
             }
-            let host = data
-                .snapshot
-                .hosts
-                .iter()
-                .find(|host| host.id == agent.host_id)
-                .cloned()
-                .ok_or("Auto-name agent host was not found.")?;
-            let task = Task {
-                id: id(),
-                agent_id: agent.id,
-                title: String::new(),
-                native_session_id: None,
-                status: "idle".into(),
-                archived: false,
-                created_at: now(),
-                updated_at: now(),
-                parent_task_id: None,
-                channel_id: None,
-                host_id: host.id.clone(),
-                cwd: agent.cwd,
-                provider: agent.provider,
-                model: String::new(),
-                model_settings: None,
-                sandbox: "read-only".into(),
-                project_id: None,
-                acp: None,
-            };
             let mut messages = data
                 .snapshot
                 .messages
@@ -4841,12 +5384,11 @@ impl Service {
             if messages.len() > 12 {
                 messages.drain(..messages.len() - 12);
             }
-            let content: String = messages
+            messages
                 .into_iter()
                 .map(|message| format!("{}: {}", message.role, message.text))
                 .collect::<Vec<_>>()
-                .join("\n");
-            (host, task, content)
+                .join("\n")
         } else if let Some(channel_id) = channel_id {
             let data = self
                 .data
@@ -4858,132 +5400,22 @@ impl Service {
                 .iter()
                 .find(|channel| channel.id == channel_id)
                 .ok_or("Channel was not found.")?;
-            let agent = data
-                .snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.provider == "codex")
-                .or_else(|| data.snapshot.agents.first())
-                .cloned()
-                .ok_or("Add a Codex agent before using Auto-name.")?;
-            if agent.provider != "codex" {
-                return Err("Auto-name currently requires a configured Codex agent.".into());
-            }
-            let host = data
-                .snapshot
-                .hosts
-                .iter()
-                .find(|host| host.id == agent.host_id)
-                .cloned()
-                .ok_or("Auto-name agent host was not found.")?;
-            let task = Task {
-                id: id(),
-                agent_id: agent.id,
-                title: String::new(),
-                native_session_id: None,
-                status: "idle".into(),
-                archived: false,
-                created_at: now(),
-                updated_at: now(),
-                parent_task_id: None,
-                channel_id: None,
-                host_id: host.id.clone(),
-                cwd: agent.cwd,
-                provider: agent.provider,
-                model: String::new(),
-                model_settings: None,
-                sandbox: "read-only".into(),
-                project_id: None,
-                acp: None,
-            };
             let mut messages = channel.messages.iter().collect::<Vec<_>>();
             if messages.len() > 12 {
                 messages.drain(..messages.len() - 12);
             }
-            let content: String = messages
+            messages
                 .into_iter()
                 .map(|message| format!("{}: {}", message.role, message.text))
                 .collect::<Vec<_>>()
-                .join("\n");
-            (host, task, content)
+                .join("\n")
         } else {
             let terminal_id = terminal_id.unwrap();
             self.terminal(terminal_id)?;
-            let data = self
-                .data
-                .lock()
-                .map_err(|_| "Monitter state lock failed.".to_string())?;
-            let agent = data
-                .snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.provider == "codex")
-                .or_else(|| data.snapshot.agents.first())
-                .cloned()
-                .ok_or("Add a Codex agent before using Auto-name.")?;
-            if agent.provider != "codex" {
-                return Err("Auto-name currently requires a configured Codex agent.".into());
-            }
-            let host = data
-                .snapshot
-                .hosts
-                .iter()
-                .find(|host| host.id == agent.host_id)
-                .cloned()
-                .ok_or("Auto-name agent host was not found.")?;
-            let task = Task {
-                id: id(),
-                agent_id: agent.id,
-                title: String::new(),
-                native_session_id: None,
-                status: "idle".into(),
-                archived: false,
-                created_at: now(),
-                updated_at: now(),
-                parent_task_id: None,
-                channel_id: None,
-                host_id: host.id.clone(),
-                cwd: agent.cwd,
-                provider: agent.provider,
-                model: String::new(),
-                model_settings: None,
-                sandbox: "read-only".into(),
-                project_id: None,
-                acp: None,
-            };
-            (host, task, target.content.unwrap_or_default())
+            target.content.unwrap_or_default()
         };
         if content.trim().is_empty() {
             return Err("There is no recent content to name yet.".into());
-        }
-        // A catalog is authoritative when available. Prefer only advertised
-        // lightweight model IDs, otherwise retain the selected harness default.
-        if let Ok(catalog) = self.model_catalog(&host, "codex", &task.cwd) {
-            if let Some(model) = catalog
-                .models
-                .iter()
-                .find(|model| {
-                    let id = model.id.to_ascii_lowercase();
-                    id.contains("spark") || id.contains("luna") || id.contains("mini")
-                })
-                .or_else(|| {
-                    catalog
-                        .models
-                        .iter()
-                        .find(|model| model.id == catalog.current.model)
-                })
-            {
-                task.model = model.id.clone();
-                task.model_settings = Some(ModelSettings {
-                    model: model.id.clone(),
-                    reasoning_effort: model
-                        .reasoning_efforts
-                        .iter()
-                        .find(|value| value.id == "low")
-                        .map(|value| value.id.clone()),
-                    fast_mode: None,
-                });
-            }
         }
         let content: String = content
             .chars()
@@ -4993,11 +5425,7 @@ impl Service {
             .chars()
             .rev()
             .collect();
-        let title = clean_generated_title(&runner::generate_title(
-            &host,
-            &task,
-            &title_prompt(&content),
-        )?)?;
+        let title = clean_generated_title(&self.send_admin_turn(title_prompt(&content))?)?;
         if let Some(task_id) = task_id {
             return self.mutate(Some(task_id.into()), |snapshot| {
                 let task = snapshot
@@ -5102,10 +5530,7 @@ fn set_task_archived(
 }
 
 #[tauri::command]
-fn clear_task_context(
-    state: State<'_, AppState>,
-    task_id: String,
-) -> Result<Snapshot, String> {
+fn clear_task_context(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
     state.0.clear_task_context(&task_id)
 }
 
@@ -5377,6 +5802,11 @@ fn send_channel_message_accepted(
                 .find(|agent| &agent.id == agent_id)
                 .cloned()
                 .ok_or_else(|| "Agent was not found.".to_string())?;
+            if agent.internal {
+                return Err(
+                    "The Monitter Admin agent cannot be selected as a channel recipient.".into(),
+                );
+            }
             if !known_provider(&agent.provider)
                 || !valid_sandbox_for_provider(&agent.provider, &agent.sandbox)
             {
@@ -6736,8 +7166,9 @@ name@rafa.test",
         let task = service
             .create_task(task_input(agent_id, "Clear context", None))
             .unwrap();
-        let original_instructions = initial_task_instructions(&service.snapshot().unwrap(), &task.id)
-            .expect("new task has saved instructions");
+        let original_instructions =
+            initial_task_instructions(&service.snapshot().unwrap(), &task.id)
+                .expect("new task has saved instructions");
         service
             .mutate(None, |snapshot| {
                 let task = snapshot
@@ -6776,7 +7207,11 @@ name@rafa.test",
             .unwrap();
 
         let cleared = service.clear_task_context(&task.id).unwrap();
-        let cleared_task = cleared.tasks.iter().find(|item| item.id == task.id).unwrap();
+        let cleared_task = cleared
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .unwrap();
         assert!(cleared_task.native_session_id.is_none());
         assert!(cleared.messages.iter().any(|message| {
             message.task_id == task.id && message.role == "user" && message.text == "old request"
@@ -7295,6 +7730,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     .find(|item| item.id == task.id)
                     .unwrap()
                     .status = "running".into();
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .provider = "claude".into();
                 Ok(())
             })
             .unwrap();
@@ -7757,12 +8198,6 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     .find(|item| item.id == task.id)
                     .unwrap()
                     .status = "running".into();
-                snapshot
-                    .tasks
-                    .iter_mut()
-                    .find(|item| item.id == task.id)
-                    .unwrap()
-                    .provider = "claude".into();
                 Ok(())
             })
             .unwrap();
@@ -7825,7 +8260,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             )
             .unwrap();
         assert!(command.session_scope.is_none());
-        assert!(!service.apply_matching_session_approval(&command.id).unwrap());
+        assert!(!service
+            .apply_matching_session_approval(&command.id)
+            .unwrap());
 
         control.cancel();
         service.release_app_server_run(&task.id, &control);
@@ -7852,8 +8289,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 
     #[test]
     fn session_file_scope_is_only_advertised_for_known_edit_requests() {
-        let request = |provider: &str, tool: &str, raw_input: serde_json::Value| {
-            CreateApprovalRequest {
+        let request =
+            |provider: &str, tool: &str, raw_input: serde_json::Value| CreateApprovalRequest {
                 task_id: "task".into(),
                 provider: provider.into(),
                 run_id: "run".into(),
@@ -7862,8 +8299,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 detail: String::new(),
                 risk: "unknown".into(),
                 raw_input: Some(raw_input),
-            }
-        };
+            };
         assert_eq!(
             approval_session_scope(&request("codex", "File change", serde_json::json!({})))
                 .as_deref(),
@@ -7874,8 +8310,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             Some("file_changes")
         );
         assert_eq!(
-            approval_session_scope(&request("acp", "Apply patch", serde_json::json!({"kind":"edit"})))
-                .as_deref(),
+            approval_session_scope(&request(
+                "acp",
+                "Apply patch",
+                serde_json::json!({"kind":"edit"})
+            ))
+            .as_deref(),
             Some("file_changes")
         );
         assert!(approval_session_scope(&request(
@@ -7905,7 +8345,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .unwrap();
         service
             .mutate(None, |snapshot| {
-                let task = snapshot.tasks.iter_mut().find(|item| item.id == task.id).unwrap();
+                let task = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap();
                 task.provider = "claude".into();
                 task.status = "running".into();
                 Ok(())
@@ -7915,16 +8359,27 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         control.mark_resident();
         control.set_mcp_fingerprint(Some("old-private-config-digest".into()));
         let request = |run: &str| CreateApprovalRequest {
-            task_id: task.id.clone(), provider: "claude".into(), run_id: run.into(),
-            tool: "Bash".into(), summary: "Run command".into(), detail: "private".into(),
-            risk: "high".into(), raw_input: Some(serde_json::json!({"command":"printf exact"})),
+            task_id: task.id.clone(),
+            provider: "claude".into(),
+            run_id: run.into(),
+            tool: "Bash".into(),
+            summary: "Run command".into(),
+            detail: "private".into(),
+            risk: "high".into(),
+            raw_input: Some(serde_json::json!({"command":"printf exact"})),
         };
         let old = service.create_approval_request(request("old")).unwrap();
-        service.resolve_approval_request(&old.id, ApprovalDecision::ApproveAlways).unwrap();
+        service
+            .resolve_approval_request(&old.id, ApprovalDecision::ApproveAlways)
+            .unwrap();
         control.set_mcp_fingerprint(Some("new-private-config-digest".into()));
         let new = service.create_approval_request(request("new")).unwrap();
         let snapshot = service.snapshot().unwrap();
-        let new = snapshot.approval_requests.iter().find(|item| item.id == new.id).unwrap();
+        let new = snapshot
+            .approval_requests
+            .iter()
+            .find(|item| item.id == new.id)
+            .unwrap();
         assert!(new.rule_id.is_none());
         control.cancel();
         service.release_app_server_run(&task.id, &control);
@@ -8001,40 +8456,84 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .unwrap();
         assert_eq!(matched.rule_id.as_deref(), Some(rule.id.as_str()));
         assert_eq!(matched.decision.as_deref(), Some("approve_always"));
-        let duplicate = service.create_approval_request(make("printf exact", "duplicate")).unwrap();
-        service.resolve_approval_request(&duplicate.id, ApprovalDecision::ApproveAlways).unwrap();
+        let duplicate = service
+            .create_approval_request(make("printf exact", "duplicate"))
+            .unwrap();
+        service
+            .resolve_approval_request(&duplicate.id, ApprovalDecision::ApproveAlways)
+            .unwrap();
         let rules = service.snapshot().unwrap().approval_rules;
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].use_count, 3);
-        assert_eq!(service.wait_for_approval(&duplicate.id, || true).unwrap(), ApprovalDecision::ApproveOnce);
+        assert_eq!(
+            service.wait_for_approval(&duplicate.id, || true).unwrap(),
+            ApprovalDecision::ApproveOnce
+        );
         // Every identity dimension must participate, not just the action hash.
-        for field in ["agent", "host", "provider", "cwd", "sandbox", "host-config", "launcher", "action"] {
-            let request = service.create_approval_request(make("printf exact", field)).unwrap();
-            service.mutate(None, |snapshot| {
-                let scope = snapshot.approval_requests.iter_mut().find(|r| r.id == request.id).unwrap().approval_scope.as_mut().unwrap();
-                let value = match field {
-                    "agent" => &mut scope.agent_id, "host" => &mut scope.host_id,
-                    "provider" => &mut scope.provider, "cwd" => &mut scope.cwd,
-                    "sandbox" => &mut scope.sandbox, "host-config" => &mut scope.host_fingerprint,
-                    "launcher" => &mut scope.launcher_fingerprint, _ => &mut scope.action_fingerprint,
-                };
-                value.push_str("-changed");
-                Ok(())
-            }).unwrap();
-            assert!(!service.apply_matching_approval_rule(&request.id).unwrap(), "scope mismatch: {field}");
+        for field in [
+            "agent",
+            "host",
+            "provider",
+            "cwd",
+            "sandbox",
+            "host-config",
+            "launcher",
+            "action",
+        ] {
+            let request = service
+                .create_approval_request(make("printf exact", field))
+                .unwrap();
+            service
+                .mutate(None, |snapshot| {
+                    let scope = snapshot
+                        .approval_requests
+                        .iter_mut()
+                        .find(|r| r.id == request.id)
+                        .unwrap()
+                        .approval_scope
+                        .as_mut()
+                        .unwrap();
+                    let value = match field {
+                        "agent" => &mut scope.agent_id,
+                        "host" => &mut scope.host_id,
+                        "provider" => &mut scope.provider,
+                        "cwd" => &mut scope.cwd,
+                        "sandbox" => &mut scope.sandbox,
+                        "host-config" => &mut scope.host_fingerprint,
+                        "launcher" => &mut scope.launcher_fingerprint,
+                        _ => &mut scope.action_fingerprint,
+                    };
+                    value.push_str("-changed");
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                !service.apply_matching_approval_rule(&request.id).unwrap(),
+                "scope mismatch: {field}"
+            );
         }
         let mut changed_arguments = make("printf exact", "argument-id");
-        changed_arguments.raw_input = Some(serde_json::json!({"rawInput":{"command":"printf exact","requestId":"semantic-tool-argument"}}));
+        changed_arguments.raw_input = Some(
+            serde_json::json!({"rawInput":{"command":"printf exact","requestId":"semantic-tool-argument"}}),
+        );
         let changed_arguments = service.create_approval_request(changed_arguments).unwrap();
-        assert!(!service.apply_matching_approval_rule(&changed_arguments.id).unwrap());
-        let structured = service.create_approval_request(make("printf exact", "structured")).unwrap();
+        assert!(!service
+            .apply_matching_approval_rule(&changed_arguments.id)
+            .unwrap());
+        let structured = service
+            .create_approval_request(make("printf exact", "structured"))
+            .unwrap();
         service.mutate(None, |snapshot| {
             let request = snapshot.approval_requests.iter_mut().find(|r| r.id == structured.id).unwrap();
             request.input = Some(serde_json::from_value(serde_json::json!({"kind":"questions","questions":[],"schema":null,"url":null})).unwrap());
             Ok(())
         }).unwrap();
-        assert!(!service.apply_matching_approval_rule(&structured.id).unwrap());
-        assert!(service.resolve_approval_request(&structured.id, ApprovalDecision::ApproveAlways).is_err());
+        assert!(!service
+            .apply_matching_approval_rule(&structured.id)
+            .unwrap());
+        assert!(service
+            .resolve_approval_request(&structured.id, ApprovalDecision::ApproveAlways)
+            .is_err());
         let other = service
             .create_approval_request(make("printf different", "three"))
             .unwrap();
@@ -8053,7 +8552,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         let changed_scope = service
             .create_approval_request(make("printf exact", "scope-change"))
             .unwrap();
-        assert!(!service.apply_matching_approval_rule(&changed_scope.id).unwrap());
+        assert!(!service
+            .apply_matching_approval_rule(&changed_scope.id)
+            .unwrap());
         service
             .mutate(None, |snapshot| {
                 snapshot
@@ -8113,7 +8614,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         let after_revoke = service
             .create_approval_request(make("printf exact", "four"))
             .unwrap();
-        assert!(!service.apply_matching_approval_rule(&after_revoke.id).unwrap());
+        assert!(!service
+            .apply_matching_approval_rule(&after_revoke.id)
+            .unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -8866,6 +9369,173 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 .chars()
                 .count(),
             60
+        );
+    }
+
+    #[test]
+    fn autoname_rejects_unconfigured_admin_without_mutating_target() {
+        // Persist a snapshot with no agents and no hosts. The bootstrap
+        // leaves the admin unconfigured because there is no source agent
+        // to clone. autoname must surface the readable configuration
+        // error before touching the target task.
+        let root = std::env::temp_dir().join(format!("monitter-autoname-unconfigured-{}", id()));
+        let mut snapshot = crate::model::default_snapshot();
+        snapshot.agents.clear();
+        snapshot.hosts.clear();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("state.json"), json).unwrap();
+        let service = Service::open(None, root.clone()).unwrap();
+        let err = service
+            .clone()
+            .autoname(AutonameTarget {
+                task_id: Some("task-that-must-not-change".into()),
+                terminal_id: None,
+                channel_id: None,
+                content: Some("some content".into()),
+            })
+            .expect_err("unconfigured admin must surface a readable error");
+        assert!(
+            err.contains("Monitter Admin is not configured"),
+            "unexpected error: {err}"
+        );
+        // The unconfigured error must short-circuit before any target
+        // mutation: a task id that does not even exist must remain absent,
+        // and no autoname-side effect on tasks/events can leak through.
+        let snap = service.snapshot().unwrap();
+        assert!(snap
+            .tasks
+            .iter()
+            .all(|task| task.id != "task-that-must-not-change"));
+        assert!(snap.events.is_empty());
+        service.cleanup();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn autoname_rejects_multiple_admins_without_mutating_target() {
+        // Persist a snapshot with two internal agents. autoname must surface
+        // the multiple-admins error before any target mutation.
+        let root = std::env::temp_dir().join(format!("monitter-autoname-multiple-{}", id()));
+        let mut snapshot = crate::model::default_snapshot();
+        snapshot.agents.push(crate::model::Agent {
+            internal: true,
+            ..snapshot.agents[0].clone()
+        });
+        snapshot.agents.push(crate::model::Agent {
+            internal: true,
+            ..snapshot.agents[0].clone()
+        });
+        let json = serde_json::to_string(&snapshot).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("state.json"), json).unwrap();
+        let service = Service::open(None, root.clone()).unwrap();
+        // Seed a known task so we can assert the title is not touched.
+        let agent_id = service
+            .snapshot()
+            .unwrap()
+            .agents
+            .iter()
+            .find(|agent| !agent.internal)
+            .expect("non-internal agent must exist")
+            .id
+            .clone();
+        let task = service
+            .create_task(task_input(agent_id, "Preserved title", None))
+            .unwrap();
+        let err = service
+            .clone()
+            .autoname(AutonameTarget {
+                task_id: Some(task.id.clone()),
+                terminal_id: None,
+                channel_id: None,
+                content: Some("seed".into()),
+            })
+            .expect_err("multiple admins must surface a readable error");
+        assert!(
+            err.contains("Multiple Monitter Admin agents"),
+            "unexpected error: {err}"
+        );
+        // The task title must remain exactly the seed value; the multiple
+        // admin error must not have mutated the target.
+        let preserved = service
+            .snapshot()
+            .unwrap()
+            .tasks
+            .into_iter()
+            .find(|current| current.id == task.id)
+            .expect("task must still exist");
+        assert_eq!(preserved.title, "Preserved title");
+        service.cleanup();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn autoname_routes_through_the_admin_turn_broker() {
+        // Pre-register a broker entry for the resident admin task id. The
+        // call must fail with the canonical "busy" error, proving that
+        // autoname actually went through send_admin_turn and entered the
+        // broker. Without the new routing the call would never reach the
+        // broker and could not observe this error.
+        let dir = temp_dir("autoname-broker-route");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let admin_task_id = service.ensure_internal_admin_task().unwrap();
+        let owner: Arc<runner::RunControl> = runner::RunControl::new(false);
+        let _receiver = service
+            .admin_turn_broker
+            .try_register(
+                format!("req-{}", id()),
+                admin_task_id.clone(),
+                Arc::downgrade(&owner),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+        // Seed a user task with some recent content so the target
+        // resolution reaches the broker step.
+        let agent_id = service
+            .snapshot()
+            .unwrap()
+            .agents
+            .iter()
+            .find(|agent| !agent.internal)
+            .expect("non-internal agent must exist")
+            .id
+            .clone();
+        let task = service
+            .create_task(task_input(agent_id.clone(), "Original", None))
+            .unwrap();
+        let outcome = service.clone().autoname(AutonameTarget {
+            task_id: Some(task.id.clone()),
+            terminal_id: None,
+            channel_id: None,
+            content: None,
+        });
+        let err = outcome.expect_err("occupied broker must reject the autoname request");
+        assert!(
+            err.contains("Monitter Admin is busy with another interface request"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn autoname_no_longer_exposes_the_one_shot_subprocess_path() {
+        // Source-level proof: the one-shot title subprocess path was retired
+        // in favour of the resident Monitter Admin broker. `generate_title`
+        // is no longer a public symbol in the runner crate; this guard test
+        // fails to compile if a future change accidentally re-introduces it.
+        let source = include_str!("runner.rs");
+        assert!(
+            !source.contains("pub(crate) fn generate_title"),
+            "runner::generate_title must remain removed; autoname routes through send_admin_turn"
+        );
+        assert!(
+            !source.contains("fn run_title_command"),
+            "runner::run_title_command must remain removed; autoname routes through send_admin_turn"
+        );
+        assert!(
+            !source.contains("fn build_title_command"),
+            "runner::build_title_command must remain removed; autoname routes through send_admin_turn"
         );
     }
 

@@ -411,7 +411,9 @@ fn load_history_updates_are_not_mirrored_as_new_monitter_messages() {
         fs::read_to_string(&f.log)
             .map(|x| x.contains("update:historical-context-from-load"))
             .unwrap_or(false)
-            && f.service.resident_control(&t.id).unwrap()
+            && f.service
+                .resident_control(&t.id)
+                .unwrap()
                 .is_some_and(|control| control.current_app_server_thread().is_some())
     });
     let s = f.service.snapshot().unwrap();

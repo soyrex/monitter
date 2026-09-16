@@ -64,6 +64,8 @@ export interface Agent {
   color: string; sandbox: Sandbox;
   expertise: string[]; responsibilities: string[]; skills: string[];
   collaborationEnabled: boolean;
+  /** Internal agents and their tasks are deliberately hidden from every user-facing surface. */
+  internal?: boolean;
 }
 export interface Task {
   id: string; agentId: string; title: string; nativeSessionId: string | null;

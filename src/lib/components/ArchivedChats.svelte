@@ -5,7 +5,9 @@
  let query=$state(''),pending=$state<Task|null>(null),preview=$state<Preview|null>(null),previewLoading=$state(false),removeNative=$state(false),busy=$state(false),error=$state(''),generation=0;
  // Retaining the modal for its exit must not retain a destructive confirmation on reopening.
  $effect(()=>{if(open){query='';pending=null;preview=null;previewLoading=false;removeNative=false;error='';}});
- const rows=$derived(snapshot.tasks.filter(t=>t.archived).filter(t=>{const a=snapshot.agents.find(a=>a.id===t.agentId)?.name??'',h=snapshot.hosts.find(h=>h.id===t.hostId)?.name??'';return [t.title,a,h].join(' ').toLowerCase().includes(query.toLowerCase())}).toSorted((a,b)=>b.updatedAt-a.updatedAt));
+ // Internal agents and their tasks never appear in the archived chats list, even if the snapshot contains them.
+ const internalAgentIds=$derived(new Set(snapshot.agents.filter(agent=>agent.internal===true).map(agent=>agent.id)));
+ const rows=$derived(snapshot.tasks.filter(t=>t.archived&&!internalAgentIds.has(t.agentId)).filter(t=>{const a=snapshot.agents.find(a=>a.id===t.agentId)?.name??'',h=snapshot.hosts.find(h=>h.id===t.hostId)?.name??'';return [t.title,a,h].join(' ').toLowerCase().includes(query.toLowerCase())}).toSorted((a,b)=>b.updatedAt-a.updatedAt));
  async function confirm(task:Task){pending=task;preview=null;removeNative=false;error='';const g=++generation;previewLoading=true;try{const value=await previewDeletion(task.id);if(g===generation)preview=value}catch(reason){if(g===generation)preview={supported:false,reason:reason instanceof Error?reason.message:String(reason),files:[]}}finally{if(g===generation)previewLoading=false}}
  async function restore(id:string){busy=true;error='';try{await onRestore(id)}catch(reason){error=reason instanceof Error?reason.message:String(reason)}finally{busy=false}}
  async function remove(){if(!pending)return;busy=true;error='';try{await onDelete(pending,!!preview?.supported&&removeNative);pending=null}catch(reason){error=reason instanceof Error?reason.message:String(reason)}finally{busy=false}}

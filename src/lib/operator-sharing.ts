@@ -41,7 +41,10 @@ export function splitOperatorMessage(text: string): { name: string | null; text:
 export function sharedTaskIds(snapshot: Snapshot, share: Pick<ActiveOperatorShare, 'taskIds' | 'projectIds'>): Set<string> {
   const explicit = new Set(share.taskIds);
   const projects = new Set(share.projectIds);
-  return new Set(snapshot.tasks.filter(task => !task.archived && !task.channelId &&
+  // Internal agents and their tasks never appear in any visitor projection,
+  // even if a crafted share carries their IDs.
+  const internalAgentIds = new Set(snapshot.agents.filter(agent => agent.internal === true).map(agent => agent.id));
+  return new Set(snapshot.tasks.filter(task => !task.archived && !task.channelId && !internalAgentIds.has(task.agentId) &&
     (explicit.has(task.id) || (task.projectId !== null && projects.has(task.projectId)))).map(task => task.id));
 }
 
@@ -97,7 +100,8 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
       interfaceScale: 100, showToolActivity: false, showReasoningSummaries: false,
       sendWithEnter: false, sidebarView: 'standard', userName: '' },
     hosts: [],
-    agents: snapshot.agents.filter(agent => agentIds.has(agent.id)).map(safeAgent),
+    // Internal agents are explicitly excluded so a crafted share never leaks them.
+    agents: snapshot.agents.filter(agent => agentIds.has(agent.id) && agent.internal !== true).map(safeAgent),
     tasks,
     messages: snapshot.messages
       .filter(message => ids.has(message.taskId))

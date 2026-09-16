@@ -79,6 +79,22 @@ for (const secret of ['/private', 'secret instructions', 'secret system profile'
 assert.equal(source.tasks[0].cwd, '/private/workspace', 'Projection must not mutate owner state.');
 assert.equal(source.messages[0].attachments?.[0].path, '/private/secret.txt');
 
+// Even a crafted share carrying an internal agent's ID must never surface it.
+const internalAgentSource: Snapshot = {
+  ...source,
+  agents: [...source.agents, { id: 'monitter-admin', name: 'Monitter Admin', description: '', instructions: '', avatar: null, provider: 'codex', model: '', hostId: 'private-host', cwd: '/private', color: '#000', sandbox: 'harness-configured', expertise: [], responsibilities: [], skills: [], collaborationEnabled: false, internal: true }],
+  tasks: [...source.tasks, { ...task(selectedId, { id: 'admin-task' }), agentId: 'monitter-admin' }],
+};
+const craftedGrant = (): ActiveOperatorShare => ({
+  primary: { name: 'Alex', role: 'primary user' }, visitor: { name: 'Sam', role: 'visitor' },
+  taskIds: [selectedId, 'admin-task'], projectIds: [],
+});
+const craftedVisitor = sharedSnapshot(internalAgentSource, craftedGrant());
+assert.deepEqual(craftedVisitor.tasks.map(item => item.id), [selectedId], 'Internal-agent tasks must never appear in a visitor projection.');
+assert.deepEqual(craftedVisitor.agents.map(item => item.id), ['agent'], 'Internal agents must never appear in a visitor projection.');
+assert.ok(!JSON.stringify(craftedVisitor).includes('Monitter Admin'));
+assert.ok(!JSON.stringify(craftedVisitor).includes('admin-task'));
+
 let active: ActiveOperatorShare | null = grant();
 let sent = 0;
 let sentText = '';

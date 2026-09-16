@@ -73,12 +73,16 @@ No fake conversations, progress, token counts, host connections or model replies
   session, prompts a model, or services filesystem/terminal callbacks. Returns
   negotiated version, safe agent name/version and advertised recovery/content
   capabilities; it does not prove login or model-turn functionality.
-- `save_agent { agent: Agent }` -> Snapshot (empty id creates)
-- `delete_agent { id: string }` -> Snapshot (reject if tasks exist)
+- `save_agent { agent: Agent }` -> Snapshot (empty id creates; ordinary callers cannot set `internal: true`,
+  cannot clear an existing internal flag, and cannot rename or re-enable collaboration on the resident
+  Monitter Admin record. Editing the existing admin preserves `internal: true`, the canonical "Monitter
+  Admin" name, and `collaborationEnabled: false`, and may safely reset the resident task/session so a
+  reconfigured transport replaces the previous one on next use.)
+- `delete_agent { id: string }` -> Snapshot (reject if tasks exist; reject internal agents)
 - `save_project { project: Project }` -> Snapshot (empty id creates)
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
-- `create_task { input: CreateTaskInput }` -> Task
+- `create_task { input: CreateTaskInput }` -> Task (rejects the internal Monitter Admin agent as a chat recipient)
 - `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null } }` -> ModelCatalog
 - `set_task_model_settings { taskId: string, settings: ModelSettings }` -> Snapshot
   Codex tasks may be running: the new model, reasoning effort, and Fast mode are written to the
@@ -90,7 +94,7 @@ No fake conversations, progress, token counts, host connections or model replies
   the next `turn/start` as a fresh `approvalPolicy` + `sandboxPolicy`. Other harnesses and
   archived tasks still reject.
 - `rename_task { id: string, title: string }` -> Snapshot
-- `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot
+- `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot (routed through the resident Monitter Admin turn; see Internal agent)
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
 - `clear_task_goal { taskId: string }` -> void (Codex only; clears the native persisted goal without
@@ -138,6 +142,12 @@ headers are not an encrypted credential vault and must not enter workspace expor
 diagnostics, browser storage, command previews, or shared snapshots.
 Reads include an opaque revision. Saves from an older settings pane are rejected
 instead of overwriting newer edits; the UI retains the unsaved draft.
+
+Internal Monitter Admin prompts, replies, and per-request IDs are similarly
+runtime-only and must never enter workspace exports, diagnostics, browser
+storage, command previews, shared snapshots, compact LAN UI projections, or
+visitor / mobile-controller replies. Only the durable target mutation (for
+example a renamed task, channel, or terminal) is reported to the client.
 
 Each MCP server has an ID, display name, enabled flag, exact agent IDs, and either a
 stdio command/argument/environment configuration or HTTP URL/headers. Each managed
@@ -498,6 +508,19 @@ supervisor supports the same persistent full-duplex channel. SSH Codex `exec` an
 show enabled interactive approval buttons. No auto-resubmission after
 errors.
 
+The resident Monitter Admin transport is a separate, single-occupant lane that the runtime owns for
+its own use (currently `autoname`): the bootstrap migration creates exactly one internal agent named
+"Monitter Admin" on `Service::open` and hides it from every user-facing surface. The internal task is
+created lazily on first use, never archived, and never projected into ordinary chat lists. There is no
+idle timeout: the resident transport stays live for the lifetime of the process so repeated `autoname`
+calls reuse it without restarting the native session. The transport stops on app quit, on admin
+reconfiguration that changes its provider/host/cwd/sandbox (so the next use launches a fresh resident
+session), and on transport failure. A restart resumes the saved native session id from the persisted
+task; no silent retries are attempted after a failed, timed-out, or interrupted turn, and concurrent
+admin requests are rejected with a readable "Monitter Admin is busy with another interface request."
+error. The admin's configured provider, model, host, cwd, and sandbox are used as-is: no Spark/Luna/Mini
+mini-model selection, no provider fallback, and no automatic retry.
+
 Codex command/file/permission approval decisions remain one-time approve or deny and are returned
 to the exact JSON-RPC request. Structured questions and supported MCP forms attach optional `input`
 to the durable ApprovalRequest, with `response` retained after submission. `resolve_input
@@ -558,7 +581,7 @@ Typing `/` opens a filtered, keyboard-accessible menu labelled Monitter commands
 actions: `/new` and `/clear` reset the active chat's provider context while preserving its visible transcript; outside an active chat `/new` opens an independent draft. `/settings` opens preferences, `/project` selects the
 chat's project, `/stop` cancels a running task, `/resume` continues the saved native session in this chat, and
 `/goal` reads the available Codex goal. Task-specific actions only appear in applicable contexts.
-`/autoname` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming uses the configured default Codex agent (first Codex agent, then first agent), makes an ephemeral read-only title run with user config/rules ignored and no persisted task or session, and preserves channel history/membership and terminal session identity.
+`/autoname` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming routes through the resident Monitter Admin agent (see Internal agent) on its saved provider, model, host, cwd, and sandbox. The admin uses no Spark/Luna/Mini mini-model selection, no provider fallback, and no persisted admin prompt/reply. Concurrent requests are rejected; the request is bounded to 45 seconds; the final target mutation (task title, channel name, or terminal rename) is reported through `monitter:changed` exactly like any other rename.
 `/terminal` opens a terminal tab in the current host and folder; `/terminal <command>` runs that shell command in the new interactive tab (for example `/terminal npm build`). The command is written to the PTY after the shell starts, so the tab stays interactive when it finishes.
 Selection supports arrows, Enter, Escape and clicking. IME composition does not select an action.
 
@@ -567,6 +590,29 @@ and command arguments such as `/goal objective` produce a visible explanation wi
 as ordinary model text. The Send button and keyboard use the same dispatch rule. `//` explicitly
 escapes a literal leading slash; paths such as `/path/to/file` remain ordinary messages. Full native
 command discovery/execution needs separate harness adapters and is not implied by this menu.
+
+## Internal agent
+
+`Agent.internal` is an optional boolean that defaults to `false`. The bootstrap migration creates
+exactly one internal agent on `Service::open`, named "Monitter Admin"; that record is created only by
+the bootstrap, is never offered to ordinary `save_agent` callers, and cannot be deleted. The internal
+agent and its single resident task are deliberately hidden from every user-facing surface:
+
+- Sidebars, the monitter menu, the Agent directory, and Cmd-K / Cmd-P palettes list user agents
+  only; the internal record is omitted from every projection, search result, and picker.
+- New chat, channel invite, channel membership, and channel recipient pickers exclude the internal
+  agent. `create_task` rejects it as a chat recipient; `set_channel_membership` is a no-op for it.
+- Extensions MCP/skill eligible-agent sets, collaboration discovery, and the resident routing
+  eligible-agent set all filter out the internal record before iteration.
+- Archived chats, the share control, mobile projections, and paired-mobile / controller replies
+  never surface the internal agent or its task. Visitor snapshots exclude them by construction.
+- Run detail, the right sidebar, and any agent-attributed chat metadata skip the internal record.
+
+Editing the existing admin via `save_agent` preserves `internal: true`, the canonical "Monitter
+Admin" name, and `collaborationEnabled: false`. Generic callers cannot create a new internal record
+or clear an existing one. When the admin's configured provider, model, host, cwd, or sandbox changes
+through ordinary agent edits, the next `autoname` run safely replaces the resident task/session so
+the new transport starts cleanly without inheriting the old native session id.
 
 ## Cross-agent collaboration
 
@@ -912,7 +958,7 @@ display context only, not authentication, permission or shared-operator authorit
 Conversation display: `Settings.tintUserMessages` defaults to false for existing and new installs. When enabled, user bubbles in direct chats and channels use a subtle accent tint; message content and agent replies are unchanged.
 
 
-`autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` returns Snapshot. Exactly one target is required; terminal text comes from a bounded, control-sequence-scrubbed client buffer. Chat/channel context uses the last 12 messages, bounded to 12,000 characters. The first configured Codex agent supplies the naming host/folder. An advertised Spark/Luna/Mini model is preferred, otherwise the Codex harness default is used. The ephemeral read-only invocation ignores user config/rules and does not resume the working session. Codex built-in read tools remain available; this is not a guaranteed tool-free API. Unsupported CLI isolation flags fail visibly rather than falling back to the working session. The title subprocess times out after 45 seconds, with input/output handled concurrently and the SSH control pipe held open until completion. Titles are bounded to 60 characters. Terminal names update the existing session and are refreshed into the tab runtime. Use /autoname in chat or find /autoname in the Controls palette (Cmd-P on macOS) for a terminal; the shell never receives the command.
+`autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` returns Snapshot. Exactly one target is required; terminal text comes from a bounded, control-sequence-scrubbed client buffer. Chat/channel context uses the last 12 messages, bounded to 12,000 characters. The naming request is a blocking resident turn on the resident Monitter Admin agent: `Service::send_admin_turn(prompt)` → `AdminTurnBroker` → the saved Codex app-server / Claude stream-json / ACP transport selected by the admin's configured provider. The admin's configured provider, model, host, cwd, and sandbox are used exactly as saved — there is no Spark/Luna/Mini mini-model selection, no provider fallback, and no automatic retry. The request is bounded to 45 seconds; on expiry the resident control is terminated and the next explicit turn starts a fresh resident transport. At most one admin request is active at a time; concurrent callers are rejected with `Monitter Admin is busy with another interface request.` Internal prompts, replies, and request IDs are runtime-only and never enter `Snapshot.messages`, `RunEvent`s, `get_task_events` pages, compact LAN snapshots, or shared/visitor projections. The saved native session id on the internal task is persisted so a restart resumes the saved native session; an interrupted, timed-out, or failed request is never replayed. Titles are bounded to 60 characters. Terminal names update the existing session and are refreshed into the tab runtime. The final target mutation is reported through `monitter:changed` exactly as for ordinary renames. Use /autoname in chat or find /autoname in the Controls palette (Cmd-P on macOS) for a terminal; the shell never receives the command.
 
 
 ### Pane controls and window chrome

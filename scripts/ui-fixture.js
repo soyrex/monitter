@@ -3,7 +3,11 @@
   const local = { id:'local', name:'This Mac', kind:'local', address:'', user:'', port:0, identityFile:'', defaultCwd:'/tmp/monitter-ui-test', codexPath:'codex', claudePath:'', opencodePath:'', hermesPath:'' };
   let state = {
     hosts:[local],
-    agents:[{id:'atlas',avatar:null,name:'Atlas',description:'Coding partner',instructions:'Work carefully and explain the result.',provider:'codex',model:'',hostId:'local',cwd:local.defaultCwd,color:'#397e61',sandbox:'read-only',expertise:[],responsibilities:[],skills:[],collaborationEnabled:true}],
+    agents:[
+      {id:'atlas',avatar:null,name:'Atlas',description:'Coding partner',instructions:'Work carefully and explain the result.',provider:'codex',model:'',hostId:'local',cwd:local.defaultCwd,color:'#397e61',sandbox:'read-only',expertise:[],responsibilities:[],skills:[],collaborationEnabled:true},
+      // Mirror the backend bootstrap: an internal agent must never reach any user-facing surface.
+      {id:'monitter-admin',avatar:null,name:'Monitter Admin',description:'Housekeeping',instructions:'',provider:'codex',model:'',hostId:'local',cwd:local.defaultCwd,color:'#5b6f7d',sandbox:'read-only',expertise:[],responsibilities:[],skills:[],collaborationEnabled:false,internal:true},
+    ],
     tasks:[],messages:[],events:[],channels:[],projects:[],collaborations:[],queuedMessages:[],approvalRequests:[],approvalRules:[],settings:{accent:'#3f9d6a',theme:'light',interfaceScale:125,showToolActivity:true,showReasoningSummaries:true,sendWithEnter:false,sidebarView:'standard'}
   };
   const clone = value => JSON.parse(JSON.stringify(value));

@@ -2,10 +2,23 @@
 //!
 //! The fixture is a local executable and never contacts a provider.
 
-use crate::{model::{AcpLaunch, CreateTaskInput}, Service};
-use std::{fs, path::PathBuf, sync::Arc, thread, time::{Duration, Instant}};
+use crate::{
+    model::{AcpLaunch, CreateTaskInput},
+    Service,
+};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
-struct Fixture { service: Arc<Service>, root: PathBuf, script: PathBuf }
+struct Fixture {
+    service: Arc<Service>,
+    root: PathBuf,
+    script: PathBuf,
+}
 
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -43,26 +56,44 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   }
 });
 "#).unwrap();
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
     }
     let service = Service::open(None, root.clone()).unwrap();
-    service.mutate(None, |snapshot| {
-        let agent = &mut snapshot.agents[0];
-        agent.provider = "acp".into();
-        agent.sandbox = "harness-configured".into();
-        agent.cwd = root.to_string_lossy().into_owned();
-        agent.acp = Some(AcpLaunch { command: script.to_string_lossy().into_owned(), args: mode.map(str::to_owned).into_iter().collect() });
-        Ok(())
-    }).unwrap();
-    Fixture { service, root, script }
+    service
+        .mutate(None, |snapshot| {
+            let agent = &mut snapshot.agents[0];
+            agent.provider = "acp".into();
+            agent.sandbox = "harness-configured".into();
+            agent.cwd = root.to_string_lossy().into_owned();
+            agent.acp = Some(AcpLaunch {
+                command: script.to_string_lossy().into_owned(),
+                args: mode.map(str::to_owned).into_iter().collect(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    Fixture {
+        service,
+        root,
+        script,
+    }
 }
 
 fn wait_for(service: &Service, task_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if service.snapshot().unwrap().tasks.iter().any(|task| task.id == task_id && task.status == "completed") { return; }
+        if service
+            .snapshot()
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == "completed")
+        {
+            return;
+        }
         thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out waiting for ACP stream fixture");
@@ -72,18 +103,46 @@ fn wait_for(service: &Service, task_id: &str) {
 fn acp_message_id_chunks_remain_separate_and_preserve_order() {
     let fixture = fixture(None);
     let agent = fixture.service.snapshot().unwrap().agents[0].clone();
-    let task = fixture.service.create_task(CreateTaskInput {
-        agent_id: agent.id, title: "ACP stream identity".into(), native_session_id: None,
-        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
-        model_settings: None, sandbox: None,
-    }).unwrap();
-    let prompt = fixture.service.accept_send(task.id.clone(), "group chunks".into(), vec![]).unwrap().unwrap();
+    let task = fixture
+        .service
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "ACP stream identity".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let prompt = fixture
+        .service
+        .accept_send(task.id.clone(), "group chunks".into(), vec![])
+        .unwrap()
+        .unwrap();
     fixture.service.launch(task.id.clone(), prompt).unwrap();
     wait_for(&fixture.service, &task.id);
-    let messages = fixture.service.snapshot().unwrap().messages.into_iter()
-        .filter(|message| message.task_id == task.id && message.role == "assistant" && message.stream_status.as_deref() == Some("complete"))
+    let messages = fixture
+        .service
+        .snapshot()
+        .unwrap()
+        .messages
+        .into_iter()
+        .filter(|message| {
+            message.task_id == task.id
+                && message.role == "assistant"
+                && message.stream_status.as_deref() == Some("complete")
+        })
         .collect::<Vec<_>>();
-    assert_eq!(messages.iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), vec!["a1a2", "b1"]);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a1a2", "b1"]
+    );
     assert!(messages[0].attachments.is_empty());
     assert_eq!(messages[1].attachments.len(), 1);
     assert_eq!(messages[1].attachments[0].path, "Generated by ACP agent");

@@ -27,21 +27,68 @@ pub struct ConfigOption {
 pub fn model_catalog(session: &Value) -> Result<crate::model::ModelCatalog, String> {
     use crate::model::{CatalogModel, ModelCatalog, ModelCatalogCurrent};
     let options = parse_options(&session["configOptions"])?;
-    let model = options.iter().find(|option| option.category.as_deref() == Some("model"));
+    let model = options
+        .iter()
+        .find(|option| option.category.as_deref() == Some("model"));
     let (choices, current) = if let Some(model) = model {
-        (model.options.iter().map(|o| (o.value.clone(), o.name.clone(), o.description.clone().unwrap_or_default())).collect::<Vec<_>>(), model.current_value.clone())
+        (
+            model
+                .options
+                .iter()
+                .map(|o| {
+                    (
+                        o.value.clone(),
+                        o.name.clone(),
+                        o.description.clone().unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            model.current_value.clone(),
+        )
     } else {
-        let available = session["models"]["availableModels"].as_array().cloned().unwrap_or_default();
-        if available.len() > 4096 { return Err("Too many advertised ACP models.".into()); }
-        let choices = available.iter().map(|m| Ok((text(&m["modelId"],512)?, text(&m["name"],512)?, optional_text(&m["description"],4096).unwrap_or_default())))
-            .collect::<Result<Vec<_>,String>>()?;
-        (choices, optional_text(&session["models"]["currentModelId"],512).unwrap_or_default())
+        let available = session["models"]["availableModels"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if available.len() > 4096 {
+            return Err("Too many advertised ACP models.".into());
+        }
+        let choices = available
+            .iter()
+            .map(|m| {
+                Ok((
+                    text(&m["modelId"], 512)?,
+                    text(&m["name"], 512)?,
+                    optional_text(&m["description"], 4096).unwrap_or_default(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        (
+            choices,
+            optional_text(&session["models"]["currentModelId"], 512).unwrap_or_default(),
+        )
     };
     let warning = choices.is_empty().then(|| "Models become available after the ACP agent initializes a chat and advertises its choices. Its default model is used otherwise.".into());
     Ok(ModelCatalog {
-        models: choices.into_iter().map(|(id,name,description)| CatalogModel { id,name,description,reasoning_efforts:vec![],default_effort:None,supports_fast:false,fast_description:None }).collect(),
-        current: ModelCatalogCurrent { model:current, reasoning_effort:None, fast_mode:None },
-        source:"ACP session advertisement".into(), warning,
+        models: choices
+            .into_iter()
+            .map(|(id, name, description)| CatalogModel {
+                id,
+                name,
+                description,
+                reasoning_efforts: vec![],
+                default_effort: None,
+                supports_fast: false,
+                fast_description: None,
+            })
+            .collect(),
+        current: ModelCatalogCurrent {
+            model: current,
+            reasoning_effort: None,
+            fast_mode: None,
+        },
+        source: "ACP session advertisement".into(),
+        warning,
     })
 }
 
@@ -192,13 +239,23 @@ pub fn configured_permission_request(
     let mode = options
         .iter()
         .find(|option| option.category.as_deref() == Some("mode"))
-        .ok_or("This ACP agent did not advertise a permission mode selector; YOLO was not enabled.")?;
-    if !mode.options.iter().any(|option| option.value == "bypassPermissions") {
-        return Err("This ACP agent did not advertise bypassPermissions; YOLO was not enabled.".into());
+        .ok_or(
+            "This ACP agent did not advertise a permission mode selector; YOLO was not enabled.",
+        )?;
+    if !mode
+        .options
+        .iter()
+        .any(|option| option.value == "bypassPermissions")
+    {
+        return Err(
+            "This ACP agent did not advertise bypassPermissions; YOLO was not enabled.".into(),
+        );
     }
     let params = selection_params(&options, session_id, &mode.id, "bypassPermissions")?;
-    Ok((mode.current_value != "bypassPermissions")
-        .then_some(("session/set_config_option", params)))
+    Ok(
+        (mode.current_value != "bypassPermissions")
+            .then_some(("session/set_config_option", params)),
+    )
 }
 
 #[cfg(test)]
@@ -276,9 +333,11 @@ mod tests {
                 {"value":"bypassPermissions","name":"Bypass permissions"}
             ]
         }]});
-        assert!(configured_permission_request(&result, "s", "harness-configured")
-            .unwrap()
-            .is_none());
+        assert!(
+            configured_permission_request(&result, "s", "harness-configured")
+                .unwrap()
+                .is_none()
+        );
         let (method, params) = configured_permission_request(&result, "s", "yolo")
             .unwrap()
             .unwrap();

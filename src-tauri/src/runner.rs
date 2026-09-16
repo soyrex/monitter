@@ -224,7 +224,7 @@ fn merge_opencode_mcp_config(existing: Option<&str>, helper: &str) -> Result<Str
     Ok(config.to_string())
 }
 
-fn codex_args(task: &Task, collaboration_helper: Option<&str>, title_mode: bool) -> Vec<String> {
+fn codex_args(task: &Task, collaboration_helper: Option<&str>) -> Vec<String> {
     // These are exec options and must precede the optional resume subcommand.
     let mut args = vec!["exec".into()];
     if task.sandbox == "yolo" {
@@ -235,17 +235,6 @@ fn codex_args(task: &Task, collaboration_helper: Option<&str>, title_mode: bool)
         args.extend(["-s".into(), task.sandbox.clone()]);
     }
     args.push("--skip-git-repo-check".into());
-    if title_mode {
-        // These options are documented by the installed Codex CLI. They keep
-        // this classification turn out of persistent history and prevent user
-        // MCP/rule configuration from being inherited. Codex has no documented
-        // no-tools switch, so callers must not represent this as toolless.
-        args.extend([
-            "--ephemeral".into(),
-            "--ignore-user-config".into(),
-            "--ignore-rules".into(),
-        ]);
-    }
     if !task.model.trim().is_empty() {
         args.extend(["-m".into(), task.model.clone()]);
     }
@@ -639,9 +628,12 @@ pub(crate) fn build_command(host: &Host, task: &Task) -> Result<Command, String>
     build_command_with_collaboration(host, task, None)
 }
 
-/// Runs one small, isolated naming turn. It intentionally uses the ordinary
-/// configured harness and read-only task policy, but has no stored task,
-/// session resume, collaboration grant, or tool configuration.
+/// Reads up to `limit` bytes from `pipe` on a worker thread while continuing
+/// to drain the pipe once the cap is reached. Used by the SSH helper
+/// staging path to keep verbose diagnostics from blocking a full
+/// stdout/stderr pipe. The historical `title_` prefix is retained to avoid
+/// renaming a shared reader; the naming subprocess path was retired in
+/// favour of the resident Monitter Admin broker.
 fn title_reader<R: Read + Send + 'static>(
     mut pipe: R,
     limit: usize,
@@ -668,136 +660,18 @@ fn title_reader<R: Read + Send + 'static>(
     receiver
 }
 
-pub(crate) fn generate_title(host: &Host, task: &Task, prompt: &str) -> Result<String, String> {
-    if task.provider != "codex" {
-        return Err("Auto-name currently requires a configured Codex agent.".into());
-    }
-    let mut naming_task = task.clone();
-    naming_task.sandbox = "read-only".into();
-    naming_task.native_session_id = None;
-    let command = build_title_command(host, &naming_task)?;
-    run_title_command(command, host.kind == "ssh", prompt, Duration::from_secs(45))
-}
-
-fn run_title_command(
-    mut command: Command,
-    remote: bool,
-    prompt: &str,
-    timeout_duration: Duration,
-) -> Result<String, String> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start Codex: {error}"))?;
-    let deadline = Instant::now() + timeout_duration;
-    let result = (|| -> Result<String, String> {
-        let mut stdin = child.stdin.take().ok_or("Could not open provider stdin.")?;
-        let stdout = title_reader(
-            child
-                .stdout
-                .take()
-                .ok_or("Could not read title response.")?,
-            256 * 1024,
-        );
-        let stderr = title_reader(
-            child
-                .stderr
-                .take()
-                .ok_or("Could not read title diagnostics.")?,
-            64 * 1024,
-        );
-        let payload = if remote {
-            format!("MONITTER/1 {}\n{}", prompt.len(), prompt)
-        } else {
-            format!("{prompt}\n")
-        };
-        let (sent, writing) = mpsc::channel();
-        let (_hold_stdin, release_stdin) = mpsc::channel::<()>();
-        thread::spawn(move || {
-            let result = stdin
-                .write_all(payload.as_bytes())
-                .and_then(|_| stdin.flush())
-                .map_err(|error| format!("Could not send title prompt: {error}"));
-            let _ = sent.send(result);
-            // EOF on the supervisor control pipe means cancel. Keep it open
-            // until the naming request completes or its deadline expires.
-            if remote {
-                let _ = release_stdin.recv();
-            }
-            drop(stdin);
-        });
-        let timeout = || {
-            format!(
-                "Auto-name timed out after {} seconds.",
-                timeout_duration.as_secs()
-            )
-        };
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("Could not wait for title response: {error}"))?
-            {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                return Err(timeout());
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
-        writing
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| timeout())??;
-        let stdout = stdout
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| timeout())??;
-        let stderr = stderr
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| timeout())??;
-        if !status.success() {
-            let detail = String::from_utf8_lossy(&stderr).trim().to_string();
-            return Err(if detail.is_empty() {
-                "Codex exited without a title.".into()
-            } else {
-                detail
-            });
-        }
-        let mut answer = String::new();
-        for line in String::from_utf8_lossy(&stdout).lines() {
-            if let Ok(value) = serde_json::from_str::<Value>(line) {
-                for parsed in parse_events("codex", &value) {
-                    if let Some(text) = parsed.assistant.filter(|text| !text.trim().is_empty()) {
-                        answer = text;
-                    }
-                }
-            }
-        }
-        if answer.is_empty() {
-            return Err("The naming harness returned no title.".into());
-        }
-        Ok(answer)
-    })();
-    if result.is_err() {
-        terminate_bounded(&mut child);
-    }
-    result
-}
-
 fn build_command_with_collaboration(
     host: &Host,
     task: &Task,
     collaboration: Option<(&SessionGrant, &str)>,
 ) -> Result<Command, String> {
-    build_command_with_options(host, task, collaboration, false, None)
-}
-
-fn build_title_command(host: &Host, task: &Task) -> Result<Command, String> {
-    build_command_with_options(host, task, None, true, None)
+    build_command_with_options(host, task, collaboration, None)
 }
 
 fn build_command_with_options(
     host: &Host,
     task: &Task,
     collaboration: Option<(&SessionGrant, &str)>,
-    title_mode: bool,
     claude_mcp_config_path: Option<&std::path::Path>,
 ) -> Result<Command, String> {
     if !valid_sandbox_for_provider(&task.provider, &task.sandbox) {
@@ -819,7 +693,7 @@ fn build_command_with_options(
         None
     };
     let args = match task.provider.as_str() {
-        "codex" => codex_args(task, collaboration.map(|(_, helper)| helper), title_mode),
+        "codex" => codex_args(task, collaboration.map(|(_, helper)| helper)),
         "claude" => {
             let mut args = adapters::claude::args(task);
             if let Some(path) = claude_mcp_config_path {
@@ -1191,29 +1065,73 @@ pub struct NormalizedUsage {
     pub context: Option<UsageContext>,
 }
 
-fn integer(value: Option<&Value>) -> Option<i64> { value.and_then(Value::as_i64).filter(|v| *v >= 0) }
-fn number(value: Option<&Value>) -> Option<f64> { value.and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) }
+fn integer(value: Option<&Value>) -> Option<i64> {
+    value.and_then(Value::as_i64).filter(|v| *v >= 0)
+}
+fn number(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
 /// The small adapter boundary used by every harness. It deliberately accepts
 /// only documented numeric fields and leaves unknown provider payload intact
 /// only in the diagnostic RunEvent.
-pub fn normalize_usage(value: &Value, classification: &str, provider_turn_id: Option<String>) -> Option<NormalizedUsage> {
+pub fn normalize_usage(
+    value: &Value,
+    classification: &str,
+    provider_turn_id: Option<String>,
+) -> Option<NormalizedUsage> {
     let usage = value.get("usage").unwrap_or(value);
     let tokens = usage.get("tokens").unwrap_or(usage);
     let result = NormalizedUsage {
-        classification: classification.into(), provider_turn_id,
+        classification: classification.into(),
+        provider_turn_id,
         tokens: UsageTokens {
             input: integer(tokens.get("input_tokens").or_else(|| tokens.get("input"))),
             output: integer(tokens.get("output_tokens").or_else(|| tokens.get("output"))),
-            cache_read: integer(tokens.get("cache_read_input_tokens").or_else(|| tokens.get("cacheRead"))),
-            cache_write: integer(tokens.get("cache_creation_input_tokens").or_else(|| tokens.get("cacheWrite"))),
-            reasoning: integer(tokens.get("reasoning_tokens").or_else(|| tokens.get("reasoning"))),
+            cache_read: integer(
+                tokens
+                    .get("cache_read_input_tokens")
+                    .or_else(|| tokens.get("cacheRead")),
+            ),
+            cache_write: integer(
+                tokens
+                    .get("cache_creation_input_tokens")
+                    .or_else(|| tokens.get("cacheWrite")),
+            ),
+            reasoning: integer(
+                tokens
+                    .get("reasoning_tokens")
+                    .or_else(|| tokens.get("reasoning")),
+            ),
             total: integer(tokens.get("total_tokens").or_else(|| tokens.get("total"))),
         },
-        cost_usd: number(usage.get("total_cost_usd").or_else(|| usage.get("cost")).or_else(|| usage.get("cost_usd"))),
-        duration_ms: integer(usage.get("duration_ms")), api_duration_ms: integer(usage.get("duration_api_ms")), provider_turns: integer(usage.get("num_turns")),
-        context: match (integer(usage.get("used")), integer(usage.get("size"))) { (Some(used), Some(size)) => Some(UsageContext { used, size }), _ => None },
+        cost_usd: number(
+            usage
+                .get("total_cost_usd")
+                .or_else(|| usage.get("cost"))
+                .or_else(|| usage.get("cost_usd")),
+        ),
+        duration_ms: integer(usage.get("duration_ms")),
+        api_duration_ms: integer(usage.get("duration_api_ms")),
+        provider_turns: integer(usage.get("num_turns")),
+        context: match (integer(usage.get("used")), integer(usage.get("size"))) {
+            (Some(used), Some(size)) => Some(UsageContext { used, size }),
+            _ => None,
+        },
     };
-    (result.tokens.input.is_some() || result.tokens.output.is_some() || result.tokens.cache_read.is_some() || result.tokens.cache_write.is_some() || result.tokens.reasoning.is_some() || result.tokens.total.is_some() || result.cost_usd.is_some() || result.duration_ms.is_some() || result.api_duration_ms.is_some() || result.provider_turns.is_some() || result.context.is_some()).then_some(result)
+    (result.tokens.input.is_some()
+        || result.tokens.output.is_some()
+        || result.tokens.cache_read.is_some()
+        || result.tokens.cache_write.is_some()
+        || result.tokens.reasoning.is_some()
+        || result.tokens.total.is_some()
+        || result.cost_usd.is_some()
+        || result.duration_ms.is_some()
+        || result.api_duration_ms.is_some()
+        || result.provider_turns.is_some()
+        || result.context.is_some())
+    .then_some(result)
 }
 
 /// Hermes' gateway exposes a request ID that must be echoed on its dedicated
@@ -1658,12 +1576,28 @@ impl RunControl {
     }
     pub(crate) fn begin_run(&self) -> Result<(String, i64), String> {
         let started_at = crate::model::now();
-        *self.run_id.lock().map_err(|_| "Monitter run identity lock failed.".to_string())? = crate::model::id();
-        *self.run_started_at.lock().map_err(|_| "Monitter run identity lock failed.".to_string())? = started_at;
+        *self
+            .run_id
+            .lock()
+            .map_err(|_| "Monitter run identity lock failed.".to_string())? = crate::model::id();
+        *self
+            .run_started_at
+            .lock()
+            .map_err(|_| "Monitter run identity lock failed.".to_string())? = started_at;
         Ok((self.current_run_id()?, started_at))
     }
-    pub(crate) fn current_run_id(&self) -> Result<String, String> { self.run_id.lock().map(|id| id.clone()).map_err(|_| "Monitter run identity lock failed.".to_string()) }
-    pub(crate) fn run_started_at(&self) -> Result<i64, String> { self.run_started_at.lock().map(|at| *at).map_err(|_| "Monitter run identity lock failed.".to_string()) }
+    pub(crate) fn current_run_id(&self) -> Result<String, String> {
+        self.run_id
+            .lock()
+            .map(|id| id.clone())
+            .map_err(|_| "Monitter run identity lock failed.".to_string())
+    }
+    pub(crate) fn run_started_at(&self) -> Result<i64, String> {
+        self.run_started_at
+            .lock()
+            .map(|at| *at)
+            .map_err(|_| "Monitter run identity lock failed.".to_string())
+    }
 
     /// Sends a provider control frame only while this run still owns an
     /// intentionally persistent stdin channel. This is never used to inject
@@ -2739,7 +2673,6 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             &host,
             &task,
             grant_for_command,
-            false,
             claude_config.as_ref().map(|file| file.path()),
         ) {
             Ok(command) => command,
@@ -2912,8 +2845,13 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                             },
                                         );
                                         if let Ok(request) = &request {
-                                            if let Ok(mut owners) = service.app_server_approvals.lock() {
-                                                owners.insert(request.id.clone(), Arc::downgrade(&control));
+                                            if let Ok(mut owners) =
+                                                service.app_server_approvals.lock()
+                                            {
+                                                owners.insert(
+                                                    request.id.clone(),
+                                                    Arc::downgrade(&control),
+                                                );
                                             }
                                         }
                                         let allow = match request.and_then(|request| {
@@ -3043,7 +2981,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                 // Attribute the final result usage to this
                                 // current run before making the resident
                                 // transport eligible for its next prompt.
-                                if complete_claude_turn { service.complete_resident_turn(&task); }
+                                if complete_claude_turn {
+                                    service.complete_resident_turn(&task);
+                                }
                             }
                             Err(error) => {
                                 failed_event.store(true, Ordering::SeqCst);
@@ -3341,11 +3281,7 @@ mod tests {
 
     #[test]
     fn codex_collaboration_is_scoped_to_the_monitter_server() {
-        let args = codex_args(
-            &task(None, ""),
-            Some("/private/runtime/monitter-mcp.py"),
-            false,
-        );
+        let args = codex_args(&task(None, ""), Some("/private/runtime/monitter-mcp.py"));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-c", "mcp_servers.monitter.required=true"]));
@@ -3809,72 +3745,6 @@ mod tests {
         control.cancel();
         let status = control.wait().unwrap();
         assert!(!status.success());
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-
-    #[test]
-    fn title_command_is_ephemeral_and_does_not_resume() {
-        let mut title_task = task(Some("old-session"), "");
-        title_task.sandbox = "read-only".into();
-        title_task.native_session_id = None;
-        let mut local = host("local");
-        local.codex_path = "/bin/echo".into();
-        let command = build_title_command(&local, &title_task).unwrap();
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        assert!(args.contains(&"--ephemeral".into()));
-        assert!(args.contains(&"--ignore-user-config".into()));
-        assert!(args.contains(&"--ignore-rules".into()));
-        assert!(!args.contains(&"old-session".into()));
-        assert_eq!(args.iter().filter(|arg| arg.as_str() == "exec").count(), 1);
-        let remote = build_title_command(&host("ssh"), &title_task).unwrap();
-        let remote_args = remote
-            .get_args()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        let bootstrap = remote_args.last().unwrap();
-        assert!(bootstrap.contains("'--ephemeral'"));
-        assert!(bootstrap.contains("'--ignore-user-config'"));
-        assert!(!bootstrap.contains("old-session"));
-    }
-    #[test]
-    fn title_runner_keeps_remote_control_open_and_drains_diagnostics() {
-        let mut command = Command::new("python3");
-        command.args(["-c", REMOTE_SUPERVISOR, "/tmp", "python3", "-c",
-            "import sys,json,time; sys.stdin.read(); sys.stderr.write('x'*131072); sys.stderr.flush(); time.sleep(.05); print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Remote title'}}))"])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        isolate_child(&mut command);
-        assert_eq!(
-            run_title_command(
-                command,
-                true,
-                &"Recent content ".repeat(3000),
-                Duration::from_secs(5)
-            )
-            .unwrap(),
-            "Remote title"
-        );
-    }
-
-    #[test]
-    fn title_runner_bounds_a_child_that_never_reads_stdin() {
-        let mut command = Command::new("sh");
-        command
-            .args(["-c", "sleep 30"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        isolate_child(&mut command);
-        let started = Instant::now();
-        let result = run_title_command(
-            command,
-            false,
-            &"x".repeat(128 * 1024),
-            Duration::from_millis(100),
-        );
-        assert!(result.unwrap_err().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 

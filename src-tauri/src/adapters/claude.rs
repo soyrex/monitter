@@ -203,7 +203,9 @@ pub fn parse_event(value: &Value) -> Vec<Parsed> {
             }
             // Stream-json places token accounting under `usage`; retain only
             // fields actually present rather than manufacturing a total.
-            if let Some(item) = value.get("usage") { usage.insert("usage".into(), item.clone()); }
+            if let Some(item) = value.get("usage") {
+                usage.insert("usage".into(), item.clone());
+            }
             let mut events = vec![event(
                 session_id.clone(),
                 "usage",

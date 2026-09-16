@@ -119,6 +119,16 @@ impl Service {
         let phase = phase
             .filter(|value| matches!(*value, "commentary" | "final_answer"))
             .map(str::to_owned);
+        // The resident Monitter Admin lane must never persist prompt text or
+        // replies into the snapshot. Route the streamed assistant text into
+        // the process-local broker and return without touching `messages`,
+        // `events`, `channels`, or any other durable record. Both streaming
+        // deltas and completed items are buffered; the broker finalises the
+        // accumulated text when the owner terminates the turn.
+        if self.is_internal_admin_task(task_id) {
+            self.admin_turn_broker.capture_assistant_text(task_id, text);
+            return Ok(());
+        }
         self.app_server_mutate(task_id, control, Some(turn_id), |data, _| {
             // Keep provider identifiers runtime-only. Persist normal local UUIDs,
             // including in messages projected to shared visitors.
@@ -246,6 +256,12 @@ impl Service {
         turn_id: Option<&str>,
         parsed: Parsed,
     ) -> Result<(), String> {
+        // The resident Monitter Admin lane is intentionally invisible to
+        // the activity timeline. Skip capturing the parsed event entirely
+        // (no RunEvent, no native-session metadata, no usage ledger).
+        if self.is_internal_admin_task(task_id) {
+            return Ok(());
+        }
         if let Some((kind, _, detail)) = parsed.event.as_ref() {
             if kind == "usage" { self.capture_usage(task_id, detail)?; }
         }
@@ -430,6 +446,45 @@ impl Service {
         status: &str,
         error: Option<String>,
     ) -> bool {
+        // The resident Monitter Admin lane does not write a transcript, an
+        // error event, channel mirrors, collaboration records, queued
+        // messages, or approval expirations. Finalise the buffered broker
+        // reply, update only task status and session metadata, and release
+        // the run so the next explicit mini-task can use the same transport.
+        if self.is_internal_admin_task(task_id) {
+            let normalized = if status == "completed" {
+                "completed"
+            } else if status == "interrupted" {
+                "interrupted"
+            } else {
+                "error"
+            };
+            // Buffer was already captured via `app_server_message`. If the
+            // transport ended without streaming any text, complete the
+            // request with an empty reply so the caller never blocks on a
+            // hung oneshot.
+            self.admin_turn_broker.complete(task_id);
+            let native_session_id = control.current_app_server_thread().or_else(|| {
+                self.data.lock().ok().and_then(|data| {
+                    data.snapshot
+                        .tasks
+                        .iter()
+                        .find(|task| task.id == task_id)
+                        .and_then(|task| task.native_session_id.clone())
+                })
+            });
+            self.finalise_internal_admin_turn(task_id, normalized, None);
+            self.app_server_message_ids
+                .lock()
+                .map(|mut ids| ids.retain(|(task, _, _), _| task != task_id))
+                .ok();
+            self.release_app_server_run(task_id, control);
+            // Drop the explicit `native_session_id` argument by ignoring it
+            // after `finalise_internal_admin_turn` already restored the
+            // persisted value.
+            let _ = native_session_id;
+            return true;
+        }
         self.mark_usage_final(task_id);
         let result =
             self.app_server_mutate(task_id, control, turn_id, |data, _| {

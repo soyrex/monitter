@@ -80,7 +80,7 @@ impl Service {
             .snapshot
             .agents
             .iter()
-            .find(|agent| agent.id == task.agent_id)
+            .find(|agent| agent.id == task.agent_id && !agent.internal)
             .cloned()
             .ok_or_else(|| "Collaboration caller agent was not found.".to_string())?;
         if !agent.collaboration_enabled {
@@ -103,6 +103,7 @@ impl Service {
             .snapshot
             .agents
             .iter()
+            .filter(|agent| !agent.internal)
             .filter(|agent| agent.collaboration_enabled)
             .filter(|agent| profile_matches(agent, &needle))
             .take(MAX_DIRECTORY)
@@ -201,7 +202,9 @@ impl Service {
                 .snapshot
                 .agents
                 .iter()
-                .find(|agent| agent.id == to_agent_id && agent.collaboration_enabled)
+                .find(|agent| {
+                    agent.id == to_agent_id && !agent.internal && agent.collaboration_enabled
+                })
                 .cloned()
                 .ok_or_else(|| "Recipient agent is unavailable for collaboration.".to_string())?;
             if target_agent.id == caller.agent_id {
@@ -374,11 +377,9 @@ impl Service {
                 else {
                     return true;
                 };
-                let enabled = data
-                    .snapshot
-                    .agents
-                    .iter()
-                    .any(|agent| agent.id == item.to_agent_id && agent.collaboration_enabled);
+                let enabled = data.snapshot.agents.iter().any(|agent| {
+                    agent.id == item.to_agent_id && !agent.internal && agent.collaboration_enabled
+                });
                 !enabled
                     || task.archived
                     || (task.status != "running" && !self.run_is_active(&task.id))
@@ -407,18 +408,17 @@ impl Service {
                     .find(|task| task.id == item.to_task_id);
                 task.is_none()
                     || task.is_some_and(|task| task.archived)
-                    || !snapshot
-                        .agents
-                        .iter()
-                        .any(|agent| agent.id == item.to_agent_id && agent.collaboration_enabled)
+                    || !snapshot.agents.iter().any(|agent| {
+                        agent.id == item.to_agent_id
+                            && !agent.internal
+                            && agent.collaboration_enabled
+                    })
             });
             if let Some(index) = terminal {
                 let item = snapshot.collaborations[index].clone();
-                let reason = if !snapshot
-                    .agents
-                    .iter()
-                    .any(|agent| agent.id == item.to_agent_id && agent.collaboration_enabled)
-                {
+                let reason = if !snapshot.agents.iter().any(|agent| {
+                    agent.id == item.to_agent_id && !agent.internal && agent.collaboration_enabled
+                }) {
                     "Recipient agent is unavailable for collaboration."
                 } else if snapshot
                     .tasks
@@ -858,7 +858,7 @@ fn collaboration_caller(snapshot: &Snapshot, task_id: &str) -> Result<Task, Stri
     let enabled = snapshot
         .agents
         .iter()
-        .any(|agent| agent.id == task.agent_id && agent.collaboration_enabled);
+        .any(|agent| agent.id == task.agent_id && !agent.internal && agent.collaboration_enabled);
     if task.status != "running" || !enabled {
         return Err("Collaboration caller is not eligible.".into());
     }

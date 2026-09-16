@@ -52,6 +52,11 @@ pub fn valid_acp_launch(launch: &AcpLaunch) -> bool {
             .iter()
             .all(|arg| arg.len() <= 16 * 1024 && !arg.contains('\0'))
 }
+/// The intrinsic "internal" agent name. Exactly one saved agent may carry
+/// `internal: true`; the bootstrap migration reuses this name and the
+/// centralized save path rejects renames of the resident admin.
+pub const INTERNAL_AGENT_NAME: &str = "Monitter Admin";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
@@ -79,6 +84,18 @@ pub struct Agent {
     /// of provider-specific executable fields. It is copied into new tasks.
     #[serde(default)]
     pub acp: Option<AcpLaunch>,
+    /// Hidden resident admin agent. Exactly one agent may carry this flag;
+    /// only the bootstrap migration creates it and the centralized save path
+    /// rejects any other caller from setting it. Older saved agents default
+    /// to `false` via `#[serde(default)]`.
+    #[serde(default)]
+    pub internal: bool,
+}
+
+/// The resident admin agent must never be visible as a normal chat, channel,
+/// or collaboration target. Centralized helpers gate on this single flag.
+pub fn is_internal_agent(agent: &Agent) -> bool {
+    agent.internal
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -227,45 +244,103 @@ pub struct RunUsageSample {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageTokens {
-    pub input: Option<i64>, pub output: Option<i64>, pub cache_read: Option<i64>,
-    pub cache_write: Option<i64>, pub reasoning: Option<i64>, pub total: Option<i64>,
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+    pub reasoning: Option<i64>,
+    pub total: Option<i64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct UsageContext { pub used: i64, pub size: i64 }
+pub struct UsageContext {
+    pub used: i64,
+    pub size: i64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunUsageSummary {
-    pub run_id: String, pub task_id: String, pub provider: String, pub configured_model: Option<String>,
-    pub started_at: i64, pub finished_at: Option<i64>, #[serde(rename = "final")] pub final_: bool, pub tokens: UsageTokens,
-    pub cost_usd: Option<f64>, pub duration_ms: Option<i64>, pub api_duration_ms: Option<i64>,
-    pub provider_turns: Option<i64>, pub context: Option<UsageContext>,
+    pub run_id: String,
+    pub task_id: String,
+    pub provider: String,
+    pub configured_model: Option<String>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    #[serde(rename = "final")]
+    pub final_: bool,
+    pub tokens: UsageTokens,
+    pub cost_usd: Option<f64>,
+    pub duration_ms: Option<i64>,
+    pub api_duration_ms: Option<i64>,
+    pub provider_turns: Option<i64>,
+    pub context: Option<UsageContext>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunUsageAggregate {
-    pub provider: String, pub runs: i64, pub final_runs: i64, pub tokens: RequiredUsageTokens,
-    pub cost_usd: Option<f64>, pub duration_ms: Option<i64>,
+    pub provider: String,
+    pub runs: i64,
+    pub final_runs: i64,
+    pub tokens: RequiredUsageTokens,
+    pub cost_usd: Option<f64>,
+    pub duration_ms: Option<i64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct RequiredUsageTokens { pub input: i64, pub output: i64, pub cache_read: i64, pub cache_write: i64, pub reasoning: i64, pub total: i64 }
+pub struct RequiredUsageTokens {
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    pub reasoning: i64,
+    pub total: i64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AllowanceWindow {
-    pub key: String, pub label: String, pub metric: String, pub used_percent: Option<f64>, pub used: Option<f64>, pub limit: Option<f64>, pub unit: String, pub resets_at: Option<i64>,
+    pub key: String,
+    pub label: String,
+    pub metric: String,
+    pub used_percent: Option<f64>,
+    pub used: Option<f64>,
+    pub limit: Option<f64>,
+    pub unit: String,
+    pub resets_at: Option<i64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AllowanceBalance { pub key: String, pub label: String, pub unit: String, pub remaining: Option<f64>, pub limit: Option<f64>, pub resets_at: Option<i64> }
+pub struct AllowanceBalance {
+    pub key: String,
+    pub label: String,
+    pub unit: String,
+    pub remaining: Option<f64>,
+    pub limit: Option<f64>,
+    pub resets_at: Option<i64>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionUsageSource {
-    pub provider: String, pub host_id: String, pub source: String, pub state: String, pub plan_type: Option<String>, pub fetched_at: Option<i64>, pub stale_after: Option<i64>, pub last_attempt_at: i64, pub windows: Vec<AllowanceWindow>, pub balances: Vec<AllowanceBalance>, pub error: Option<String>,
+    pub provider: String,
+    pub host_id: String,
+    pub source: String,
+    pub state: String,
+    pub plan_type: Option<String>,
+    pub fetched_at: Option<i64>,
+    pub stale_after: Option<i64>,
+    pub last_attempt_at: i64,
+    pub windows: Vec<AllowanceWindow>,
+    pub balances: Vec<AllowanceBalance>,
+    pub error: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct UsageOverview { pub generated_at: i64, pub captured_since: Option<i64>, pub subscriptions: Vec<SubscriptionUsageSource>, pub provider_totals: Vec<RunUsageAggregate>, pub recent_runs: Vec<RunUsageSummary> }
+pub struct UsageOverview {
+    pub generated_at: i64,
+    pub captured_since: Option<i64>,
+    pub subscriptions: Vec<SubscriptionUsageSource>,
+    pub provider_totals: Vec<RunUsageAggregate>,
+    pub recent_runs: Vec<RunUsageSummary>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMessage {
@@ -728,6 +803,7 @@ pub fn default_snapshot() -> Snapshot {
             skills: vec![],
             collaboration_enabled: true,
             acp: None,
+            internal: false,
         }],
         tasks: vec![],
         messages: vec![],

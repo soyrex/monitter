@@ -291,7 +291,10 @@ fn managed_mcp_and_skill_reach_acp_launch_without_rewriting_user_transcript() {
 
     let captured = fs::read_to_string(&capture).unwrap();
     let _ = fs::remove_file(&capture);
-    assert!(captured.contains(r#""name":"11111111-1111-4111-8111-111111111111""#), "{captured}");
+    assert!(
+        captured.contains(r#""name":"11111111-1111-4111-8111-111111111111""#),
+        "{captured}"
+    );
     assert!(
         captured.contains(r#""name":"PRIVATE_TOKEN","value":"fixture-secret""#),
         "{captured}"

@@ -18,6 +18,21 @@ export type SnapshotIndexes = {
   activeTasksByProject: ReadonlyMap<string, Task[]>;
   activityTasksByAgent: ReadonlyMap<string, Task[]>;
   activityTasksByProject: ReadonlyMap<string, Task[]>;
+  /**
+   * User-visible agents (excluding internal agents and their tasks). The raw
+   * maps above remain authoritative for backend-linked lookups; these arrays
+   * and the visibility-keyed maps are the only sources the UI must use when
+   * enumerating agents/tasks the user can see and select.
+   */
+  visibleAgents: Agent[];
+  visibleAgentIds: ReadonlySet<string>;
+  visibleTasks: Task[];
+  visibleActiveTasks: Task[];
+  visibleActivityTasks: Task[];
+  visibleActiveTasksByAgent: ReadonlyMap<string, Task[]>;
+  visibleActiveTasksByProject: ReadonlyMap<string, Task[]>;
+  visibleActivityTasksByAgent: ReadonlyMap<string, Task[]>;
+  visibleActivityTasksByProject: ReadonlyMap<string, Task[]>;
   localHost: Host | null;
   defaultAgent: Agent | null;
   messagesByTask: ReadonlyMap<string, Message[]>;
@@ -61,6 +76,18 @@ export function createSnapshotIndexes(snapshot: Snapshot): SnapshotIndexes {
   const activeTasks = snapshot.tasks.filter(task => !task.archived);
   const activityTasks = activeTasks.filter(task => !task.channelId).toSorted((left, right) =>
     Number(right.status === 'running') - Number(left.status === 'running') || right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
+  // The internal flag hides a bootstrap agent (and its tasks) from every user-facing surface.
+  // Backend is authoritative: an agent without the flag is user-visible, a flagged agent is internal.
+  const visibleAgents = snapshot.agents.filter(agent => !agent.internal);
+  const visibleAgentIds = new Set(visibleAgents.map(agent => agent.id));
+  const visibleTasks = snapshot.tasks.filter(task => visibleAgentIds.has(task.agentId));
+  const visibleActiveTasks = visibleTasks.filter(task => !task.archived);
+  const visibleActivityTasks = visibleActiveTasks.filter(task => !task.channelId).toSorted((left, right) =>
+    Number(right.status === 'running') - Number(left.status === 'running') || right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
+  const visibleActiveTasksByAgent = new Map<string, Task[]>();
+  const visibleActiveTasksByProject = new Map<string, Task[]>();
+  const visibleActivityTasksByAgent = new Map<string, Task[]>();
+  const visibleActivityTasksByProject = new Map<string, Task[]>();
 
   for (const task of snapshot.tasks) {
     append(tasksByParent, task.parentTaskId, task);
@@ -73,6 +100,14 @@ export function createSnapshotIndexes(snapshot: Snapshot): SnapshotIndexes {
   for (const task of activityTasks) {
     append(activityTasksByAgent, task.agentId, task);
     append(activityTasksByProject, task.projectId || 'unassigned', task);
+  }
+  for (const task of visibleActiveTasks) {
+    append(visibleActiveTasksByAgent, task.agentId, task);
+    append(visibleActiveTasksByProject, task.projectId || 'unassigned', task);
+  }
+  for (const task of visibleActivityTasks) {
+    append(visibleActivityTasksByAgent, task.agentId, task);
+    append(visibleActivityTasksByProject, task.projectId || 'unassigned', task);
   }
   for (const message of snapshot.messages) append(messagesByTask, message.taskId, message);
   for (const event of snapshot.events) append(eventsByTask, event.taskId, event);
@@ -95,8 +130,17 @@ export function createSnapshotIndexes(snapshot: Snapshot): SnapshotIndexes {
     activeTasksByProject: readonlyValues(activeTasksByProject),
     activityTasksByAgent: readonlyValues(activityTasksByAgent),
     activityTasksByProject: readonlyValues(activityTasksByProject),
+    visibleAgents,
+    visibleAgentIds,
+    visibleTasks,
+    visibleActiveTasks,
+    visibleActivityTasks,
+    visibleActiveTasksByAgent: readonlyValues(visibleActiveTasksByAgent),
+    visibleActiveTasksByProject: readonlyValues(visibleActiveTasksByProject),
+    visibleActivityTasksByAgent: readonlyValues(visibleActivityTasksByAgent),
+    visibleActivityTasksByProject: readonlyValues(visibleActivityTasksByProject),
     localHost: snapshot.hosts.find(host => host.kind === 'local') ?? null,
-    defaultAgent: snapshot.agents.find(agent => agent.provider === 'codex') ?? snapshot.agents[0] ?? null,
+    defaultAgent: visibleAgents.find(agent => agent.provider === 'codex') ?? visibleAgents[0] ?? null,
     channelById,
     messagesByTask: readonlyValues(messagesByTask),
     eventsByTask: readonlyValues(eventsByTask),
@@ -108,19 +152,19 @@ export function createSnapshotIndexes(snapshot: Snapshot): SnapshotIndexes {
   };
 }
 
-/** Returns an already-grouped active task set without scanning the snapshot. */
+/** Returns an already-grouped active task set without scanning the snapshot. Internal agents are excluded. */
 export function activeTasksForWorkspace(indexes: SnapshotIndexes | null | undefined, scope: string): Task[] {
   if (!indexes) return [];
-  if (scope === 'all') return indexes.activeTasks;
-  if (scope.startsWith('agent:')) return indexes.activeTasksByAgent.get(scope.slice(6)) ?? [];
-  if (scope.startsWith('project:')) return indexes.activeTasksByProject.get(scope.slice(8)) ?? [];
+  if (scope === 'all') return indexes.visibleActiveTasks;
+  if (scope.startsWith('agent:')) return indexes.visibleActiveTasksByAgent.get(scope.slice(6)) ?? [];
+  if (scope.startsWith('project:')) return indexes.visibleActiveTasksByProject.get(scope.slice(8)) ?? [];
   return [];
 }
 
 export function activityTasksForWorkspace(indexes: SnapshotIndexes | null | undefined, scope: string): Task[] {
   if (!indexes) return [];
-  if (scope === 'all') return indexes.activityTasks;
-  if (scope.startsWith('agent:')) return indexes.activityTasksByAgent.get(scope.slice(6)) ?? [];
-  if (scope.startsWith('project:')) return indexes.activityTasksByProject.get(scope.slice(8)) ?? [];
+  if (scope === 'all') return indexes.visibleActivityTasks;
+  if (scope.startsWith('agent:')) return indexes.visibleActivityTasksByAgent.get(scope.slice(6)) ?? [];
+  if (scope.startsWith('project:')) return indexes.visibleActivityTasksByProject.get(scope.slice(8)) ?? [];
   return [];
 }

@@ -73,6 +73,21 @@ for (const selection of [{ taskIds: [task], projectIds: [] }, { taskIds: [], pro
 assert.equal(sharingSource.approvalRequests.length, 2);
 assert.equal(sharingSource.approvalRules?.length, 1);
 assert.equal(sharingSource.tasks[0].cwd, '/private/folder');
+
+// Internal agents must never appear in any visitor projection, even when a crafted share
+// carries their IDs alongside shared chat IDs.
+const internalAgentSharing: typeof sharingSource = {
+  ...sharingSource,
+  agents: [...sharingSource.agents, { id: 'monitter-admin', name: 'Monitter Admin', description: '', instructions: '', avatar: null, provider: 'codex', model: '', hostId: 'private-host', cwd: '/private', color: '#000', sandbox: 'harness-configured', expertise: [], responsibilities: [], skills: [], collaborationEnabled: false, internal: true }],
+  tasks: [...sharingSource.tasks, { ...sharedTask, id: 'admin-task', agentId: 'monitter-admin' }],
+};
+for (const selection of [{ taskIds: [task, 'admin-task'], projectIds: [] }, { taskIds: [], projectIds: ['shared-project'] }]) {
+  const guarded = sharedSnapshot(internalAgentSharing, selection);
+  assert.deepEqual(guarded.tasks.map(item => item.id), [task], 'Internal-agent tasks must never appear in a visitor projection.');
+  assert.deepEqual(guarded.agents.map(item => item.id), ['agent'], 'Internal agents must never appear in a visitor projection.');
+  assert.ok(!JSON.stringify(guarded).includes('Monitter Admin'));
+  assert.ok(!JSON.stringify(guarded).includes('admin-task'));
+}
 const dispatcher = new ControllerDispatcher(client, { maxMutationReceipts: 3 });
 
 // A current bridge can acknowledge a durable send without returning a large

@@ -298,6 +298,12 @@
   // messages/events/approvals from the full snapshot independently.
   const localSnapshotIndexes = $derived.by(() => snapshot ? createSnapshotIndexes(snapshot) : null);
   const indexes = $derived(snapshotIndexes ?? localSnapshotIndexes);
+  // Internal agents and their tasks are deliberately excluded from every user-facing surface.
+  // The raw indexes (and snapshot) remain authoritative for backend-linked historical lookups.
+  const visibleAgents = $derived(indexes?.visibleAgents ?? []);
+  const visibleTasks = $derived(indexes?.visibleTasks ?? []);
+  const visibleActiveTasks = $derived(indexes?.visibleActiveTasks ?? []);
+  const visibleActivityTasks = $derived(indexes?.visibleActivityTasks ?? []);
   let openTerminalIds=$state<string[]>([]), selectedTerminalId=$state<string|null>(null), terminalBusy=$state(false);
   let openEmptyIds=$state<string[]>([]), selectedEmptyId=$state<string|null>(null);
   const selectedTerminal=$derived(selectedTerminalId ? $terminalSessions[selectedTerminalId] ?? null : null);
@@ -476,9 +482,9 @@
     seedViewerInterfaceScale('desktop', snapshot.settings.interfaceScale ?? 125);
     seedViewerInterfaceScale('mobile', snapshot.settings.interfaceScale ?? 125);
   });
-  const activeTasks = $derived(indexes?.activeTasks ?? []);
+  const activeTasks = $derived(visibleActiveTasks);
   const scopedTasks = $derived(activeTasksForWorkspace(indexes, activeWorkspaceKey));
-  const activityTasks = $derived(indexes?.activityTasks ?? []);
+  const activityTasks = $derived(visibleActivityTasks);
   const scopedActivityTasks = $derived(activityTasksForWorkspace(indexes, activeWorkspaceKey));
   const workspaceLabel = $derived(activeWorkspaceKey === 'all' ? 'All activity' : activeWorkspaceKey.startsWith('agent:')
     ? indexes?.agentById.get(activeWorkspaceKey.slice(6))?.name ?? 'Deleted agent'
@@ -704,7 +710,7 @@
   let resolvingApprovalId = $state<string | null>(null);
   const globalPendingApprovals = $derived((snapshot?.approvalRequests ?? []).filter(request => request.status === 'pending')
     .map(request => ({ request, task: indexes?.taskById.get(request.taskId) ?? null }))
-    .filter((item): item is { request: ApprovalRequest; task: Task } => !!item.task)
+    .filter((item): item is { request: ApprovalRequest; task: Task } => !!item.task && indexes?.visibleAgentIds.has(item.task.agentId) === true)
     .sort((left, right) => left.request.createdAt - right.request.createdAt));
   const channelPendingApprovals = $derived(globalPendingApprovals
     .filter(item => !!activeChannel && item.task.channelId === activeChannel.id)
@@ -842,7 +848,7 @@
   }
   const sidebarWorkspaceTabs = $derived.by(() => {
     const result: Record<string, SidebarWorkspaceTab[]> = {};
-    for (const agent of snapshot?.agents ?? []) {
+    for (const agent of visibleAgents) {
       const scope = `agent:${agent.id}`;
       const saved = workspaceSet?.workspaces[scope];
       const states = scope === activeWorkspaceKey
@@ -1032,9 +1038,9 @@
       pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
       detailTab: ['run', 'git', 'timeline', 'approvals', 'subagents'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
     };
-    const taskIds = new Set(snapshot?.tasks.filter(task => !task.archived && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
+    const taskIds = new Set((snapshot?.tasks ?? []).filter(task => !task.archived && indexes?.visibleAgentIds.has(task.agentId) === true && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
     const channelIds = new Set(snapshot?.channels.map(channel => channel.id) ?? []);
-    const agentIds = new Set(snapshot?.agents.map(agent => agent.id) ?? []);
+    const agentIds = indexes?.visibleAgentIds ?? new Set<string>();
     const projectIds = new Set(snapshot?.projects.map(project => project.id) ?? []);
     state.openTaskIds = state.openTaskIds.filter(id => taskIds.has(id));
     state.openChannelIds = state.openChannelIds.filter(id => channelIds.has(id));
@@ -1363,7 +1369,7 @@
     if(pane==='task' && !currentDraftId && selectedTask) return [{target:{taskId:selectedTask.id},scope:`${selectedTask.hostId}:${selectedTask.cwd}`}];
     const agentIds=pane==='channel'?effectiveRecipients:currentDraftId?[taskAgentId]:[];
     return agentIds.flatMap(agentId=>{
-      const agent=snapshot?.agents.find(item=>item.id===agentId);if(!agent)return [];
+      const agent=visibleAgents.find(item=>item.id===agentId);if(!agent)return [];
       const projectId=pane==='channel'?null:taskProjectId||null;
       const cwd=snapshot?.projects.find(project=>project.id===projectId)?.workspaces.find(workspace=>workspace.hostId===agent.hostId)?.cwd || agent.cwd || snapshot?.hosts.find(host=>host.id===agent.hostId)?.defaultCwd || '';
       return [{target:{agentId,projectId},scope:`${agent.hostId}:${cwd}`}];
@@ -1437,7 +1443,7 @@
   const senderName = (message: (typeof messages)[number]) => {
     if (message.role === 'user') return splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')).name;
     const sender = (message as typeof message & { senderAgentId?: string | null }).senderAgentId;
-    return sender ? snapshot?.agents.find(agent => agent.id === sender)?.name ?? "Agent" : null;
+    return sender ? visibleAgents.find(agent => agent.id === sender)?.name ?? "Agent" : null;
   };
   const operatorMessageText = (value: string) => splitOperatorMessage(value.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')).text;
   const operatorShareFor = (taskId: string) => {
@@ -1464,11 +1470,11 @@
   );
   const activeChannelTasks = $derived(
     activeChannel
-      ? indexes?.runningTasksByChannel.get(activeChannel.id) ?? []
+      ? (indexes?.runningTasksByChannel.get(activeChannel.id) ?? []).filter(task => indexes?.visibleAgentIds.has(task.agentId) === true)
       : [],
   );
   const channelLiveErrors = $derived(activeChannel
-    ? (snapshot?.tasks ?? []).filter(task => task.channelId === activeChannel.id && task.status === 'error')
+    ? visibleTasks.filter(task => task.channelId === activeChannel.id && task.status === 'error')
     : []);
   const activeChannelStarting = $derived(
     !!(activeChannel && (composerPending[`channel:${activeChannel.id}`]
@@ -1486,7 +1492,7 @@
   }));
   const channelTranscriptBuffer = createTranscriptBuffer<ChannelTranscriptDisplay>(
     () => activeChannel?.id ?? '',
-    () => ({ messages: activeChannel?.messages ?? [], agents: snapshot?.agents ?? [], tintUserMessages: snapshot?.settings.tintUserMessages === true, optimisticMessages: optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel?.id), confirmedDeliveryIds, waiting: channelWaiting }),
+    () => ({ messages: activeChannel?.messages ?? [], agents: visibleAgents, tintUserMessages: snapshot?.settings.tintUserMessages === true, optimisticMessages: optimisticMessages.filter(message => message.kind === 'channel' && message.targetId === activeChannel?.id), confirmedDeliveryIds, waiting: channelWaiting }),
     () => channelTranscriptFingerprint,
   );
   const displayedChannelTranscript = $derived(channelTranscriptBuffer.value());
@@ -2522,7 +2528,7 @@
   let agentEdits=$state<Record<string,Agent>>({});
   function selectAgentEditor(id:string) {
     if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
-    agentDraft=JSON.parse(JSON.stringify(agentEdits[id]??snapshot?.agents.find(agent=>agent.id===id)??blankAgent()));
+    agentDraft=JSON.parse(JSON.stringify(agentEdits[id]??visibleAgents.find(agent=>agent.id===id)??blankAgent()));
   }
   export function openAgentSettings(draft:Agent) {
     if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
@@ -2537,14 +2543,14 @@
     activePaneId=owner;
     if(owner==='main')openAgentSettings(draft);else paneRefs[owner]?.openAgentSettings(draft);
   }
-  $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && snapshot)untrack(()=>selectAgentEditor(snapshot!.agents[0]?.id??''));});
-  function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(snapshot?.agents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
-  async function deleteEditedAgent(){if(!agentDraft?.id)return;const id=agentDraft.id;if(await run(()=>bridge.deleteAgent(id),'Agent removed.')){delete agentEdits[id];agentDraft=null;selectAgentEditor(snapshot?.agents[0]?.id??'');}}
+  $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && visibleAgents.length)untrack(()=>selectAgentEditor(visibleAgents[0]?.id??''));});
+  function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(visibleAgents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
+  async function deleteEditedAgent(){if(!agentDraft?.id)return;const id=agentDraft.id;if(await run(()=>bridge.deleteAgent(id),'Agent removed.')){delete agentEdits[id];agentDraft=null;selectAgentEditor(visibleAgents[0]?.id??'');}}
   async function saveAgent() {
     if(!agentDraft)return;
     const oldId=agentDraft.id;
     const submitted={...agentDraft,id:oldId||localUuid(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean)};
-    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(snapshot?.agents.find(agent=>agent.id===submitted.id)??submitted));}
+    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(visibleAgents.find(agent=>agent.id===submitted.id)??submitted));}
   }
   async function saveHost() {
     if (
@@ -3039,14 +3045,14 @@
   const switchItems = $derived([
     {id:"settings:settings",label:"Settings",group:"Workspace",detail:"Appearance, typography and behaviour"},
     ...Object.values($terminalSessions).map(session=>({id:`terminal:${session.id}`,label:session.title,group:'Terminals',detail:`${snapshot?.hosts.find(host=>host.id===session.hostId)?.name??'Host'} · ${session.cwd}`})),
-    ...Object.values(taskDrafts).map(draft => ({id:`draft:${draft.id}`,label:draft.title || 'New chat',group:'Draft chats',detail:snapshot?.agents.find(agent=>agent.id===draft.agentId)?.name ?? 'Agent'})),
-    ...(snapshot?.tasks ?? []).filter(task=>!task.channelId).toSorted((a,b)=>b.updatedAt-a.updatedAt).map(task=>({
+    ...Object.values(taskDrafts).map(draft => ({id:`draft:${draft.id}`,label:draft.title || 'New chat',group:'Draft chats',detail:visibleAgents.find(agent=>agent.id===draft.agentId)?.name ?? 'Agent'})),
+    ...visibleTasks.filter(task=>!task.channelId).toSorted((a,b)=>b.updatedAt-a.updatedAt).map(task=>({
       id:`task:${task.id}`,label:task.title,group:task.archived ? "Archived chats" : "Chats",
-      detail:`${task.archived ? "Select to restore · " : ""}${snapshot?.agents.find(agent=>agent.id===task.agentId)?.name ?? "Agent"}`,
+      detail:`${task.archived ? "Select to restore · " : ""}${visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? "Agent"}`,
       keywords:`${task.provider} ${task.cwd}`,
     })),
     ...(snapshot?.channels ?? []).map(channel=>({id:`channel:${channel.id}`,label:channel.name,group:"Channels",detail:channel.description})),
-    ...(snapshot?.agents ?? []).map(agent=>({id:`agent:${agent.id}`,label:agent.name,group:"Agents",detail:`${agent.provider} · ${agent.description}`})),
+    ...visibleAgents.map(agent=>({id:`agent:${agent.id}`,label:agent.name,group:"Agents",detail:`${agent.provider} · ${agent.description}`})),
     ...projects.map(project=>({id:`project:${project.id}`,label:project.name,group:'Projects',detail:project.description || `${activityTasks.filter(task=>task.projectId===project.id).length} chats`})),
   ]);
   const controlItems = $derived([
@@ -3096,7 +3102,7 @@
         const project = projects.find(project=>project.id===itemId);
         if (project) { const scope=`project:${project.id}` as WorkspaceKey; if(scope===activeWorkspaceKey)openProject(project);else await switchWorkspace(scope); }
       } else {
-        const agent = snapshot?.agents.find(agent=>agent.id===itemId);
+        const agent = visibleAgents.find(agent=>agent.id===itemId);
         if (agent) { const scope=`agent:${agent.id}` as WorkspaceKey; if(scope===activeWorkspaceKey)openAgent(agent);else await switchWorkspace(scope); }
       }
       return;
@@ -3138,7 +3144,7 @@
   }
   async function changeChannelMembership(agentId:string,member:boolean) {
     const channel=activeChannel;if(!channel)return false;
-    const agent=snapshot?.agents.find(agent=>agent.id===agentId);
+    const agent=visibleAgents.find(agent=>agent.id===agentId);
     const result=await run(()=>bridge.setChannelMembership(channel.id,agentId,member),`${agent?.name??'Agent'} ${member?'joined':'left'} ${channel.name}.`);
     if(result && !member) { channelRecipients[channel.id]=(channelRecipients[channel.id]??[]).filter(id=>id!==agentId);if(selectedChannelId===channel.id)recipients=recipients.filter(id=>id!==agentId); }
     return !!result;
@@ -3155,7 +3161,7 @@
       else if(name==='topic') {if(!args)notice=`Topic: ${channel.description||'No topic set'}`;else success=!!await run(()=>bridge.saveChannel({...channel,description:args==='-'?'':args}),'Channel topic updated.');}
       else if(name==='invite'||name==='kick') {
         if(!args)throw Error(`Usage: /${name} @agent-name`);
-        const agent=resolveChannelAgent(args,name==='kick'?channelMentionAgents:snapshot?.agents??[]);
+        const agent=resolveChannelAgent(args,name==='kick'?channelMentionAgents:visibleAgents);
         success=await changeChannelMembership(agent.id,name==='invite');
       }
       if(success) {clearSentDraft(key,original);slashOpen=false;}
@@ -3170,7 +3176,7 @@
     if(activeChannel) await run(()=>bridge.stopChannelAgentConversation(activeChannel.id), "Channel stopped.");
   }
   async function configureChannelConversation(enabled:boolean,turnLimit:number) { if(activeChannel) await run(()=>bridge.setChannelAgentConversation(activeChannel.id,enabled,turnLimit)); }
-  const channelMentionAgents = $derived(snapshot?.agents.filter(agent=>activeChannel?.agentIds.includes(agent.id)) ?? []);
+  const channelMentionAgents = $derived(visibleAgents.filter(agent=>activeChannel?.agentIds.includes(agent.id)));
   const channelMentionIds = $derived(mentionedAgentIds(composer, channelMentionAgents));
   const effectiveRecipients = $derived([...new Set([...recipients, ...channelMentionIds])].filter(id=>activeChannel?.agentIds.includes(id)));
   const currentQueuedMessages = $derived(pane === 'channel'
@@ -3215,12 +3221,12 @@
 
 {#snippet sidebarChat(task: Task, detail = false, recent = false)}
   {@const sortGroup=sidebarView==='activity'?'':sidebarView==='projects'?`project-chats:${task.projectId??'unassigned'}`:`agent-chats:${task.agentId}`}
-  {@const agent = snapshot?.agents.find(item=>item.id===task.agentId)}
+  {@const agent = visibleAgents.find(item=>item.id===task.agentId)}
   <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:recent class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
     <button class="task-select" onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)} title={task.title}>
       {#if detail}<span class="avatar small" title={agent?.name ?? 'Agent'} aria-label={agent?.name ?? 'Agent'}>{@render avatarVisual(agent, 12)}</span>{/if}
       <span class={`dot ${task.status}`}></span><span class="chat-copy"><span>{task.title}</span>
-        {#if detail}<span class="chat-meta">{snapshot?.agents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
+        {#if detail}<span class="chat-meta">{visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
       </span>
     </button>
     {#if task.status === 'running'}
@@ -3373,14 +3379,14 @@
         use hosts, agents, and tasks.
       </div>{/if}
     {#if settingsOpen && snapshot}<div class="settings-surface" class:settings-hidden={pane!=='settings'}>
-      <SettingsPane settings={snapshot.settings} interfaceScale={activeInterfaceScale} {interfaceScaleViewer} onscale={value=>{ setViewerInterfaceScale(interfaceScaleViewer,value); }} approvalRules={approvalRules} agents={snapshot.agents} hosts={snapshot.hosts} revokingRuleId={revokingApprovalRuleId} onrevokeRule={revokeApprovalRule} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
+      <SettingsPane settings={snapshot.settings} interfaceScale={activeInterfaceScale} {interfaceScaleViewer} onscale={value=>{ setViewerInterfaceScale(interfaceScaleViewer,value); }} approvalRules={approvalRules} agents={visibleAgents} hosts={snapshot.hosts} revokingRuleId={revokingApprovalRuleId} onrevokeRule={revokeApprovalRule} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
     </div>{/if}
     {#if !snapshot}<div class="loading">
         <LoaderCircle size={22} /><span>Loading your workspace…</span
         >{#if error}<button onclick={reload}>Try again</button>{/if}
       </div>
     {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
-      <button class="pane-choice" disabled={busy} onclick={()=>snapshot?.agents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
+      <button class="pane-choice" disabled={busy} onclick={()=>visibleAgents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
       <button class="pane-choice" disabled={terminalBusy} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<SquareTerminal size={22}/>{/if}<span>Terminal</span></button>
     </div></section>
     {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface">{#if !mobileSidebar}<div class="terminal-pane-overlay">{@render paneExpandControl()}</div>{/if}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
@@ -3391,12 +3397,12 @@
         <div class="project-overview-actions"><button class="secondary" aria-label={`Edit project ${focusedProject.name}`} onclick={()=>editProject(focusedProject)}><Settings2 size={15}/>Edit project</button><button class="primary" onclick={()=>routeProjectDraft(focusedProject.id)}><Plus size={16}/>New chat</button></div>
       </div>
       {#if focusedProject.workspaces.length}<dl class="project-folders">{#each focusedProject.workspaces as workspace}<div><dt><HardDrive size={13}/>{snapshot.hosts.find(host=>host.id===workspace.hostId)?.name ?? 'Host'}</dt><dd>{workspace.cwd}</dd></div>{/each}</dl>{/if}
-      <div class="agent-chats">{#each scopedActivityTasks.filter(task=>task.projectId===focusedProject.id) as task (task.id)}<button class="overview-task" onclick={()=>openTask(task)}><span class={`dot ${task.status}`}></span><div><b>{task.title}</b><small>{snapshot.agents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {task.provider} · {relative(task.updatedAt)}</small></div></button>{:else}<p class="hint">No chats yet. Choose any agent to start working on this project.</p>{/each}</div>
+      <div class="agent-chats">{#each scopedActivityTasks.filter(task=>task.projectId===focusedProject.id) as task (task.id)}<button class="overview-task" onclick={()=>openTask(task)}><span class={`dot ${task.status}`}></span><div><b>{task.title}</b><small>{visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {task.provider} · {relative(task.updatedAt)}</small></div></button>{:else}<p class="hint">No chats yet. Choose any agent to start working on this project.</p>{/each}</div>
     </section>
     {:else if pane === "agent" && focusedAgent}<section class="overview">
         <div class="overview-head"><div class="overview-expand">{@render paneExpandControl()}</div><div><p class="eyebrow">AGENT · {focusedAgent.provider}</p><h1>{focusedAgent.name}</h1><p>{focusedAgent.description}</p></div>
           <button class="primary" onclick={()=>openTaskComposer(null,focusedAgent.id)}><Plus size={16}/>New chat</button></div>
-        <div class="agent-chats">{#each snapshot.tasks.filter(task=>task.agentId===focusedAgent.id && !task.archived) as task}<button class="overview-task" onclick={()=>openTask(task)}><span class={`dot ${task.status}`}></span><div><b>{task.title}</b><small>{relative(task.updatedAt)}</small></div></button>{:else}<p class="hint">No chats yet. Start one with {focusedAgent.name}.</p>{/each}</div>
+        <div class="agent-chats">{#each visibleTasks.filter(task=>task.agentId===focusedAgent.id && !task.archived) as task}<button class="overview-task" onclick={()=>openTask(task)}><span class={`dot ${task.status}`}></span><div><b>{task.title}</b><small>{relative(task.updatedAt)}</small></div></button>{:else}<p class="hint">No chats yet. Start one with {focusedAgent.name}.</p>{/each}</div>
       </section>
     {:else if pane === "overview" || (pane === "task" && !selectedTask && !currentTaskDraft) || (pane === "channel" && !activeChannel) || (pane === 'project' && !focusedProject) || (pane==='terminal' && !selectedTerminal)}<section
         class="overview dashboard-overview"
@@ -3407,15 +3413,15 @@
             {#if !embedded}<div class="workspace-health" role="status" title="Connection reflects the latest workspace refresh; counts cover all saved agents and active tasks.">
               <span class="connection-light" class:connected={workspaceConnected===true} aria-hidden="true"></span>
               <span>{!bridge.available?'Preview only':workspaceConnected===true?'Connected':workspaceConnected===false?'Connection unavailable':'Connecting…'}</span>
-              <span>{snapshot.agents.length} {snapshot.agents.length===1?'agent':'agents'} · {snapshot.tasks.filter(task=>task.status==='running'&&!task.archived).length} running</span>
+              <span>{visibleAgents.length} {visibleAgents.length===1?'agent':'agents'} · {visibleTasks.filter(task=>task.status==='running'&&!task.archived).length} running</span>
             </div>{/if}
             <h1>
-              {snapshot.agents.length
+              {visibleAgents.length
                 ? "Everything in motion."
                 : "Start with one agent."}
             </h1>
             <p>
-              {snapshot.agents.length
+              {visibleAgents.length
                 ? "Tasks stay with the agent, host and folder that started them."
                 : "Create a Codex agent, choose where it works, then give it a task."}
             </p>
@@ -3423,10 +3429,10 @@
           <div class="overview-create-actions"><button
             class="primary"
             onclick={() =>
-              snapshot!.agents.length
+              visibleAgents.length
                 ? openTaskComposer()
                 : routeAgentSettings(blankAgent())}
-            ><Plus size={16} />{snapshot.agents.length
+            ><Plus size={16} />{visibleAgents.length
               ? "New chat"
               : "Create agent"}</button
           >
@@ -3435,7 +3441,7 @@
             New terminal
           </button></div>
         </div>
-        {#if !snapshot.hosts.length || !snapshot.agents.length}<section
+        {#if !snapshot.hosts.length || !visibleAgents.length}<section
             class="onboarding"
           >
             <div class="onboard-number">01</div>
@@ -3476,7 +3482,7 @@
                     ><span class={`dot ${task.status}`}></span>
                     <div>
                       <b>{task.title}</b><small
-                        >{snapshot.agents.find(
+                        >{visibleAgents.find(
                           (agent) => agent.id === task.agentId,
                         )?.name ?? "Unknown agent"} · {task.provider}</small
                       >
@@ -3541,7 +3547,7 @@
         {#if channelTranscriptBuffer.held() && channelLiveErrors.length}<div class="live-channel-status" aria-live="polite">
           {#each channelLiveErrors as task}<p class="live-transcript-notice" role="status">{(events.filter(event=>event.taskId===task.id&&event.kind==='error').at(-1)?.detail || 'A channel task stopped with an error.').slice(0, 500)}</p>{/each}
         </div>{/if}
-        <QueuedMessages messages={currentQueuedMessages} agents={snapshot.agents} tasks={snapshot.tasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
+        <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
         <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
         <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
@@ -3551,7 +3557,7 @@
             {@render attachmentTools()}
             <div class="recipient-picker">
               <span>Send to</span
-              >{#each snapshot.agents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
+              >{#each visibleAgents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
                   class:selected={effectiveRecipients.includes(agent.id)}
                   aria-pressed={effectiveRecipients.includes(agent.id)}
                   disabled={channelMentionIds.includes(agent.id)}
@@ -3566,7 +3572,7 @@
       {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss channel members" onclick={()=>showDetail=false}></button>{/if}
       <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail channel-members" class:closed={!showDetail} aria-label="Channel members">
         <SidebarResize side="right"/>
-        <ChannelMembers channel={activeChannel} agents={snapshot.agents} hosts={snapshot.hosts} tasks={snapshot.tasks} {busy} onmembership={changeChannelMembership} onadmin={editActiveChannel} onconversation={configureChannelConversation} onstopconversation={stopChannel} onclose={()=>showDetail=false}/>
+        <ChannelMembers channel={activeChannel} agents={visibleAgents} hosts={snapshot.hosts} tasks={visibleTasks} {busy} onmembership={changeChannelMembership} onadmin={editActiveChannel} onconversation={configureChannelConversation} onstopconversation={stopChannel} onclose={()=>showDetail=false}/>
       </aside>
       </section>
     {:else if startingTaskDraft}
@@ -3583,7 +3589,7 @@
             <p>Ask a question, explore a project, or describe a change. Your agent starts when you send.</p>
           </div>
           <div class="draft-options form-grid">
-            <label>Agent<select class="draft-select" aria-label="Agent" bind:value={taskAgentId} onchange={routeChangedDraft} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId}>{#each snapshot.agents as agent}<option value={agent.id}>{agent.name} · {agent.provider}</option>{/each}</select></label>
+            <label>Agent<select class="draft-select" aria-label="Agent" bind:value={taskAgentId} onchange={routeChangedDraft} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId}>{#each visibleAgents as agent}<option value={agent.id}>{agent.name} · {agent.provider}</option>{/each}</select></label>
             <label>Project<select class="draft-select" id="task-project" aria-label="Project" bind:value={taskProjectId} onchange={routeChangedDraft} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId}><option value="">No project</option>{#each projects as project}<option value={project.id}>{project.name}</option>{/each}</select></label>
           </div>
           {#if taskFormAgent && !taskProjectId}<label class="task-workspace-editor"><span><Folder size={13}/>Working folder</span><div><input aria-label="Working folder" bind:value={taskCwd} placeholder={inheritedTaskCwd || '/path/to/project'} disabled={busy || !!currentTaskDraft.createdTaskId}/>{#if nativeRuntime && snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.kind === 'local'}<button class="icon" aria-label="Browse working folder" title="Choose folder" disabled={busy || !!currentTaskDraft.createdTaskId} onclick={browseTaskFolder}><Folder size={15}/></button>{/if}</div></label>{:else if taskFormAgent}<p class="task-workspace-preview"><Folder size={13}/><span><b>{snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.name ?? 'Host'}</b><code>{taskFormCwd}</code></span></p>{/if}
@@ -3611,7 +3617,7 @@
               <label>Existing native session ID <span class="optional">Optional</span><input aria-label="Existing native session ID" bind:value={taskNativeSessionId} disabled={busy || !!currentTaskDraft.createdTaskId} placeholder="Resume an idle native session"/></label>
             </div>
           </details>
-          {#if taskParentId}<p class="hint">Delegated from {snapshot.tasks.find(task=>task.id===taskParentId)?.title ?? 'the selected task'}.</p>{/if}
+          {#if taskParentId}<p class="hint">Delegated from {visibleTasks.find(task=>task.id===taskParentId)?.title ?? 'the selected task'}.</p>{/if}
         </div>
       </section>
     {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
@@ -3624,7 +3630,7 @@
           {#if showClose}<button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>{/if}
         </div>{/snippet}
         {#snippet taskComposer()}
-          <QueuedMessages messages={currentQueuedMessages} agents={snapshot?.agents ?? []} tasks={snapshot?.tasks ?? []} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
+          <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
           <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
           <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
@@ -3699,12 +3705,12 @@
             <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
             <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll approval-history-panel" class:hidden={detailTab!=='approvals'} aria-label="Approval history">
               <header><h2>Approvals</h2><p>Saved rules for this agent, host and folder, plus this chat's resolved requests.</p></header>
-              {#if selectedApprovalRules.length}<section class="saved-approvals-sidebar" aria-label="Saved approvals for this chat"><h3>Saved rules</h3><p>Revoking affects future requests only; work already approved keeps running.</p><SavedApprovalRules rules={selectedApprovalRules} agents={snapshot.agents} hosts={snapshot.hosts} agentId={selectedTask.agentId} hostId={selectedTask.hostId} cwd={selectedTask.cwd} onrevoke={revokeApprovalRule} revokingId={revokingApprovalRuleId} compact={compactDetail}/></section>{/if}
+              {#if selectedApprovalRules.length}<section class="saved-approvals-sidebar" aria-label="Saved approvals for this chat"><h3>Saved rules</h3><p>Revoking affects future requests only; work already approved keeps running.</p><SavedApprovalRules rules={selectedApprovalRules} agents={visibleAgents} hosts={snapshot.hosts} agentId={selectedTask.agentId} hostId={selectedTask.hostId} cwd={selectedTask.cwd} onrevoke={revokeApprovalRule} revokingId={revokingApprovalRuleId} compact={compactDetail}/></section>{/if}
               {#each resolvedApprovalRequests as request (request.id)}<div id={`approval-history-${paneId}-${request.id}`} tabindex="-1"><ApprovalRequestCard {request}/></div>{:else}<p class="detail-empty">No resolved approvals for this chat.</p>{/each}
             </section>
             <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll subagent-panel" class:hidden={detailTab!=='subagents'} aria-label="Subagents">
               <header><h3>SUBAGENTS</h3><span>{runningSubagentCount} running · {taskSubagents.length} recent</span></header>
-              {#each taskSubagents as collaboration (collaboration.id)}<SubagentActivity {collaboration} agent={snapshot.agents.find(agent=>agent.id===collaboration.toAgentId)} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<p class="detail-empty">No subagents have run from this chat.</p>{/each}
+              {#each taskSubagents as collaboration (collaboration.id)}<SubagentActivity {collaboration} agent={visibleAgents.find(agent=>agent.id===collaboration.toAgentId)} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<p class="detail-empty">No subagents have run from this chat.</p>{/each}
             </section>
             <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || detailTab==='subagents' || (detailTab==='git' && gitState.repository===true)}>
               <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small>{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
@@ -3734,8 +3740,8 @@
                     </dd>
                   </div>{/if}
               </dl>
-              <RunSummary task={selectedTask} gitStatus={gitState.status} tasks={snapshot.tasks} terminalSessions={Object.values($terminalSessions)} onOpenGit={()=>detailTab='git'}/>
-              <section class="detail-section collaboration-list"><h3>COLLABORATION <span>{taskCollaborations.length}</span></h3>{#each taskCollaborations as collaboration}<button class="collaboration-row" onclick={()=>{const id=collaboration.fromTaskId===selectedTask?.id?collaboration.toTaskId:collaboration.fromTaskId; const task=snapshot?.tasks.find(item=>item.id===id); if(task) openTask(task)}}><span class={`dot ${collaboration.status === 'running' ? 'running' : collaboration.status === 'error' ? 'error' : 'completed'}`}></span><span><b>{collaboration.kind === 'delegation' ? 'Delegation' : 'Agent message'} · {snapshot?.agents.find(agent=>agent.id===(collaboration.fromTaskId===selectedTask?.id?collaboration.toAgentId:collaboration.fromAgentId))?.name ?? 'Agent'}</b><small>{collaborationStatus(collaboration)} · {relative(collaboration.updatedAt)}</small>{#if collaboration.result}<em>{collaboration.result}</em>{/if}{#if collaboration.error}<em class="collaboration-error">{collaboration.error}</em>{:else if !collaboration.result}<em>{collaboration.text}</em>{/if}</span></button>{:else}<p class="detail-empty">No routed agent messages or delegations yet.</p>{/each}</section>
+              <RunSummary task={selectedTask} gitStatus={gitState.status} tasks={visibleTasks} terminalSessions={Object.values($terminalSessions)} onOpenGit={()=>detailTab='git'}/>
+              <section class="detail-section collaboration-list"><h3>COLLABORATION <span>{taskCollaborations.length}</span></h3>{#each taskCollaborations as collaboration}<button class="collaboration-row" onclick={()=>{const id=collaboration.fromTaskId===selectedTask?.id?collaboration.toTaskId:collaboration.fromTaskId; const task=snapshot?.tasks.find(item=>item.id===id); if(task) openTask(task)}}><span class={`dot ${collaboration.status === 'running' ? 'running' : collaboration.status === 'error' ? 'error' : 'completed'}`}></span><span><b>{collaboration.kind === 'delegation' ? 'Delegation' : 'Agent message'} · {visibleAgents.find(agent=>agent.id===(collaboration.fromTaskId===selectedTask?.id?collaboration.toAgentId:collaboration.fromAgentId))?.name ?? 'Agent'}</b><small>{collaborationStatus(collaboration)} · {relative(collaboration.updatedAt)}</small>{#if collaboration.result}<em>{collaboration.result}</em>{/if}{#if collaboration.error}<em class="collaboration-error">{collaboration.error}</em>{:else if !collaboration.result}<em>{collaboration.text}</em>{/if}</span></button>{:else}<p class="detail-empty">No routed agent messages or delegations yet.</p>{/each}</section>
               <section class="detail-section">
                 <h3>DELEGATED TASKS <span>{delegated.length}</span></h3>
                 {#if delegated.length}{#each delegated as task}<button
@@ -3744,7 +3750,7 @@
                       ><span class={`dot ${task.status}`}></span>
                       <div>
                         <b>{task.title}</b><small
-                          >{snapshot.agents.find((a) => a.id === task.agentId)
+                          >{visibleAgents.find((a) => a.id === task.agentId)
                             ?.name ?? "Agent"}</small
                         >
                       </div></button
@@ -3773,7 +3779,7 @@
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
       {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Create">
         <button class="icon brand-action" type="button" aria-label={terminalBusy?'Opening terminal':'New terminal'} title="New terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
-        <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !snapshot?.agents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
+        <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
       </div>{/if}
     </div>
     {#if !sidebarCompressed}<div class="sidebar-tabs-row">
@@ -3788,11 +3794,11 @@
       </div>{/if}
       <div class="sidebar-mode-content" use:motionView={{key:sidebarView,x:16*sidebarMotionDirection,y:0,duration:180,opacity:0.35}}>
       {#if sidebarView === 'standard'}
-      {#if snapshot?.agents.length}{#each sidebarSorted(snapshot.agents,'agents') as agent}{@const agentTasks =
+      {#if visibleAgents.length}{#each sidebarSorted(visibleAgents,'agents') as agent}{@const agentTasks =
             sidebarSorted(activeTasks.filter(
               (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId,
             ),`agent-chats:${agent.id}`)}
-          {@const agentHost = snapshot.hosts.find(host=>host.id===agent.hostId)}
+          {@const agentHost = snapshot?.hosts.find(host=>host.id===agent.hostId) ?? null}
           <section class="agent-group" class:has-chats={(agentTasks.length > 0 || (sidebarWorkspaceTabs[agent.id]?.length ?? 0) > 0) && !collapsedAgents[agent.id]}>
             <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
               <button class="avatar agent-avatar-toggle" aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={event=>toggleSidebarGroup('agent',agent.id,event.currentTarget)}>
@@ -3880,11 +3886,11 @@
     </nav>
     {:else}<nav use:motionView={{key:"rail",initial:motionReady,x:-4,y:0,duration:160}} class="agent-rail" aria-label="Agents">
       {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
-      {#each sidebarSorted(snapshot?.agents ?? [],'agents') as agent}<button use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}} class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
+      {#each sidebarSorted(visibleAgents,'agents') as agent}<button use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}} class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
         <span class="avatar">{@render avatarVisual(agent, 15)}</span>
         {#if activeTasks.some(task=>task.agentId===agent.id && task.status==='running')}<span class="rail-running" aria-label="Running"></span>{/if}
       </button>{/each}
-      <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !snapshot?.agents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
+      <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
       <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
     </nav>{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
@@ -3944,10 +3950,10 @@
   </div>{/if}
 </Modal>
 
-{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each (snapshot?.agents ?? []).filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small>{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
+{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each visibleAgents.filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small>{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
 
 {#snippet agentEditor()}
-  <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each snapshot?.agents??[] as agent}<option value={agent.id}>{agent.name}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
+  <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each visibleAgents as agent}<option value={agent.id}>{agent.name}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
   <p class="hint">Choose an agent to edit its identity, harness, permissions and collaboration profile.</p>
 {#if agentDraft}<form
       class="form agent-settings-form"
@@ -4224,7 +4230,7 @@
       >
       <fieldset>
         <legend>Agents in this channel</legend
-        >{#each snapshot?.agents ?? [] as agent}<label class="check-row"
+        >{#each visibleAgents as agent}<label class="check-row"
             ><input
               type="checkbox" role="switch"
               checked={channelDraft.agentIds.includes(agent.id)}

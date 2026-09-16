@@ -1269,17 +1269,15 @@ fn handle_notification(
                                 last_flush: Instant::now(),
                             },
                         );
-                        if let Err(error) = service
-                            .app_server_message(
-                                task_id,
-                                control,
-                                turn_id,
-                                &stable,
-                                text,
-                                item.get("phase").and_then(Value::as_str),
-                                true,
-                            )
-                        {
+                        if let Err(error) = service.app_server_message(
+                            task_id,
+                            control,
+                            turn_id,
+                            &stable,
+                            text,
+                            item.get("phase").and_then(Value::as_str),
+                            true,
+                        ) {
                             service.complete_app_server_turn(
                                 task_id,
                                 control,
@@ -1386,12 +1384,24 @@ fn handle_notification(
             // Codex 0.154 places turn accounting on the completion params as
             // `usage`. Keep the native turn ID for cumulative-snapshot
             // replacement and emit the same normalized detail to the timeline.
-            if let Some(usage) = params.get("usage").or_else(|| params.pointer("/turn/usage")) {
+            if let Some(usage) = params
+                .get("usage")
+                .or_else(|| params.pointer("/turn/usage"))
+            {
                 let detail = json!({"providerTurnId": turn_id, "usage": usage}).to_string();
-                if let Err(error) = service.app_server_event(task_id, control, Some(turn_id), Parsed {
-                    native_session_id: None, assistant: None,
-                    event: Some(("usage".into(), "Usage updated".into(), detail)), failed: false,
-                }) { service.record(task_id, "error", "Usage capture warning", error); }
+                if let Err(error) = service.app_server_event(
+                    task_id,
+                    control,
+                    Some(turn_id),
+                    Parsed {
+                        native_session_id: None,
+                        assistant: None,
+                        event: Some(("usage".into(), "Usage updated".into(), detail)),
+                        failed: false,
+                    },
+                ) {
+                    service.record(task_id, "error", "Usage capture warning", error);
+                }
             }
             service.complete_app_server_turn(task_id, control, Some(turn_id), mapped, error);
             let prefix = format!("{turn_id}:");

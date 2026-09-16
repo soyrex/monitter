@@ -24,10 +24,12 @@
   const timer = setInterval(() => now = Date.now(), 1000);
   const key = $derived(registration && registration.expiresAt > now ? registration.code.match(/.{3}/g)?.join(' ') : '');
   const visitor = $derived(session?.getPeer()?.name ?? 'Visitor');
-  const effectiveTaskIds = $derived(lockedTaskId ? [lockedTaskId] : taskIds);
+  const internalAgentIds = $derived(snapshot ? new Set(snapshot.agents.filter(agent => agent.internal === true).map(agent => agent.id)) : new Set<string>());
+  const shareableSnapshotTasks = $derived(snapshot ? snapshot.tasks.filter(task => !task.archived && !task.channelId && !internalAgentIds.has(task.agentId)) : []);
+  const effectiveTaskIds = $derived(lockedTaskId ? [lockedTaskId] : taskIds.filter(id => shareableSnapshotTasks.some(task => task.id === id)));
   const effectiveProjectIds = $derived(lockedTaskId ? [] : projectIds);
   const selectedTaskIds = $derived(snapshot ? [...sharedTaskIds(snapshot, { taskIds: effectiveTaskIds, projectIds: effectiveProjectIds })] : []);
-  const lockedTask = $derived(snapshot?.tasks.find(item => item.id === lockedTaskId) ?? null);
+  const lockedTask = $derived(shareableSnapshotTasks.find(item => item.id === lockedTaskId) ?? null);
   const scopedRequest = $derived(lockedTaskId ?? taskId);
   function clearRegistration() { const current = registration; registration = null; if (current) void revokePairingCode(relay, current).catch(() => {}); }
   async function refresh() { if (!session) return; try { snapshot = await getBridge().getSnapshot(); } catch (reason) { error = String(reason); } }
@@ -80,7 +82,12 @@
     } catch (reason) { error = String(reason); creating = false; return; }
     if (taskId) {
       const selected = snapshot.tasks.find(item => item.id === taskId);
-      if (!shareableTask(selected)) { error = 'This chat can no longer be shared. Choose an active direct chat and try again.'; creating = false; return; }
+      const ownerAgent = selected ? snapshot.agents.find(agent => agent.id === selected.agentId) : null;
+      if (!shareableTask(selected) || ownerAgent?.internal === true) {
+        error = 'This chat can no longer be shared. Choose an active direct chat and try again.';
+        creating = false;
+        return;
+      }
       // Capture before the invitation/session exists: a visitor link from this
       // action is permanently limited to this one task.
       lockedTaskId = selected.id;
@@ -158,7 +165,7 @@
     {:else if status === 'connected'}
       {#if lockedTask}<p><b>{visitor}</b> is paired with <b>{lockedTask.title || 'Untitled chat'}</b>. Their access is locked to this chat.</p>{#if taskId && taskId !== lockedTaskId}<p class="scope-note">Only one visitor session can be active. End this share before creating a link for another chat.</p>{/if}
       {:else}<p><b>{visitor}</b> is paired. Choose exactly what they can see and message. Nothing is shared until selected.</p>
-        <div class="share-list"><h3>Chats</h3>{#each snapshot?.tasks.filter(task => !task.archived && !task.channelId) ?? [] as task}<label class="scope"><input type="checkbox" checked={taskIds.includes(task.id)} onchange={() => taskIds = toggle(taskIds, task.id)}/><span><b>{task.title || 'Untitled chat'}</b><small>{snapshot?.agents.find(agent => agent.id === task.agentId)?.name ?? 'Agent'}</small></span></label>{:else}<small>No shareable chats yet.</small>{/each}</div>
+        <div class="share-list"><h3>Chats</h3>{#each shareableSnapshotTasks as task}<label class="scope"><input type="checkbox" checked={taskIds.includes(task.id)} onchange={() => taskIds = toggle(taskIds, task.id)}/><span><b>{task.title || 'Untitled chat'}</b><small>{snapshot?.agents.find(agent => agent.id === task.agentId)?.name ?? 'Agent'}</small></span></label>{:else}<small>No shareable chats yet.</small>{/each}</div>
         <div class="share-list"><h3>Projects</h3>{#each snapshot?.projects ?? [] as project}<label class="scope"><input type="checkbox" checked={projectIds.includes(project.id)} onchange={() => projectIds = toggle(projectIds, project.id)}/><span><b>{project.name}</b><small>Shares its current chats</small></span></label>{:else}<small>No projects yet.</small>{/each}</div>
       {/if}
       <small>{selectedTaskIds.length} chat{selectedTaskIds.length === 1 ? '' : 's'} shared. The visitor can send messages only; they cannot stop agents, use terminals, or view local paths, attachments, instructions, hosts or activity.</small>

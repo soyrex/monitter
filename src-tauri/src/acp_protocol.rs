@@ -15,7 +15,9 @@ pub fn read_diagnostic_line(reader: &mut impl BufRead) -> std::io::Result<Option
     loop {
         let buf = reader.fill_buf()?;
         if buf.is_empty() {
-            if !seen { return Ok(None); }
+            if !seen {
+                return Ok(None);
+            }
             break;
         }
         seen = true;
@@ -25,10 +27,16 @@ pub fn read_diagnostic_line(reader: &mut impl BufRead) -> std::io::Result<Option
         prefix.extend_from_slice(&buf[..keep]);
         truncated |= keep < count;
         reader.consume(count);
-        if end.is_some() { break; }
+        if end.is_some() {
+            break;
+        }
     }
-    let mut text = String::from_utf8_lossy(&prefix).trim_end_matches(['\r', '\n']).to_string();
-    if truncated { text.push_str(" [truncated]"); }
+    let mut text = String::from_utf8_lossy(&prefix)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    if truncated {
+        text.push_str(" [truncated]");
+    }
     Ok(Some(text))
 }
 
@@ -210,7 +218,10 @@ mod tests {
         let first = read_diagnostic_line(&mut reader).unwrap().unwrap();
         assert!(first.len() < 8300 && first.ends_with("[truncated]"));
         assert_eq!(read_diagnostic_line(&mut reader).unwrap().unwrap(), "next");
-        assert_eq!(read_diagnostic_line(&mut reader).unwrap().unwrap(), "partial");
+        assert_eq!(
+            read_diagnostic_line(&mut reader).unwrap().unwrap(),
+            "partial"
+        );
         assert!(read_diagnostic_line(&mut reader).unwrap().is_none());
     }
 
