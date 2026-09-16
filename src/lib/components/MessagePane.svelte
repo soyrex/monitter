@@ -11,6 +11,8 @@
   let readerDetached = false;
   let detachedScrollTop = 0;
   let touchY: number | undefined;
+  let scrollbarStartTop: number | undefined;
+  let resumeFollowingUntil = 0;
   let documentVisible = $state(true);
   let lastResetKey = $state<string | undefined>();
   let owner: TranscriptScrollOwner | undefined;
@@ -50,6 +52,7 @@
     jumpRequest += 1;
     pendingLatestRequest = false;
     readerDetached = true;
+    resumeFollowingUntil = 0;
     setFollowing(false);
     detachedScrollTop = viewport.scrollTop;
     showJump = !atAbsoluteLatest() || pendingUpdates;
@@ -57,16 +60,17 @@
 
   function handleScrollKey(event: KeyboardEvent) {
     if (event.target !== viewport || event.defaultPrevented) return;
-    const towardLatest = ['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey);
-    if (towardLatest && followingLatest) return;
-    if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) detachFromLatest();
+    if (['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey)) resumeFollowingUntil = performance.now() + 500;
+    if ((viewport?.scrollTop ?? 0) <= 0) return;
+    if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) detachFromLatest();
   }
 
   function handleWheel(event: WheelEvent) {
     // Trackpad momentum and horizontal gestures at the bottom must not silently
     // disable following: no scroll event will arrive to turn it back on.
     if (event.ctrlKey || event.deltaY === 0 || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
-    if (event.deltaY < 0) detachFromLatest();
+    if (event.deltaY > 0) resumeFollowingUntil = performance.now() + 500;
+    if (event.deltaY < 0 && (viewport?.scrollTop ?? 0) > 0) detachFromLatest();
   }
 
   function handleTouchStart(event: TouchEvent) {
@@ -75,14 +79,37 @@
 
   function handleTouchMove(event: TouchEvent) {
     const nextY = event.touches[0]?.clientY;
-    if (nextY !== undefined && touchY !== undefined && nextY > touchY) detachFromLatest();
-    touchY = nextY;
+    if (nextY !== undefined && touchY !== undefined && nextY < touchY - 6) resumeFollowingUntil = performance.now() + 500;
+    if (nextY !== undefined && touchY !== undefined && nextY - touchY > 6 && (viewport?.scrollTop ?? 0) > 0) detachFromLatest();
   }
 
   function handleScrollPointer(event: PointerEvent) {
     if (!viewport) return;
     const right = viewport.getBoundingClientRect().right;
-    if (event.pointerType !== 'touch' && event.clientX >= right - 14) detachFromLatest();
+    // Merely clicking the edge isn't scrolling up. Arm the scrollbar path,
+    // then detach only if it actually moves toward earlier content.
+    if (event.pointerType !== 'touch' && event.target === viewport && event.clientX >= right - 14) scrollbarStartTop = viewport.scrollTop;
+  }
+
+  function finishPointerScroll() {
+    observeScrollbarMovement();
+    scrollbarStartTop = undefined;
+    touchY = undefined;
+  }
+
+  function observeScrollbarMovement() {
+    if (scrollbarStartTop === undefined || !viewport) return;
+    // Shrinking content or a taller viewport can clamp scrollTop on its own.
+    const previous = Math.min(scrollbarStartTop, Math.max(0, viewport.scrollHeight - viewport.clientHeight));
+    if (viewport.scrollTop < previous - 0.5) detachFromLatest();
+    if (viewport.scrollTop > previous + 0.5) resumeFollowingUntil = performance.now() + 500;
+    scrollbarStartTop = viewport.scrollTop;
+  }
+
+  function clearGesture() {
+    scrollbarStartTop = undefined;
+    touchY = undefined;
+    resumeFollowingUntil = 0;
   }
 
   async function jumpToLatest() {
@@ -99,10 +126,11 @@
   }
 
   function handleScroll() {
+    observeScrollbarMovement();
     if (readerDetached && viewport) {
-      const moved = Math.abs(viewport.scrollTop - detachedScrollTop) > 0.5;
+      const movedTowardLatest = viewport.scrollTop > detachedScrollTop + 0.5;
       detachedScrollTop = viewport.scrollTop;
-      if (moved && atAbsoluteLatest()) {
+      if (movedTowardLatest && performance.now() <= resumeFollowingUntil && atAbsoluteLatest()) {
         readerDetached = false;
         setFollowing(true);
         showJump = false;
@@ -123,17 +151,27 @@
     const changed = resetKey !== lastResetKey;
     lastResetKey = resetKey;
     if (changed && active && documentVisible) void jumpToLatest();
+    if (changed || !active) clearGesture();
   });
 
   onMount(() => {
     const visibilityChanged = () => {
       documentVisible = document.visibilityState !== 'hidden';
+      if (!documentVisible) clearGesture();
       // Returning to a visible window must not discard a reader's held place.
       if (documentVisible && active && followingLatest) void jumpToLatest();
     };
     documentVisible = document.visibilityState !== 'hidden';
     document.addEventListener('visibilitychange', visibilityChanged);
-    return () => document.removeEventListener('visibilitychange', visibilityChanged);
+    window.addEventListener('pointerup', finishPointerScroll);
+    window.addEventListener('pointercancel', finishPointerScroll);
+    window.addEventListener('blur', clearGesture);
+    return () => {
+      document.removeEventListener('visibilitychange', visibilityChanged);
+      window.removeEventListener('pointerup', finishPointerScroll);
+      window.removeEventListener('pointercancel', finishPointerScroll);
+      window.removeEventListener('blur', clearGesture);
+    };
   });
 
 </script>

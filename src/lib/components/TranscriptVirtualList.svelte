@@ -1,6 +1,6 @@
 <script lang="ts" generics="T">
-  import { createVirtualizer, defaultRangeExtractor, type VirtualizerOptions } from '@tanstack/svelte-virtual';
-  import { flushSync, untrack, type Snippet } from 'svelte';
+  import { createVirtualizer, defaultRangeExtractor, elementScroll, type VirtualizerOptions } from '@tanstack/svelte-virtual';
+  import { flushSync, tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { useTranscriptScrollController } from '$lib/transcript-scroll-owner';
 
@@ -27,13 +27,31 @@
   let unregisterOwner: (() => void) | undefined;
   let committingOptions = false;
   let canFlushMeasurements = false;
+  let followCommitPending = false;
   const controller = useTranscriptScrollController();
+  const isFollowing = () => controller?.isFollowing() !== false;
+
+  // One owner, one post-commit destination: the actual scrollable bottom.
+  // Distance is geometry, never permission to stop following. Coalesce work
+  // after Svelte commits row/spacer changes, rather than adding a frame of lag.
+  function followCommittedLayout() {
+    if (followCommitPending || !isFollowing()) return;
+    followCommitPending = true;
+    void tick().then(() => {
+      followCommitPending = false;
+      const viewport = scrollParent;
+      if (!isFollowing() || !viewport || !viewport.isConnected || viewport.clientHeight === 0) return;
+      const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      if (Math.abs(viewport.scrollTop - bottom) > 1) instance().scrollToOffset(bottom, { behavior: 'instant' });
+    });
+  }
 
   const onVirtualizerChange = (_instance: unknown, sync: boolean) => {
     // setOptions and initial measurement run during Svelte's own update. A
     // later ResizeObserver delivery is outside that update and must synchronously
     // commit its new range before core applies a scroll adjustment.
     if (sync && !committingOptions && canFlushMeasurements) flushSync();
+    followCommittedLayout();
   };
 
   const virtualizer = createVirtualizer<HTMLElement, HTMLDivElement>({
@@ -41,14 +59,20 @@
     getScrollElement: () => scrollParent,
     estimateSize: () => estimateHeight,
     getItemKey: index => getKey(items[index], index),
-    overscan,
+    overscan: untrack(() => overscan),
     scrollMargin: 0,
     paddingEnd: 0,
     // Chat is end-anchored: prepending preserves the reader's row and a
     // streamed final row remains pinned only for an already-following reader.
     anchorTo: 'end',
     followOnAppend: 'instant',
-    scrollEndThreshold: 50,
+    scrollEndThreshold: Number.POSITIVE_INFINITY,
+    scrollToFn: (offset, options, owner) => {
+      // An earlier end request may still have a reconciliation callback queued
+      // when the reader scrolls up. Never let that request take the view back.
+      if (!isFollowing() && options.behavior === 'instant') return;
+      elementScroll(offset, options, owner);
+    },
     // The adapter publishes before this callback. Flush the measured range
     // before core applies a synchronous end-anchor adjustment.
     onChange: onVirtualizerChange,
@@ -67,6 +91,7 @@
       committingOptions = true;
       try { instance().setOptions({ ...options, onChange: onVirtualizerChange }); }
       finally { committingOptions = previousCommitting; }
+      followCommittedLayout();
     });
   }
 
@@ -77,7 +102,7 @@
       footerHeight = next;
       setVirtualizerOptions({ paddingEnd: next });
       // Footer measurements use the same virtualizer-owned scroll write.
-      if (controller && controller.isFollowing()) instance().scrollToEnd({ behavior: 'instant' });
+      followCommittedLayout();
     });
   }
 
@@ -107,6 +132,7 @@
       // being within the threshold must never silently recapture that reader.
       anchorTo: controller?.isFollowing() === false ? 'start' : 'end',
       followOnAppend: controller?.isFollowing() === false ? false : 'instant',
+      scrollEndThreshold: isFollowing() ? Number.POSITIVE_INFINITY : 1,
     });
   });
 
@@ -118,15 +144,23 @@
     const measureMargin = () => {
       if (!scrollParent) return;
       scrollMargin = virtualRoot.getBoundingClientRect().top - scrollParent.getBoundingClientRect().top + scrollParent.scrollTop;
+      followCommittedLayout();
     };
     measureMargin();
     const observer = new ResizeObserver(measureMargin);
     observer.observe(virtualRoot);
+    // Include outer padding and changes outside the rows, plus viewport height
+    // changes when the composer/approval area grows or the column is resized.
+    if (virtualRoot.parentElement) observer.observe(virtualRoot.parentElement);
     if (scrollParent) observer.observe(scrollParent);
     unregisterOwner = controller?.register({
-      scrollToLatest: () => instance().scrollToEnd({ behavior: 'instant' }),
-      isAtLatest: () => instance().isAtEnd(50),
-      setFollowing: following => setVirtualizerOptions({ anchorTo: following ? 'end' : 'start', followOnAppend: following ? 'instant' : false }),
+      scrollToLatest: followCommittedLayout,
+      isAtLatest: () => instance().isAtEnd(1),
+      setFollowing: following => setVirtualizerOptions({
+        anchorTo: following ? 'end' : 'start',
+        followOnAppend: following ? 'instant' : false,
+        scrollEndThreshold: following ? Number.POSITIVE_INFINITY : 1,
+      }),
     });
     return () => { observer.disconnect(); unregisterOwner?.(); unregisterOwner = undefined; scrollParent = null; };
   });
