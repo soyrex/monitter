@@ -73,6 +73,9 @@ const state = {
     sidebarView: "standard",
   },
   sharing: {
+    composerByTask: {
+      [taskId]: {model:{id:'gpt-5.4',label:'GPT-5.4'},reasoningEffort:'high',fastMode:false,context:{status:'available',used:25000,size:100000,usedPercent:25,model:'gpt-5.4'}}
+    },
     primary: { name: "Alex", role: "primary user" },
     visitor: { name: "Riley", role: "visitor" },
     uploads: { maxFileBytes: 1024 * 1024, maxFiles: 2 },
@@ -140,7 +143,7 @@ export async function createMobileSession() {
         id: `new-${state.messages.length}`,
         taskId,
         role: "user",
-        text: `@(${api?.visitorName || "Visitor"}): ${text}`,
+        text: `@(${api?.savedVisitorName || api?.visitorName || "Visitor"}): ${text}`,
         attachments: attachmentIds.map((id) => ({
           id,
           name: "upload.txt",

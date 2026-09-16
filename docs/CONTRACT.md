@@ -1186,6 +1186,17 @@ peer-attributed system messages remain visible as shared conversation content.
 Ending sharing revokes the in-memory session immediately. A reconnect needs a
 fresh link and approval.
 
+For each selected task, the sharing projection may also include owner-computed
+composer display metadata: the resolved model label/ID, reasoning effort, Fast
+mode, and the same per-run context usage state shown by the desktop composer.
+The usage lookup is `cache-only`; it projects only the selected task's matching
+context `{ used, size }` when the harness reported one, otherwise an explicit
+unavailable state. It never exposes usage-overview account allowances, other
+runs, events, native session IDs, paths, catalog source/warnings, or lookup
+errors. This metadata is read-only and does not grant model, sandbox, approval,
+or other owner controls. Older owner bridges retain an explicit unavailable
+context state and harness-default model display.
+
 Shared user messages are stored and sent to the model with visible attribution:
 `@(Alex): message`. The execution prompt also names the two operators, such as
 `Alex (primary user)` and `Luke (visitor)`, so attribution is model context

@@ -82,11 +82,11 @@ matches(
   "optimistic messages capture a pre-send baseline",
 );
 matches(
-  /parsed\?\.text===item\.text&&\(parsed\.name\?\?''\)===item\.name/,
-  "reconciliation requires exact author and text",
+  /sameAuthor&&parsed\.text===item\.text&&sameAttachments/,
+  "reconciliation requires authenticated author, text and attachments",
 );
 matches(
-  /!item\.baselineIds\.has\(message\.id\)/,
+  /item\.baselineIds\.has\(message\.id\)/,
   "old identical messages cannot consume the optimistic entry",
 );
 matches(

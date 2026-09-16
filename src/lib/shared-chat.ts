@@ -1,4 +1,5 @@
 import type { Snapshot } from './types';
+import type { ComposerContextUsage } from './context-usage-data';
 
 export const sharedAppearanceVariables = [
   '--paper', '--sidebar', '--panel', '--line', '--soft', '--code', '--ink', '--muted',
@@ -14,6 +15,15 @@ export interface SharedChatDetails {
   visitor: { name: string; role: 'visitor' };
   appearance?: SharedChatAppearance;
   uploads?: { maxFileBytes: number; maxFiles: number };
+  /** Owner-computed, per-shared-task composer display data. It is never a
+   * capability: visitors cannot change the model, effort, sandbox, or usage. */
+  composerByTask?: Record<string, SharedComposerDetails>;
+}
+export interface SharedComposerDetails {
+  model: { id: string | null; label: string };
+  reasoningEffort: string | null;
+  fastMode: boolean | null;
+  context: ComposerContextUsage;
 }
 export type SharedChatSnapshot = Snapshot & { sharing?: SharedChatDetails };
 

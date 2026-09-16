@@ -1,6 +1,8 @@
 <script lang="ts">
 import { onMount, tick } from 'svelte';
-import { Paperclip, Send, X, PanelLeft, Info, LoaderCircle, Image } from '@lucide/svelte';
+import { Paperclip, ArrowUp, Shield, Brain, Zap, X, PanelLeft, Info, LoaderCircle, Image } from '@lucide/svelte';
+import ContextUsageBar from '$lib/components/ContextUsageBar.svelte';
+import type { ComposerContextUsage } from '$lib/context-usage-data';
 import ImageLightbox from '$lib/components/ImageLightbox.svelte';
 import Markdown from '$lib/components/Markdown.svelte';
 import MessageMeta from '$lib/components/MessageMeta.svelte';
@@ -48,6 +50,18 @@ const validCode = $derived(/^\d{9}$/.test(code.replace(/[\s-]/g, '')));
 const task = $derived(snapshot?.tasks.find(x => x.id === selectedId) ?? null);
 const messages = $derived(snapshot?.messages.filter(x => x.taskId === selectedId) ?? []);
 const uploadLimits = $derived(snapshot?.sharing?.uploads ?? { maxFileBytes: 0, maxFiles: 0 });
+const composerInfo = $derived(selectedId ? snapshot?.sharing?.composerByTask?.[selectedId] : undefined);
+const modelLabel = $derived(composerInfo?.model.label || composerInfo?.model.id || task?.modelSettings?.model || task?.model || 'Harness default');
+const effortLabel = $derived(composerInfo?.reasoningEffort || task?.modelSettings?.reasoningEffort || 'Harness default');
+const fastMode = $derived(composerInfo?.fastMode ?? task?.modelSettings?.fastMode ?? false);
+const permissionLabel = $derived(task ? ({'read-only':'Read only','workspace-write':'Workspace write','harness-configured':'Harness permissions','yolo':'YOLO'}[task.sandbox] ?? task.sandbox) : 'Unavailable');
+const contextUsage = $derived<ComposerContextUsage>(composerInfo?.context ?? {status:'unavailable',reason:'Context usage is unavailable until the host reports its context window.'});
+const contextLabel = $derived(contextUsage.status === 'available' ? `Context ${Math.round(contextUsage.usedPercent)}%` : 'Context unavailable');
+function composerKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229 || event.shiftKey) return;
+    event.preventDefault();
+    void send();
+}
 const looseTasks = $derived(snapshot?.tasks.filter(x => !x.projectId) ?? []);
 const visibleMessages = $derived([...messages.map(display), ...localOutgoing.filter(x => x.taskId === selectedId)].sort((a, b) => a.timestamp - b.timestamp));
 const initials = (value: string) => (value.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('') || '?').toUpperCase();
@@ -70,10 +84,26 @@ function select(item: Task) {
     following = true;
     void tick().then(scrollLatest);
 }
-function reconcile(next: SharedChatSnapshot) { const used = new Set<string>(); localOutgoing = localOutgoing.filter(item => { const found = next.messages.find(message => { const parsed = message.role === 'user' ? splitOperatorMessage(message.text) : null; return !used.has(message.id) && !item.baselineIds.has(message.id) && message.taskId === item.taskId && message.role === 'user' && parsed?.text === item.text && (parsed.name ?? '') === item.name; }); if (found) {
-    used.add(found.id);
-    return false;
-} return true; }); }
+function reconcile(next: SharedChatSnapshot) {
+    const used = new Set<string>();
+    localOutgoing = localOutgoing.filter(item => {
+        const found = next.messages.find(message => {
+            if (used.has(message.id) || item.baselineIds.has(message.id) || message.taskId !== item.taskId || message.role !== 'user') return false;
+            const parsed = splitOperatorMessage(message.text);
+            // The authenticated host is authoritative. Older hosts saved the
+            // entered visitor as "Visitor"; after a successful send, consume
+            // that confirmed echo rather than leaving a second "Sent" bubble.
+            const approvedVisitor = next.sharing?.visitor.name ?? 'Visitor';
+            const sameAuthor = parsed.name === item.name || (item.delivery === 'sent' && parsed.name === approvedVisitor);
+            const attachmentIds = (message.attachments ?? []).map(file => file.id).sort();
+            const sameAttachments = JSON.stringify(attachmentIds) === JSON.stringify(item.attachments.map(file => file.id).sort());
+            return sameAuthor && parsed.text === item.text && sameAttachments;
+        });
+        if (!found) return true;
+        used.add(found.id);
+        return false;
+    });
+}
 function apply(next: SharedChatSnapshot) { snapshot = next; applySharedAppearance(next.sharing?.appearance); reconcile(next); if (selectedId && !next.tasks.some(x => x.id === selectedId)) {
     selectedId = null;
     attachments = [];
@@ -320,13 +350,13 @@ onMount(() => {
 <dd>
 <ProviderIcon provider={task.provider} size={13}/>{task.provider}</dd>
 <dt>Model</dt>
-<dd>{task.modelSettings?.model||task.model||'Default'}</dd>
+<dd>{modelLabel}</dd>
 <dt>Reasoning</dt>
-<dd>{task.modelSettings?.reasoningEffort||'Default'}</dd>
+<dd>{effortLabel}</dd>
 <dt>Fast mode</dt>
 <dd>{task.modelSettings?.fastMode==null?'Default':task.modelSettings.fastMode?'On':'Off'}</dd>
 <dt>Sandbox</dt>
-<dd>{task.sandbox}</dd>
+<dd>{permissionLabel}</dd>
 <dt>Access</dt>
 <dd>Shared chat only</dd>
 </dl>
@@ -342,20 +372,34 @@ onMount(() => {
 </article>{:else}<p class="empty">No messages are shared in this chat.</p>{/each}</div>{#if task.status==='running'}<p class="agent-status" role="status">
 <LoaderCircle class="spin" size={13}/>Agent is working…</p>{/if}<form onsubmit={e=>{e.preventDefault();void send()}}>
 <div class="composer">
-<textarea aria-label="Message" bind:value={draft} onkeydown={event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();void send();}}} rows="2" maxlength="32000" placeholder="Write a message…">
-</textarea>
-<div class="composer-tools">
-<button class="icon" type="button" aria-label="Attach files" disabled={!uploadLimits.maxFiles||uploading||sending||status!=='connected'} onclick={()=>picker?.click()}>{#if uploading}<LoaderCircle class="spin" size={17}/>{:else}<Paperclip size={17}/>{/if}</button>
-<input bind:this={picker} class="file-input" type="file" multiple onchange={e=>{const files=Array.from(e.currentTarget.files??[]);e.currentTarget.value='';void attachFiles(files)}}/>
-<small>{uploadLimits.maxFiles ? (attachments.length?`${attachments.length}/${uploadLimits.maxFiles} attached`:`Up to ${uploadLimits.maxFiles} files`) : 'Attachments unavailable'}</small>
-<button class="send" aria-label="Send" disabled={(!draft.trim()&&!attachments.length)||sending||uploading||status!=='connected'}>{#if sending}<LoaderCircle class="spin" size={16}/>{:else}<Send size={16}/>{/if}<span>{sending?'Sending…':'Send'}</span>
-</button>
-</div>
-</div>{#if attachments.length}<div class="pending" aria-label="Attached files">{#each attachments as attachment (attachment.id)}<span>
-<Image size={13}/>{attachment.name}<button type="button" aria-label={`Remove attachment ${attachment.name}`} onclick={()=>attachments=attachments.filter(x=>x.id!==attachment.id)}>
-<X size={13}/>
-</button>
-</span>{/each}</div>{/if}</form>
+  {#if attachments.length}
+    <div class="pending" aria-label="Attached files">
+      {#each attachments as attachment (attachment.id)}
+        <span><Image size={13}/>{attachment.name}<button type="button" aria-label={`Remove attachment ${attachment.name}`} onclick={()=>attachments=attachments.filter(x=>x.id!==attachment.id)}><X size={13}/></button></span>
+      {/each}
+    </div>
+  {/if}
+  <textarea aria-label="Message" bind:value={draft} onkeydown={composerKeydown} rows="2" maxlength="32000" placeholder={`Message ${snapshot.agents.find(agent=>agent.id===task.agentId)?.name || 'agent'}…`} aria-describedby="composer-keyboard-hint"></textarea>
+  <div class="composer-footer">
+    <div class="composer-left">
+      <button class="icon attachment-control" type="button" aria-label="Attach files" title={uploadLimits.maxFiles ? `Attach files (up to ${uploadLimits.maxFiles}, ${Math.round(uploadLimits.maxFileBytes/1024/1024)} MB each)` : 'Attachments unavailable'} disabled={!uploadLimits.maxFiles||uploading||sending||status!=='connected'} onclick={()=>picker?.click()}>
+        {#if uploading}<LoaderCircle class="spin" size={14}/>{:else}<Paperclip size={14}/>{/if}
+      </button>
+      <input bind:this={picker} class="file-input" type="file" multiple onchange={e=>{const files=Array.from(e.currentTarget.files??[]);e.currentTarget.value='';void attachFiles(files)}}/>
+      <span class="readonly-setting permission-setting" aria-label={`Permissions: ${permissionLabel}`} title="Permissions set by the host (read-only)"><Shield size={14}/><span>{permissionLabel}</span></span>
+    </div>
+    <div class="composer-right">
+      <span class="readonly-setting model-setting" aria-label={`Model: ${modelLabel}. Reasoning effort: ${effortLabel}`} title={`Model: ${modelLabel} · Reasoning effort: ${effortLabel} · Set by the host (read-only)`}>
+        <Brain size={14}/>{#if fastMode}<Zap size={11} aria-label="Fast mode on"/>{/if}<span class="model-label">{modelLabel}</span><small class="effort-label">{effortLabel}</small>
+      </span>
+      <button class="send composer-control" aria-label="Send" title={task.status==='running' ? 'Send follow-up' : 'Send message (Enter)'} disabled={(!draft.trim()&&!attachments.length)||sending||uploading||status!=='connected'}>
+        {#if sending}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}
+      </button>
+    </div>
+  </div>
+  <div class="composer-hints"><span id="composer-keyboard-hint">Enter to send · Shift+Enter for a new line</span><span class="context-label" title={contextUsage.status==='available' ? `${contextUsage.used.toLocaleString()} of ${contextUsage.size.toLocaleString()} tokens used` : contextUsage.reason}>{contextLabel}</span></div>
+  <ContextUsageBar usage={contextUsage}/>
+</div></form>
 </section>{:else}<section class="empty-state">
 <h1>Shared with you</h1>
 <p>The host has not shared any chats yet.</p>
@@ -419,13 +463,24 @@ article.user .bubble{width:fit-content;min-width:min(260px,100%);margin-left:aut
 .pending{padding:0 16px 11px;margin:0}
 .pending>span{max-width:220px}
 .pending button{display:grid;padding:0;border:0;background:transparent;color:var(--muted)}
-form{flex:none;border-top:1px solid var(--line);background:var(--paper)}
-.composer{padding:12px 16px}
-.composer textarea{display:block;width:100%;min-height:58px;max-height:130px;resize:vertical}
-.composer-tools{display:flex;align-items:center;gap:8px;margin-top:8px}
-.composer-tools small{flex:1}
+form{flex:none;padding:0 16px 12px;background:var(--paper)}
+.composer{position:relative;box-sizing:border-box;margin:0 auto;padding:11px 12px 9px;border:1px solid var(--line);border-radius:10px;background:color-mix(in srgb,var(--panel) 80%,transparent);backdrop-filter:blur(16px);box-shadow:0 8px 30px #0002;overflow:hidden}
+.composer textarea{font-family:var(--chat-font,'IBM Plex Sans',system-ui,sans-serif);display:block;width:100%;min-height:52px;max-height:25vh;resize:vertical;border:0;outline:0;padding:2px;color:var(--ink);background:transparent;font-size:var(--chat-font-size,13px);line-height:var(--chat-line-height,1.65)}
+.composer textarea:focus-visible{outline:none;box-shadow:none}
+.composer textarea::placeholder{color:var(--muted)}
+.composer-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 10px;color:var(--muted);font:calc(10px * var(--interface-font-ratio,1)) var(--mono,monospace)}
+.composer-left,.composer-right{display:flex;align-items:center;gap:6px;min-width:0}
+.composer-right{margin-left:auto;max-width:100%}
+.readonly-setting{display:flex;align-items:center;gap:6px;min-width:0;padding:5px 3px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1));line-height:1.35}
+.readonly-setting :global(svg){flex:none}
+.model-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.effort-label{flex:none;text-transform:capitalize;color:var(--muted);font:inherit;font-size:10px}
 .file-input{display:none}
-.send{display:flex;align-items:center;gap:7px;min-height:34px;padding:6px 11px}
+.send.composer-control{width:30px;min-width:30px;height:30px;min-height:30px;flex:none;padding:0;display:inline-grid;place-items:center;border-radius:50%;background:var(--accent);color:var(--on-accent)}
+.attachment-control{padding:5px;display:grid;place-items:center}
+.composer-hints{display:flex;justify-content:space-between;gap:8px;margin-top:7px;color:var(--muted);font:9px/1.4 var(--mono,monospace)}
+.context-label{white-space:nowrap}
+.composer .pending{padding:0 0 8px}
 :global(.spin){animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}
 }
@@ -440,7 +495,6 @@ form{flex:none;border-top:1px solid var(--line);background:var(--paper)}
 .mobile-nav{display:block}
 .messages{padding:20px 16px}
 .conversation .messages{min-height:0}
-.send span{display:none}
 }
 @media(max-height:850px){.messages{min-height:0}
 }

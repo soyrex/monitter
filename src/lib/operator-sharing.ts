@@ -1,8 +1,9 @@
 import { writable } from 'svelte/store';
-import type { Agent, Attachment, AttachmentFileData, Message, Project, Snapshot, Task } from '$lib/types';
+import type { Agent, Attachment, AttachmentFileData, Message, ModelCatalog, Project, Snapshot, Task, UsageOverview } from '$lib/types';
 import type { MonitterBridge } from './bridge';
 import type { DesktopBridge } from './controller/remote-client';
-import { sharedAppearanceVariables, type SharedChatAppearance, type SharedChatSnapshot } from './shared-chat';
+import { composerContextUsage } from './context-usage-data';
+import { sharedAppearanceVariables, type SharedChatAppearance, type SharedChatSnapshot, type SharedComposerDetails } from './shared-chat';
 
 export type OperatorRole = 'primary user' | 'visitor';
 export interface OperatorIdentity { name: string; role: OperatorRole; }
@@ -115,8 +116,11 @@ function safeAppearance(value: SharedChatAppearance | undefined): SharedChatAppe
   return Object.keys(variables).length ? { theme: value.theme, variables } : undefined;
 }
 
-export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorShare, 'taskIds' | 'projectIds'> & Partial<Pick<ActiveOperatorShare, 'primary' | 'visitor'>>, appearance?: SharedChatAppearance, uploadsAvailable = true): SharedChatSnapshot {
+export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorShare, 'taskIds' | 'projectIds'> & Partial<Pick<ActiveOperatorShare, 'primary' | 'visitor'>>, appearance?: SharedChatAppearance, uploadsAvailable = true, composerByTask?: Record<string, SharedComposerDetails>): SharedChatSnapshot {
   const ids = sharedTaskIds(snapshot, share);
+  const safeComposerByTask = composerByTask
+    ? Object.fromEntries([...ids].flatMap(id => composerByTask[id] ? [[id, composerByTask[id]]] : [])) as Record<string, SharedComposerDetails>
+    : undefined;
   const tasks = snapshot.tasks.filter(task => ids.has(task.id)).map(safeTask);
   const agentIds = new Set(tasks.map(task => task.agentId));
   const projectIds = new Set(tasks.flatMap(task => task.projectId ? [task.projectId] : []));
@@ -154,7 +158,7 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
     queuedMessages: [],
     approvalRequests: [],
     approvalRules: [],
-    ...(share.primary && share.visitor ? { sharing: { primary: { name: share.primary.name, role: 'primary user' }, visitor: { name: share.visitor.name, role: 'visitor' }, ...(projectedAppearance ? { appearance: projectedAppearance } : {}), ...(uploadsAvailable ? { uploads: { maxFileBytes: 8 * 1024 * 1024, maxFiles: 8 } } : {}) } } : {}),
+    ...(share.primary && share.visitor ? { sharing: { primary: { name: share.primary.name, role: 'primary user' }, visitor: { name: share.visitor.name, role: 'visitor' }, ...(projectedAppearance ? { appearance: projectedAppearance } : {}), ...(uploadsAvailable ? { uploads: { maxFileBytes: 8 * 1024 * 1024, maxFiles: 8 } } : {}), ...(safeComposerByTask ? { composerByTask: safeComposerByTask } : {}) } } : {}),
   } as SharedChatSnapshot;
 }
 
@@ -163,11 +167,14 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
  * Revoking or changing it invalidates in-flight reads before any dispatch/response.
  */
 export function createOperatorScopedBridge(
-  bridge: Pick<MonitterBridge, 'getSnapshot' | 'sendMessage'> & Partial<Pick<MonitterBridge, 'storeAttachment'>>,
+  bridge: Pick<MonitterBridge, 'getSnapshot' | 'sendMessage'> & Partial<Pick<MonitterBridge, 'storeAttachment' | 'getUsageOverview' | 'getModelCatalog'>>,
   getShare: () => ActiveOperatorShare | null,
   getAppearance?: () => SharedChatAppearance | undefined,
 ): DesktopBridge {
   const visitorAttachments = new Map<string, { share: ActiveOperatorShare; taskId: string }>();
+  // Catalog reads may invoke a local harness. Retain their owner-side result for
+  // a bounded period so polling a shared chat never repeatedly starts probes.
+  const catalogCache = new Map<string, { expiresAt: number; result: Promise<ModelCatalog | null> }>();
   const cleanAttachments = (share: ActiveOperatorShare) => {
     for (const [id, attachment] of visitorAttachments) if (attachment.share !== share) visitorAttachments.delete(id);
   };
@@ -178,6 +185,66 @@ export function createOperatorScopedBridge(
   };
   const check = (share: ActiveOperatorShare) => {
     if (getShare() !== share) throw new Error('Sharing was revoked or changed.');
+  };
+  const bounded = <T>(request: Promise<T>, fallback: T): Promise<T> => new Promise(resolve => {
+    const timer = setTimeout(() => resolve(fallback), 1_000);
+    void request.then(value => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(fallback); });
+  });
+  const catalogFor = (task: Task): Promise<ModelCatalog | null> => {
+    if (!bridge.getModelCatalog) return Promise.resolve(null);
+    const key = JSON.stringify([task.id, task.provider, task.model, task.modelSettings ?? null]);
+    const cached = catalogCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return bounded(cached.result, null);
+    for (const [oldKey, entry] of catalogCache) if (entry.expiresAt <= Date.now()) catalogCache.delete(oldKey);
+    while (catalogCache.size >= 64) catalogCache.delete(catalogCache.keys().next().value!);
+    // Keep the owner-side request alive after a visitor snapshot's short wait
+    // expires. A later refresh can reuse its resolved result without another
+    // harness probe; failed/unavailable entries get a much shorter retry window.
+    const entry = { expiresAt: Date.now() + 5 * 60_000, result: Promise.resolve(null) as Promise<ModelCatalog | null> };
+    const result = Promise.resolve().then(() => bridge.getModelCatalog!({ taskId: task.id })).catch(() => null);
+    entry.result = result;
+    catalogCache.set(key, entry);
+    void result.then(value => {
+      if (catalogCache.get(key) === entry) entry.expiresAt = Date.now() + (value ? 5 * 60_000 : 10_000);
+    });
+    return bounded(result, null);
+  };
+  const composerDetails = async (snapshot: Snapshot, share: ActiveOperatorShare): Promise<Record<string, SharedComposerDetails>> => {
+    const ids = sharedTaskIds(snapshot, share);
+    const tasks = snapshot.tasks.filter(task => ids.has(task.id));
+    let overview: UsageOverview | null = null;
+    // cache-only is local/read-only. Older owner bridges simply retain the
+    // explicit unavailable context state instead of exposing an invocation error.
+    if (bridge.getUsageOverview) overview = await bounded(Promise.resolve().then(() => bridge.getUsageOverview!('cache-only')), null);
+    check(share);
+    const catalogs = await Promise.all(tasks.map(task => catalogFor(task)));
+    check(share);
+    return Object.fromEntries(tasks.map((task, index) => {
+      const catalog = catalogs[index];
+      // This mirrors ModelPicker: an explicit task selection wins; otherwise
+      // use the harness current/default selection when the owner bridge reports it.
+      const explicit = task.modelSettings?.model ? task.modelSettings : null;
+      const selected = explicit ? {
+        ...explicit,
+        reasoningEffort: explicit.reasoningEffort ?? (catalog?.current.model === explicit.model ? catalog.current.reasoningEffort : null),
+        fastMode: explicit.fastMode ?? (catalog?.current.model === explicit.model ? catalog.current.fastMode : null),
+      } : catalog?.current ?? {
+        model: task.model, reasoningEffort: null, fastMode: null,
+      };
+      const model = catalog?.models.find(candidate => candidate.id === selected.model);
+      const effort = selected.reasoningEffort ?? model?.defaultEffort ?? model?.reasoningEfforts[0]?.id ?? null;
+      return [task.id, {
+        model: { id: selected.model.trim() || null, label: model?.name || selected.model.trim() || 'Harness default' },
+        reasoningEffort: effort,
+        fastMode: selected.fastMode,
+        context: composerContextUsage(overview, task, snapshot.messages.filter(message => message.taskId === task.id)),
+      } satisfies SharedComposerDetails];
+    }));
+  };
+  const project = async (snapshot: Snapshot, share: ActiveOperatorShare) => {
+    const composerByTask = await composerDetails(snapshot, share);
+    check(share);
+    return sharedSnapshot(snapshot, share, getAppearance?.(), !!storeAttachment, composerByTask);
   };
   const denied = async (): Promise<never> => { throw new Error('Only reading and messaging the shared chat is permitted.'); };
   const storeAttachment = bridge.storeAttachment ? async (taskId: string, file: AttachmentFileData, previewDataUrl?: string) => {
@@ -199,7 +266,7 @@ export function createOperatorScopedBridge(
       const share = current();
       const snapshot = await bridge.getSnapshot();
       check(share);
-      return sharedSnapshot(snapshot, share, getAppearance?.(), !!storeAttachment);
+      return project(snapshot, share);
     },
     async sendMessage(taskId, text, attachmentIds = []) {
       const share = current();
@@ -221,7 +288,7 @@ export function createOperatorScopedBridge(
       check(share);
       const next = 'tasks' in result ? result : await bridge.getSnapshot();
       check(share);
-      return sharedSnapshot(next, share, getAppearance?.(), !!storeAttachment);
+      return project(next, share);
     },
     ...(storeAttachment ? { storeAttachment } : {}),
     cancelTask: denied, resumeTask: denied, listTerminals: denied, readTerminal: denied,

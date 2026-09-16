@@ -7,7 +7,7 @@ import {
   validOperatorName,
   type ActiveOperatorShare,
 } from '../src/lib/operator-sharing.ts';
-import type { Snapshot, Task } from '../src/lib/types.ts';
+import type { ModelCatalog, Snapshot, Task } from '../src/lib/types.ts';
 
 const selectedId = '11111111-1111-4111-8111-111111111111';
 const hiddenId = '22222222-2222-4222-8222-222222222222';
@@ -79,6 +79,15 @@ for (const secret of ['/private', 'secret instructions', 'secret system profile'
 assert.equal(source.tasks[0].cwd, '/private/workspace', 'Projection must not mutate owner state.');
 assert.equal(source.messages[0].attachments?.[0].path, '/private/secret.txt');
 
+const composerSource: Snapshot = {
+  ...source,
+  tasks: [task(selectedId, { model: 'model-id', modelSettings: { model: 'model-id', reasoningEffort: null, fastMode: null } })],
+  messages: [
+    { id: 'context-message', taskId: selectedId, role: 'user', text: 'shared', createdAt: 5 },
+    { id: 'other-context-clear', taskId: hiddenId, role: 'system', text: 'Context Cleared', createdAt: 99 },
+  ],
+};
+
 // Even a crafted share carrying an internal agent's ID must never surface it.
 const internalAgentSource: Snapshot = {
   ...source,
@@ -115,6 +124,52 @@ await assert.rejects(bridge.listTerminals(), /only reading and messaging/i);
 await assert.rejects(bridge.readTerminal('terminal', 0), /only reading and messaging/i);
 await assert.rejects(bridge.cancelTask(selectedId), /only reading and messaging/i);
 await assert.rejects(bridge.resumeTask(selectedId), /only reading and messaging/i);
+
+// Composer metadata is an owner-side allowlist. It carries exactly the normal
+// per-task context display state, never the full usage overview or catalog diagnostics.
+let catalogReads = 0;
+const composerBridge = createOperatorScopedBridge({
+  getSnapshot: async () => composerSource,
+  sendMessage: async () => composerSource,
+  getUsageOverview: async policy => {
+    assert.equal(policy, 'cache-only');
+    return {
+      generatedAt: 9, capturedSince: 1,
+      subscriptions: [{ provider: 'codex', hostId: 'private-host', source: '/private/account', state: 'available', planType: 'secret plan', fetchedAt: 1, staleAfter: 2, lastAttemptAt: 1, windows: [{ key: 'secret', label: 'Secret allowance', metric: 'tokens', usedPercent: 50, used: 50, limit: 100, unit: 'tokens', resetsAt: 3 }], balances: [], error: '/private/error' }],
+      providerTotals: [],
+      recentRuns: [{ runId: 'private-run', taskId: selectedId, provider: 'codex', configuredModel: 'model-id', startedAt: 6, finishedAt: 7, final: true, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, reasoning: 5, total: 6 }, costUsd: 7, durationMs: 8, apiDurationMs: 9, providerTurns: 10, context: { used: 123, size: 456 } }],
+    };
+  },
+  getModelCatalog: async () => {
+    catalogReads += 1;
+    return { models: [{ id: 'model-id', name: 'Safe model label', description: '/private/description', reasoningEfforts: [{ id: 'medium', description: '/private/effort' }], defaultEffort: 'medium', supportsFast: true, fastDescription: '/private/fast' }], current: { model: 'model-id', reasoningEffort: 'high', fastMode: true }, source: '/private/catalog', warning: '/private/warning' };
+  },
+}, () => active);
+const composerVisitor = await composerBridge.getSnapshot();
+assert.deepEqual(composerVisitor.sharing?.composerByTask, {
+  [selectedId]: { model: { id: 'model-id', label: 'Safe model label' }, reasoningEffort: 'high', fastMode: true, context: { status: 'available', used: 123, size: 456, usedPercent: (123 / 456) * 100, model: 'model-id' } },
+});
+await composerBridge.getSnapshot();
+assert.equal(catalogReads, 1, 'Catalog lookup must be cached across sharing polling.');
+const composerSerialized = JSON.stringify(composerVisitor);
+for (const secret of ['/private/account', 'secret plan', 'Secret allowance', 'private-run', '/private/description', '/private/effort', '/private/fast', '/private/catalog', '/private/warning']) assert.ok(!composerSerialized.includes(secret), secret);
+
+let finishSlowCatalog!: (catalog: ModelCatalog) => void;
+const slowCatalog = new Promise<ModelCatalog>(resolve => { finishSlowCatalog = resolve; });
+const delayedCatalogBridge = createOperatorScopedBridge({
+  getSnapshot: async () => composerSource,
+  sendMessage: async () => composerSource,
+  getModelCatalog: async () => slowCatalog,
+}, () => active);
+const beforeCatalog = await delayedCatalogBridge.getSnapshot();
+assert.equal(beforeCatalog.sharing?.composerByTask?.[selectedId]?.model.label, 'model-id', 'A slow catalog must not hold a shared snapshot open.');
+finishSlowCatalog({ models: [{ id: 'model-id', name: 'Late safe label', description: '', reasoningEfforts: [], defaultEffort: null, supportsFast: false, fastDescription: null }], current: { model: 'model-id', reasoningEffort: null, fastMode: null }, source: '', warning: null });
+await Promise.resolve();
+const afterCatalog = await delayedCatalogBridge.getSnapshot();
+assert.equal(afterCatalog.sharing?.composerByTask?.[selectedId]?.model.label, 'Late safe label', 'A late catalog result must update the existing cache for the next snapshot.');
+
+const unavailableComposer = await createOperatorScopedBridge({ getSnapshot: async () => composerSource, sendMessage: async () => composerSource }, () => active).getSnapshot();
+assert.deepEqual(unavailableComposer.sharing?.composerByTask?.[selectedId]?.context, { status: 'unavailable', reason: 'Context usage is unavailable until this model reports its context window.' });
 
 // Attachment IDs are minted only by this visitor's scoped upload and are tied
 // to the exact immutable share object and task; owner IDs never become usable.

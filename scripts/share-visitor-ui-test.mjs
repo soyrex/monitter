@@ -65,6 +65,22 @@ const task = async (browserType) => {
     "Shared chat only",
   );
   await page.getByRole("button", { name: "Chat details", exact: true }).click();
+  const composer = page.locator('.composer');
+  await expect(composer.getByLabel('Permissions: Read only',{exact:true})).toBeVisible();
+  await expect(composer.getByLabel('Model: GPT-5.4. Reasoning effort: high',{exact:true})).toBeVisible();
+  await expect(composer.getByRole('meter')).toHaveAttribute('aria-valuenow','25');
+  await expect(composer.getByRole('combobox')).toHaveCount(0);
+  await page.getByLabel('Message',{exact:true}).fill('Keyboard check');
+  await page.getByLabel('Message',{exact:true}).press('Shift+Enter');
+  await expect(page.getByLabel('Message',{exact:true})).toHaveValue('Keyboard check\n');
+  await page.getByLabel('Message',{exact:true}).dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true});
+  expect(await page.evaluate(()=>window.__shareTest.sendStarted)).toBe(false);
+  await page.getByLabel('Message',{exact:true}).press('Enter');
+  await expect.poll(()=>page.evaluate(()=>window.__shareTest.sendStarted)).toBe(true);
+  await page.evaluate(()=>window.__shareTest.releaseSend());
+  await expect(page.getByText('Keyboard check',{exact:true})).toBeVisible();
+  await expect(page.getByLabel('Message',{exact:true})).toHaveValue('');
+  await page.evaluate(()=>window.__shareTest.sendStarted=false);
   await page.setInputFiles("input[type=file]", {
     name: "upload.txt",
     mimeType: "text/plain",
@@ -81,15 +97,15 @@ const task = async (browserType) => {
   const darkStyle = await page.locator("html").getAttribute("style");
   await page.getByRole("button", { name: "Close chat details" }).click();
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.screenshot({ path: `/tmp/monitter-share-representative-dark-desktop-${browserType.name()}.png` });
+  await page.screenshot({ path: `/tmp/monitter-composer-dark-desktop-${browserType.name()}.png` });
   await page.evaluate(() => {
     const root = document.documentElement;
     root.style.setProperty("--soft", "#dfd8cb"); root.style.setProperty("--code", "#e9e3d8"); root.style.setProperty("--accent-ink", "#87461f"); root.style.setProperty("--paper", "#fbf8f2"); root.style.setProperty("--sidebar", "#e9e3d8"); root.style.setProperty("--panel", "#f2ede3"); root.style.setProperty("--line", "#c7c0b3"); root.style.setProperty("--ink", "#262119"); root.style.setProperty("--muted", "#665f56");
   });
-  await page.screenshot({ path: `/tmp/monitter-share-representative-light-desktop-${browserType.name()}.png` });
+  await page.screenshot({ path: `/tmp/monitter-composer-light-desktop-${browserType.name()}.png` });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(style => document.documentElement.setAttribute("style", style), darkStyle);
-  await page.screenshot({ path: `/tmp/monitter-share-representative-dark-mobile-${browserType.name()}.png` });
+  await page.screenshot({ path: `/tmp/monitter-composer-dark-mobile-${browserType.name()}.png` });
   await page.getByRole("button", { name: "Show shared chats" }).click();
   await expect(page.getByLabel("Shared chats", {exact:true})).toBeVisible();
   await page.getByRole("button", {name:"Hide shared chats",exact:true}).click();
@@ -138,20 +154,36 @@ const task = async (browserType) => {
     .toBe(true);
   await page.evaluate(() => window.__shareTest.releaseSend());
   await expect(page.getByText("Another text", { exact: true })).toBeVisible();
+  // An older host's authoritative Visitor echo replaces the optimistic named
+  // bubble after acknowledgement; it must never look like a second send.
+  await page.evaluate(()=>{window.__shareTest.savedVisitorName='Visitor';window.__shareTest.snapshot.sharing.visitor.name='Visitor';window.__shareTest.sendStarted=false;});
+  await page.getByLabel('Message',{exact:true}).fill('Legacy identity echo');
+  await page.getByLabel('Message',{exact:true}).press('Enter');
+  await expect.poll(()=>page.evaluate(()=>window.__shareTest.sendStarted)).toBe(true);
+  await page.evaluate(()=>window.__shareTest.releaseSend());
+  await expect(page.getByText('Legacy identity echo',{exact:true})).toHaveCount(1);
+  await expect(page.locator('.delivery',{hasText:'Sent'})).toHaveCount(0);
+  await page.waitForTimeout(2700);
+  await expect(page.getByText('Legacy identity echo',{exact:true})).toHaveCount(1);
+  await page.evaluate(()=>{window.__shareTest.savedVisitorName=undefined;window.__shareTest.snapshot.sharing.visitor.name='Riley';});
   // Shared navigation keeps per-chat drafts, and safe image previews open the normal lightbox.
   await page.setViewportSize({width:1440,height:1000});
   await page.evaluate(() => {
     const state = window.__shareTest.snapshot;
+    state.sharing.composerByTask[state.tasks[0].id].context={status:'available',used:75000,size:100000,usedPercent:75,model:'gpt-5.4'};
     state.tasks.push({...state.tasks[0],id:'second-chat',title:'Second shared chat'});
     state.messages[1].attachments = [{id:'image-preview',name:'sample.png',mimeType:'image/png',size:68,path:'',previewDataUrl:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZioAAAAASUVORK5CYII='}];
   });
   await page.getByRole('button',{name:'Refresh',exact:true}).click();
+  await expect(composer.getByRole('meter')).toHaveAttribute('aria-valuenow','75');
   await page.getByRole('button',{name:'Preview sample.png',exact:true}).click();
   await expect(page.getByRole('dialog',{name:'sample.png'})).toBeVisible();
   await page.getByRole('button',{name:'Close image preview'}).click();
   await page.getByLabel('Message',{exact:true}).fill('Keep this draft');
   await page.getByRole('button',{name:/Second shared chat/}).click();
   await expect(page.getByLabel('Message',{exact:true})).toHaveValue('');
+  await expect(composer.getByText('Context unavailable',{exact:true})).toBeVisible();
+  await expect(composer.getByRole('meter')).toHaveCount(0);
   await page.getByRole('button',{name:/SD Shared design chat/}).click();
   await expect(page.getByLabel('Message',{exact:true})).toHaveValue('Keep this draft');
   // Stress the scroll container without depending on a live shared session.
