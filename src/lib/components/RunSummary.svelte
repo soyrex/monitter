@@ -22,7 +22,7 @@
   {/if}
   <div class="processes"><h3>TRACKED PROCESSES</h3>{#each tracked as item (item.key)}<p><Play size={11}/>{item.label}</p>{:else}<p class="empty"><SquareTerminal size={11}/>No Monitter-tracked process in this folder.</p>{/each}</div>
 </section>
-<style>.run-summary{display:grid;gap:9px;padding:11px;min-width:0}
+<style>.run-summary{display:grid;gap:9px;padding:11px 0;min-width:0}
 .git{display:flex;align-items:center;gap:10px;width:100%;min-width:0;padding:10px 11px;border:1px solid color-mix(in srgb,var(--line) 65%,transparent);border-radius:7px;background:color-mix(in srgb,var(--ink) 3%,var(--sidebar));color:var(--ink);text-align:left;cursor:pointer;transition:background 120ms,border-color 120ms}
 .git:hover{background:color-mix(in srgb,var(--accent) 7%,var(--sidebar));border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
 .git:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
