@@ -1,5 +1,8 @@
 # Monitter
 
+> [!IMPORTANT]
+> **Early alpha.** I’m building Monitter for myself, but I think it has the potential to be useful to others. Expect rough edges and frequent changes. Testers, feedback, and contributions are welcome.
+
 **Your agents, together.**
 
 A cross-platform workspace for running, watching, and coordinating AI agents. Keep multiple conversations in view, give every project its own workspace, and work with agents on your computer or a remote machine over SSH.
