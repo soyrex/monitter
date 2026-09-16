@@ -30,7 +30,8 @@
   const visitor = $derived.by(() => { status; return session?.getPeer()?.name ?? 'Visitor'; });
   const internalAgentIds = $derived(snapshot ? new Set(snapshot.agents.filter(agent => agent.internal === true).map(agent => agent.id)) : new Set<string>());
   const shareableSnapshotTasks = $derived(snapshot ? snapshot.tasks.filter(task => !task.archived && !task.channelId && !internalAgentIds.has(task.agentId)) : []);
-  const effectiveTaskIds = $derived(lockedTaskId ? [lockedTaskId] : taskIds.filter(id => shareableSnapshotTasks.some(task => task.id === id)));
+  const looseTasks = $derived(shareableSnapshotTasks.filter(task => !task.projectId));
+  const effectiveTaskIds = $derived(lockedTaskId ? [lockedTaskId] : taskIds.filter(id => looseTasks.some(task => task.id === id)));
   const effectiveProjectIds = $derived(lockedTaskId ? [] : projectIds);
   const selectedTaskIds = $derived(snapshot ? [...sharedTaskIds(snapshot, { taskIds: effectiveTaskIds, projectIds: effectiveProjectIds })] : []);
   const lockedTask = $derived(shareableSnapshotTasks.find(item => item.id === lockedTaskId) ?? null);
@@ -158,7 +159,7 @@
   onDestroy(() => { clearInterval(timer); stop(); });
 </script>
 
-{#if open}<dialog use:activeModal class="share-panel" open aria-label={scopedRequest ? 'Share this chat' : 'Share workspace'}>
+{#if open}<dialog use:activeModal class="share-panel" class:selection-mode={status === 'connected' && !lockedTask} open aria-label={scopedRequest ? 'Share this chat' : 'Share workspace'}>
   <header><div><strong>{scopedRequest ? 'Share this chat' : 'Share with a collaborator'}</strong><small>{scopedRequest ? 'One visitor, one exact chat, one-use encrypted link.' : 'One visitor, one-use encrypted link.'}</small></div><button aria-label="Close sharing" onclick={() => open = false}><X size={18}/></button></header>
   {#if !session}
     {#if taskId}<p class="scope-note">This invite will be limited to the selected direct chat. It cannot include its project or any other chat.</p>{/if}
@@ -178,16 +179,37 @@
     {:else if status === 'connected'}
       {#if lockedTask}<p><b>{visitor}</b> is paired with <b>{lockedTask.title || 'Untitled chat'}</b>. Their access is locked to this chat.</p>{#if taskId && taskId !== lockedTaskId}<p class="scope-note">Only one visitor session can be active. End this share before creating a link for another chat.</p>{/if}
       {:else}<p><b>{visitor}</b> is paired. Choose exactly what they can see and message. Nothing is shared until selected.</p>
-        <div class="share-list"><h3>Chats</h3>{#each shareableSnapshotTasks as task}<label class="scope"><input type="checkbox" checked={taskIds.includes(task.id)} onchange={() => taskIds = toggle(taskIds, task.id)}/><span><b>{task.title || 'Untitled chat'}</b><small>{snapshot?.agents.find(agent => agent.id === task.agentId)?.name ?? 'Agent'}</small></span></label>{:else}<small>No shareable chats yet.</small>{/each}</div>
-        <div class="share-list"><h3>Projects</h3>{#each snapshot?.projects ?? [] as project}<label class="scope"><input type="checkbox" checked={projectIds.includes(project.id)} onchange={() => projectIds = toggle(projectIds, project.id)}/><span><b>{project.name}</b><small>Shares its current chats</small></span></label>{:else}<small>No projects yet.</small>{/each}</div>
       {/if}
       <small>{selectedTaskIds.length} chat{selectedTaskIds.length === 1 ? '' : 's'} shared. The visitor can send messages, upload files and view attachments in shared chats, but cannot change models, stop agents, use terminals, or view local paths, instructions, hosts or private activity.</small>
     {:else if ['closed', 'error', 'rejected'].includes(status)}<button class="primary" onclick={start}>Create a fresh share link</button>{/if}
     <button class="danger" onclick={stop}>End sharing and revoke access</button>
   {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if session && status === 'connected' && !lockedTask}
+    <div class="scope-scroll" role="region" aria-label="Sharing selection" tabindex="0">
+      <section class="share-list" aria-labelledby="share-projects-heading">
+        <h3 id="share-projects-heading">Projects</h3>
+        {#each snapshot?.projects ?? [] as project (project.id)}
+          <label class="scope"><input type="checkbox" checked={projectIds.includes(project.id)} onchange={() => projectIds = toggle(projectIds, project.id)}/><span><b>{project.name}</b><small>Shares its current chats</small></span></label>
+        {:else}<small>No projects yet.</small>{/each}
+      </section>
+      <section class="share-list" aria-labelledby="share-chats-heading">
+        <h3 id="share-chats-heading">Loose chats</h3>
+        {#each looseTasks as task (task.id)}
+          <label class="scope"><input type="checkbox" checked={taskIds.includes(task.id)} onchange={() => taskIds = toggle(taskIds, task.id)}/><span><b>{task.title || 'Untitled chat'}</b><small>{snapshot?.agents.find(agent => agent.id === task.agentId)?.name ?? 'Agent'}</small></span></label>
+        {:else}<small>No chats outside projects.</small>{/each}
+      </section>
+    </div>
+  {/if}
 </dialog>{/if}
 
 <style>
   .share-panel{position:fixed;right:18px;bottom:18px;z-index:100;width:min(390px,calc(100vw - 36px));max-height:85vh;margin:0;overflow:auto;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);box-shadow:0 12px 40px #0006;font:13px var(--interface-font,"IBM Plex Sans",sans-serif)}header{display:flex;justify-content:space-between;gap:10px}header strong,header small{display:block}header small,.share-panel small{color:var(--muted)}button{border:0;border-radius:7px;padding:9px 10px;background:var(--soft);color:var(--ink);cursor:pointer}button.primary{background:var(--accent);color:var(--on-accent)}button.secondary{border:1px solid var(--line)}button.danger{color:#b84c44;margin-top:10px}.share-panel>label{display:grid;gap:5px;margin:13px 0;color:var(--muted)}input{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);font:inherit}.status{text-transform:capitalize;color:var(--accent-ink)}img{display:block;max-width:250px;margin:12px auto;border-radius:8px}.quote-code{display:grid;gap:5px;text-align:center;margin:12px 0}.quote-code strong,.verification{font:600 25px var(--mono);letter-spacing:3px;color:var(--accent-ink)}.verification{display:block;text-align:center;margin:16px}.share-list{margin:15px 0;padding-top:10px;border-top:1px solid var(--line)}.share-list h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.scope{display:flex;gap:9px;align-items:start;padding:7px 0}.scope input{width:auto;margin-top:3px;accent-color:var(--accent)}.scope b,.scope small{display:block}.error{color:#b84c44;line-height:1.4}
+
+  .share-panel.selection-mode{display:flex;flex-direction:column;overflow:hidden;box-sizing:border-box}
+  .share-panel.selection-mode> :not(.scope-scroll){flex-shrink:0}
+  .scope-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;margin-top:12px;padding-right:6px;border-top:1px solid var(--line)}
+  .scope-scroll:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .scope-scroll .share-list:first-child{margin-top:0;border-top:0}
+  .scope span{min-width:0;overflow-wrap:anywhere}
 </style>

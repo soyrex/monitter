@@ -1,10 +1,11 @@
 <script lang="ts">
   import ShareControl from '../../src/lib/components/ShareControl.svelte';
+  let { taskId = "11111111-1111-4111-8111-111111111111" }: { taskId?: string | null } = $props();
   let open = $state(true);
 </script>
 
 <main>
-  <ShareControl bind:open taskId="11111111-1111-4111-8111-111111111111" />
+  <ShareControl bind:open {taskId} />
 </main>
 
 <style>

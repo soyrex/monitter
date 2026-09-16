@@ -26,4 +26,53 @@ try {
   await expect(dialog.getByRole('button',{name:'Approve Roger'})).toBeVisible();await dialog.getByRole('button',{name:'Approve Roger'}).click();await expect.poll(()=>phone.evaluate(()=>window.__visitor.getStatus())).toBe('connected');const activeShare=await desktop.evaluate(async()=>{const m=await import('/bundle.js');let value;const unsubscribe=m.activeOperatorShare.subscribe(next=>value=next);unsubscribe();return {value,taskScopeFrozen:Object.isFrozen(value.taskIds),projectScopeFrozen:Object.isFrozen(value.projectIds)};});assert.deepEqual(activeShare.value,{primary:{name:'Owner',role:'primary user'},visitor:{name:'Roger',role:'visitor'},taskIds:[taskId],projectIds:[]});assert.equal(activeShare.taskScopeFrozen,true);assert.equal(activeShare.projectScopeFrozen,true);const shared=await phone.evaluate(()=>window.__visitor.getSnapshot());assert.deepEqual(shared.tasks.map(task=>task.id),[taskId]);assert.equal(shared.tasks[0].cwd,'');assert.deepEqual(shared.events,[]);assert.equal(shared.sharing.visitor.name,'Roger');assert.equal(shared.sharing.primary.name,'Owner');assert.equal(shared.sharing.appearance.variables['--accent'],'#3978d4');
   await desktop.evaluate(()=>document.documentElement.style.setProperty('--accent','#8755c7'));const recoloured=await phone.evaluate(()=>window.__visitor.getSnapshot());assert.equal(recoloured.sharing.appearance.variables['--accent'],'#8755c7');
   await phone.evaluate(taskId=>window.__visitor.sendMessage(taskId,'Hello'),taskId);await expect.poll(()=>desktop.evaluate(()=>window.__shareSends.length)).toBe(1);const sent=await desktop.evaluate(()=>window.__shareSends[0]);assert.match(sent.text,/^\[Two human operators are collaborating in this chat: Owner \(primary user\), Roger \(visitor\)\./);assert.match(sent.text,/@\(Roger\): Hello$/);assert.deepEqual(errors,[]);console.log('ShareControl UI: profile prefill, Roger approval, immutable exact-chat scope, and visitor attribution passed.');
+  // Workspace sharing has a bounded selection scroller; its controls stay put.
+  const workspaceContext = await browser.newContext({viewport:{width:1280,height:900}});
+  const workspaceSnapshot = structuredClone(snapshot);
+  workspaceSnapshot.projects = Array.from({length:12},(_,i)=>({id:`project-${i}`,name:`Project ${i+1}`,description:'',icon:'folder',color:'#397e61',workspaces:[]}));
+  workspaceSnapshot.tasks = [
+    {...snapshot.tasks[0],id:'project-chat',title:'Inside a project',projectId:'project-0'},
+    ...Array.from({length:35},(_,i)=>({...snapshot.tasks[0],id:`loose-${i}`,title:`Loose chat ${i+1}`})),
+  ];
+  await workspaceContext.addInitScript(snapshot=>{window.__MONITTER_TEST_BRIDGE__={invoke:async command=>{if(command==='get_snapshot')return snapshot;throw Error('Unexpected '+command);}};},workspaceSnapshot);
+  await workspaceContext.route(relayUrl.replace('ws:','http:')+'/pairing',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({code:'987654321',expiresAt:Date.now()+300000,revocationToken:'test-token'})}));
+  const workspace=await workspaceContext.newPage(),collaborator=await workspaceContext.newPage();
+  workspace.on('pageerror',error=>errors.push(error.message));
+  await workspace.goto(base);
+  await workspace.evaluate(async()=>{const m=await import('/bundle.js');m.mountHarness({taskId:null});});
+  const workspaceDialog=workspace.getByRole('dialog',{name:'Share workspace'});
+  await workspaceDialog.getByLabel('Share relay address').fill(relayUrl);
+  await workspaceDialog.getByRole('button',{name:'Create one-use share link'}).click();
+  const workspaceQr=await workspaceDialog.getByAltText('One-use sharing QR code').getAttribute('src');
+  const workspaceInvite=new URLSearchParams(new URL(decodeURIComponent(workspaceQr.slice('data:text/plain,'.length))).hash.slice(1)).get('invite');
+  await collaborator.goto(base);
+  await collaborator.evaluate(async invite=>{const m=await import('/bundle.js');window.__visitor=await m.createMobileSession(invite,{name:'Luke',role:'visitor'});},workspaceInvite);
+  await workspaceDialog.getByRole('button',{name:'Approve Luke'}).click();
+  const selection=workspaceDialog.getByRole('region',{name:'Sharing selection'});
+  await expect(selection).toBeVisible();
+  assert.deepEqual(await selection.getByRole('heading').allTextContents(),['Projects','Loose chats']);
+  await expect(selection.getByRole('checkbox')).toHaveCount(47);
+  await expect(selection.getByText('Inside a project',{exact:true})).toHaveCount(0);
+  await selection.getByRole('checkbox',{name:'Project 1 Shares its current chats',exact:true}).check();
+  const scope=await collaborator.evaluate(()=>window.__visitor.getSnapshot());
+  assert.deepEqual(scope.tasks.map(task=>task.id),['project-chat']);
+  for(const size of [{width:1280,height:900},{width:390,height:680}]) {
+    await workspace.setViewportSize(size);
+    const close=workspaceDialog.getByRole('button',{name:'Close sharing'});
+    const revoke=workspaceDialog.getByRole('button',{name:'End sharing and revoke access'});
+    const before={close:await close.boundingBox(),revoke:await revoke.boundingBox()};
+    assert(await selection.evaluate(node=>node.scrollHeight>node.clientHeight));
+    await selection.evaluate(node=>node.scrollTop=node.scrollHeight);
+    const after={close:await close.boundingBox(),revoke:await revoke.boundingBox()};
+    assert.deepEqual(after,before);
+    assert(before.close.y>=0 && before.revoke.y+before.revoke.height<size.height);
+    assert.equal(await workspaceDialog.evaluate(node=>node.scrollTop),0);
+    await selection.getByRole('checkbox',{name:'Loose chat 35 Codex',exact:true}).check();
+    await selection.evaluate(node=>node.scrollTop=0);
+  }
+  await workspace.screenshot({path:'/tmp/monitter-share-selection-mobile.png'});
+  assert.deepEqual(errors,[]);
+  console.log('Share workspace: projects first, loose chats only, live scope, independently scrolling selection and fixed controls passed.');
+  await workspaceContext.close();
+
 } finally {await browser?.close();relay?.kill('SIGTERM');await new Promise(ok=>server?server.close(ok):ok());await rm(temp,{recursive:true,force:true});}
