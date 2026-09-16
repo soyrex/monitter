@@ -11,7 +11,6 @@
   let readerDetached = false;
   let detachedScrollTop = 0;
   let touchY: number | undefined;
-  const bottomThreshold = 50;
   let documentVisible = $state(true);
   let lastResetKey = $state<string | undefined>();
   let owner: TranscriptScrollOwner | undefined;
@@ -24,7 +23,7 @@
       owner = nextOwner;
       if (pendingLatestRequest) {
         pendingLatestRequest = false;
-        owner.scrollToLatest();
+        void jumpToLatest();
       }
       return () => { if (owner === nextOwner) owner = undefined; };
     },
@@ -40,10 +39,6 @@
 
   function distanceFromLatest() {
     return viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop) : 0;
-  }
-
-  function nearLatest() {
-    return distanceFromLatest() < bottomThreshold;
   }
 
   function atAbsoluteLatest() {
@@ -117,8 +112,9 @@
       }
       return;
     }
-    setFollowing(nearLatest());
-    showJump = !followingLatest || pendingUpdates;
+    // Streaming/layout writes can emit a scroll event while TanStack settles
+    // its anchor. Reader intent changes only through an explicit gesture.
+    showJump = pendingUpdates;
   }
 
   // A conversation activation or explicit send requests a jump after Svelte
