@@ -24,8 +24,8 @@ const proxy = Object.values(webDevProxy())[0];
 assert.equal(proxy.target, 'http://127.0.0.1:18436');
 assert.equal(proxy.headers.origin, proxy.target);
 assert.equal(proxy.changeOrigin, true);
-const appUiProxy = Object.values(webDevProxy({ developerBridge: true }))[0];
-assert.equal(appUiProxy.headers['x-monitter-dev-bridge'], '1');
+const appUiProxy = Object.values(webDevProxy())[0];
+assert.equal(appUiProxy.headers['x-monitter-dev-bridge'], '0');
 const appUiOrigin = 'http://127.0.0.1:18420';
 let appUiStatus;
 webDevGuard(appUiOrigin)(

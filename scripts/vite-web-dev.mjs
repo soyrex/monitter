@@ -60,14 +60,15 @@ export function webDevPlugin() {
   };
 }
 
-export function webDevProxy({ developerBridge = false } = {}) {
+export function webDevProxy() {
   return {
     // The guard checks the original browser Origin before proxying. Rewrite it
-    // only for this trusted hop; desktop auth and permission handling stay intact.
+    // only for this trusted hop. Use the normal local API access policy: hot UI
+    // must not opt into the legacy developer-bridge pairing-code requirement.
     '^/api/(access|invoke)(\\?|$)': {
       target: backend,
       changeOrigin: true,
-      headers: { origin: backend, ...(developerBridge ? { 'x-monitter-dev-bridge': '1' } : {}) },
+      headers: { origin: backend, 'x-monitter-dev-bridge': '0' },
     },
   };
 }

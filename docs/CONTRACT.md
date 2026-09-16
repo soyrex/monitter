@@ -1046,8 +1046,11 @@ The desktop hot-reload interface is separate from LAN browser access. An install
 probe succeeds. The marker is not an authentication mechanism. Its Tauri capability is restricted to returning to the packaged main-window URL; arbitrary
 hosts, LAN peers, the `dev:web` port, and the developer renderer receive no native task, terminal,
 filesystem, approval or settings IPC. The renderer instead uses the existing localhost developer bridge,
-which requires the per-process LAN access code even while general LAN prototyping leaves its code gate
-disabled; its proxy rejects originless and foreign write requests before adding the bridge marker. The frontend displays a persistent `DEV UI · HMR`
+which uses the normal local API access policy. While `REQUIRE_ACCESS_CODE` is false, hot UI is
+automatically trusted and needs no pairing code. The loopback-only Vite proxy rejects originless
+and foreign write requests before rewriting Host/Origin, and overwrites the legacy developer-bridge
+marker with `0` so it does not enable that separate code gate. Re-enabling the global API code
+requirement also protects this proxy. The frontend displays a persistent `DEV UI · HMR`
 badge and returns to packaged assets after three consecutive marker failures. This mode reuses the
 installed app's native process rather than starting a competing Tauri backend.
 
