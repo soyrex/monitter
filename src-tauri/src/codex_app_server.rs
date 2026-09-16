@@ -145,9 +145,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         service.complete_app_server_turn(&task_id, &control, None, "error", Some("Codex app-server interactive sessions currently require a local desktop host. Monitter will not fall back to an uncertain exec resume turn on an SSH host.".into()));
         return;
     }
-    let mut extensions = match service.extension_config().map(|config| {
-        crate::extensions_runtime::RuntimeExtensions::for_agent(&config, &task.agent_id)
-    }) {
+    let mut extensions = match service.runtime_extensions_for_agent(&task.agent_id) {
         Ok(extensions) => extensions,
         Err(error) => {
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
@@ -1651,7 +1649,7 @@ fn thread_request(
     let mut config = extensions.codex_config();
     if has_grant {
         if let Some(helper) = helper {
-            config.extend(json!({"mcp_servers.monitter.command":"python3","mcp_servers.monitter.args":[helper],"mcp_servers.monitter.env_vars":["MONITTER_ENDPOINT","MONITTER_TOKEN"],"mcp_servers.monitter.required":true,"mcp_servers.monitter.enabled_tools":["list_agents","delegate_task","send_message","get_task_result","wait_for_task","list_messages","cancel_delegation","terminal_run"]}).as_object().cloned().unwrap_or_default());
+            config.extend(json!({"mcp_servers.monitter.command":"python3","mcp_servers.monitter.args":[helper],"mcp_servers.monitter.env_vars":["MONITTER_ENDPOINT","MONITTER_TOKEN"],"mcp_servers.monitter.required":true,"mcp_servers.monitter.enabled_tools":["list_agents","delegate_task","send_message","get_task_result","wait_for_task","list_messages","cancel_delegation","terminal_run","skills_help","list_shared_skills","install_shared_skill"],"mcp_servers.monitter.tools.install_shared_skill.approval_mode":"prompt"}).as_object().cloned().unwrap_or_default());
         }
     }
     if !config.is_empty() {
@@ -1812,6 +1810,21 @@ mod tests {
         );
         assert_eq!(request["method"], "thread/resume");
         assert_eq!(request["params"]["excludeTurns"], Value::Bool(true));
+        let with_mcp = thread_request(
+            &task,
+            Some("/private/monitter_mcp.py"),
+            true,
+            &crate::extensions_runtime::RuntimeExtensions::default(),
+        );
+        let config = &with_mcp["params"]["config"];
+        assert_eq!(
+            config["mcp_servers.monitter.tools.install_shared_skill.approval_mode"],
+            "prompt"
+        );
+        assert!(config["mcp_servers.monitter.enabled_tools"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("install_shared_skill")));
     }
 
     #[test]

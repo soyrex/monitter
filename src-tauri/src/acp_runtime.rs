@@ -544,9 +544,7 @@ fn run(
         );
         return;
     };
-    let mut extensions = match service.extension_config().map(|config| {
-        crate::extensions_runtime::RuntimeExtensions::for_agent(&config, &task.agent_id)
-    }) {
+    let mut extensions = match service.runtime_extensions_for_agent(&task.agent_id) {
         Ok(extensions) => extensions,
         Err(error) => {
             fail(&service, &task_id, &control, error);

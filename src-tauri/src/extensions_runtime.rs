@@ -80,10 +80,9 @@ impl RuntimeExtensions {
             .filter(|server| server.enabled && server.agent_ids.iter().any(|id| id == agent_id))
             .cloned()
             .collect();
-        let skills = config
-            .skills
-            .iter()
-            .filter(|skill| skill.enabled && skill.agent_ids.iter().any(|id| id == agent_id));
+        let skills = config.skills.iter().filter(|skill| {
+            skill.enabled && (skill.all_agents || skill.agent_ids.iter().any(|id| id == agent_id))
+        });
         let mut skill_context = String::new();
         for skill in skills {
             if !skill_context.is_empty() {
@@ -304,6 +303,8 @@ mod tests {
             description: String::new(),
             enabled: true,
             agent_ids: vec!["agent-a".into()],
+            all_agents: false,
+            source_url: None,
             content: "Check boundaries.".into(),
         });
         let runtime = RuntimeExtensions::for_agent(&config, "agent-a");
@@ -312,6 +313,41 @@ mod tests {
             RuntimeExtensions::for_agent(&config, "agent-b").prompt("hello"),
             "hello"
         );
+    }
+
+    #[test]
+    fn all_agent_skill_reaches_current_and_future_agents_but_disabled_does_not() {
+        let mut config = ExtensionConfig::default();
+        config.skills.push(ManagedSkill {
+            id: "all".into(),
+            name: "All agents".into(),
+            description: String::new(),
+            enabled: true,
+            agent_ids: vec!["agent-a".into()],
+            all_agents: true,
+            source_url: None,
+            content: "Future-safe guidance.".into(),
+        });
+        config.skills.push(ManagedSkill {
+            id: "disabled".into(),
+            name: "Disabled".into(),
+            description: String::new(),
+            enabled: false,
+            agent_ids: vec![],
+            all_agents: true,
+            source_url: None,
+            content: "Must not appear.".into(),
+        });
+
+        assert!(RuntimeExtensions::for_agent(&config, "agent-a")
+            .prompt("hello")
+            .contains("Future-safe guidance."));
+        assert!(RuntimeExtensions::for_agent(&config, "future-agent")
+            .prompt("hello")
+            .contains("Future-safe guidance."));
+        assert!(!RuntimeExtensions::for_agent(&config, "future-agent")
+            .prompt("hello")
+            .contains("Must not appear."));
     }
 
     #[test]

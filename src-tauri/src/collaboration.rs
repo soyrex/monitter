@@ -57,11 +57,21 @@ impl Service {
                 self.cancel_protocol(caller_task, required_string(args, "collaboration_id")?)
             }
             "terminal_run" => self.terminal_run_protocol(caller_task, args),
+            "skills_help" => Ok(crate::shared_skills::help()),
+            "list_shared_skills" => self.list_shared_skills_protocol(),
+            "install_shared_skill" => self.install_shared_skill_protocol(
+                caller_task,
+                &required_string(args, "url")?,
+                string_arg(args, "name")?,
+            ),
             _ => Err("Unknown Monitter collaboration tool.".into()),
         }
     }
 
-    fn require_collaboration_caller(&self, task_id: &str) -> Result<(Task, Agent), String> {
+    pub(crate) fn require_collaboration_caller(
+        &self,
+        task_id: &str,
+    ) -> Result<(Task, Agent), String> {
         let data = self
             .data
             .lock()
@@ -810,7 +820,8 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "send_message" => &["to_agent_id", "message", "request_id", "task_id"],
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
         "wait_for_task" => &["collaboration_id", "timeout_seconds"],
-        "list_messages" => &[],
+        "list_messages" | "skills_help" | "list_shared_skills" => &[],
+        "install_shared_skill" => &["url", "name"],
         "terminal_run" => &["command", "cwd"],
         _ => return Err("Unknown Monitter collaboration tool.".into()),
     };

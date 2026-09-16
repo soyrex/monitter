@@ -175,7 +175,7 @@ export interface McpServerConfig {
 /** Portable markdown instructions, not an executable plugin bundle. */
 export interface ManagedSkill {
   id: string; name: string; description: string; enabled: boolean;
-  agentIds: string[]; content: string;
+  agentIds: string[]; allAgents?: boolean; sourceUrl?: string; content: string;
 }
 export interface ExtensionConfig {
   /** Opaque edit revision; stale saves are rejected rather than overwriting newer edits. */

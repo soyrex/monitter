@@ -59,6 +59,8 @@ mod runner;
 mod runtime_gc;
 #[cfg(test)]
 mod runtime_gc_tests;
+mod shared_skills;
+mod skill_install;
 mod store;
 mod terminal;
 mod usage_quota;

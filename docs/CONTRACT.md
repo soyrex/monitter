@@ -151,8 +151,11 @@ example a renamed task, channel, or terminal) is reported to the client.
 
 Each MCP server has an ID, display name, enabled flag, exact agent IDs, and either a
 stdio command/argument/environment configuration or HTTP URL/headers. Each managed
-skill has an ID, name, description, enabled flag, exact agent IDs and Markdown content.
-An empty agent selection grants nothing. Saving configuration never starts a server,
+skill has an ID, name, description, enabled flag, exact agent IDs, an optional
+`allAgents` flag, optional `sourceUrl` provenance, and Markdown content.
+`allAgents` includes current and future user agents, excluding the internal Monitter
+Admin. It defaults to false for existing data. An empty selection grants nothing
+unless `allAgents` is true. Saving configuration never starts a server,
 installs a package, calls a model, changes native CLI authentication, or approves a tool.
 Changed MCP entries revoke remembered approvals for affected agents so a replacement
 server cannot inherit the previous server's tool grants.
@@ -175,6 +178,42 @@ Use OpenCode through ACP for this feature. Skill text is added to execution cont
 without changing the stored user message; this does not erase instructions already
 present in a native session's history. Codex receives required startup and prompted
 tool approval for managed servers, never the built-in collaboration allowlist.
+
+### Shared skill installation through the built-in MCP
+
+A running agent with collaboration enabled can discover this workflow through
+`skills_help`, inspect metadata through `list_shared_skills`, and call
+`install_shared_skill {url, name?}` when the user requests an installation.
+The tool accepts public HTTPS Markdown files, raw GitHub URLs, GitHub blob/tree
+URLs, and repository URLs with a root `SKILL.md`. For repositories with multiple
+skills, provide the specific skill file or directory. Generic HTML installation
+pages must first be resolved to their actual Markdown skill URL; downloaded
+instructions are not executed to discover or install dependencies.
+
+Example: `install_shared_skill {"url":"https://github.com/owner/repo/tree/main/skills/shipping"}`.
+
+The download is bounded to 128 KiB, uses public HTTPS addresses pinned after DNS
+validation, and does not follow redirects or use credentials. No Git clone, shell
+installer, package manager, bundled scripts or assets are run or installed.
+The response explicitly states this Markdown-only limitation. Remote instructions
+are untrusted content and cannot authorize additional actions.
+
+Installation adds one enabled `allAgents` skill to the latest private extension
+configuration under the same write lock used by Settings. It does not return MCP
+secrets or skill contents. Exact repeat installs are idempotent; source/name
+conflicts, including disabled or edited skills, fail without replacing existing
+configuration. Stale Settings revisions remain rejected. Settings → MCP & Plugins
+can review, edit, disable, remove or narrow the assignment afterward.
+
+The caller must still be an active, noninternal collaboration-enabled agent after
+the download completes. Codex installation calls use a per-tool `prompt` policy;
+Claude does not put installation on its built-in automatic tool allowlist. Other
+harnesses retain their native permission handling. Read-only help/list tools are
+available alongside the existing collaboration tools. No new LAN/controller
+configuration command is exposed.
+
+Saved instructions apply at the next harness launch. Existing resident sessions
+are not restarted or replayed; launch a new task/session to consume the skill.
 
 ### Follow-up: managed MCP over SSH (not implemented)
 
@@ -663,6 +702,9 @@ A process-local broker binds only to `127.0.0.1` on a random port. Every running
 in-memory bearer grant; the broker derives caller identity from that grant, never from tool arguments.
 Grants are revoked on run completion. A bundled Python stdio MCP helper exposes a narrow tool set:
 
+- `skills_help`: explain supported shared skill installation and activation.
+- `list_shared_skills`: list shared skill metadata without private MCP configuration.
+- `install_shared_skill`: download public Markdown instructions for all current/future user agents.
 - `list_agents`: search configured, published agents by profile.
 - `delegate_task`: create a child chat, inherit its parent's project, apply the recipient's saved
   host/folder/model/permissions, and durably queue the supplied brief.

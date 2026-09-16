@@ -261,6 +261,8 @@ fn managed_mcp_and_skill_reach_acp_launch_without_rewriting_user_transcript() {
         description: String::new(),
         enabled: true,
         agent_ids: vec![agent.id.clone()],
+        all_agents: false,
+        source_url: None,
         content: "MANAGED_SKILL_SENTINEL".into(),
     });
     fixture.save_extension_config(config).unwrap();

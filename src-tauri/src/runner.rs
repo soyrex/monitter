@@ -157,6 +157,8 @@ fn remote_cli<'a>(host: &'a Host, provider: &'a str) -> Result<&'a str, String> 
     })
 }
 
+// Built-in automatic grants. Installation is advertised separately and must
+// retain the harness permission flow because it changes every agent's context.
 const MONITTER_TOOLS: &[&str] = &[
     "list_agents",
     "delegate_task",
@@ -166,6 +168,8 @@ const MONITTER_TOOLS: &[&str] = &[
     "list_messages",
     "cancel_delegation",
     "terminal_run",
+    "skills_help",
+    "list_shared_skills",
 ];
 
 fn claude_tool_names() -> String {
@@ -260,7 +264,8 @@ fn codex_args(task: &Task, collaboration_helper: Option<&str>) -> Vec<String> {
         // configuration. Credentials stay in the child environment, never in
         // an argument, event, or shell fragment.
         let helper_args = serde_json::to_string(&vec![helper]).unwrap_or_else(|_| "[]".into());
-        let tools = serde_json::to_string(MONITTER_TOOLS).unwrap_or_else(|_| "[]".into());
+        let tools = serde_json::to_string(&[MONITTER_TOOLS, &["install_shared_skill"]].concat())
+            .unwrap_or_else(|_| "[]".into());
         args.extend([
             "-c".into(),
             "mcp_servers.monitter.command=\"python3\"".into(),
@@ -276,6 +281,8 @@ fn codex_args(task: &Task, collaboration_helper: Option<&str>) -> Vec<String> {
             format!("mcp_servers.monitter.enabled_tools={tools}"),
             "-c".into(),
             "mcp_servers.monitter.default_tools_approval_mode=\"approve\"".into(),
+            "-c".into(),
+            "mcp_servers.monitter.tools.install_shared_skill.approval_mode=\"prompt\"".into(),
         ]);
     }
     if let Some(native) = &task.native_session_id {
@@ -3216,9 +3223,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             crate::acp_runtime::start(service, task_id, prompt, control);
             return;
         }
-        let mut extensions = match service.extension_config().map(|config| {
-            crate::extensions_runtime::RuntimeExtensions::for_agent(&config, &task.agent_id)
-        }) {
+        let mut extensions = match service.runtime_extensions_for_agent(&task.agent_id) {
             Ok(extensions) => extensions,
             Err(error) => {
                 service.finish(&task_id, "error", Some(error));
@@ -4288,6 +4293,14 @@ mod tests {
             .any(|arg| arg.contains("mcp_servers.monitter.enabled_tools")));
         assert!(args.iter().any(|arg| arg.contains("list_agents")));
         assert!(args.iter().any(|arg| arg.contains("cancel_delegation")));
+        assert!(args.iter().any(|arg| arg.contains("install_shared_skill")));
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "-c",
+                "mcp_servers.monitter.tools.install_shared_skill.approval_mode=\"prompt\""
+            ]));
+        assert!(!claude_tool_names().contains("install_shared_skill"));
+        assert!(claude_tool_names().contains("skills_help"));
         assert!(!args.iter().any(|arg| arg.contains("ignore-user-config")));
         assert!(args
             .iter()

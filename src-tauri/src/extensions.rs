@@ -77,6 +77,14 @@ pub(crate) struct ManagedSkill {
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) agent_ids: Vec<String>,
+    /// When enabled, this skill applies to every current and future agent.
+    /// Missing values remain false so legacy configurations keep their
+    /// explicit-agent-only semantics.
+    #[serde(default)]
+    pub(crate) all_agents: bool,
+    /// Optional provenance for skills imported from a shared catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_url: Option<String>,
     #[serde(default)]
     pub(crate) content: String,
 }
@@ -233,6 +241,9 @@ fn normalize(
         normalize_name(&mut skill.name, "Skill", &mut names)?;
         normalize_agents(&mut skill.agent_ids, known_agents, prune_unknown_agents)?;
         bounded_optional(&mut skill.description, MAX_DESCRIPTION, "Skill description")?;
+        if let Some(source_url) = &mut skill.source_url {
+            bounded_optional(source_url, MAX_VALUE, "Skill source URL")?;
+        }
         if skill.content.is_empty()
             || skill.content.len() > MAX_SKILL_CONTENT
             || skill.content.contains('\0')
@@ -470,6 +481,8 @@ mod tests {
                 description: "private".into(),
                 enabled: true,
                 agent_ids: vec![],
+                all_agents: false,
+                source_url: None,
                 content: "Use concise prose.".into(),
             }],
         }
@@ -498,6 +511,20 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn legacy_skill_json_defaults_all_agents_to_false() {
+        let skill: ManagedSkill = serde_json::from_value(serde_json::json!({
+            "id": "22222222-2222-4222-8222-222222222222",
+            "name": "Writing",
+            "enabled": true,
+            "agentIds": [],
+            "content": "Use concise prose."
+        }))
+        .unwrap();
+        assert!(!skill.all_agents);
+        assert!(skill.source_url.is_none());
     }
     #[test]
     fn invalid_entries_and_unknown_agents_are_rejected() {
