@@ -105,6 +105,7 @@ export interface MonitterBridge {
   deleteArchivedTask(taskId: string, removeNativeFiles: boolean): Promise<Snapshot>;
   storeAttachment(target: AttachmentTarget, file: AttachmentFileData, previewDataUrl?: string | null, sourceId?: string): Promise<Attachment>;
   readAttachmentFile(sourcePath: string): Promise<AttachmentFileData>;
+  readAttachmentImage(attachmentId: string): Promise<AttachmentFileData>;
   onChanged(handler: () => void): Promise<UnlistenFn>;
 }
 
@@ -274,6 +275,7 @@ const nativeBridge: MonitterBridge = {
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
   storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, previewDataUrl, sourceId}),
   readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
+  readAttachmentImage: attachmentId => invoke<AttachmentFileData>('read_attachment_image', {attachmentId}),
   onChanged: async (handler) => {
     changedSubscribers.add(handler);
     const changed = () => scheduleSnapshotRefresh();
@@ -367,6 +369,7 @@ const previewBridge: MonitterBridge = {
   deleteArchivedTask: () => desktopOnly(),
   storeAttachment: () => desktopOnly(),
   readAttachmentFile: () => desktopOnly(),
+  readAttachmentImage: () => desktopOnly(),
   onChanged: async () => () => {},
 };
 
@@ -453,6 +456,7 @@ export function getBridge(): MonitterBridge {
       deleteArchivedTask: (taskId, removeNativeFiles) => test.invoke("delete_archived_task", {taskId, removeNativeFiles}) as Promise<Snapshot>,
       storeAttachment: (target, file, previewDataUrl = null, sourceId) => test.invoke("store_attachment", {target, ...file, previewDataUrl, sourceId}) as Promise<Attachment>,
       readAttachmentFile: sourcePath => test.invoke("read_attachment_file", {sourcePath}) as Promise<AttachmentFileData>,
+      readAttachmentImage: attachmentId => test.invoke('read_attachment_image', {attachmentId}) as Promise<AttachmentFileData>,
       onChanged: (handler) => test.listen("monitter:changed", handler),
     };
   }

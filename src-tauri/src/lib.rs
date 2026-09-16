@@ -1383,6 +1383,9 @@ impl Service {
                         .map_err(|_| "Invalid sourceId.")?,
                 )?,
             ),
+            "read_attachment_image" => {
+                value(self.read_attachment_image(&arg::<String>(&args, "attachmentId")?)?)
+            }
             _ => Err(format!("LAN command '{command}' is not available.")),
         }
     }
@@ -2263,6 +2266,42 @@ impl Service {
             );
             Ok(attachment.clone())
         })
+    }
+
+    fn read_attachment_image(
+        &self,
+        attachment_id: &str,
+    ) -> Result<attachments::ReadAttachmentFile, String> {
+        let (stored, host) = {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.")?;
+            let stored = data
+                .attachments
+                .get(attachment_id)
+                .cloned()
+                .ok_or("Attachment was not found.")?;
+            // Prefer the immutable host snapshot captured for a matching task.
+            // Draft attachments have no task snapshot, so use the current saved
+            // host only as that explicit fallback.
+            let host = data
+                .snapshot
+                .tasks
+                .iter()
+                .filter(|task| task.host_id == stored.host_id && task.cwd == stored.cwd)
+                .find_map(|task| data.task_hosts.get(&task.id).cloned())
+                .or_else(|| {
+                    data.snapshot
+                        .hosts
+                        .iter()
+                        .find(|host| host.id == stored.host_id)
+                        .cloned()
+                })
+                .ok_or("Attachment host was not found.")?;
+            (stored, host)
+        };
+        attachments::read_stored_image(&host, &stored.cwd, &stored.attachment)
     }
 
     fn reserve_run(&self, task_id: &str) -> Result<Arc<runner::RunControl>, String> {
@@ -5313,6 +5352,17 @@ fn read_attachment_file(source_path: String) -> Result<attachments::ReadAttachme
 }
 
 #[tauri::command]
+async fn read_attachment_image(
+    state: State<'_, AppState>,
+    attachment_id: String,
+) -> Result<attachments::ReadAttachmentFile, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.read_attachment_image(&attachment_id))
+        .await
+        .map_err(|error| format!("Attachment image worker failed: {error}"))?
+}
+
+#[tauri::command]
 fn store_attachment(
     state: State<'_, AppState>,
     target: attachments::AttachmentTarget,
@@ -7040,6 +7090,7 @@ pub fn run() {
             resolve_input,
             finish_quit,
             read_attachment_file,
+            read_attachment_image,
             store_attachment,
             save_host,
             delete_host,

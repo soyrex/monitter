@@ -840,6 +840,15 @@ and unsent text survive navigation and tab movement within the window. Failed up
 visible and preserve successfully queued files. Thumbnails are at most 192 pixels and 256 KiB; missing
 image previews fall back to a file icon.
 
+Opening an uploaded image uses `read_attachment_image { attachmentId }` and returns
+`{ filename, mimeType, dataBase64 }` from the registered original without resizing or re-encoding.
+The reader is available to native and authenticated LAN clients, not visitors. It accepts no
+caller-supplied path, enforces the saved attachment folder and 20 MiB limit, and allows only
+PNG/JPEG/WebP/GIF raster images. Missing or unsafe originals produce a visible error rather than
+an enlarged thumbnail. Original bytes load on demand, not with transcript history.
+Codex receives original attachment paths in its text prompt, not inline image input or thumbnails;
+the agent must open the file. This does not guarantee provider-internal full-resolution processing.
+
 Codex Computer Use MCP result images are distinct from user-uploaded `local_image` records.
 Supported PNG/JPEG/WebP result bytes can be retained inline on the following assistant reply,
 bounded to four pending images and 512 KiB per encoded data URL. Invalid or oversized images

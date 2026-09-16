@@ -1,6 +1,14 @@
 //! Private, bounded attachment storage rooted in a task workspace.
 use crate::{model::Host, runner};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::{
+    ffi::CString,
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    },
+};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -19,6 +27,7 @@ const MAX_PREVIEW_DATA_URL_BYTES: usize = 256 * 1024;
 pub const MAX_GENERATED_IMAGE_DATA_URL_BYTES: usize = 512 * 1024;
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(12);
 const REMOTE_OUTPUT_LIMIT: usize = 16 * 1024;
+const REMOTE_IMAGE_OUTPUT_LIMIT: usize = ((MAX_BYTES + 2) / 3) * 4 + 16 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -181,6 +190,164 @@ pub fn read_attachment_file(source_path: &str) -> Result<ReadAttachmentFile, Str
     })
 }
 
+/// Reads an image that Monitter itself previously stored.  Unlike
+/// `read_attachment_file`, neither this function nor its callers accept a
+/// renderer-provided path.
+pub fn read_stored_image(
+    host: &Host,
+    cwd: &str,
+    attachment: &Attachment,
+) -> Result<ReadAttachmentFile, String> {
+    let filename = safe_name(&attachment.name)?;
+    let bytes = match host.kind.as_str() {
+        "local" => read_local_stored_image(cwd, &attachment.path)?,
+        "ssh" => read_remote_stored_image(host, cwd, &attachment.path)?,
+        _ => return Err("Host kind must be local or ssh.".into()),
+    };
+    let mime_type = image_mime(&bytes).ok_or("Attachment is not a supported browser image.")?;
+    if attachment.mime_type.trim().to_ascii_lowercase() != mime_type {
+        return Err("Stored attachment image type does not match its content.".into());
+    }
+    Ok(ReadAttachmentFile {
+        filename,
+        mime_type: mime_type.into(),
+        data_base64: encode_base64(&bytes),
+    })
+}
+
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else {
+        None
+    }
+}
+
+fn read_local_stored_image(cwd: &str, stored_path: &str) -> Result<Vec<u8>, String> {
+    let directory = existing_attachment_directory(&local_cwd(cwd))?;
+    let path = Path::new(stored_path);
+    if path.parent() != Some(directory.as_path()) {
+        return Err("Stored attachment is outside its task attachment folder.".into());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| "Attachment file is unavailable.")?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err("Stored attachment must be a regular file.".into());
+    }
+    #[cfg(unix)]
+    {
+        return read_local_image_openat(&local_cwd(cwd), path);
+    }
+    #[cfg(not(unix))]
+    read_regular_file(path)
+}
+
+#[cfg(unix)]
+fn read_local_image_openat(root: &Path, path: &Path) -> Result<Vec<u8>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Task folder is unavailable.")?;
+    let root = open_directory_nofollow(&root)?;
+    let monitter = open_directory_at(&root, ".monitter")?;
+    let attachments = open_directory_at(&monitter, "attachments")?;
+    let filename = CString::new(
+        path.file_name()
+            .ok_or("Stored attachment is outside its task attachment folder.")?
+            .as_bytes(),
+    )
+    .map_err(|_| "Attachment filename is invalid.")?;
+    let fd = unsafe {
+        libc::openat(
+            attachments.as_raw_fd(),
+            filename.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err("Attachment file is unavailable.".into());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Attachment file is unavailable.")?;
+    if !metadata.is_file() {
+        return Err("Stored attachment must be a regular file.".into());
+    }
+    read_open_file(file, metadata.len())
+}
+
+#[cfg(unix)]
+fn open_directory_nofollow(path: &Path) -> Result<File, String> {
+    let path =
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| "Task folder is unavailable.")?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err("Attachment folder escapes task folder.".into());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn open_directory_at(parent: &File, name: &str) -> Result<File, String> {
+    let name = CString::new(name).expect("static directory names contain no NUL");
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err("Attachment folder escapes task folder.".into());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(not(unix))]
+fn read_regular_file(path: &Path) -> Result<Vec<u8>, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Attachment file is unavailable.")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Attachment file is unavailable.")?;
+    if !metadata.is_file() {
+        return Err("Stored attachment must be a regular file.".into());
+    }
+    read_open_file(file, metadata.len())
+}
+
+fn read_open_file(file: File, length: u64) -> Result<Vec<u8>, String> {
+    if length > MAX_BYTES as u64 {
+        return Err("Attachments are limited to 20 MiB.".into());
+    }
+    let mut bytes = Vec::with_capacity(length as usize);
+    file.take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Could not read attachment file.")?;
+    if bytes.len() > MAX_BYTES {
+        return Err("Attachments are limited to 20 MiB.".into());
+    }
+    Ok(bytes)
+}
+
 pub fn generated_image(data_base64: &str) -> Result<Attachment, String> {
     if data_base64.len() + "data:image/jpeg;base64,".len() > MAX_GENERATED_IMAGE_DATA_URL_BYTES {
         return Err("Generated image is too large for inline display (512 KiB limit).".into());
@@ -287,6 +454,34 @@ fn attachment_directory(root: &Path) -> Result<PathBuf, String> {
     }
     Ok(attachments)
 }
+fn existing_attachment_directory(root: &Path) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Task folder is unavailable.")?;
+    if !root.is_dir() {
+        return Err("Task folder is unavailable.".into());
+    }
+    let monitter = root.join(".monitter");
+    let attachments = monitter.join("attachments");
+    for directory in [&monitter, &attachments] {
+        let metadata =
+            fs::symlink_metadata(directory).map_err(|_| "Could not verify attachment folder.")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("Attachment folder escapes task folder.".into());
+        }
+        if directory
+            .canonicalize()
+            .map_err(|_| "Could not verify attachment folder.")?
+            != *directory
+        {
+            return Err("Attachment folder escapes task folder.".into());
+        }
+    }
+    if !monitter.starts_with(&root) || !attachments.starts_with(&monitter) {
+        return Err("Attachment folder escapes task folder.".into());
+    }
+    Ok(attachments)
+}
 fn ensure_private_child(parent: &Path, child: &Path) -> Result<(), String> {
     match fs::symlink_metadata(child) {
         Ok(m) => {
@@ -362,6 +557,31 @@ try:
  print(json.dumps({'path':path}))
 except Exception as e: print(json.dumps({'error':str(e)})); sys.exit(1)"#
 }
+fn remote_read_script() -> &'static str {
+    r#"import base64,json,os,stat,sys
+MAX=20971520
+DIR_FLAGS=os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_CLOEXEC',0)
+FILE_FLAGS=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0)|getattr(os,'O_CLOEXEC',0)
+def open_child_dir(parent,name):
+ st=os.stat(name,dir_fd=parent,follow_symlinks=False)
+ if not stat.S_ISDIR(st.st_mode): raise ValueError('Attachment folder escapes task folder.')
+ return os.open(name,DIR_FLAGS,dir_fd=parent)
+try:
+ p=json.loads(sys.stdin.buffer.read().decode('utf-8')); root=os.path.realpath(os.path.expanduser(p['cwd']))
+ if not os.path.isdir(root): raise ValueError('Task folder is unavailable.')
+ d=os.path.join(root,'.monitter','attachments'); path=p['path']
+ if os.path.dirname(path)!=d: raise ValueError('Stored attachment is outside its task attachment folder.')
+ rootfd=os.open(root,DIR_FLAGS); monitterfd=open_child_dir(rootfd,'.monitter'); attachmentsfd=open_child_dir(monitterfd,'attachments')
+ name=os.path.basename(path); st=os.stat(name,dir_fd=attachmentsfd,follow_symlinks=False)
+ if not stat.S_ISREG(st.st_mode): raise ValueError('Stored attachment must be a regular file.')
+ if st.st_size>MAX: raise ValueError('Attachments are limited to 20 MiB.')
+ fd=os.open(name,FILE_FLAGS,dir_fd=attachmentsfd); st=os.fstat(fd)
+ if not stat.S_ISREG(st.st_mode): raise ValueError('Stored attachment must be a regular file.')
+ with os.fdopen(fd,'rb') as f: data=f.read(MAX+1)
+ if len(data)>MAX: raise ValueError('Attachments are limited to 20 MiB.')
+ print(json.dumps({'dataBase64':base64.b64encode(data).decode('ascii')}))
+except Exception as e: print(json.dumps({'error':str(e)})); sys.exit(1)"#
+}
 fn store_remote(
     host: &Host,
     cwd: &str,
@@ -396,7 +616,42 @@ fn store_remote(
                 .to_string()
         })
 }
-fn run_bounded(mut command: Command, input: Vec<u8>) -> Result<Vec<u8>, String> {
+fn read_remote_stored_image(host: &Host, cwd: &str, path: &str) -> Result<Vec<u8>, String> {
+    let payload = serde_json::json!({"cwd":cwd,"path":path}).to_string();
+    let mut command = Command::new("ssh");
+    runner::add_ssh_options(&mut command, host);
+    command
+        .arg(runner::ssh_target(host)?)
+        .arg(format!(
+            "python3 -c {}",
+            runner::posix_quote(remote_read_script())
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let out = run_bounded_with_limit(command, payload.into_bytes(), REMOTE_IMAGE_OUTPUT_LIMIT)?;
+    let value: serde_json::Value = serde_json::from_slice(&out)
+        .map_err(|_| "Remote attachment read returned invalid output.")?;
+    let data = value
+        .get("dataBase64")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Could not read attachment on remote host.")
+                .to_string()
+        })?;
+    decode_base64(data).map_err(|_| "Remote attachment data is invalid or exceeds 20 MiB.".into())
+}
+fn run_bounded(command: Command, input: Vec<u8>) -> Result<Vec<u8>, String> {
+    run_bounded_with_limit(command, input, REMOTE_OUTPUT_LIMIT)
+}
+fn run_bounded_with_limit(
+    mut command: Command,
+    input: Vec<u8>,
+    output_limit: usize,
+) -> Result<Vec<u8>, String> {
     let mut child = command
         .spawn()
         .map_err(|_| "Could not start remote attachment storage.")?;
@@ -412,9 +667,7 @@ fn run_bounded(mut command: Command, input: Vec<u8>) -> Result<Vec<u8>, String> 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut b = Vec::new();
-        let _ = stdout
-            .take((REMOTE_OUTPUT_LIMIT + 1) as u64)
-            .read_to_end(&mut b);
+        let _ = stdout.take((output_limit + 1) as u64).read_to_end(&mut b);
         let _ = tx.send(b);
     });
     let deadline = Instant::now() + REMOTE_TIMEOUT;
@@ -439,7 +692,7 @@ fn run_bounded(mut command: Command, input: Vec<u8>) -> Result<Vec<u8>, String> 
     let out = rx
         .recv_timeout(Duration::from_secs(1))
         .map_err(|_| "Remote attachment output did not finish.")?;
-    if out.len() > REMOTE_OUTPUT_LIMIT {
+    if out.len() > output_limit {
         return Err("Remote attachment output was too large.".into());
     }
     if !status.success() {
@@ -506,6 +759,105 @@ mod tests {
             image.preview_data_url.as_deref(),
             Some("data:image/jpeg;base64,/9j/2Q==")
         );
+    }
+    #[test]
+    fn stored_image_read_preserves_the_exact_original_bytes() {
+        let root = root();
+        fs::create_dir(&root).unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\noriginal-image-bytes";
+        let attachment = store(
+            &host(),
+            root.to_str().unwrap(),
+            "original.png",
+            "image/png",
+            &encode_base64(bytes),
+            None,
+            None,
+        )
+        .unwrap();
+        let read = read_stored_image(&host(), root.to_str().unwrap(), &attachment).unwrap();
+        assert_eq!(read.filename, "original.png");
+        assert_eq!(read.mime_type, "image/png");
+        assert_eq!(decode_base64(&read.data_base64).unwrap(), bytes);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn stored_image_read_rejects_non_images_and_mime_mismatches() {
+        let root = root();
+        fs::create_dir(&root).unwrap();
+        let mut attachment = store(
+            &host(),
+            root.to_str().unwrap(),
+            "not-image.png",
+            "image/png",
+            &encode_base64(b"not an image"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(read_stored_image(&host(), root.to_str().unwrap(), &attachment).is_err());
+        fs::write(&attachment.path, b"GIF89aexact-bytes").unwrap();
+        attachment.mime_type = "image/png".into();
+        assert!(read_stored_image(&host(), root.to_str().unwrap(), &attachment).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn stored_image_read_rejects_missing_outside_and_oversize_files() {
+        let root = root();
+        let outside = root.with_extension("outside.png");
+        fs::create_dir(&root).unwrap();
+        let attachment = store(
+            &host(),
+            root.to_str().unwrap(),
+            "original.png",
+            "image/png",
+            &encode_base64(b"\x89PNG\r\n\x1a\noriginal"),
+            None,
+            None,
+        )
+        .unwrap();
+        fs::write(&outside, b"\x89PNG\r\n\x1a\noutside").unwrap();
+        let mut outside_attachment = attachment.clone();
+        outside_attachment.path = outside.to_string_lossy().into_owned();
+        assert!(read_stored_image(&host(), root.to_str().unwrap(), &outside_attachment).is_err());
+        fs::remove_file(&attachment.path).unwrap();
+        assert!(read_stored_image(&host(), root.to_str().unwrap(), &attachment).is_err());
+        fs::write(&attachment.path, b"\x89PNG\r\n\x1a\noriginal").unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&attachment.path)
+            .unwrap()
+            .set_len(MAX_BYTES as u64 + 1)
+            .unwrap();
+        assert!(read_stored_image(&host(), root.to_str().unwrap(), &attachment).is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(outside);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn stored_image_read_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let root = root();
+        let outside = root.with_extension("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let attachment = store(
+            &host(),
+            root.to_str().unwrap(),
+            "original.png",
+            "image/png",
+            &encode_base64(b"\x89PNG\r\n\x1a\noutside"),
+            None,
+            None,
+        )
+        .unwrap();
+        let target = outside.join("outside.png");
+        fs::write(&target, b"\x89PNG\r\n\x1a\noutside").unwrap();
+        fs::remove_file(&attachment.path).unwrap();
+        symlink(&target, &attachment.path).unwrap();
+        assert!(read_stored_image(&host(), root.to_str().unwrap(), &attachment).is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
     #[cfg(unix)]
     #[test]
@@ -611,5 +963,57 @@ mod tests {
         assert!(!outside.join("attachments").exists());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+    #[test]
+    fn embedded_remote_reader_returns_exact_bytes_and_rejects_outside_and_oversize() {
+        let root = root();
+        let outside = root.with_extension("outside.png");
+        fs::create_dir(&root).unwrap();
+        let bytes = b"GIF89aoriginal-image-bytes";
+        let attachment = store(
+            &host(),
+            root.to_str().unwrap(),
+            "original.gif",
+            "image/gif",
+            &encode_base64(bytes),
+            None,
+            None,
+        )
+        .unwrap();
+        let invoke = |path: &str| {
+            let payload = serde_json::json!({"cwd":root,"path":path}).to_string();
+            let mut child = Command::new("python3")
+                .arg("-c")
+                .arg(remote_read_script())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let output = invoke(&attachment.path);
+        assert!(output.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            decode_base64(value["dataBase64"].as_str().unwrap()).unwrap(),
+            bytes
+        );
+        fs::write(&outside, bytes).unwrap();
+        assert!(!invoke(outside.to_str().unwrap()).status.success());
+        OpenOptions::new()
+            .write(true)
+            .open(&attachment.path)
+            .unwrap()
+            .set_len(MAX_BYTES as u64 + 1)
+            .unwrap();
+        assert!(!invoke(&attachment.path).status.success());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(outside);
     }
 }
