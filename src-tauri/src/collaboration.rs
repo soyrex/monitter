@@ -5,7 +5,10 @@
 
 use crate::{
     create_task_in_data,
-    model::{id, now, Agent, Collaboration, CreateTaskInput, Message, RunEvent, Snapshot, Task},
+    model::{
+        finalize_subagent_sessions, id, now, sync_collaboration_subagent_sessions, Agent,
+        Collaboration, CreateTaskInput, Message, RunEvent, Snapshot, Task,
+    },
     AcceptedTurn, Service,
 };
 use serde_json::{json, Value};
@@ -302,6 +305,7 @@ impl Service {
                 updated_at: timestamp,
             };
             data.snapshot.collaborations.push(collaboration.clone());
+            sync_collaboration_subagent_sessions(&mut data.snapshot);
             data.snapshot.events.push(RunEvent {
                 id: id(),
                 task_id: caller_task.into(),
@@ -506,6 +510,7 @@ impl Service {
             snapshot.tasks[task_index].updated_at = now();
             snapshot.collaborations[index].status = "running".into();
             snapshot.collaborations[index].updated_at = now();
+            sync_collaboration_subagent_sessions(snapshot);
             snapshot.events.push(RunEvent {
                 id: id(),
                 task_id: item.to_task_id.clone(),
@@ -533,6 +538,7 @@ impl Service {
         error: Option<&str>,
     ) {
         let finished = now();
+        finalize_subagent_sessions(&mut snapshot.subagent_sessions, task_id, status, finished);
         let matching = snapshot
             .collaborations
             .iter()
@@ -590,9 +596,25 @@ impl Service {
                 created_at: finished,
             });
         }
+        sync_collaboration_subagent_sessions(snapshot);
     }
 
     pub(crate) fn recover_collaborations(snapshot: &mut Snapshot) {
+        let inactive_task_ids = snapshot
+            .tasks
+            .iter()
+            .filter(|task| task.status != "running")
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        let recovered_at = now();
+        for task_id in inactive_task_ids {
+            finalize_subagent_sessions(
+                &mut snapshot.subagent_sessions,
+                &task_id,
+                "interrupted",
+                recovered_at,
+            );
+        }
         for item in &mut snapshot.collaborations {
             if item.status == "running" {
                 item.status = "interrupted".into();
@@ -600,6 +622,7 @@ impl Service {
                 item.updated_at = now();
             }
         }
+        sync_collaboration_subagent_sessions(snapshot);
     }
 
     pub(crate) fn cancel_collaboration_children(&self, task_id: &str) {
@@ -627,6 +650,7 @@ impl Service {
                     }
                 }
             }
+            sync_collaboration_subagent_sessions(snapshot);
             Ok(())
         });
     }

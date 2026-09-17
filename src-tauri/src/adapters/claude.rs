@@ -272,6 +272,7 @@ mod tests {
             sandbox: "read-only".into(),
             project_id: None,
             acp: None,
+            archived_agent_name: None,
         }
     }
 

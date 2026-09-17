@@ -218,6 +218,8 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         projects: snapshot.projects.clone(),
         settings: snapshot.settings.clone(),
         collaborations: snapshot.collaborations.clone(),
+        subagent_sessions: snapshot.subagent_sessions.clone(),
+        subagent_transcripts: snapshot.subagent_transcripts.clone(),
         queued_messages: snapshot.queued_messages.clone(),
         approval_requests: snapshot.approval_requests.clone(),
         approval_rules: snapshot.approval_rules.clone(),

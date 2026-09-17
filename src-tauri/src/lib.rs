@@ -344,6 +344,32 @@ pub(crate) struct Service {
 /// fabricate a host when nothing is configured, or records that the saved
 /// state contains multiple internal agents so a later read can surface the
 /// configuration error without silently picking one.
+/// User choice presented by `delete_agent` for what should happen to the
+/// removed agent's chats. The strings are stable wire values shared with
+/// the frontend via `CONTRACT.md`; new options must extend both the
+/// Tauri command, the LAN invoke handler, and the bridge wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteAgentChatHandling {
+    /// Keep every chat owned by the removed agent under `Archived chats`,
+    /// stamped with the removed agent's display name and the LLM it used.
+    Archive,
+    /// Permanently remove every chat owned by the removed agent, including
+    /// any verified native session files.
+    Delete,
+}
+
+impl DeleteAgentChatHandling {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "archive" => Ok(Self::Archive),
+            "delete" => Ok(Self::Delete),
+            other => Err(format!(
+                "Unknown chat handling mode '{other}'. Use 'archive' or 'delete'."
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum InternalAdminState {
     Created,
@@ -651,6 +677,7 @@ impl Service {
                 acp: (admin.provider == "acp")
                     .then(|| admin.acp.clone())
                     .flatten(),
+                archived_agent_name: None,
             };
             data.task_hosts.insert(task.id.clone(), host);
             data.snapshot.tasks.push(task.clone());
@@ -818,25 +845,261 @@ impl Service {
 
     /// Centralized agent deletion. Refuses to remove the resident Monitter
     /// Admin so the bootstrap migration cannot be undone by accident.
-    fn delete_agent(&self, id: &str) -> Result<Snapshot, String> {
-        self.mutate(None, |snapshot| {
-            if snapshot.tasks.iter().any(|task| task.agent_id == id) {
-                return Err("Agent has tasks and cannot be deleted.".into());
-            }
-            let target = snapshot
+    ///
+    /// `chat_handling` decides what happens to the removed agent's chats:
+    /// `Archive` keeps the chat history under `Archived chats` and stamps
+    /// each task with the removed agent's display name (so the LLM and the
+    /// agent remain identifiable after the agent record is gone), while
+    /// `Delete` permanently removes the chats including any verified native
+    /// session files. Running tasks are cancelled in either mode.
+    fn delete_agent(
+        &self,
+        id: &str,
+        chat_handling: DeleteAgentChatHandling,
+    ) -> Result<Snapshot, String> {
+        // Pass 1: re-validate the agent and cancel any owned tasks that are
+        // currently running. We deliberately do not call `self.cancel` here:
+        // that helper is reserved for user-initiated Stop and writes a
+        // "You cancelled this run." message that is misleading once the
+        // owning agent is gone. The inline helper mirrors the same cleanup
+        // (interrupt the task, expire approvals, fail queued follow-ups,
+        // stop the resident run, cancel collaboration children) but with a
+        // clearer, agent-removal-specific system message and event title.
+        let (_running_task_ids, running_controls) = self.mutate_data(None, |data| {
+            let agent_index = data
+                .snapshot
                 .agents
                 .iter()
-                .find(|agent| agent.id == id)
+                .position(|agent| agent.id == id)
                 .ok_or_else(|| "Agent was not found.".to_string())?;
-            if target.internal {
+            if data.snapshot.agents[agent_index].internal {
                 return Err("The Monitter Admin agent cannot be deleted.".into());
             }
-            snapshot.agents.retain(|agent| agent.id != id);
+            let runs = self
+                .runs
+                .lock()
+                .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+            let running: Vec<(String, Option<Arc<runner::RunControl>>)> = data
+                .snapshot
+                .tasks
+                .iter()
+                .filter(|task| task.agent_id == id && task.status == "running")
+                .map(|task| {
+                    let control = runs.tasks.get(&task.id).cloned();
+                    (task.id.clone(), control)
+                })
+                .collect();
+            drop(runs);
+            let ids = running.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            Ok((ids, running))
+        })?;
+        for (task_id, control) in running_controls.into_iter() {
+            if let Some(control) = control.as_ref() {
+                control.reserve_cancellation();
+            }
+            self.cancel_task_for_owner_removal(&task_id, control)?;
+        }
+
+        // Pass 2: archive (or remove, in delete mode) every task owned by
+        // the agent, capture the agent display name so the LLM and the
+        // human-readable label survive, fail queued follow-ups, expire
+        // pending approvals, cancel pending collaborations, drop the agent
+        // from channel membership, and finally remove the agent itself.
+        let affected_task_ids: Vec<String> = self.mutate(None, |snapshot| {
+            let agent_index = snapshot
+                .agents
+                .iter()
+                .position(|agent| agent.id == id)
+                .ok_or_else(|| "Agent was not found.".to_string())?;
+            if snapshot.agents[agent_index].internal {
+                return Err("The Monitter Admin agent cannot be deleted.".into());
+            }
+            let archived_agent_name = snapshot.agents[agent_index].name.clone();
+            let archived_at = now();
+            let affected: Vec<String> = snapshot
+                .tasks
+                .iter()
+                .filter(|task| task.agent_id == id)
+                .map(|task| task.id.clone())
+                .collect();
+            let affected_set: HashSet<String> = affected.iter().cloned().collect();
+            for task in snapshot
+                .tasks
+                .iter_mut()
+                .filter(|task| task.agent_id == id)
+            {
+                task.archived = true;
+                task.archived_agent_name = Some(archived_agent_name.clone());
+                if task.status == "running" {
+                    task.status = "interrupted".into();
+                }
+                task.updated_at = archived_at;
+            }
+            for message in snapshot.queued_messages.iter_mut() {
+                if affected_set.contains(&message.task_id)
+                    && matches!(message.status.as_str(), "queued" | "sending")
+                {
+                    message.status = "error".into();
+                    message.error = Some("Owner agent removed.".into());
+                }
+            }
+            for request in snapshot.approval_requests.iter_mut() {
+                if affected_set.contains(&request.task_id) && request.status == "pending" {
+                    request.status = "expired".into();
+                    request.resolved_at = Some(archived_at);
+                }
+            }
+            for collab in snapshot.collaborations.iter_mut() {
+                if (affected_set.contains(&collab.from_task_id)
+                    || affected_set.contains(&collab.to_task_id))
+                    && matches!(collab.status.as_str(), "queued" | "running")
+                {
+                    collab.status = "interrupted".into();
+                    collab.updated_at = archived_at;
+                    if collab.result.is_none() {
+                        collab.result = Some("Owner agent removed.".into());
+                    }
+                }
+            }
             for channel in &mut snapshot.channels {
                 channel.agent_ids.retain(|member| member != id);
             }
-            Ok(snapshot.clone())
-        })
+            snapshot.agents.remove(agent_index);
+            Ok(affected)
+        })?;
+
+        // Pass 3 (delete mode only): attempt native session cleanup outside
+        // the data lock, then drop every trace of the affected tasks from
+        // the snapshot and the per-task host store. File deletion is
+        // best-effort; a failed verification never blocks the in-memory
+        // cleanup so the chat is still removed from Monitter.
+        if chat_handling == DeleteAgentChatHandling::Delete {
+            let snapshot = self.snapshot()?;
+            let affected_for_io: Vec<String> = affected_task_ids.clone();
+            for task_id in &affected_for_io {
+                if let Ok((task, host)) = self.task_and_host(task_id) {
+                    if task.archived && task.status != "running" {
+                        let _ = deletion::remove_verified(&snapshot, &task, &host);
+                    }
+                }
+            }
+            self.mutate_data(None, |data| {
+                let affected_set: HashSet<String> =
+                    affected_task_ids.iter().cloned().collect();
+                data.snapshot.tasks.retain(|t| !affected_set.contains(&t.id));
+                data.snapshot
+                    .messages
+                    .retain(|m| !affected_set.contains(&m.task_id));
+                data.snapshot
+                    .events
+                    .retain(|e| !affected_set.contains(&e.task_id));
+                data.snapshot
+                    .subagent_sessions
+                    .retain(|s| !affected_set.contains(&s.parent_task_id));
+                data.snapshot
+                    .queued_messages
+                    .retain(|m| !affected_set.contains(&m.task_id));
+                data.snapshot
+                    .approval_requests
+                    .retain(|r| !affected_set.contains(&r.task_id));
+                data.snapshot.collaborations.retain(|c| {
+                    !affected_set.contains(&c.from_task_id)
+                        && !affected_set.contains(&c.to_task_id)
+                });
+                for task_id in &affected_task_ids {
+                    let _ = self.store.remove_task_usage(task_id);
+                    data.task_hosts.remove(task_id);
+                }
+                Ok(())
+            })?;
+        }
+
+        self.snapshot()
+    }
+
+    /// Helper used by `delete_agent` to stop a resident task that the
+    /// owning agent is about to leave behind. Mirrors `cancel` but uses an
+    /// agent-removal-specific message so the diagnostic timeline does not
+    /// lie about who stopped the run.
+    fn cancel_task_for_owner_removal(
+        &self,
+        task_id: &str,
+        control: Option<Arc<runner::RunControl>>,
+    ) -> Result<(), String> {
+        let (expired_approvals, cancelled_control) = self.mutate_data(Some(task_id.into()), |data| {
+            data.accepted_turns.remove(task_id);
+            let state = &mut data.snapshot;
+            let ix = state
+                .tasks
+                .iter()
+                .position(|task| task.id == task_id)
+                .ok_or_else(|| "Task was not found.".to_string())?;
+            // Pass 1 already filtered for `running`; defend against a race
+            // where a recovery completed between the snapshot and here.
+            if state.tasks[ix].status != "running" {
+                return Ok((Vec::new(), None));
+            }
+            let cancelled_at = now();
+            state.tasks[ix].status = "interrupted".into();
+            state.tasks[ix].updated_at = cancelled_at;
+            for message in state.messages.iter_mut() {
+                if message.task_id == task_id
+                    && message.stream_status.as_deref() == Some("streaming")
+                {
+                    message.stream_status = Some("interrupted".into());
+                }
+            }
+            state.messages.push(Message {
+                stream_status: None,
+                phase: None,
+                id: id(),
+                task_id: task_id.into(),
+                role: "system".into(),
+                text: "The owning agent was removed while this chat was running.".into(),
+                created_at: cancelled_at,
+                sender_agent_id: None,
+                collaboration_id: None,
+                attachments: vec![],
+            });
+            state.events.push(RunEvent {
+                id: id(),
+                task_id: task_id.into(),
+                kind: "status".into(),
+                title: "The owning agent was removed while this chat was running.".into(),
+                detail: String::new(),
+                created_at: cancelled_at,
+            });
+            for message in &mut state.queued_messages {
+                if message.task_id == task_id && message.status == "queued" {
+                    message.status = "error".into();
+                    message.error = Some("Owner agent removed.".into());
+                }
+            }
+            let resolved_at = now();
+            let expired = state
+                .approval_requests
+                .iter_mut()
+                .filter(|request| request.task_id == task_id && request.status == "pending")
+                .map(|request| {
+                    request.status = "expired".into();
+                    request.resolved_at = Some(resolved_at);
+                    request.id.clone()
+                })
+                .collect::<Vec<_>>();
+            Ok((expired, control))
+        })?;
+        for approval_id in expired_approvals {
+            self.notify_input_waiter(&approval_id, Err("Request cancelled.".into()));
+            self.notify_approval_waiters(
+                &approval_id,
+                Err("Approval request expired because its task was cancelled.".into()),
+            );
+        }
+        if let Some(control) = cancelled_control {
+            control.cancel();
+        }
+        self.cancel_collaboration_children(task_id);
+        Ok(())
     }
 
     fn snapshot(&self) -> Result<Snapshot, String> {
@@ -1120,7 +1383,14 @@ impl Service {
             }
             "delete_agent" => {
                 let id: String = arg(&args, "id")?;
-                self.delete_agent(&id).and_then(snapshot_value)
+                let handling: DeleteAgentChatHandling = match args.get("chatHandling") {
+                    Some(value) => match value.as_str() {
+                        Some(text) => DeleteAgentChatHandling::parse(text)?,
+                        None => return Err("chatHandling must be a string.".into()),
+                    },
+                    None => DeleteAgentChatHandling::Archive,
+                };
+                self.delete_agent(&id, handling).and_then(snapshot_value)
             }
             "create_task" => value(self.create_task(arg(&args, "input")?)?),
             "autoname" => value(self.autoname(arg(&args, "target")?)?),
@@ -1329,6 +1599,18 @@ impl Service {
                     Ok(serde_json::Value::Null)
                 } else {
                     value(goals::read_goal(&host, &task)?)
+                }
+            }
+            "get_subagent_transcript" => {
+                match subagent_transcript_target(
+                    self,
+                    &arg::<String>(&args, "taskId")?,
+                    &arg::<String>(&args, "subagentId")?,
+                )? {
+                    SubagentTranscriptTarget::CodexThread(host, thread_id) => {
+                        value(goals::read_subagent_transcript(&host, &thread_id)?)
+                    }
+                    SubagentTranscriptTarget::Inline(entries) => value(entries),
                 }
             }
             "clear_task_goal" => {
@@ -2865,6 +3147,16 @@ impl Service {
             event,
             failed: _,
         } = parsed;
+        let subagent_updates = event
+            .as_ref()
+            .filter(|(kind, _, _)| kind == "subagent")
+            .and_then(|(_, _, detail)| serde_json::from_str(detail).ok())
+            .map(|value: serde_json::Value| {
+                let mut updates = crate::runner::parse_codex_subagent_updates(&value, task_id);
+                updates.extend(crate::runner::parse_acp_subagent_updates(&value, task_id));
+                updates
+            })
+            .unwrap_or_default();
         // The resident Monitter Admin lane never persists prompt/reply text
         // or activity, but it must retain its native session before a later
         // idle retirement can restore the same transport.
@@ -2937,6 +3229,14 @@ impl Service {
                 }
             }
             state.tasks[ix].updated_at = now();
+            let observed_at = now();
+            for update in subagent_updates {
+                crate::model::upsert_subagent_session(
+                    &mut state.subagent_sessions,
+                    update,
+                    observed_at,
+                );
+            }
             if let Some((kind, title, detail)) = event {
                 state.events.push(RunEvent {
                     id: id(),
@@ -5654,8 +5954,16 @@ fn validate_agent_avatar(avatar: Option<&str>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_agent(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
-    state.0.delete_agent(&id)
+fn delete_agent(
+    state: State<'_, AppState>,
+    id: String,
+    chat_handling: Option<String>,
+) -> Result<Snapshot, String> {
+    let handling = match chat_handling.as_deref() {
+        Some(value) => DeleteAgentChatHandling::parse(value)?,
+        None => DeleteAgentChatHandling::Archive,
+    };
+    state.0.delete_agent(&id, handling)
 }
 
 #[tauri::command]
@@ -5943,6 +6251,9 @@ fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, Strin
             .messages
             .retain(|message| message.task_id != id);
         data.snapshot.events.retain(|event| event.task_id != id);
+        data.snapshot
+            .subagent_sessions
+            .retain(|session| session.parent_task_id != id);
         state.0.store.remove_task_usage(&id)?;
         data.snapshot
             .queued_messages
@@ -6091,6 +6402,9 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     if !matches!(settings.theme.as_str(), "light" | "dark" | "system") {
         return Err("Theme must be light, dark, or system.".into());
     }
+    if !matches!(settings.window_surface.as_str(), "opaque" | "translucent" | "glass") {
+        return Err("Window surface must be opaque, translucent, or glass.".into());
+    }
     if settings.accent.trim().is_empty() {
         return Err("Accent colour is required.".into());
     }
@@ -6101,6 +6415,12 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
         || !(0.1..=0.9).contains(&settings.inactive_pane_opacity)
     {
         return Err("Inactive pane opacity must be between 10% and 90%.".into());
+    }
+    if settings.window_transparency > 70 {
+        return Err("Window transparency must be between 0% and 70%.".into());
+    }
+    if !matches!(settings.window_surface.as_str(), "opaque" | "translucent" | "glass") {
+        return Err("Window surface must be opaque, translucent, or glass.".into());
     }
     if !matches!(
         settings.sidebar_view.as_str(),
@@ -6695,6 +7015,86 @@ async fn get_task_goal(
         .map_err(|error| format!("Goal lookup worker failed: {error}"))?
 }
 
+enum SubagentTranscriptTarget {
+    /// Codex has a separately re-queryable native thread: read it live.
+    CodexThread(Host, String),
+    /// ACP has no such thread; its transcript was captured inline as it
+    /// streamed and is returned as-is.
+    Inline(Vec<SubagentTranscriptEntry>),
+}
+
+fn subagent_transcript_target(
+    service: &Service,
+    task_id: &str,
+    subagent_id: &str,
+) -> Result<SubagentTranscriptTarget, String> {
+    let snapshot = service.snapshot()?;
+    let mut reachable_tasks = HashSet::from([task_id.to_string()]);
+    let mut selected = None;
+    loop {
+        let mut changed = false;
+        for session in &snapshot.subagent_sessions {
+            if !reachable_tasks.contains(&session.parent_task_id) {
+                continue;
+            }
+            if session.id == subagent_id {
+                selected = Some(session.clone());
+            }
+            if let Some(collaboration_id) = session.collaboration_id.as_deref() {
+                if let Some(collaboration) = snapshot
+                    .collaborations
+                    .iter()
+                    .find(|value| value.id == collaboration_id)
+                {
+                    changed |= reachable_tasks.insert(collaboration.to_task_id.clone());
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let session = selected.ok_or_else(|| "Subagent was not found for this task.".to_string())?;
+    match session.source.as_str() {
+        "codex" => {
+            let thread_id = session
+                .agent_thread_id
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    "This Codex subagent does not have a readable thread yet.".to_string()
+                })?;
+            let (_, host) = service.task_and_host(&session.parent_task_id)?;
+            Ok(SubagentTranscriptTarget::CodexThread(host, thread_id))
+        }
+        "acp" => Ok(SubagentTranscriptTarget::Inline(
+            snapshot
+                .subagent_transcripts
+                .get(&session.id)
+                .cloned()
+                .unwrap_or_default(),
+        )),
+        _ => Err("This subagent transcript is stored in its Monitter task.".into()),
+    }
+}
+
+#[tauri::command]
+async fn get_subagent_transcript(
+    state: State<'_, AppState>,
+    task_id: String,
+    subagent_id: String,
+) -> Result<Vec<SubagentTranscriptEntry>, String> {
+    match subagent_transcript_target(&state.0, &task_id, &subagent_id)? {
+        SubagentTranscriptTarget::CodexThread(host, thread_id) => {
+            tauri::async_runtime::spawn_blocking(move || {
+                goals::read_subagent_transcript(&host, &thread_id)
+            })
+            .await
+            .map_err(|error| format!("Subagent transcript worker failed: {error}"))?
+        }
+        SubagentTranscriptTarget::Inline(entries) => Ok(entries),
+    }
+}
+
 #[tauri::command]
 async fn clear_task_goal(state: State<'_, AppState>, task_id: String) -> Result<(), String> {
     let (task, host) = state.0.task_and_host(&task_id)?;
@@ -7139,6 +7539,7 @@ pub fn run() {
             set_task_model_settings,
             set_task_sandbox,
             get_task_goal,
+            get_subagent_transcript,
             clear_task_goal,
             get_task_git_status,
             wait_for_task_git_marker,
@@ -9723,6 +10124,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     sandbox: "read-only".into(),
                     project_id: None,
                     acp: None,
+                    archived_agent_name: None,
                 });
                 data.snapshot.projects.push(Project {
                     id: "project".into(),
