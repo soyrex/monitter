@@ -58,10 +58,15 @@ mod menu;
 pub mod model;
 mod models;
 mod process_metrics;
+pub mod profile_init;
 mod runner;
 mod runtime_gc;
 #[cfg(test)]
 mod runtime_gc_tests;
+#[cfg(test)]
+mod responsiveness_tests;
+#[cfg(test)]
+mod service_latency_benchmark;
 mod shared_skills;
 mod skill_install;
 mod store;
@@ -115,7 +120,7 @@ struct ServiceData {
     // later owner after cancellation or another state transition.
     accepted_turns: HashMap<String, AcceptedTurn>,
     // Runtime-only revision counter. It advances only after a durable store
-    // write succeeds while this same data lock is held.
+    // write succeeds, before publishing the new immutable state.
     revision: u64,
 }
 
@@ -294,7 +299,10 @@ pub(crate) struct Service {
     store: store::Store,
     extensions: extensions::ExtensionStore,
     extension_writes: Mutex<()>,
-    data: Mutex<ServiceData>,
+    // Serialize mutations independently from readers. Readers see the last
+    // durable state while a new candidate is being encoded and synced.
+    state_writes: Mutex<()>,
+    data: Mutex<Arc<ServiceData>>,
     runs: Mutex<RunRegistry>,
     // Serializes only the admin accept/reserve/register/dispatch window.
     // The caller drops this before waiting for its reply.
@@ -311,6 +319,9 @@ pub(crate) struct Service {
     idle_collection: Mutex<()>,
     idle_retirement_failures: Mutex<HashSet<(String, usize)>>,
     native_escape_shield: std::sync::atomic::AtomicBool,
+    // AppKit's key monitor must never lock or clone transcript state. 0 is
+    // unknown/disabled, 1 standard, 2 Vim; updated only after durable commit.
+    native_shortcut_mode: std::sync::atomic::AtomicU8,
     #[cfg(test)]
     runtime_dir: PathBuf,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
@@ -504,19 +515,21 @@ impl Service {
         if internal_admin_state == InternalAdminState::Created {
             store.save(&snapshot, &task_hosts, &attachments)?;
         }
+        let shortcut_mode = native_shortcut_mode_code(&snapshot.settings.shortcut_mode);
         let service = Arc::new(Self {
             app,
             store,
             extensions,
             extension_writes: Mutex::new(()),
-            data: Mutex::new(ServiceData {
+            state_writes: Mutex::new(()),
+            data: Mutex::new(Arc::new(ServiceData {
                 snapshot,
                 task_hosts,
                 attachments,
                 blocked_channel_deliveries: HashSet::new(),
                 accepted_turns: HashMap::new(),
                 revision: 0,
-            }),
+            })),
             runs: Mutex::new(RunRegistry::default()),
             admin_dispatch: Mutex::new(()),
             pending_codex_images: Mutex::new(HashMap::new()),
@@ -529,6 +542,7 @@ impl Service {
             idle_collection: Mutex::new(()),
             idle_retirement_failures: Mutex::new(HashSet::new()),
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
+            native_shortcut_mode: std::sync::atomic::AtomicU8::new(shortcut_mode),
             #[cfg(test)]
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
@@ -839,11 +853,15 @@ impl Service {
         })
     }
 
-    fn snapshot(&self) -> Result<Snapshot, String> {
+    fn committed_data(&self) -> Result<Arc<ServiceData>, String> {
         self.data
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())
-            .map(|data| data.snapshot.clone())
+            .map(|data| Arc::clone(&data))
+    }
+
+    fn snapshot(&self) -> Result<Snapshot, String> {
+        Ok(self.committed_data()?.snapshot.clone())
     }
 
     /// This private configuration is intentionally separate from Snapshot so
@@ -903,10 +921,7 @@ impl Service {
     }
 
     fn ui_snapshot(&self, revision: Option<&str>) -> Result<lan_sync::UiSnapshot, String> {
-        let data = self
-            .data
-            .lock()
-            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let data = self.committed_data()?;
         let current = format!("{}:{}", self.revision_epoch, data.revision);
         if revision == Some(current.as_str()) {
             return Ok(lan_sync::UiSnapshot {
@@ -926,10 +941,7 @@ impl Service {
         before: Option<i64>,
         limit: Option<u32>,
     ) -> Result<lan_sync::TaskEventsPage, String> {
-        let data = self
-            .data
-            .lock()
-            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let data = self.committed_data()?;
         if !data.snapshot.tasks.iter().any(|task| task.id == task_id) {
             return Err("Task was not found.".into());
         }
@@ -948,10 +960,7 @@ impl Service {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> Result<lan_sync::EventDetailChunk, String> {
-        let data = self
-            .data
-            .lock()
-            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let data = self.committed_data()?;
         lan_sync::event_detail_chunk(&data.snapshot, task_id, event_id, offset, limit)
     }
 
@@ -1145,15 +1154,15 @@ impl Service {
             "delete_task" => {
                 let id: String = arg(&args, "id")?;
                 let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(delete_task(app.state(), id)?)
+                snapshot_value(tauri::async_runtime::block_on(delete_task(app.state(), id))?)
             }
             "delete_archived_task" => {
                 let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(delete_archived_task(
+                snapshot_value(tauri::async_runtime::block_on(delete_archived_task(
                     app.state(),
                     arg(&args, "taskId")?,
                     arg(&args, "removeNativeFiles")?,
-                )?)
+                ))?)
             }
             "set_task_archived" => snapshot_value(
                 self.set_task_archived(&arg::<String>(&args, "taskId")?, arg(&args, "archived")?)?,
@@ -1213,7 +1222,7 @@ impl Service {
             "save_settings" => {
                 let settings: Settings = arg(&args, "settings")?;
                 let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(save_settings(app.state(), settings)?)
+                snapshot_value(tauri::async_runtime::block_on(save_settings(app.state(), settings))?)
             }
             "save_channel" => snapshot_value(self.save_channel(arg(&args, "channel")?)?),
             "set_channel_membership" => snapshot_value(self.set_channel_membership(
@@ -1233,7 +1242,7 @@ impl Service {
             ),
             "send_channel_message" => {
                 let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(send_channel_message(
+                snapshot_value(tauri::async_runtime::block_on(send_channel_message(
                     app.state(),
                     arg(&args, "channelId")?,
                     arg(&args, "text")?,
@@ -1243,7 +1252,7 @@ impl Service {
                         .map(serde_json::from_value)
                         .transpose()
                         .map_err(|_| "Invalid attachmentIds.")?,
-                )?)
+                ))?)
             }
             "send_channel_message_fast" => {
                 let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
@@ -2168,10 +2177,7 @@ impl Service {
     }
 
     fn set_native_escape_shield(&self, enabled: bool) {
-        let vim_mode = self
-            .snapshot()
-            .map(|snapshot| snapshot.settings.shortcut_mode == menu::VIM_SHORTCUT_MODE)
-            .unwrap_or(false);
+        let vim_mode = self.native_shortcut_mode.load(std::sync::atomic::Ordering::Acquire) == 2;
         self.native_escape_shield
             .store(enabled && vim_mode, std::sync::atomic::Ordering::Release);
     }
@@ -2181,25 +2187,29 @@ impl Service {
         task_id: Option<String>,
         f: impl FnOnce(&mut ServiceData) -> Result<R, String>,
     ) -> Result<R, String> {
-        let (output, changed) = {
-            let mut data = self
-                .data
-                .lock()
-                .map_err(|_| "Monitter state lock failed.".to_string())?;
-            let mut candidate = data.clone();
-            let output = f(&mut candidate)?;
-            let changed = candidate != *data;
-            if changed {
-                self.store.save(
-                    &candidate.snapshot,
-                    &candidate.task_hosts,
-                    &candidate.attachments,
-                )?;
-                candidate.revision = data.revision.saturating_add(1);
-                *data = candidate;
+        let writer = self.state_writes.lock()
+            .map_err(|_| "Monitter state writer lock failed.".to_string())?;
+        let previous = self.committed_data()?;
+        let mut candidate = previous.as_ref().clone();
+        let output = f(&mut candidate)?;
+        // Arc<RunEvent>'s Eq fast path recognizes shared allocations. Keep
+        // the derived comparison so newly added state fields cannot be missed.
+        let changed = candidate != *previous;
+        if changed {
+            self.store.save_update(
+                (&previous.snapshot, &previous.task_hosts, &previous.attachments),
+                (&candidate.snapshot, &candidate.task_hosts, &candidate.attachments),
+            )?;
+            candidate.revision = previous.revision.saturating_add(1);
+            let shortcut_mode = native_shortcut_mode_code(&candidate.snapshot.settings.shortcut_mode);
+            *self.data.lock()
+                .map_err(|_| "Monitter state lock failed.".to_string())? = Arc::new(candidate);
+            self.native_shortcut_mode.store(shortcut_mode, std::sync::atomic::Ordering::Release);
+            if shortcut_mode != 2 {
+                self.native_escape_shield.store(false, std::sync::atomic::Ordering::Release);
             }
-            (output, changed)
-        };
+        }
+        drop(writer);
         if changed {
             self.changed(task_id);
         }
@@ -2312,6 +2322,8 @@ impl Service {
     }
 
     fn reserve_run(&self, task_id: &str) -> Result<Arc<runner::RunControl>, String> {
+        let _writer = self.state_writes.lock()
+            .map_err(|_| "Monitter state writer lock failed.".to_string())?;
         let data = self
             .data
             .lock()
@@ -2456,14 +2468,14 @@ impl Service {
             }
             return;
         }
-        // Lock order matches reserve_run (data, then runs). Holding both makes
-        // pointer ownership and the durable terminal transition one operation:
-        // an old resident writer cannot fail over a newer run for this task.
+        // The writer gate prevents a replacement run from being reserved.
+        // Keep the exact run owner pinned across persistence, but never hold
+        // the committed-data mutex during disk I/O. Release runs before
+        // acquiring data again so the data -> runs lock order cannot invert.
         let changed = (|| -> Result<bool, String> {
-            let mut data = self
-                .data
-                .lock()
-                .map_err(|_| "Monitter state lock failed.".to_string())?;
+            let _writer = self.state_writes.lock()
+                .map_err(|_| "Monitter state writer lock failed.".to_string())?;
+            let data = self.committed_data()?;
             let mut runs = self
                 .runs
                 .lock()
@@ -2476,7 +2488,7 @@ impl Service {
             {
                 return Ok(false);
             }
-            let mut candidate = data.clone();
+            let mut candidate = data.as_ref().clone();
             let task = candidate
                 .snapshot
                 .tasks
@@ -2488,23 +2500,24 @@ impl Service {
             }
             task.status = "error".into();
             task.updated_at = now();
-            candidate.snapshot.events.push(RunEvent {
+            candidate.snapshot.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: task_id.into(),
                 kind: "error".into(),
                 title: "Message delivery failed".into(),
-                detail: error,
+                detail: error.into(),
                 created_at: now(),
-            });
-            self.store.save(
-                &candidate.snapshot,
-                &candidate.task_hosts,
-                &candidate.attachments,
+            }));
+            self.store.save_update(
+                (&data.snapshot, &data.task_hosts, &data.attachments),
+                (&candidate.snapshot, &candidate.task_hosts, &candidate.attachments),
             )?;
             candidate.revision = data.revision.saturating_add(1);
-            *data = candidate;
             runs.tasks.remove(task_id);
             runs.native_sessions.retain(|_, owner| owner != task_id);
+            drop(runs);
+            *self.data.lock()
+                .map_err(|_| "Monitter state lock failed.".to_string())? = Arc::new(candidate);
             Ok(true)
         })()
         .unwrap_or(false);
@@ -2532,14 +2545,14 @@ impl Service {
                 task.updated_at = now();
             }
             if stop_resident {
-                snapshot.events.push(RunEvent {
+                snapshot.events.push(Arc::new(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "status".into(),
                     title: "Resident Claude session stopped for archive".into(),
-                    detail: String::new(),
+                    detail: String::new().into(),
                     created_at: now(),
-                });
+                }));
             }
             if archived {
                 for message in &mut snapshot.queued_messages {
@@ -2726,6 +2739,8 @@ impl Service {
         let release_deadline = Instant::now() + runtime_gc::RUNTIME_RELEASE_TIMEOUT;
         let existing = loop {
             let current = {
+                let _writer = self.state_writes.lock()
+                    .map_err(|_| "Monitter state writer lock failed.".to_string())?;
                 let data = self
                     .data
                     .lock()
@@ -2846,14 +2861,14 @@ impl Service {
 
     pub(crate) fn record(&self, task: &str, kind: &str, title: &str, detail: String) {
         let _ = self.mutate(Some(task.into()), |state| {
-            state.events.push(RunEvent {
+            state.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: task.into(),
                 kind: kind.into(),
                 title: title.into(),
-                detail,
+                detail: detail.into(),
                 created_at: now(),
-            });
+            }));
             Ok(())
         });
     }
@@ -2938,14 +2953,14 @@ impl Service {
             }
             state.tasks[ix].updated_at = now();
             if let Some((kind, title, detail)) = event {
-                state.events.push(RunEvent {
+                state.events.push(Arc::new(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
                     kind,
                     title,
-                    detail,
+                    detail: detail.into(),
                     created_at: now(),
-                });
+                }));
             }
             if let Some(text) = assistant.filter(|text| !text.trim().is_empty()) {
                 state.messages.push(Message {
@@ -3176,14 +3191,14 @@ impl Service {
             }
             task.cwd = directory.into();
             task.updated_at = now();
-            data.snapshot.events.push(RunEvent {
+            data.snapshot.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: task_id.into(),
                 kind: "status".into(),
                 title: "Restored OpenCode session folder".into(),
                 detail: directory.into(),
                 created_at: now(),
-            });
+            }));
             Ok(task.clone())
         })
     }
@@ -3218,14 +3233,14 @@ impl Service {
                     (final_status, was_running, provider)
                 };
                 if let Some(detail) = error {
-                    data.snapshot.events.push(RunEvent {
+                    data.snapshot.events.push(Arc::new(RunEvent {
                         id: id(),
                         task_id: task_id.into(),
                         kind: "error".into(),
                         title: format!("{} process failed", provider_name(&final_status.2)),
-                        detail,
+                        detail: detail.into(),
                         created_at: now(),
-                    });
+                    }));
                 }
                 let resolved_at = now();
                 let expired_approvals = data
@@ -3537,6 +3552,8 @@ impl Service {
             Err(error) => return self.fail_accepted(&task_id, &accepted.receipt, error),
         };
         let claimed = (|| -> Result<(Arc<runner::RunControl>, Task, bool), String> {
+            let _writer = self.state_writes.lock()
+                .map_err(|_| "Monitter state writer lock failed.".to_string())?;
             let data = self
                 .data
                 .lock()
@@ -3690,14 +3707,14 @@ impl Service {
                         request.id.clone()
                     })
                     .collect::<Vec<_>>();
-                data.snapshot.events.push(RunEvent {
+                data.snapshot.events.push(Arc::new(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "error".into(),
                     title: "Accepted message could not start".into(),
-                    detail: error,
+                    detail: error.into(),
                     created_at: now(),
-                });
+                }));
                 Ok(expired)
             })
             .unwrap_or_default();
@@ -3766,14 +3783,14 @@ impl Service {
                         request.id.clone()
                     })
                     .collect::<Vec<_>>();
-                data.snapshot.events.push(RunEvent {
+                data.snapshot.events.push(Arc::new(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "error".into(),
                     title: "Accepted message could not start".into(),
-                    detail: error,
+                    detail: error.into(),
                     created_at: now(),
-                });
+                }));
                 // Fence the exact failed owner while data -> runs are held.
                 // Process and pipe teardown waits until persistence and
                 // approval waiter notifications have completed.
@@ -3832,14 +3849,14 @@ impl Service {
                 };
                 message.status = "queued".into();
                 message.error = None;
-                snapshot.events.push(RunEvent {
+                snapshot.events.push(Arc::new(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "status".into(),
                     title: "Codex could not steer; message queued".into(),
                     detail: detail.into(),
                     created_at: now(),
-                });
+                }));
                 Ok(snapshot
                     .tasks
                     .iter()
@@ -4233,16 +4250,16 @@ impl Service {
                     collaboration_id: None,
                     attachments: vec![],
                 });
-                state.events.push(RunEvent {
+                state.events.push(Arc::new(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "status".into(),
                     // This is a durable user decision, not fabricated agent text.
                     // It remains available in the diagnostic timeline.
                     title: "You cancelled this run.".into(),
-                    detail: String::new(),
+                    detail: String::new().into(),
                     created_at: cancelled_at,
-                });
+                }));
                 for message in &mut state.queued_messages {
                     if message.task_id == task_id && message.status == "queued" {
                         message.status = "error".into();
@@ -5221,13 +5238,18 @@ fn append_attachment_paths(prompt: String, attachments: &[attachments::Attachmen
 }
 
 #[tauri::command]
-fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
-    state.0.snapshot()
+async fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.snapshot())
+        .await
+        .map_err(|error| format!("Snapshot worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn get_process_metrics() -> Result<process_metrics::ProcessMetricsSample, String> {
-    process_metrics::sample()
+async fn get_process_metrics() -> Result<process_metrics::ProcessMetricsSample, String> {
+    tauri::async_runtime::spawn_blocking(process_metrics::sample)
+        .await
+        .map_err(|error| format!("Process metrics worker failed: {error}"))?
 }
 
 /// Native desktop only. This command is deliberately absent from the LAN
@@ -5354,8 +5376,12 @@ async fn resolve_input(
 }
 
 #[tauri::command]
-fn read_attachment_file(source_path: String) -> Result<attachments::ReadAttachmentFile, String> {
-    attachments::read_attachment_file(&source_path)
+async fn read_attachment_file(
+    source_path: String,
+) -> Result<attachments::ReadAttachmentFile, String> {
+    tauri::async_runtime::spawn_blocking(move || attachments::read_attachment_file(&source_path))
+        .await
+        .map_err(|error| format!("Attachment file worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -5370,7 +5396,7 @@ async fn read_attachment_image(
 }
 
 #[tauri::command]
-fn store_attachment(
+async fn store_attachment(
     state: State<'_, AppState>,
     target: attachments::AttachmentTarget,
     filename: String,
@@ -5379,19 +5405,25 @@ fn store_attachment(
     preview_data_url: Option<String>,
     source_id: Option<String>,
 ) -> Result<attachments::Attachment, String> {
-    state.0.store_attachment(
-        target,
-        filename,
-        mime_type,
-        data_base64,
-        preview_data_url,
-        source_id,
-    )
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.store_attachment(
+            target,
+            filename,
+            mime_type,
+            data_base64,
+            preview_data_url,
+            source_id,
+        )
+    })
+    .await
+    .map_err(|error| format!("Attachment storage worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn save_host(state: State<'_, AppState>, mut host: Host) -> Result<Snapshot, String> {
-    state.0.mutate(None, |snapshot| {
+async fn save_host(state: State<'_, AppState>, mut host: Host) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.mutate(None, |snapshot| {
         if host.id.trim().is_empty() {
             host.id = id();
         }
@@ -5414,12 +5446,15 @@ fn save_host(state: State<'_, AppState>, mut host: Host) -> Result<Snapshot, Str
             snapshot.hosts.push(host);
         }
         Ok(snapshot.clone())
-    })
+    }))
+    .await
+    .map_err(|error| format!("Host save worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn delete_host(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
-    state.0.mutate(None, |snapshot| {
+async fn delete_host(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.mutate(None, |snapshot| {
         let host = snapshot
             .hosts
             .iter()
@@ -5448,7 +5483,9 @@ fn delete_host(state: State<'_, AppState>, id: String) -> Result<Snapshot, Strin
         }
         snapshot.hosts.retain(|host| host.id != id);
         Ok(snapshot.clone())
-    })
+    }))
+    .await
+    .map_err(|error| format!("Host deletion worker failed: {error}"))?
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -5565,14 +5602,16 @@ async fn discover_acp_agents(
     state: State<'_, AppState>,
     host_id: String,
 ) -> Result<Vec<acp_discovery::AcpCandidate>, String> {
-    let host = state
-        .0
-        .snapshot()?
-        .hosts
-        .into_iter()
-        .find(|host| host.id == host_id)
-        .ok_or("Host was not found.")?;
-    tauri::async_runtime::spawn_blocking(move || acp_discovery::discover(&host))
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = service
+            .snapshot()?
+            .hosts
+            .into_iter()
+            .find(|host| host.id == host_id)
+            .ok_or("Host was not found.")?;
+        acp_discovery::discover(&host)
+    })
         .await
         .map_err(|error| format!("ACP discovery worker failed: {error}"))?
 }
@@ -5583,21 +5622,26 @@ async fn verify_acp_agent(
     host_id: String,
     launch: AcpLaunch,
 ) -> Result<acp_probe::ProbeResult, String> {
-    let host = state
-        .0
-        .snapshot()?
-        .hosts
-        .into_iter()
-        .find(|host| host.id == host_id)
-        .ok_or("Host was not found.")?;
-    tauri::async_runtime::spawn_blocking(move || acp_probe::verify(&host, &launch))
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = service
+            .snapshot()?
+            .hosts
+            .into_iter()
+            .find(|host| host.id == host_id)
+            .ok_or("Host was not found.")?;
+        acp_probe::verify(&host, &launch)
+    })
         .await
         .map_err(|error| format!("ACP verification worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn save_agent(state: State<'_, AppState>, agent: Agent) -> Result<Snapshot, String> {
-    state.0.save_agent(agent)
+async fn save_agent(state: State<'_, AppState>, agent: Agent) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_agent(agent))
+        .await
+        .map_err(|error| format!("Agent save worker failed: {error}"))?
 }
 
 const MAX_AVATAR_DATA_URL_BYTES: usize = 3 * 1024 * 1024;
@@ -5654,12 +5698,21 @@ fn validate_agent_avatar(avatar: Option<&str>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_agent(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
-    state.0.delete_agent(&id)
+async fn delete_agent(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.delete_agent(&id))
+        .await
+        .map_err(|error| format!("Agent deletion worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn choose_local_folder(initial: String) -> Result<Option<String>, String> {
+async fn choose_local_folder(initial: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || choose_local_folder_blocking(initial))
+        .await
+        .map_err(|error| format!("Folder chooser worker failed: {error}"))?
+}
+
+fn choose_local_folder_blocking(initial: String) -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
         let script = if initial.trim().is_empty() {
@@ -5748,27 +5801,37 @@ fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String
 }
 
 #[tauri::command]
-fn save_project(state: State<'_, AppState>, project: Project) -> Result<Snapshot, String> {
-    state.0.save_project(project)
+async fn save_project(state: State<'_, AppState>, project: Project) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_project(project))
+        .await
+        .map_err(|error| format!("Project save worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn delete_project(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
-    state.0.delete_project(&id)
+async fn delete_project(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.delete_project(&id))
+        .await
+        .map_err(|error| format!("Project deletion worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn set_task_project(
+async fn set_task_project(
     state: State<'_, AppState>,
     task_id: String,
     project_id: Option<String>,
 ) -> Result<Snapshot, String> {
-    state.0.set_task_project(&task_id, project_id)
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.set_task_project(&task_id, project_id))
+        .await
+        .map_err(|error| format!("Task project worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn rename_task(state: State<'_, AppState>, id: String, title: String) -> Result<Snapshot, String> {
-    state.0.mutate(Some(id.clone()), |snapshot| {
+async fn rename_task(state: State<'_, AppState>, id: String, title: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.mutate(Some(id.clone()), |snapshot| {
         if title.trim().is_empty() {
             return Err("Task title is required.".into());
         }
@@ -5780,7 +5843,9 @@ fn rename_task(state: State<'_, AppState>, id: String, title: String) -> Result<
         task.title = title.trim().into();
         task.updated_at = now();
         Ok(snapshot.clone())
-    })
+    }))
+    .await
+    .map_err(|error| format!("Task rename worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -5915,9 +5980,8 @@ impl Service {
     }
 }
 
-#[tauri::command]
-fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
-    state.0.mutate_data(Some(id.clone()), |data| {
+fn delete_task_blocking(service: &Service, id: String) -> Result<Snapshot, String> {
+    service.mutate_data(Some(id.clone()), |data| {
         if data.snapshot.collaborations.iter().any(|delivery| {
             (delivery.from_task_id == id || delivery.to_task_id == id)
                 && matches!(delivery.status.as_str(), "queued" | "running")
@@ -5943,7 +6007,7 @@ fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, Strin
             .messages
             .retain(|message| message.task_id != id);
         data.snapshot.events.retain(|event| event.task_id != id);
-        state.0.store.remove_task_usage(&id)?;
+        service.store.remove_task_usage(&id)?;
         data.snapshot
             .queued_messages
             .retain(|message| message.task_id != id);
@@ -5953,58 +6017,88 @@ fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, Strin
 }
 
 #[tauri::command]
-fn preview_task_deletion(
-    state: State<'_, AppState>,
-    task_id: String,
-) -> Result<deletion::DeletionPreview, String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
-    Ok(deletion::preview(&state.0.snapshot()?, &task, &host))
+async fn delete_task(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || delete_task_blocking(&service, id))
+        .await
+        .map_err(|error| format!("Task deletion worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn delete_archived_task(
+async fn preview_task_deletion(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<deletion::DeletionPreview, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
+        Ok(deletion::preview(&service.snapshot()?, &task, &host))
+    })
+    .await
+    .map_err(|error| format!("Task deletion preview worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn delete_archived_task(
     state: State<'_, AppState>,
     task_id: String,
     remove_native_files: bool,
 ) -> Result<Snapshot, String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
-    let snapshot = state.0.snapshot()?;
-    if !task.archived {
-        return Err("Archive this chat before permanently deleting it.".into());
-    }
-    if task.status == "running" {
-        return Err("Cancel this running chat before permanently deleting it.".into());
-    }
-    if remove_native_files {
-        deletion::remove_verified(&snapshot, &task, &host)?;
-    }
-    delete_task(state, task_id)
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
+        let snapshot = service.snapshot()?;
+        if !task.archived {
+            return Err("Archive this chat before permanently deleting it.".into());
+        }
+        if task.status == "running" {
+            return Err("Cancel this running chat before permanently deleting it.".into());
+        }
+        if remove_native_files {
+            deletion::remove_verified(&snapshot, &task, &host)?;
+        }
+        delete_task_blocking(&service, task_id)
+    })
+    .await
+    .map_err(|error| format!("Archived task deletion worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn set_task_archived(
+async fn set_task_archived(
     state: State<'_, AppState>,
     task_id: String,
     archived: bool,
 ) -> Result<Snapshot, String> {
-    state.0.set_task_archived(&task_id, archived)
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.set_task_archived(&task_id, archived))
+        .await
+        .map_err(|error| format!("Task archive worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn clear_task_context(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
-    state.0.clear_task_context(&task_id)
+async fn clear_task_context(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.clear_task_context(&task_id))
+        .await
+        .map_err(|error| format!("Task context worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn send_message(
+async fn send_message(
     state: State<'_, AppState>,
     task_id: String,
     text: String,
     attachment_ids: Option<Vec<String>>,
 ) -> Result<Snapshot, String> {
-    state
-        .0
-        .send(task_id, text, attachment_ids.unwrap_or_default())
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.send(task_id, text, attachment_ids.unwrap_or_default())
+    })
+    .await
+    .map_err(|error| format!("Send worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -6024,47 +6118,67 @@ async fn send_message_fast(
 }
 
 #[tauri::command]
-fn resume_task(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
-    state.0.resume(task_id)
+async fn resume_task(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.resume(task_id))
+        .await
+        .map_err(|error| format!("Task resume worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn cancel_task(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
-    state.0.cancel(&task_id)
+async fn cancel_task(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.cancel(&task_id))
+        .await
+        .map_err(|error| format!("Task cancellation worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn cancel_queued_message(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
-    state.0.cancel_queued_message(&id)
+async fn cancel_queued_message(state: State<'_, AppState>, id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.cancel_queued_message(&id))
+        .await
+        .map_err(|error| format!("Queued message cancellation worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn set_channel_agent_conversation(
+async fn set_channel_agent_conversation(
     state: State<'_, AppState>,
     channel_id: String,
     enabled: bool,
     turn_limit: u32,
 ) -> Result<Snapshot, String> {
-    state
-        .0
-        .set_channel_agent_conversation(&channel_id, enabled, turn_limit)
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.set_channel_agent_conversation(&channel_id, enabled, turn_limit)
+    })
+    .await
+    .map_err(|error| format!("Channel conversation worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn stop_channel_agent_conversation(
+async fn stop_channel_agent_conversation(
     state: State<'_, AppState>,
     channel_id: String,
 ) -> Result<Snapshot, String> {
-    state.0.stop_channel_agent_conversation(&channel_id)
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.stop_channel_agent_conversation(&channel_id)
+    })
+    .await
+    .map_err(|error| format!("Channel conversation stop worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn edit_queued_message(
+async fn edit_queued_message(
     state: State<'_, AppState>,
     id: String,
     text: String,
 ) -> Result<Snapshot, String> {
-    state.0.edit_queued_message(&id, text)
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.edit_queued_message(&id, text))
+        .await
+        .map_err(|error| format!("Queued message edit worker failed: {error}"))?
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), String> {
@@ -6130,12 +6244,15 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Snapshot, String> {
+async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Snapshot, String> {
     validate_settings(&settings)?;
-    let snapshot = state.0.mutate(None, |snapshot| {
+    let service = state.0.clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || service.mutate(None, |snapshot| {
         snapshot.settings = settings;
         Ok(snapshot.clone())
-    })?;
+    }))
+    .await
+    .map_err(|error| format!("Settings save worker failed: {error}"))??;
     if snapshot.settings.shortcut_mode != menu::VIM_SHORTCUT_MODE {
         // Clear before replacing the native menu so an in-flight renderer
         // focus update cannot leave Escape consumed in standard mode.
@@ -6166,32 +6283,49 @@ fn use_packaged_ui(app: AppHandle, state: State<'_, dev_ui::DevUiState>) -> Resu
 }
 
 #[tauri::command]
-fn save_channel(state: State<'_, AppState>, channel: Channel) -> Result<Snapshot, String> {
-    state.0.save_channel(channel)
+async fn save_channel(state: State<'_, AppState>, channel: Channel) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_channel(channel))
+        .await
+        .map_err(|error| format!("Channel save worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn set_channel_membership(
+async fn set_channel_membership(
     state: State<'_, AppState>,
     channel_id: String,
     agent_id: String,
     member: bool,
 ) -> Result<Snapshot, String> {
-    state
-        .0
-        .set_channel_membership(&channel_id, &agent_id, member)
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.set_channel_membership(&channel_id, &agent_id, member)
+    })
+    .await
+    .map_err(|error| format!("Channel membership worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn send_channel_message(
+async fn send_channel_message(
     state: State<'_, AppState>,
     channel_id: String,
     text: String,
     agent_ids: Vec<String>,
     attachment_ids: Option<Vec<String>>,
 ) -> Result<Snapshot, String> {
-    send_channel_message_accepted(state.0.clone(), channel_id, text, agent_ids, attachment_ids)?;
-    state.0.snapshot()
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        send_channel_message_accepted(
+            service.clone(),
+            channel_id,
+            text,
+            agent_ids,
+            attachment_ids,
+        )?;
+        service.snapshot()
+    })
+    .await
+    .map_err(|error| format!("Channel send worker failed: {error}"))?
 }
 
 fn send_channel_message_accepted(
@@ -6292,12 +6426,12 @@ fn send_channel_message_accepted(
                         sender_agent_id: None, origin: None,
                     });
                     if state.settings.busy_message_mode == "steer" {
-                        state.events.push(RunEvent {
+                        state.events.push(Arc::new(RunEvent {
                             id: id(), task_id: task.id.clone(), kind: "status".into(),
                             title: "Live steering unavailable; channel message queued".into(),
                             detail: "Current CLI adapters do not support live steering of an active turn.".into(),
                             created_at: now(),
-                        });
+                        }));
                     }
                     continue;
                 }
@@ -6433,16 +6567,21 @@ async fn send_channel_message_fast(
 }
 
 #[tauri::command]
-fn get_resume_command(state: State<'_, AppState>, task_id: String) -> Result<String, String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
-    if task.status == "running" {
-        return Err("A running task cannot be resumed from another terminal.".into());
-    }
-    let native = task
-        .native_session_id
-        .as_ref()
-        .ok_or_else(|| "Task has no native session ID yet.".to_string())?;
-    runner::resume_command(&host, &task, native)
+async fn get_resume_command(state: State<'_, AppState>, task_id: String) -> Result<String, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
+        if task.status == "running" {
+            return Err("A running task cannot be resumed from another terminal.".into());
+        }
+        let native = task
+            .native_session_id
+            .as_ref()
+            .ok_or_else(|| "Task has no native session ID yet.".to_string())?;
+        runner::resume_command(&host, &task, native)
+    })
+    .await
+    .map_err(|error| format!("Resume command worker failed: {error}"))?
 }
 
 pub fn smoke_sequence(
@@ -6686,22 +6825,28 @@ async fn get_task_goal(
     state: State<'_, AppState>,
     task_id: String,
 ) -> Result<Option<serde_json::Value>, String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
-    if task.provider != "codex" {
-        return Ok(None);
-    }
-    tauri::async_runtime::spawn_blocking(move || goals::read_goal(&host, &task))
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
+        if task.provider != "codex" {
+            return Ok(None);
+        }
+        goals::read_goal(&host, &task)
+    })
         .await
         .map_err(|error| format!("Goal lookup worker failed: {error}"))?
 }
 
 #[tauri::command]
 async fn clear_task_goal(state: State<'_, AppState>, task_id: String) -> Result<(), String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
-    if task.provider != "codex" {
-        return Err("Only Codex tasks have a native goal to clear.".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || goals::clear_goal(&host, &task))
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
+        if task.provider != "codex" {
+            return Err("Only Codex tasks have a native goal to clear.".into());
+        }
+        goals::clear_goal(&host, &task)
+    })
         .await
         .map_err(|error| format!("Goal clear worker failed: {error}"))?
 }
@@ -6845,8 +6990,9 @@ async fn get_task_git_status(
     task_id: String,
     detector_session: String,
 ) -> Result<git::GitStatus, String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
+    let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
         Ok::<_, String>(git::detect_status(&host, &task.cwd, &detector_session))
     })
     .await
@@ -6859,8 +7005,9 @@ async fn wait_for_task_git_marker(
     task_id: String,
     detector_session: String,
 ) -> Result<String, String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
+    let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
         git::wait_for_marker(&host, &task.cwd, &detector_session)
     })
     .await
@@ -6874,8 +7021,11 @@ async fn get_task_git_diff(
     path: String,
     scope: String,
 ) -> Result<git::GitDiff, String> {
-    let (task, host) = state.0.task_and_host(&task_id)?;
-    tauri::async_runtime::spawn_blocking(move || git::diff(&host, &task.cwd, &path, &scope))
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (task, host) = service.task_and_host(&task_id)?;
+        git::diff(&host, &task.cwd, &path, &scope)
+    })
         .await
         .map_err(|error| format!("Git diff worker failed: {error}"))?
 }
@@ -6886,8 +7036,11 @@ fn finish_quit(app: AppHandle) {
 }
 
 #[tauri::command]
-fn list_terminals(state: State<AppState>) -> Result<Vec<terminal::TerminalSession>, String> {
-    state.0.list_terminals()
+async fn list_terminals(state: State<'_, AppState>) -> Result<Vec<terminal::TerminalSession>, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.list_terminals())
+        .await
+        .map_err(|error| format!("Terminal list worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -6944,6 +7097,14 @@ async fn close_terminal(state: State<'_, AppState>, id: String) -> Result<(), St
         .map_err(|error| format!("Terminal worker failed: {error}"))?
 }
 
+fn native_shortcut_mode_code(mode: &str) -> u8 {
+    match mode {
+        menu::STANDARD_SHORTCUT_MODE => 1,
+        menu::VIM_SHORTCUT_MODE => 2,
+        _ => 0,
+    }
+}
+
 /// AppKit processes Escape before WKWebView's DOM key handlers while a native
 /// fullscreen window is active. A local monitor is the supported interception
 /// point: it consumes only an explicitly renderer-armed Escape and reports it
@@ -6958,6 +7119,9 @@ fn install_macos_escape_shield(app: AppHandle, service: Arc<Service>) {
         const ESCAPE_KEY_CODE: u16 = 53;
         const W_KEY_CODE: u16 = 13;
         let event = unsafe { event.as_ref() };
+        if !matches!(event.keyCode(), ESCAPE_KEY_CODE | W_KEY_CODE) {
+            return event as *const NSEvent as *mut NSEvent;
+        }
         let main_window = app
             .get_webview_window("main")
             .and_then(|window| window.ns_window().ok())
@@ -6971,10 +7135,8 @@ fn install_macos_escape_shield(app: AppHandle, service: Arc<Service>) {
             | NSEventModifierFlags::Option
             | NSEventModifierFlags::Command;
         let modifiers = event.modifierFlags();
-        let standard_shortcuts = service
-            .snapshot()
-            .map(|snapshot| snapshot.settings.shortcut_mode == menu::STANDARD_SHORTCUT_MODE)
-            .unwrap_or(false);
+        let standard_shortcuts = service.native_shortcut_mode
+            .load(std::sync::atomic::Ordering::Acquire) == 1;
         if is_main_window
             && standard_shortcuts
             && modifiers.contains(NSEventModifierFlags::Command)
@@ -7059,7 +7221,8 @@ pub fn run() {
                 // does, and resource roots above take precedence over source.
                 lan_roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../build"));
             }
-            service.apply_shortcut_mode(&service.snapshot()?.settings.shortcut_mode)?;
+            let shortcut_mode = service.committed_data()?.snapshot.settings.shortcut_mode.clone();
+            service.apply_shortcut_mode(&shortcut_mode)?;
             #[cfg(target_os = "macos")]
             install_macos_escape_shield(app.handle().clone(), Arc::clone(&service));
             service.initialize_collaboration()?;
@@ -9213,7 +9376,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         assert!(snapshot.events.iter().any(|event| {
             event.task_id == task.id
                 && event.title == "Restored OpenCode session folder"
-                && event.detail == "/native-folder"
+                && event.detail.as_ref() == "/native-folder"
         }));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -9873,10 +10036,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         let root = std::env::temp_dir().join(format!("monitter-autoname-multiple-{}", id()));
         let mut snapshot = crate::model::default_snapshot();
         snapshot.agents.push(crate::model::Agent {
+            id: id(),
             internal: true,
             ..snapshot.agents[0].clone()
         });
         snapshot.agents.push(crate::model::Agent {
+            id: id(),
             internal: true,
             ..snapshot.agents[0].clone()
         });
@@ -10084,14 +10249,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 // 800 x 10 KiB: representative historical provider stderr/log
                 // that must remain durable but must not enter a polling response.
                 for index in 0..800 {
-                    snapshot.events.push(RunEvent {
+                    snapshot.events.push(Arc::new(RunEvent {
                         id: id(),
                         task_id: task_ids[index % task_ids.len()].clone(),
                         kind: "log".into(),
                         title: "Provider diagnostic".into(),
-                        detail: "x".repeat(10 * 1024),
+                        detail: "x".repeat(10 * 1024).into(),
                         created_at: index as i64,
-                    });
+                    }));
                 }
                 Ok(())
             })

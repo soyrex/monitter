@@ -397,6 +397,12 @@ fn watchdog_terminates_owner_and_drops_buffer_after_timeout() {
         .recv_timeout(Duration::from_secs(2))
         .expect("watchdog must deliver a reply");
     assert!(matches!(reply, AdminTurnReply::Timeout));
+    // Timeout delivery precedes the teardown callback. Wait for that separate
+    // observable action rather than racing the receiving thread against it.
+    let cancellation_deadline = Instant::now() + Duration::from_secs(2);
+    while !owner.is_cancelled() && Instant::now() < cancellation_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(owner.is_cancelled(), "owner must be cancelled by watchdog");
     // After the timeout, the broker rejects further captures from any task.
     assert!(!broker.capture_assistant_text(&task_id, "late"));

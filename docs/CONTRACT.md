@@ -518,14 +518,41 @@ false; archiving preserves messages/events/native IDs and hides the chat from or
 Cmd-K explicitly restores archived chats. Channel sends start a new task instead of reusing an
 archived one. Permanent deletion is available only after archiving. The confirmation preserves CLI history by default; an optional switch requests verified native session file cleanup as described below.
 
-Persist configuration and transcript in the Tauri app data directory, private permissions, atomic writes.
-`state.json` stores core chat/configuration state and an `_eventJournal` generation/committed-count
-pointer. Historical events live in a private append-only JSONL journal instead of being serialized
-again on every send. New events are flushed before the atomic core-state commit; uncommitted tails
-are ignored during recovery. Editing/removing historical events creates a new journal generation.
-Legacy embedded events migrate at startup with the original state preserved in a `state.legacy-*.json`
-backup. Missing or corrupt referenced history fails explicitly rather than silently loading empty
-events. Keep state and its journals together when backing up or recovering the workspace.
+Persist configuration and transcript in the private Tauri app data directory using
+`state.sqlite3`. SQLite stores each Snapshot collection record, task-host map entry,
+attachment registry entry, and usage sample as an individual row; collection position
+preserves array ordering and collection/task/creation indexes support bounded reads. It
+uses WAL with `synchronous=FULL`, a serialized transaction writer, and row-level
+insert/update/delete/reorder diffs. Retained records at the same position are not
+rewritten. Readers continue to see the last committed immutable state while a candidate
+is prepared and committed; AppKit keyboard handling never reads or clones transcript
+state. A failed or ambiguous database commit poisons further writes until reopen rather
+than publishing a stale candidate.
+
+Opening an existing database is strict: it must be a regular non-symlink file with the
+expected SQLite application ID, schema version, tables and indexes. WAL/SHM sidecars
+must be absent or regular non-symlink files; database and created sidecars are private.
+Malformed row payloads, mismatched row/payload IDs, malformed positions, unexpected
+schema, missing database after a guard, or migration-source changes fail closed rather
+than silently starting from empty state.
+
+The first SQLite migration records a durable intent containing exact hashes of every
+legacy source, writes exact private source backups, imports and verifies SQLite, WAL
+checkpoints the migration database, atomically installs it, and finally replaces
+`state.json` with an explicit SQLite downgrade guard. The guard makes old binaries fail
+to decode state rather than silently ignoring acknowledged SQLite updates. Interrupted
+migrations resume only when the intent, source hashes, database integrity, and imported
+state hash all agree; otherwise they preserve files and report an error. The new Store
+holds a private lease for its lifetime so two current versions do not write the same
+directory concurrently.
+
+An already-running old binary does not honor that lease. It must be verified stopped
+before migration: otherwise it can write legacy state after final verification and
+before the guard replacement, which would lose that late legacy update. After SQLite
+writes begin, downgrade requires an explicit, tested legacy-format export while no
+writer is active, or restoration of a complete pre-upgrade backup; a SQLite checkpoint
+is not a legacy export. Never run old and new binaries concurrently against the same
+data directory.
 Recover formerly running tasks as interrupted after restart. One active turn per task and provider/host/native-session key.
 Store task host/cwd/provider/model/sandbox as a snapshot when created; agent edits affect new tasks.
 An idle, unarchived task may change its saved sandbox through `set_task_sandbox`; its next native

@@ -62,6 +62,7 @@ impl Service {
     /// Called only after completion has been saved. Recheck under data -> runs
     /// so a new accepted send cannot have its clock reset by an old completion.
     pub(crate) fn mark_runtime_idle_if_current(&self, task_id: &str, control: &Arc<RunControl>) {
+        let Ok(_writer) = self.state_writes.lock() else { return };
         let Ok(data) = self.data.lock() else { return };
         if !data
             .snapshot
@@ -119,6 +120,7 @@ impl Service {
                 continue;
             }
             let claimed = (|| {
+                let _writer = self.state_writes.lock().ok()?;
                 let data = self.data.lock().ok()?;
                 let runs = self.runs.lock().ok()?;
                 if self.stopping.load(Ordering::Acquire)

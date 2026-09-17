@@ -20,6 +20,8 @@ impl Service {
         if self.stopping.load(Ordering::Acquire) || old.is_cancelled() {
             return Err("ACP transport recovery was stopped.".into());
         }
+        let _writer = self.state_writes.lock()
+            .map_err(|_| "Monitter state writer lock failed.".to_string())?;
         // Match cancellation's data -> runs ordering so it cannot cancel the
         // old owner between validation and the replacement CAS.
         let data = self
@@ -364,14 +366,14 @@ impl Service {
                     }
                     images.push(image);
                 } else {
-                    data.snapshot.events.push(RunEvent {
+                    data.snapshot.events.push(Arc::new(RunEvent {
                         id: id(),
                         task_id: task_id.into(),
                         kind,
                         title,
-                        detail,
+                        detail: detail.into(),
                         created_at: now(),
-                    });
+                    }));
                 }
             }
             Ok(())
@@ -427,14 +429,14 @@ impl Service {
                 phase: None,
                 stream_status: None,
             });
-            data.snapshot.events.push(RunEvent {
+            data.snapshot.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: task_id.into(),
                 kind: "status".into(),
                 title: "Follow-up steered into active Codex turn".into(),
-                detail: String::new(),
+                detail: String::new().into(),
                 created_at: now(),
-            });
+            }));
             Ok(())
         });
         if let Err(error) = accepted {
@@ -474,14 +476,14 @@ impl Service {
                 };
                 message.status = "queued".into();
                 message.error = None;
-                data.snapshot.events.push(RunEvent {
+                data.snapshot.events.push(Arc::new(RunEvent {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "status".into(),
                     title: "Codex could not steer; message queued".into(),
                     detail: detail.into(),
                     created_at: now(),
-                });
+                }));
                 Ok(data
                     .snapshot
                     .tasks
@@ -596,27 +598,27 @@ impl Service {
                 }
                 let expired = expire_inputs(&mut data.snapshot, task_id);
                 if let Some(detail) = error {
-                    data.snapshot.events.push(RunEvent {
+                    data.snapshot.events.push(Arc::new(RunEvent {
                         id: id(),
                         task_id: task_id.into(),
                         kind: "error".into(),
                         title: "Resident transport turn failed".into(),
-                        detail,
+                        detail: detail.into(),
                         created_at: now(),
-                    });
+                    }));
                 }
                 let routes = if status == "completed" {
                     match prepare_channel_mention_routes(data, task_id) {
                         Ok(routes) => routes,
                         Err(detail) => {
-                            data.snapshot.events.push(RunEvent {
+                            data.snapshot.events.push(Arc::new(RunEvent {
                                 id: id(),
                                 task_id: task_id.into(),
                                 kind: "error".into(),
                                 title: "Channel peer routing unavailable".into(),
-                                detail,
+                                detail: detail.into(),
                                 created_at: now(),
-                            });
+                            }));
                             vec![]
                         }
                     }

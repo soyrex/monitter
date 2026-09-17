@@ -190,7 +190,6 @@ export interface Settings {
   windowTransparency?: number;
   showActivePaneBorder?: boolean; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
-  windowSurface?: 'opaque' | 'translucent' | 'glass';
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
   /** Legacy migration seed; active sidebar selection is client-local UI state. */
   sidebarView: SidebarView; busyMessageMode?: 'queue' | 'steer';
@@ -220,7 +219,6 @@ export interface Snapshot {
   /** Inline transcript for sources with no re-queryable native thread (`acp`), keyed by subagent id. */
   subagentTranscripts?: Record<string, SubagentTranscriptEntry[]>;
   approvalRequests: ApprovalRequest[];
-  subagentSessions?: SubagentSession[];
   /** Omitted by older runtimes and deliberately absent from visitor projections. */
   approvalRules?: ApprovalRule[];
 }

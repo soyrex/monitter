@@ -1,0 +1,8 @@
+[package]
+name = "monitter-sqlite-latency-benchmark"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }

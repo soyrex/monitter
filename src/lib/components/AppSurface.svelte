@@ -297,7 +297,10 @@
     updateFullscreen();
     return () => { mounted = false; clearTimeout(timer); window.removeEventListener('resize', resized); };
   });
-  let snapshot = $state<Snapshot | null>(null),
+  // Bridge snapshots are immutable and replaced as a whole. Deep proxies make
+  // every history/index traversal pay per-field reactive bookkeeping, even
+  // though no UI code mutates these records. Keep form/composer state separate.
+  let snapshot = $state.raw<Snapshot | null>(null),
     selectedTaskId = $state<string | null>(null),
     selectedChannelId = $state<string | null>(null),
     pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "settings">(untrack(()=>embedded?"empty":"overview"));
@@ -518,9 +521,8 @@
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let snapshotIssued = 0,
     snapshotApplied = 0;
-  // Svelte deeply proxies `$state` objects, so `snapshot === bridgeCache` is
-  // not reliable. Retain the unproxied bridge object separately to recognize
-  // an unchanged revision without replacing local optimistic/synthetic state.
+  // Retain bridge identity separately from local optimistic/synthetic snapshots
+  // so an unchanged revision cannot overwrite those local replacements.
   let lastBridgeSnapshot: Snapshot | null = null;
   let appliedScale = 0;
   let openTaskIds = $state<string[]>([]);

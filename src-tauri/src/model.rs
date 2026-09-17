@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 pub fn id() -> String {
@@ -213,8 +213,46 @@ pub struct RunEvent {
     pub task_id: String,
     pub kind: String,
     pub title: String,
-    pub detail: String,
+    /// Diagnostic payloads are frequently copied when the service prepares a
+    /// candidate snapshot. Share the immutable string across those clones;
+    /// serde's `rc` support preserves the existing JSON string contract.
+    pub detail: Arc<str>,
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod run_event_tests {
+    use super::{default_snapshot, RunEvent};
+    use std::sync::Arc;
+
+    #[test]
+    fn detail_clone_shares_storage_and_keeps_json_string_shape() {
+        let event = RunEvent {
+            id: "event".into(),
+            task_id: "task".into(),
+            kind: "log".into(),
+            title: "Diagnostic".into(),
+            detail: Arc::<str>::from("payload"),
+            created_at: 0,
+        };
+        let cloned = event.clone();
+        assert!(Arc::ptr_eq(&event.detail, &cloned.detail));
+        let json = serde_json::to_value(&event).expect("RunEvent should serialize");
+        assert_eq!(json["detail"], "payload");
+    }
+
+    #[test]
+    fn snapshot_clone_shares_event_records_and_keeps_event_json_shape() {
+        let mut snapshot = default_snapshot();
+        snapshot.events.push(Arc::new(RunEvent {
+            id: "event".into(), task_id: "task".into(), kind: "log".into(),
+            title: "Diagnostic".into(), detail: Arc::from("payload"), created_at: 0,
+        }));
+        let cloned = snapshot.clone();
+        assert!(Arc::ptr_eq(&snapshot.events[0], &cloned.events[0]));
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["events"][0]["detail"], "payload");
+    }
 }
 
 /// Normalized, durable observation from one provider turn. `classification` is
@@ -638,7 +676,11 @@ pub struct Snapshot {
     pub agents: Vec<Agent>,
     pub tasks: Vec<Task>,
     pub messages: Vec<Message>,
-    pub events: Vec<RunEvent>,
+    /// Event records are immutable after insertion. Sharing their allocation
+    /// keeps a candidate Snapshot clone from duplicating every historical
+    /// event on an ordinary streaming update; serde retains the same JSON
+    /// array-of-event-records shape.
+    pub events: Vec<Arc<RunEvent>>,
     pub channels: Vec<Channel>,
     #[serde(default)]
     pub projects: Vec<Project>,

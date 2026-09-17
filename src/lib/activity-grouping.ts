@@ -23,23 +23,28 @@ export function nativeSubagentActivity(event: RunEvent): NativeSubagentActivity 
   let detail: unknown;
   try { detail = JSON.parse(event.detail); }
   catch { return null; }
-  if (!acpRecord(detail) || !['collabAgentToolCall', 'subAgentActivity'].includes(String(detail.type))) return null;
-  const states = acpRecord(detail.agentsStates)
-    ? Object.fromEntries(Object.entries(detail.agentsStates).flatMap(([id, value]) => acpRecord(value)
+  if (!acpRecord(detail)) return null;
+  const activity = acpRecord(detail.activity) ? detail.activity : detail;
+  const type = ['collabAgentToolCall', 'subAgentActivity'].includes(String(activity.type))
+    ? activity.type as NativeSubagentActivity['type']
+    : typeof activity.agentThreadId === 'string' || typeof activity.agent_thread_id === 'string' ? 'subAgentActivity' : null;
+  if (!type) return null;
+  const receivers = activity.receiverThreadIds ?? activity.receiver_thread_ids;
+  const states = acpRecord(activity.agentsStates)
+    ? Object.fromEntries(Object.entries(activity.agentsStates).flatMap(([id, value]) => acpRecord(value)
       ? [[id, { status: typeof value.status === 'string' ? value.status : '', message: typeof value.message === 'string' ? value.message : '' }]]
       : []))
     : {};
   return {
-    type: detail.type as NativeSubagentActivity['type'],
-    id: typeof detail.id === 'string' ? detail.id : event.id,
-    action: typeof detail.tool === 'string' ? detail.tool : typeof detail.kind === 'string' ? detail.kind : '',
-    phase: typeof detail.status === 'string' ? detail.status : '',
-    agentPath: typeof detail.agentPath === 'string' ? detail.agentPath : null,
-    agentThreadId: typeof detail.agentThreadId === 'string' ? detail.agentThreadId : null,
-    receiverThreadIds: Array.isArray(detail.receiverThreadIds) ? detail.receiverThreadIds.filter((value): value is string => typeof value === 'string') : [],
-    prompt: typeof detail.prompt === 'string' && detail.prompt.trim() ? detail.prompt.trim() : null,
-    model: typeof detail.model === 'string' && detail.model.trim() ? detail.model.trim() : null,
-    reasoningEffort: typeof detail.reasoningEffort === 'string' && detail.reasoningEffort.trim() ? detail.reasoningEffort.trim() : null,
+    type, id: typeof activity.id === 'string' ? activity.id : event.id,
+    action: typeof activity.tool === 'string' ? activity.tool : typeof activity.kind === 'string' ? activity.kind : '',
+    phase: typeof activity.status === 'string' ? activity.status : '',
+    agentPath: typeof activity.agentPath === 'string' ? activity.agentPath : null,
+    agentThreadId: typeof activity.agentThreadId === 'string' ? activity.agentThreadId : typeof activity.agent_thread_id === 'string' ? activity.agent_thread_id : null,
+    receiverThreadIds: Array.isArray(receivers) ? receivers.filter((value): value is string => typeof value === 'string') : [],
+    prompt: typeof activity.prompt === 'string' && activity.prompt.trim() ? activity.prompt.trim() : null,
+    model: typeof activity.model === 'string' && activity.model.trim() ? activity.model.trim() : null,
+    reasoningEffort: typeof activity.reasoningEffort === 'string' && activity.reasoningEffort.trim() ? activity.reasoningEffort.trim() : null,
     agentsStates: states,
   };
 }
@@ -187,33 +192,6 @@ export function isNativeMessageTransportArtifact(event: RunEvent): boolean {
     const type = JSON.parse(event.detail)?.type;
     return typeof type === 'string' && ['usermessage', 'agentmessage'].includes(type.toLowerCase());
   } catch { return false; }
-}
-
-/** Read the thread linkage from a structured native subagent event, if present. */
-export interface NativeSubagentActivity {
-  agentThreadId: string;
-  receiverThreadIds: string[];
-}
-
-export function nativeSubagentActivity(event: RunEvent): NativeSubagentActivity | null {
-  try {
-    const parsed = JSON.parse(event.detail) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const record = parsed as Record<string, unknown>;
-    const activity = record.activity && typeof record.activity === 'object' && !Array.isArray(record.activity)
-      ? record.activity as Record<string, unknown>
-      : record;
-    const agentThreadId = [activity.agentThreadId, activity.agent_thread_id]
-      .find(value => typeof value === 'string' && value.trim()) as string | undefined;
-    if (!agentThreadId) return null;
-    const receivers = activity.receiverThreadIds ?? activity.receiver_thread_ids;
-    const receiverThreadIds = Array.isArray(receivers)
-      ? receivers.filter((value): value is string => typeof value === 'string' && !!value.trim())
-      : [];
-    return { agentThreadId, receiverThreadIds };
-  } catch {
-    return null;
-  }
 }
 
 export type ConversationActivityItem =

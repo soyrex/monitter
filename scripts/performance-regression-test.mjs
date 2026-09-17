@@ -34,11 +34,13 @@ has(app, /if\s*\(fromBridge\s*&&\s*next\s*===\s*lastBridgeSnapshot\)\s*return/, 
 has(app, /getTaskEvents\(taskId,\s*before,\s*100\)/, 'timeline reads must use a bounded page size');
 has(messagePane, /class="messages"[^>]*\boverflow:\s*auto|\.messages\s*\{[^}]*(?:overflow:\s*auto|overflow-y:\s*auto)/, 'transcripts must use a scroll viewport');
 
-// Activity-aware work must have a teardown path. MessagePane no longer needs a
-// periodic repair timer; observers exist only while the pane is active.
-has(messagePane, /const observer = new ResizeObserver/, 'MessagePane must observe layout changes');
-has(messagePane, /const liveTextObserver = new MutationObserver/, 'MessagePane must observe streamed text changes');
-has(messagePane, /observer\.disconnect\(\)[\s\S]*liveTextObserver\.disconnect\(\)/, 'MessagePane observers must be cleaned up');
+// Activity-aware work must have a teardown path. Geometry is now owned by the
+// virtualizer rather than MessagePane, so keep the assertion at its owner.
+const virtualList = read('src/lib/components/TranscriptVirtualList.svelte');
+has(virtualList, /const observer = new ResizeObserver\(measureMargin\)/, 'TranscriptVirtualList must observe transcript geometry');
+has(virtualList, /observer\.disconnect\(\); unregisterOwner\?\.\(\)/, 'Transcript geometry observer must be cleaned up');
+has(virtualList, /footerObserver = new ResizeObserver\(updateFooterHeight\)/, 'Transcript footer changes must be observed');
+has(virtualList, /footerObserver\?\.disconnect\(\)/, 'Transcript footer observer must be cleaned up');
 assert.doesNotMatch(messagePane, /setInterval\s*\(/, 'MessagePane must not retain a periodic layout-repair timer');
 has(terminal, /function stopPolling\(runtime(?:\s*:\s*Runtime)?\)/, 'terminal polling must have an explicit stop path');
 has(terminal, /runtime\.observer\?\.disconnect\(\)/, 'terminal resize observers must be disconnected');

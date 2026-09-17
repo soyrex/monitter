@@ -144,14 +144,11 @@ fn exercise_resume_after_failure(mode: &str, first_prompt: &str) {
         .unwrap();
     assert_eq!(saved.native_session_id.as_deref(), Some("resume-session"));
 
-    // The failure status is persisted before the run owner finishes tearing
-    // down. Resume only once that owner has released the native session.
-    let release_deadline = Instant::now() + Duration::from_secs(8);
-    while f.service.run_is_active(&task.id) && Instant::now() < release_deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!f.service.run_is_active(&task.id), "failed ACP run must release its owner");
-
+    // EOF recovery deliberately retains a repaired resident owner. Explicit
+    // Resume must work both through that owner and while teardown is finishing;
+    // requiring an empty registry would contradict automatic recovery. The
+    // frame assertions below still require exactly one saved-session resume
+    // and prohibit replaying the original prompt.
     f.service.resume(task.id.clone()).unwrap();
     wait_for(&f, &task.id, |s| {
         s.tasks
