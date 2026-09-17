@@ -247,13 +247,38 @@ imported user agent and does not automatically start a model turn.
 
 ## Handoff status
 
-Goal remains incomplete: native GUI acceptance has not been matched to the
-installed-app workload, and the initial browser GUI run missed the target. The
+Goal remains incomplete: GUI acceptance has not been matched to the
+installed-app workload, and browser/WebKit fixture runs still missed the p95 target. The
 SQLite implementation and integration with the captured pending workspace work
 have passed the native tests above; GUI acceptance and rollout remain incomplete.
 The live app, user sessions, and main dirty checkout were not replaced or
 restarted. Complete the recoverable blank-profile cutover preparation, final UI
 verification, and explicit installation/restart reporting first.
+
+### Packaged blank-profile candidate
+
+Source commit `9684a3b` produced the optimized real-UI candidate, built with its
+normal bundled LAN web assets and a separate test bundle identity. The native
+build completed in 5m24s after the final Vite build (2m25s). Ad-hoc signing and
+`codesign --verify --deep --strict` passed. The protected deliverable is:
+
+`/Users/alex/code/monitter-macos-responsiveness/artifacts/sqlite-candidate-OaYQpq/Monitter SQLite Candidate.app`
+
+Its adjacent `manifest.json` records the source commit, executable SHA-256,
+signature check, and profile identity. Do not include this 22 MB deliverable
+directory or its profile in cache cleanup. It was launched and visibly verified
+at `tauri://localhost` (not the synthetic page): **Connected 0 agents · 0 running**,
+**Create first agent**, and no tasks in any status section. Its identity is
+`com.monitter.sqlite-candidate.20260917`; its separately initialized profile is
+`/Users/alex/Library/Application Support/com.monitter.sqlite-candidate.20260917`.
+The one internal housekeeping agent is hidden, as designed.
+
+The candidate is open for a trial. `/Applications/Monitter.app` and the older
+user-used `Monitter Performance Test.app` were not replaced or stopped. No old
+profile, CLI login, or CLI configuration was reset. A real installation/blank-
+profile cutover still needs an explicitly coordinated quit/restart and protected
+old-profile/client-settings backup. Passing synthetic checks and native tests
+does not establish that real provider streaming can no longer beachball.
 
 ## Build-cache cleanup tracking
 
