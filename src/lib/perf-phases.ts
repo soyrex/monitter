@@ -1,6 +1,25 @@
 /** Synthetic diagnosis hooks; inert unless the current URL includes monitter-perf=1. */
 const enabled = () => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('monitter-perf') === '1';
 const MAX_START_AGE_MS = 5_000;
+// Geometry probes are selected once at page load: the normal UI avoids both
+// Performance API calls and repeated URL parsing in its measurement hot path.
+const geometryEnabled = enabled();
+type GeometryPhase = 'row-measure' | 'margin-measure' | 'footer-measure' | 'follow-layout' | 'sync-flush';
+
+/** Synchronous duration only, not paint latency; nested phases overlap. */
+export function perfGeometryStart(phase: GeometryPhase): (() => void) | undefined {
+  if (!geometryEnabled) return undefined;
+  const start = performance.now();
+  return () => {
+    const end = performance.now();
+    const name = `monitter.geometry.${phase}`;
+    try {
+      performance.clearMeasures(name);
+      performance.measure(name, { start, end });
+    } catch { /* Diagnostics must never change rendering on unsupported engines. */ }
+  };
+}
+
 export function perfMark(name: string) {
   if (!enabled()) return;
   const mark = `monitter:${name}`;

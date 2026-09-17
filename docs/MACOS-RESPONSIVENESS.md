@@ -280,21 +280,74 @@ profile cutover still needs an explicitly coordinated quit/restart and protected
 old-profile/client-settings backup. Passing synthetic checks and native tests
 does not establish that real provider streaming can no longer beachball.
 
+### Isolated native transcript geometry diagnostic
+
+`node scripts/transcript-geometry-preview.mjs` builds a small fixture in memory
+and serves only `127.0.0.1:18434`; `--build-only` compiles without a server or
+disk bundle. It uses the real MessagePane, TranscriptVirtualList, Markdown, and
+reader buffer, with four synthetic 1,000-message chats and immutable 100 ms
+updates. It does not use TaskTranscript, provider output, IPC, or persistent
+workspace data. Its simplified last-message fingerprint is valid only for this
+append-only synthetic workload, not a replacement for production change
+detection. Icons are stubbed. This is a diagnostic, not an end-to-end acceptance
+benchmark or a comparison against the earlier full-app fixture.
+
+An initial fixture run froze at tick 1 because its own geometry-reporting effect
+tracked the parent metrics state it updated. That run was discarded. Sampling
+is now untracked, and runtime errors are displayed visibly. The corrected run
+in the separately identified native WebKit test app reached 597 ticks, with two
+panes, typing, three chat selections, and reader detachment:
+
+| Diagnostic | Observed result |
+| --- | --- |
+| Typing event to two animation frames | 136 events; maximum 47 ms |
+| Chat selection to two animation frames | 3 events; maximum 104 ms |
+| Wheel event to two animation frames | 2 events; maximum 11 ms; too few for a useful distribution |
+| Visible frame interval | Whole-run maximum 107 ms |
+| Direct row measurement | 482 calls; maximum 1 ms |
+| Margin measurement | 172 calls; maximum 1 ms |
+| Follow-layout callback | 1,635 calls; maximum 3 ms |
+| Synchronous virtualizer flush | 349 calls; maximum 1 ms |
+
+The timer resolution was about 1 ms: reported zero is not zero work. Phases can
+overlap and do not include all browser layout/paint work. The chat-start mark is
+shared by both fixture panes, so its six first-virtualizer measures are not six
+independent chat selections. Small-sample percentile rounding in the fixture
+was corrected after this run; the table deliberately reports unambiguous
+counts and maxima instead. Future quantiles use nearest rank over the last
+120 samples, and cumulative phase totals are shown separately.
+
+While the primary pane advanced from scrollTop 125250 to 125757, the detached
+secondary remained at 124055 with a 1166 px bottom gap and a held snapshot.
+The jump action released the held state. Its final geometry sample was taken
+before layout settled after streaming stopped, so it is not proof of the final
+bottom coordinate. The fixture and its server were then stopped; no data was
+deleted and no user-used app was stopped.
+
+This evidence does not justify removing the virtualizer's synchronous flush or
+scroll-owner safeguards: measured callback maxima were small, while the
+broader selection proxy still exceeded 100 ms. Opt-in geometry probes are
+inactive outside `monitter-perf=1`. Their off/on/error/bounded-entry contracts
+pass `node scripts/perf-phases-test.mjs`; the fixture compile and existing
+performance, activity-grouping, and snapshot-index tests also pass. These new
+diagnostics are not included in the protected candidate built from `9684a3b`.
+
 ## Build-cache cleanup tracking
 
 Alex requested tracking build-cache cleanup alongside the responsiveness work.
-The 2026-09-17 inventory during the release build was:
+The 2026-09-17 inventory (build sizes rechecked after the candidate build) was:
 
 | Exact build directory | Size | Cleanup status |
 | --- | ---: | --- |
 | `/Users/alex/code/monitter/src-tauri/target/debug` | 5.4 GB | Shared cache; contains a running user-used test app. Preserve until its consumers are stopped and exact disposable targets are agreed. |
-| `/Users/alex/code/monitter/src-tauri/target/release` | 1.1 GB | Created for this task; active compilation. Retain through native QA and artifact handoff, then assess disposable intermediates. |
-| `/Users/alex/code/monitter-macos-responsiveness/build` | 4.1 MB | Built frontend used by the active loopback test fixture; retain through QA. |
+| `/Users/alex/code/monitter/src-tauri/target/release` | 1.1 GB | Task build cache; compilation finished. Retain through native QA and artifact handoff, then assess disposable intermediates. |
+| `/Users/alex/code/monitter-macos-responsiveness/build` | 4.1 MB | Built frontend for the packaged candidate and full-app fixture; retain through QA. |
+| `/Users/alex/code/monitter-macos-responsiveness/artifacts/sqlite-candidate-OaYQpq` | 22 MB | Protected signed candidate and manifest, not a build cache. Keep. |
 | `/Users/alex/Library/Caches/Monitter/builds` | 319 MB | Existing staged apps and 90 MB of packages; identify referenced deliverables before removing any exact staging directory. |
 | `/Users/alex/code/monitter/artifacts` | 5.4 GB | Mixed artifacts, not a disposable cache: includes 1.4 GB install backups and 3.0 GB idle-runtime diagnostics. Preserve pending exact classification/approval. |
 
 No cache directories were deleted for this inventory. Free disk space was about
-10 GiB at this check (earlier as low as 3.3 GiB; unrelated system activity changes
+11 GiB at the post-build check (earlier as low as 3.3 GiB; unrelated system activity changes
 it). Before cleanup, remeasure sizes, identify exact no-longer-used artifacts,
 and preserve the deliverable app, running apps, source worktrees, profiles,
 backups, CLI auth, and shared dependencies. Prefer recoverable removal; report
