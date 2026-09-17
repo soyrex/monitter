@@ -51,10 +51,12 @@ session. Before a session exists, use the agent's default or an explicitly enter
 model ID; a nonempty ID must be advertised before Monitter sends the prompt.
 Configuration changes are acknowledged before the next prompt is released.
 
-When collaboration is enabled, Monitter passes its scoped stdio MCP helper in
-`mcpServers`. Tokens are ephemeral environment entries inside the protocol frame,
+When collaboration is enabled, Monitter passes its Rust HTTP MCP endpoint in
+`mcpServers`. The agent must advertise HTTP MCP support at initialization. Tokens
+are ephemeral Authorization headers inside the private session protocol frame,
 not launcher arguments or persisted agent settings. SSH uses the existing
-loopback-only reverse tunnel and removes its temporary helper on owned teardown.
+loopback-only reverse tunnel, which is stopped on owned teardown. No MCP helper
+is launched or copied to the remote host.
 
 Diagnostics must not block sends or token streaming. Bound protocol frames,
 pending requests, text accumulation and diagnostic output. Unknown optional

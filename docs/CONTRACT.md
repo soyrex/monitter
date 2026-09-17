@@ -700,7 +700,16 @@ detail expose capabilities, collaboration availability, linked chats, delivery s
 
 A process-local broker binds only to `127.0.0.1` on a random port. Every running task receives its own
 in-memory bearer grant; the broker derives caller identity from that grant, never from tool arguments.
-Grants are revoked on run completion. A bundled Python stdio MCP helper exposes a narrow tool set:
+Grants are revoked when the owning process is released. Resident Codex/Claude/ACP sessions retain
+their configured grant across turns, but every tool call still requires the task to be running and
+the agent's collaboration setting to be enabled. Replacement transports preserve the existing
+ownership checks; restarting never replays an uncertain prompt.
+
+The Rust broker exposes Streamable HTTP MCP at `/mcp`, using JSON responses and no SSE stream or
+MCP session ID. Initialization supplies usage instructions; `tools/list` supplies the fixed schemas.
+Bearer authentication applies to discovery as well as tool calls. Notifications receive an empty
+202 response; GET is unsupported (405). The Python stdio relay and `/rpc` endpoint are removed.
+The same Rust catalogue supplies the native harness tool allowlists:
 
 - `skills_help`: explain supported shared skill installation and activation.
 - `list_shared_skills`: list shared skill metadata without private MCP configuration.
@@ -740,10 +749,16 @@ rules remain in force. These are added to normal host configuration, without rep
 or disabling other configured MCP servers. Hermes can receive tasks through its existing gateway
 adapter; publishing callable collaboration tools into a Hermes turn awaits its ACP integration.
 
-SSH uses an owned reverse forward bound to remote loopback and a private temporary helper. Task
-credentials travel over SSH stdin into the remote environment; they never enter command arguments,
-persisted state, command previews or logs. No public listener or persistent remote service is installed.
-The broker rejects browser-origin requests, invalid/revoked grants, oversized input and unknown tools.
+Local harnesses use the broker's loopback `/mcp` URL. SSH uses an owned reverse forward bound to
+remote loopback; the remote harness receives that forwarded port, not the desktop-only port.
+No MCP executable, Python relay, or temporary helper file is uploaded. Task credentials travel over
+SSH stdin into the remote environment (or private ACP session frames); they never enter command
+arguments, persisted state, command previews or logs. No public listener or persistent remote service
+is installed. Codex uses `bearer_token_env_var`; Claude and OpenCode use native environment
+interpolation for the Authorization header. ACP receives an HTTP server definition over its private
+session pipe and must advertise `agentCapabilities.mcpCapabilities.http`; otherwise startup fails
+visibly before a prompt is sent. Other Python-based adapters and SSH supervisors are unaffected.
+The broker rejects non-loopback browser origins, invalid/revoked grants, oversized input and unknown tools.
 
 ## Task Git viewer
 

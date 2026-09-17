@@ -172,16 +172,6 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             return;
         }
     };
-    let helper = match grant.as_ref() {
-        Some(_) => match service.collaboration_helper() {
-            Ok(value) => value,
-            Err(error) => {
-                service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
-                return;
-            }
-        },
-        None => std::path::PathBuf::new(),
-    };
     let mut command = Command::new(executable);
     command
         .arg("app-server")
@@ -471,10 +461,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 }
                 if send(&control, json!({"method":"initialized"}))
                     .and_then(|_| {
-                        send(
-                            &control,
-                            thread_request(&task, helper.to_str(), grant.is_some(), &extensions),
-                        )
+                        send(&control, thread_request(&task, grant.as_ref(), &extensions))
                     })
                     .is_err()
                 {
@@ -1620,8 +1607,7 @@ fn turn_request(thread_id: &str, prompt: &str, task: &Task) -> Value {
 }
 fn thread_request(
     task: &Task,
-    helper: Option<&str>,
-    has_grant: bool,
+    grant: Option<&crate::collaboration_transport::SessionGrant>,
     extensions: &crate::extensions_runtime::RuntimeExtensions,
 ) -> Value {
     let sandbox = if task.sandbox == "yolo" {
@@ -1647,10 +1633,19 @@ fn thread_request(
         }
     }
     let mut config = extensions.codex_config();
-    if has_grant {
-        if let Some(helper) = helper {
-            config.extend(json!({"mcp_servers.monitter.command":"python3","mcp_servers.monitter.args":[helper],"mcp_servers.monitter.env_vars":["MONITTER_ENDPOINT","MONITTER_TOKEN"],"mcp_servers.monitter.required":true,"mcp_servers.monitter.enabled_tools":["list_agents","delegate_task","send_message","get_task_result","wait_for_task","list_messages","cancel_delegation","terminal_run","skills_help","list_shared_skills","install_shared_skill"],"mcp_servers.monitter.tools.install_shared_skill.approval_mode":"prompt"}).as_object().cloned().unwrap_or_default());
-        }
+    if let Some(grant) = grant {
+        config.extend(
+            json!({
+                "mcp_servers.monitter.url": grant.endpoint,
+                "mcp_servers.monitter.bearer_token_env_var": "MONITTER_TOKEN",
+                "mcp_servers.monitter.required": true,
+                "mcp_servers.monitter.enabled_tools": crate::collaboration_mcp::tool_names(),
+                "mcp_servers.monitter.tools.install_shared_skill.approval_mode": "prompt"
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
     }
     if !config.is_empty() {
         params["config"] = Value::Object(config);
@@ -1805,18 +1800,24 @@ mod tests {
         let request = thread_request(
             &task,
             None,
-            false,
             &crate::extensions_runtime::RuntimeExtensions::default(),
         );
         assert_eq!(request["method"], "thread/resume");
         assert_eq!(request["params"]["excludeTurns"], Value::Bool(true));
         let with_mcp = thread_request(
             &task,
-            Some("/private/monitter_mcp.py"),
-            true,
+            Some(&crate::collaboration_transport::SessionGrant {
+                endpoint: "http://127.0.0.1:4444/mcp".into(),
+                token: "test-token".into(),
+            }),
             &crate::extensions_runtime::RuntimeExtensions::default(),
         );
         let config = &with_mcp["params"]["config"];
+        assert_eq!(
+            config["mcp_servers.monitter.url"],
+            "http://127.0.0.1:4444/mcp"
+        );
+        assert_eq!(config["mcp_servers.monitter.bearer_token_env_var"], "MONITTER_TOKEN");
         assert_eq!(
             config["mcp_servers.monitter.tools.install_shared_skill.approval_mode"],
             "prompt"

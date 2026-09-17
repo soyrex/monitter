@@ -38,7 +38,7 @@ const out=(id,result)=>console.log(JSON.stringify({jsonrpc:'2.0',id,result}));
 const note=s=>fs.appendFileSync(log,s+'\n');
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const f=JSON.parse(line); note(f.method||`response:${f.id}`);
- if(f.method==='initialize') out(f.id,{protocolVersion:1,agentCapabilities:{sessionCapabilities:{resume:{}}}});
+ if(f.method==='initialize') out(f.id,{protocolVersion:1,agentCapabilities:{sessionCapabilities:{resume:{}},mcpCapabilities:{http:true}}});
  else if(f.method==='session/new') out(f.id,{sessionId:'native-retire-id'});
  else if(f.method==='session/resume') out(f.id,{});
  else if(f.method==='session/prompt') out(f.id,{stopReason:'end_turn'});

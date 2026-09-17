@@ -38,9 +38,10 @@ Retries reuse a stable request ID. Requests, results and lineage are private, du
 
 | Harness | Implementation | Validation scope |
 | --- | --- | --- |
-| Codex | Per-invocation MCP config, exact Monitter tool list and server-scoped tool approval; normal host auth/config retained. | Local and Mira transport proofs; full handoff evidence recorded in VALIDATION.md. |
-| Claude | Inline MCP config and exact Monitter tool allowlist. | Argument/unit checks; no live Claude model delegation claimed. |
-| OpenCode | Inline `mcp.monitter` config merged with the host's existing inline settings. | Installed 1.18 MCP registration plus local/remote merge checks; no live model delegation claimed. |
+| Codex | HTTP MCP URL, environment bearer token, exact Monitter tool list and server-scoped tool approval; normal host auth/config retained. | Historical relay proofs and current HTTP validation are distinguished in VALIDATION.md. |
+| Claude | HTTP MCP config with an environment-expanded Authorization header and exact Monitter tool allowlist. | Local adapter; SSH Claude remains unsupported by its interactive transport. |
+| OpenCode | HTTP `mcp.monitter` config merged with the host's existing inline settings; OAuth disabled for the private bearer grant. | Version 1.18 configuration; local and remote merge checks. |
+| ACP | HTTP MCP session definition with private Authorization header; HTTP capability required. | Local and tunneled endpoint, unsupported-capability and recovery checks. |
 | Hermes | Receives delegated work through the existing gateway. | Gateway offline checks; callable outbound collaboration awaits an ephemeral ACP integration. |
 
 Primary integration references: [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli),
@@ -54,9 +55,11 @@ Registration is per invocation. Monitter does not rewrite AGENTS.md, CLAUDE.md, 
 authentication or the user's other MCP servers. Independently running Desktop/TUI processes do not
 receive these tools retroactively. Existing idle native sessions receive them when resumed by Monitter.
 
-The broker and SSH reverse forwards bind to loopback only. Grants stay in memory and child process
-environments, never arguments or saved state. Remote helpers are private temporary files, removed
-with their owned SSH tunnel at turn end. There is no public relay or persistent remote daemon.
+The Rust HTTP MCP broker and SSH reverse forwards bind to loopback only. Grants stay in memory,
+child process environments and private session frames, never arguments or saved state. No MCP helper
+is installed remotely. The owned tunnel is stopped when its harness process is released. Resident
+harnesses retain their MCP configuration between turns, while idle tasks cannot execute tools.
+There is no public relay or persistent remote daemon.
 
 Delegation depth, cycles, per-task/root request counts and concurrent runs are bounded. A peer brief
 is context, not new user authorization. Native permissions and purchase/publishing boundaries remain.

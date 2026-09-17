@@ -56,7 +56,8 @@ const update=t=>{ write('update:'+t); console.log(JSON.stringify({jsonrpc:'2.0',
 readline.createInterface({input:process.stdin}).on('line',line=>{
   const f=JSON.parse(line); if(f.method) write(f.method);
   if(f.method==='initialize') {
-    const caps=mode==='unsupported-load'?{}:mode==='load-history'?{loadSession:true}:{sessionCapabilities:{load:{},resume:{}}};
+    const recovery=mode==='unsupported-load'?{}:mode==='load-history'?{loadSession:true}:{sessionCapabilities:{load:{},resume:{}}};
+    const caps={...recovery,mcpCapabilities:{http:true}};
     reply(f.id,{protocolVersion:1,agentCapabilities:caps});
   } else if(f.method==='session/new') {
     if(mode==='known-unsent-failure') console.log(JSON.stringify({jsonrpc:'2.0',id:f.id,error:{code:-32001,message:'fixture session setup failed'}}));
@@ -267,7 +268,11 @@ fn cancellation_during_delayed_recovery_handshake_prevents_respawn() {
             .map(|x| x.len() >= 2)
             .unwrap_or(false)
     });
-    f.service.cancel(&t.id).unwrap();
+    f.service
+        .resident_control(&t.id)
+        .unwrap()
+        .expect("recovering ACP control")
+        .terminate_owned();
     wait_for(&f, &t.id, |s| {
         s.tasks
             .iter()
@@ -333,9 +338,11 @@ fn successful_new_turn_resets_recovery_budget_for_a_second_process_loss() {
             .map(|x| x.len() >= 3)
             .unwrap_or(false)
     });
-    if let Some(control) = f.service.runs.lock().unwrap().tasks.get(&t.id).cloned() {
-        control.terminate_owned();
-    }
+    f.service
+        .resident_control(&t.id)
+        .unwrap()
+        .expect("resident ACP control after second loss")
+        .terminate_owned();
     let starts = fs::read_to_string(&f.count).unwrap_or_default().len();
     assert_eq!(
         starts, 3,

@@ -4,8 +4,6 @@ use crate::{
     Service,
 };
 use std::{
-    fs,
-    path::PathBuf,
     sync::{atomic::Ordering, Arc},
     thread,
     time::Duration,
@@ -125,37 +123,5 @@ impl Service {
                 }
             }
         }
-    }
-
-    pub(crate) fn collaboration_helper(&self) -> Result<PathBuf, String> {
-        fs::create_dir_all(&self.runtime_dir)
-            .map_err(|error| format!("Cannot create collaboration runtime folder: {error}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.runtime_dir, fs::Permissions::from_mode(0o700))
-                .map_err(|error| error.to_string())?;
-        }
-        // Use an immutable versioned filename so parallel turns never read a partly written helper.
-        let source = include_str!("monitter_mcp.py");
-        let path = self.runtime_dir.join("monitter-mcp-v1.py");
-        if fs::read_to_string(&path).ok().as_deref() != Some(source) {
-            let temporary = self
-                .runtime_dir
-                .join(format!("helper-{}.tmp", crate::model::id()));
-            fs::write(&temporary, source)
-                .map_err(|error| format!("Cannot write collaboration helper: {error}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
-                    .map_err(|error| error.to_string())?;
-            }
-            if let Err(error) = fs::rename(&temporary, &path) {
-                let _ = fs::remove_file(&temporary);
-                return Err(format!("Cannot install collaboration helper: {error}"));
-            }
-        }
-        Ok(path)
     }
 }

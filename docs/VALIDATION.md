@@ -3,6 +3,10 @@
 Validation of the first locally installed macOS build. This document distinguishes real CLI
 execution from browser fixtures and records the limits of each check.
 
+For the subsequent Rust HTTP collaboration MCP migration, see
+[RUST-HTTP-MCP.md](RUST-HTTP-MCP.md). Historical Python relay/model-turn evidence below
+does not, by itself, prove the new HTTP path.
+
 ## Verified environment (2026-09-09)
 
 - Mac: macOS 26.1, arm64, Xcode installed, Rust 1.94.0, Node 26.8.1.

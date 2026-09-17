@@ -246,6 +246,75 @@ mod tests {
     }
 
     #[test]
+    fn app_server_fixture_http_mcp_survives_two_resident_turns() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/fixtures/codex-app-server/mock.mjs");
+        let executable = std::env::temp_dir().join(format!(
+            "monitter-app-server-http-mcp-fixture-{}",
+            crate::id()
+        ));
+        let script = format!(
+            "#!/bin/sh\nMONITTER_FIXTURE_VERIFY_MCP_HTTP=1 exec /usr/bin/env node {}\n",
+            crate::runner::posix_quote(&root.to_string_lossy())
+        );
+        std::fs::write(&executable, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let service = Service::open(None, dir("http-mcp-two-turns")).unwrap();
+        let task = running_task(&service, executable.to_str().unwrap());
+        let _cleanup = FixtureCleanup {
+            service: Some(service.clone()),
+            task_id: task.id.clone(),
+            state_dir: service.runtime_dir.clone(),
+            executable: executable.clone(),
+        };
+        service
+            .launch(task.id.clone(), "first HTTP MCP turn".into())
+            .unwrap();
+        resolve_fixture_requests(&service, &task.id);
+        wait_until(&service, &task.id, Duration::from_secs(5), |snapshot| {
+            snapshot
+                .messages
+                .iter()
+                .filter(|message| message.task_id == task.id && message.role == "assistant")
+                .count()
+                == 1
+        });
+        service
+            .send_fast(task.id.clone(), "second HTTP MCP turn".into(), vec![])
+            .unwrap();
+        resolve_fixture_requests(&service, &task.id);
+        wait_until(&service, &task.id, Duration::from_secs(5), |snapshot| {
+            snapshot
+                .messages
+                .iter()
+                .filter(|message| message.task_id == task.id && message.role == "assistant")
+                .count()
+                == 2
+        });
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|message| message.task_id == task.id && message.text == "fixture response"));
+        service
+            .resident_control(&task.id)
+            .unwrap()
+            .unwrap()
+            .terminate_owned();
+        wait_until(&service, &task.id, Duration::from_secs(5), |_| {
+            !service
+                .collaboration_grants
+                .lock()
+                .unwrap()
+                .contains_key(&task.id)
+        });
+    }
+
+    #[test]
     fn stale_app_server_turn_cannot_mutate_replacement_run() {
         let service = Service::open(None, dir("stale-turn")).unwrap();
         let task = running_task(&service, "/bin/echo");
@@ -291,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_resumes_saved_thread_once_with_required_collaboration_helper() {
+    fn restart_resumes_saved_thread_once_with_required_http_collaboration() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../scripts/fixtures/codex-app-server/mock.mjs");
         let executable = std::env::temp_dir().join(format!(

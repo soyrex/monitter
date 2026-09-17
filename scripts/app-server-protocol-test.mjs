@@ -10,6 +10,9 @@ import path from 'node:path';
 
 const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/codex-app-server/mock.mjs');
 const child = spawn(process.execPath, [fixture], { stdio: ['pipe', 'pipe', 'inherit'] });
+const expectedTools = ['list_agents', 'delegate_task', 'send_message', 'get_task_result', 'wait_for_task', 'list_messages', 'cancel_delegation', 'terminal_run', 'skills_help', 'list_shared_skills', 'install_shared_skill'];
+// HTTP MCP behavior is exercised by the Rust integration test; this fixture only validates config.
+const mcpEndpoint = 'http://127.0.0.1:1/mcp';
 const lines = []; child.stdout.setEncoding('utf8');
 child.stdout.on('data', (chunk) => lines.push(...chunk.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))));
 const waitFor = async (predicate) => { for (;;) { const found = lines.find(predicate); if (found) return found; await new Promise((resolve) => setTimeout(resolve, 5)); } };
@@ -19,6 +22,13 @@ const reply = (id, result) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.
 call(1, 'initialize', { clientInfo: { name: 'test', title: null, version: '1' }, capabilities: { experimentalApi: false, requestAttestation: false } });
 assert.equal((await waitFor((m) => m.id === 1)).result.platformOs, 'macos');
 call(2, 'thread/start', {}); const started = await waitFor((m) => m.id === 2); assert.equal(started.result.thread.historyMode, 'paginated');
+call(20, 'thread/resume', { threadId: started.result.thread.id, excludeTurns: true, config: {
+  'mcp_servers.monitter.url': mcpEndpoint,
+  'mcp_servers.monitter.bearer_token_env_var': 'MONITTER_TOKEN',
+  'mcp_servers.monitter.required': true,
+  'mcp_servers.monitter.enabled_tools': expectedTools,
+} });
+assert.equal((await waitFor((m) => m.id === 20)).result.thread.id, started.result.thread.id);
 call(3, 'turn/start', { threadId: started.result.thread.id, input: [{ type: 'text', text: 'fixture', text_elements: [] }] });
 assert.equal((await waitFor((m) => m.id === 3)).result.turn.status, 'inProgress');
 const approval = await waitFor((m) => m.method === 'item/commandExecution/requestApproval');

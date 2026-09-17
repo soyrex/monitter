@@ -32,12 +32,14 @@ fn fixture() -> Fixture {
     )
     .unwrap();
     // The internal admin deliberately has collaboration disabled. Keep the
-    // mock's saved-thread/excludeTurns assertion, but do not require a
-    // Monitter MCP helper that this lane must never create.
-    let source = source.replace(
-        "if (request.params?.excludeTurns !== true || config['mcp_servers.monitter.required'] !== true || config['mcp_servers.monitter.command'] !== 'python3') {",
-        "if (request.params?.excludeTurns !== true) {",
-    );
+    // mock's saved-thread/excludeTurns assertion, but do not require an MCP
+    // server for this lane. Locate the validation line so the fixture can
+    // evolve its normal HTTP MCP checks without weakening them elsewhere.
+    let validation = source
+        .lines()
+        .find(|line| line.trim_start().starts_with("if (request.params?.excludeTurns !== true || config['mcp_servers.monitter.required']"))
+        .expect("Codex fixture resume validation");
+    let source = source.replacen(validation, "    if (request.params?.excludeTurns !== true) {", 1);
     fs::write(&executable, source).unwrap();
     #[cfg(unix)]
     {

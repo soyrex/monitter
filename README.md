@@ -112,3 +112,8 @@ When opening an issue, include your OS and version, Monitter commit, harness/ver
 - [Design reference](design/reference.html)
 
 Monitter is independently implemented. [Orbit](https://github.com/xinnaider/orbit) informed early CLI execution and resume patterns. Bundled font licenses are in `static/licenses/`.
+
+The built-in collaboration MCP runs in Rust over loopback HTTP. Local harnesses connect
+directly; SSH harnesses use an owned reverse tunnel. Codex, Claude, OpenCode and
+compatible ACP sessions receive scoped collaboration tools. The Python MCP relay
+has been removed; other Python integrations remain. See [the Rust HTTP MCP notes](docs/RUST-HTTP-MCP.md).

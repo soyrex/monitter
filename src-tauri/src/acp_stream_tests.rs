@@ -39,7 +39,7 @@ const reply = (id, result) => console.log(JSON.stringify({jsonrpc:'2.0', id, res
 const update = (messageId, content) => console.log(JSON.stringify({jsonrpc:'2.0', method:'session/update', params:{sessionId:session, update:{sessionUpdate:'agent_message_chunk', messageId, content}}}));
 readline.createInterface({input:process.stdin}).on('line', line => {
   const frame = JSON.parse(line);
-  if (frame.method === 'initialize') reply(frame.id, {protocolVersion:1, agentCapabilities:{}});
+  if (frame.method === 'initialize') reply(frame.id, {protocolVersion:1, agentCapabilities:{mcpCapabilities:{http:true}}});
   else if (frame.method === 'session/new') reply(frame.id, {sessionId:session});
   else if (frame.method === 'session/prompt') {
     if (process.argv[2] === 'anonymous') {

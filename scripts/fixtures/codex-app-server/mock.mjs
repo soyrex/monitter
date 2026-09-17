@@ -11,6 +11,9 @@ let turnNumber = 0;
 let activeTurn = false;
 let requestNumber = 100;
 let pendingRequestKind = null;
+let mcpEndpoint = null;
+let mcpToken = null;
+let mcpInitialized = false;
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const response = (id, result) => send({ jsonrpc: '2.0', id, result });
@@ -30,9 +33,37 @@ const thread = (id = threadId) => ({
 const turn = (status = 'inProgress') => ({ id: turnId, items: [], status, startedAt: 1726000000, completedAt: status === 'inProgress' ? null : 1726000001, durationMs: status === 'inProgress' ? null : 1000, error: null, itemsView: 'full' });
 const userInputText = (input) => Array.isArray(input) && input.some((entry) => entry?.type === 'text');
 
-function beginTurn(id, params) {
+async function verifyMcp(method, params = {}) {
+  if (process.env.MONITTER_FIXTURE_VERIFY_MCP_HTTP !== '1') return;
+  if (!mcpEndpoint || !mcpToken) throw new Error('fixture missing HTTP MCP credentials');
+  const headers = { authorization: `Bearer ${mcpToken}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' };
+  if (mcpInitialized) headers['MCP-Protocol-Version'] = '2025-03-26';
+  const result = await fetch(mcpEndpoint, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params }) });
+  if (!result.ok) throw new Error(`fixture MCP HTTP status ${result.status}`);
+  const payload = await result.json();
+  if (payload.error) throw new Error(`fixture MCP error ${payload.error.message}`);
+  if (payload.result?.isError === true) throw new Error('fixture MCP tool returned an error result');
+  if (method === 'initialize') mcpInitialized = true;
+  return payload.result;
+}
+
+async function configureMcp(params) {
+  const config = params?.config || {};
+  if (typeof config['mcp_servers.monitter.url'] === 'string') {
+    mcpEndpoint = config['mcp_servers.monitter.url'];
+    mcpToken = process.env[config['mcp_servers.monitter.bearer_token_env_var'] || ''];
+  }
+  if (process.env.MONITTER_FIXTURE_VERIFY_MCP_HTTP === '1') {
+    const init = await verifyMcp('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'monitter-fixture', version: '1' } });
+    const listing = await verifyMcp('tools/list');
+    if (!init?.serverInfo || !Array.isArray(listing?.tools) || !listing.tools.some((tool) => tool.name === 'list_agents')) throw new Error('fixture MCP catalogue missing list_agents');
+  }
+}
+
+async function beginTurn(id, params) {
   if (!userInputText(params?.input)) return rpcError(id, -32602, 'turn/start input must contain a text UserInput');
   if (process.env.MONITTER_FIXTURE_ERROR === '1') { rpcError(id, -32001, 'fixture injected protocol failure'); process.exitCode = 2; return; }
+  try { await verifyMcp('tools/call', { name: 'list_agents', arguments: {} }); } catch (error) { return rpcError(id, -32002, error.message); }
   turnNumber += 1;
   turnId = `00000000-0000-7000-8000-00000000000${turnNumber + 1}`;
   itemId = `00000000-0000-7000-8000-00000000000${turnNumber + 2}`;
@@ -61,17 +92,20 @@ rl.on('line', (line) => {
   try { request = JSON.parse(line); } catch { return rpcError(null, -32700, 'Invalid JSON'); }
   if (request.method === 'initialize') return response(request.id, { userAgent: 'monitter-protocol-fixture', codexHome: process.cwd(), platformFamily: 'unix', platformOs: 'macos' });
   if (request.method === 'initialized') return;
-  if (request.method === 'thread/start') return response(request.id, { thread: thread(), model: 'fixture-model', modelProvider: 'openai', serviceTier: null, cwd: process.cwd(), instructionSources: [], approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, reasoningEffort: null });
+  if (request.method === 'thread/start') return void configureMcp(request.params).then(() => response(request.id, { thread: thread(), model: 'fixture-model', modelProvider: 'openai', serviceTier: null, cwd: process.cwd(), instructionSources: [], approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, reasoningEffort: null })).catch((error) => rpcError(request.id, -32002, error.message));
   if (request.method === 'thread/resume') {
     const config = request.params?.config || {};
-    if (request.params?.excludeTurns !== true || config['mcp_servers.monitter.required'] !== true || config['mcp_servers.monitter.command'] !== 'python3') {
-      return rpcError(request.id, -32602, 'fixture requires excludeTurns and the required Monitter helper');
+    const enabled = config['mcp_servers.monitter.enabled_tools'];
+    const expectedTools = ['list_agents', 'delegate_task', 'send_message', 'get_task_result', 'wait_for_task', 'list_messages', 'cancel_delegation', 'terminal_run', 'skills_help', 'list_shared_skills', 'install_shared_skill'];
+    if (request.params?.excludeTurns !== true || config['mcp_servers.monitter.required'] !== true || typeof config['mcp_servers.monitter.url'] !== 'string' || !config['mcp_servers.monitter.url'].startsWith('http://') || config['mcp_servers.monitter.bearer_token_env_var'] !== 'MONITTER_TOKEN' || config['mcp_servers.monitter.command'] !== undefined || config['mcp_servers.monitter.args'] !== undefined || JSON.stringify(enabled) !== JSON.stringify(expectedTools) || JSON.stringify(config).includes('fixture-token')) {
+      return rpcError(request.id, -32602, 'fixture requires HTTP Monitter MCP config, env bearer token, and exact tool allowlist');
     }
     const result = () => response(request.id, { thread: thread(request.params?.threadId || threadId), model: 'fixture-model', modelProvider: 'openai', serviceTier: null, cwd: process.cwd(), instructionSources: [], approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, reasoningEffort: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null });
+    if (process.env.MONITTER_FIXTURE_VERIFY_MCP_HTTP === '1') return void configureMcp(request.params).then(result).catch((error) => rpcError(request.id, -32002, error.message));
     const delay = Number(process.env.MONITTER_FIXTURE_DELAY_THREAD_RESUME_MS || 0);
     return delay > 0 ? setTimeout(result, delay) : result();
   }
-  if (request.method === 'turn/start') return beginTurn(request.id, request.params);
+  if (request.method === 'turn/start') return void beginTurn(request.id, request.params);
   if (request.method === 'turn/steer') {
     if (!activeTurn) return rpcError(request.id, -32602, 'No active fixture turn');
     if (request.params?.threadId !== threadId || request.params?.expectedTurnId !== turnId || !userInputText(request.params?.input)) {

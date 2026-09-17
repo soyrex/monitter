@@ -48,7 +48,7 @@ const err=(id,message)=>{note('error:'+message); console.log(JSON.stringify({jso
 const update=text=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'resume-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text},id:'reply'}}}));
 readline.createInterface({input:process.stdin}).on('line', line=>{
   const f=JSON.parse(line); if(f.method) note(f.method); if(f.method==='session/prompt') note('prompt:'+f.params.prompt?.[0]?.text);
-  if(f.method==='initialize') out(f.id,{protocolVersion:1,agentCapabilities:{sessionCapabilities:{resume:{}}}});
+  if(f.method==='initialize') out(f.id,{protocolVersion:1,agentCapabilities:{sessionCapabilities:{resume:{}},mcpCapabilities:{http:true}}});
   else if(f.method==='session/new') out(f.id,{sessionId:'resume-session'});
   else if(f.method==='session/resume') out(f.id,{});
   else if(f.method==='session/prompt' && generation===1 && mode==='error') { err(f.id,'fixture prompt failed'); setTimeout(()=>process.exit(0),10); }
@@ -143,6 +143,14 @@ fn exercise_resume_after_failure(mode: &str, first_prompt: &str) {
         .find(|t| t.id == task.id)
         .unwrap();
     assert_eq!(saved.native_session_id.as_deref(), Some("resume-session"));
+
+    // The failure status is persisted before the run owner finishes tearing
+    // down. Resume only once that owner has released the native session.
+    let release_deadline = Instant::now() + Duration::from_secs(8);
+    while f.service.run_is_active(&task.id) && Instant::now() < release_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!f.service.run_is_active(&task.id), "failed ACP run must release its owner");
 
     f.service.resume(task.id.clone()).unwrap();
     wait_for(&f, &task.id, |s| {
