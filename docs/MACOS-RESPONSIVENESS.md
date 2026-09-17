@@ -471,7 +471,9 @@ The 2026-09-17 inventory (build sizes rechecked after the candidate build) was:
 | `/Users/alex/code/monitter/src-tauri/target/debug` | 5.4 GB | Shared cache; contains a running user-used test app. Preserve until its consumers are stopped and exact disposable targets are agreed. |
 | `/Users/alex/code/monitter/src-tauri/target/release` | 1.1 GB | Task build cache; compilation finished. Retain through native QA and artifact handoff, then assess disposable intermediates. |
 | `/Users/alex/code/monitter-macos-responsiveness/build` | 4.1 MB | Built frontend for the packaged candidate and full-app fixture; retain through QA. |
+| `/Users/alex/code/monitter-macos-responsiveness/.svelte-kit` | 6.5 MB | Regenerable frontend intermediates; retain while frontend verification continues. |
 | `/Users/alex/code/monitter-macos-responsiveness/artifacts/sqlite-candidate-OaYQpq` | 22 MB | Protected signed candidate and manifest, not a build cache. Keep. |
+| `/Users/alex/code/monitter-macos-responsiveness/artifacts/webkit-profile-BU6cA8` | 3.0 MB | Native profiling evidence and context, not build cache. Keep. |
 | `/Users/alex/Library/Caches/Monitter/builds` | 319 MB | Existing staged apps and 90 MB of packages; identify referenced deliverables before removing any exact staging directory. |
 | `/Users/alex/code/monitter/artifacts` | 5.4 GB | Mixed artifacts, not a disposable cache: includes 1.4 GB install backups and 3.0 GB idle-runtime diagnostics. Preserve pending exact classification/approval. |
 
