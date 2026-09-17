@@ -124,6 +124,58 @@ mod tests {
         resolve_fixture_requests_with_timeout(service, task_id, Duration::from_secs(5));
     }
 
+    fn paced_fixture_wrapper(name: &str) -> PathBuf {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/fixtures/codex-app-server/mock.mjs");
+        let executable = std::env::temp_dir().join(format!(
+            "monitter-app-server-{name}-fixture-{}",
+            crate::id()
+        ));
+        let script = format!(
+            "#!/bin/sh\nunset MONITTER_FIXTURE_ERROR MONITTER_FIXTURE_VERIFY_MCP_HTTP MONITTER_FIXTURE_DELAY_THREAD_RESUME_MS MONITTER_FIXTURE_UNIQUE_IDS\nMONITTER_FIXTURE_DELTA_TICKS=2 MONITTER_FIXTURE_DELTA_INTERVAL_MS=0 exec /usr/bin/env node {}\n",
+            crate::runner::posix_quote(&fixture.to_string_lossy())
+        );
+        std::fs::write(&executable, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        executable
+    }
+
+    #[test]
+    fn app_server_flushes_dirty_deltas_before_waiting_for_approval() {
+        let executable = paced_fixture_wrapper("flush-before-approval");
+        let service = Service::open(None, dir("flush-before-approval")).unwrap();
+        let task = running_task(&service, executable.to_str().unwrap());
+        let _cleanup = FixtureCleanup {
+            service: Some(service.clone()),
+            task_id: task.id.clone(),
+            state_dir: service.runtime_dir.clone(),
+            executable,
+        };
+
+        service
+            .launch(task.id.clone(), "flush buffered fixture deltas".into())
+            .unwrap();
+        wait_until(&service, &task.id, Duration::from_secs(5), |snapshot| {
+            snapshot
+                .approval_requests
+                .iter()
+                .any(|request| request.task_id == task.id && request.status == "pending")
+        });
+
+        let snapshot = service.cancel(&task.id).unwrap();
+        let assistant = snapshot
+            .messages
+            .iter()
+            .find(|message| message.task_id == task.id && message.role == "assistant")
+            .expect("first delta must be durable before cancellation");
+        assert_eq!(assistant.text, "fixture response fixture response 2");
+        assert_eq!(assistant.stream_status.as_deref(), Some("interrupted"));
+    }
+
     #[test]
     fn app_server_fixture_round_trip_persists_stream_and_interaction_records() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

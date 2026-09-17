@@ -101,6 +101,52 @@ fn observe_subsequent_turn_clock(
 struct BufferedMessage {
     text: String,
     last_flush: Instant,
+    flushed_len: usize,
+}
+
+/// Persist every dirty assistant item for this turn before a server request can
+/// block the reader. A Stop fences later service mutations, so waiting for the
+/// next delta (the normal 100 ms coalescing path) could otherwise discard a
+/// final buffered chunk while an approval is visible.
+fn flush_buffered_messages(
+    service: &Arc<Service>,
+    task_id: &str,
+    control: &Arc<RunControl>,
+    turn_id: &str,
+    message_text: &mut HashMap<String, BufferedMessage>,
+    turn_items: &Arc<Mutex<HashMap<String, Value>>>,
+    complete: bool,
+) -> Result<(), String> {
+    let prefix = format!("{turn_id}:");
+    for (stable, buffered) in message_text.iter_mut() {
+        if !stable.starts_with(&prefix)
+            || (!complete && buffered.flushed_len == buffered.text.len())
+        {
+            continue;
+        }
+        let item_id = stable
+            .strip_prefix(&prefix)
+            .ok_or("Buffered Codex message has an invalid item key.")?;
+        let phase = turn_items.lock().ok().and_then(|items| {
+            items
+                .get(item_id)
+                .and_then(|started| started.get("phase"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        service.app_server_message(
+            task_id,
+            control,
+            turn_id,
+            stable,
+            &buffered.text,
+            phase.as_deref(),
+            complete,
+        )?;
+        buffered.last_flush = Instant::now();
+        buffered.flushed_len = buffered.text.len();
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -394,6 +440,38 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         // before considering client response correlation; never mistake one
         // for a late turn/start acknowledgement.
         if value.get("method").is_some() && value.get("id").is_some() {
+            let request_thread = value
+                .pointer("/params/threadId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let request_turn = value
+                .pointer("/params/turnId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !request_thread.is_empty()
+                && !request_turn.is_empty()
+                && control.app_server_turn_is_current(request_thread, request_turn)
+            {
+                if let Err(error) = flush_buffered_messages(
+                    &service,
+                    &task_id,
+                    &control,
+                    request_turn,
+                    &mut message_text,
+                    &turn_items,
+                    false,
+                ) {
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        Some(request_turn),
+                        "error",
+                        Some(error),
+                    );
+                    terminal = true;
+                    break;
+                }
+            }
             handle_server_request(
                 service.clone(),
                 task_id.clone(),
@@ -1442,6 +1520,7 @@ fn handle_notification(
                         .or_insert_with(|| BufferedMessage {
                             text: String::new(),
                             last_flush: Instant::now() - DELTA_FLUSH_INTERVAL,
+                            flushed_len: 0,
                         });
                 if buffered.text.len().saturating_add(delta.len()) > MAX_DELTA_TEXT {
                     service.complete_app_server_turn(
@@ -1477,6 +1556,7 @@ fn handle_notification(
                         return;
                     }
                     buffered.last_flush = Instant::now();
+                    buffered.flushed_len = buffered.text.len();
                 }
             }
         }
@@ -1493,6 +1573,7 @@ fn handle_notification(
                             BufferedMessage {
                                 text: text.into(),
                                 last_flush: Instant::now(),
+                                flushed_len: text.len(),
                             },
                         );
                         if let Err(error) = service.app_server_message(
@@ -1590,6 +1671,32 @@ fn handle_notification(
             }
         }
         "turn/completed" => {
+            let status = params
+                .pointer("/turn/status")
+                .and_then(Value::as_str)
+                .unwrap_or("failed");
+            // A provider can complete a turn without a final agent-item
+            // envelope. Preserve its last buffered delta while this turn is
+            // still owned; completion may clear the ownership fence.
+            if let Err(error) = flush_buffered_messages(
+                service,
+                task_id,
+                control,
+                turn_id,
+                message_text,
+                turn_items,
+                status == "completed",
+            ) {
+                service.complete_app_server_turn(
+                    task_id,
+                    control,
+                    Some(turn_id),
+                    "error",
+                    Some(error),
+                );
+                *_terminal = true;
+                return;
+            }
             // Revoke response rights before durable completion wakes waiters.
             // This ordering prevents an error result racing upstream's own
             // terminal notification.
@@ -1600,10 +1707,6 @@ fn handle_notification(
                 state.resolved.extend(rpc_ids);
                 state.received.clear();
             }
-            let status = params
-                .pointer("/turn/status")
-                .and_then(Value::as_str)
-                .unwrap_or("failed");
             let error = params
                 .pointer("/turn/error/message")
                 .and_then(Value::as_str)
@@ -1940,7 +2043,132 @@ fn thread_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::{io::Cursor, path::PathBuf};
+
+    fn current_turn_service(name: &str) -> (Arc<Service>, String, Arc<RunControl>, PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("monitter-codex-app-server-{name}-{}", crate::id()));
+        let service = Service::open(None, directory.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(crate::model::CreateTaskInput {
+                agent_id,
+                title: "terminal flush fixture".into(),
+                native_session_id: None,
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                cwd: None,
+                model_settings: None,
+                sandbox: None,
+            })
+            .unwrap();
+        service
+            .mutate_data(None, |data| {
+                data.snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+        let control = service.reserve_run(&task.id).unwrap();
+        control.set_app_server_thread("thread-terminal".into());
+        control.set_app_server_turn("turn-terminal".into());
+        (service, task.id, control, directory)
+    }
+
+    #[test]
+    fn terminal_completion_flushes_dirty_deltas_without_agent_item() {
+        let (service, task_id, control, directory) = current_turn_service("terminal-flush");
+        let mut started = true;
+        let mut terminal = false;
+        let mut messages = HashMap::new();
+        let items = Arc::new(Mutex::new(HashMap::new()));
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let lifecycle = Arc::new(Mutex::new(RequestLifecycle::default()));
+        let delta = |text| {
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-terminal",
+                    "turnId": "turn-terminal",
+                    "itemId": "item-terminal",
+                    "delta": text,
+                }
+            })
+        };
+
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &delta("first"),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &delta(" second"),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-terminal",
+                    "turnId": "turn-terminal",
+                    "turn": {"status": "completed", "error": null},
+                }
+            }),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+
+        let snapshot = service.snapshot().unwrap();
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .find(|message| message.task_id == task_id && message.role == "assistant")
+                .map(|message| message.text.as_str()),
+            Some("first second")
+        );
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .find(|message| message.task_id == task_id && message.role == "assistant")
+                .and_then(|message| message.stream_status.as_deref()),
+            Some("complete")
+        );
+        assert!(snapshot
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == "completed"));
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn bounded_line_rejects_before_accumulating_following_chunks() {
@@ -2086,7 +2314,10 @@ mod tests {
             config["mcp_servers.monitter.url"],
             "http://127.0.0.1:4444/mcp"
         );
-        assert_eq!(config["mcp_servers.monitter.bearer_token_env_var"], "MONITTER_TOKEN");
+        assert_eq!(
+            config["mcp_servers.monitter.bearer_token_env_var"],
+            "MONITTER_TOKEN"
+        );
         assert_eq!(
             config["mcp_servers.monitter.tools.install_shared_skill.approval_mode"],
             "prompt"
