@@ -201,6 +201,8 @@ impl Database {
             projects: read_vec(&connection, "projects")?,
             settings,
             collaborations: read_vec(&connection, "collaborations")?,
+            subagent_sessions: read_vec(&connection, "subagent_sessions")?,
+            subagent_transcripts: read_map(&connection, "subagent_transcripts")?,
             queued_messages: read_vec(&connection, "queued_messages")?,
             approval_requests: read_vec(&connection, "approval_requests")?,
             approval_rules: read_vec(&connection, "approval_rules")?,
@@ -405,6 +407,17 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
     )?;
     write_vec(
         transaction,
+        "subagent_sessions",
+        &snapshot.subagent_sessions,
+        plain_id,
+    )?;
+    write_map(
+        transaction,
+        "subagent_transcripts",
+        &snapshot.subagent_transcripts,
+    )?;
+    write_vec(
+        transaction,
         "queued_messages",
         &snapshot.queued_messages,
         queued_message_key,
@@ -485,6 +498,19 @@ fn diff_state(
     )?;
     diff_vec(
         transaction,
+        "subagent_sessions",
+        &before_snapshot.subagent_sessions,
+        &after_snapshot.subagent_sessions,
+        plain_id,
+    )?;
+    diff_map(
+        transaction,
+        "subagent_transcripts",
+        &before_snapshot.subagent_transcripts,
+        &after_snapshot.subagent_transcripts,
+    )?;
+    diff_vec(
+        transaction,
         "queued_messages",
         &before_snapshot.queued_messages,
         &after_snapshot.queued_messages,
@@ -548,6 +574,7 @@ has_id!(
     Channel,
     Project,
     Collaboration,
+    SubagentSession,
     QueuedMessage,
     ApprovalRequest,
     ApprovalRule

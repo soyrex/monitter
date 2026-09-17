@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{id, RunEvent};
+use crate::model::{id, RunEvent, SubagentSession, SubagentTranscriptEntry};
 use std::{fs, sync::Arc};
 
 #[test]
@@ -70,6 +70,35 @@ fn usage(id: &str, classification: &str, total: i64) -> RunUsageSample {
     .unwrap()
 }
 
+fn subagent_session(id: &str) -> SubagentSession {
+    SubagentSession {
+        id: id.into(),
+        source: "acp".into(),
+        parent_task_id: "task".into(),
+        parent_thread_id: None,
+        collaboration_id: None,
+        agent_path: Some("root/research".into()),
+        agent_thread_id: None,
+        prompt: Some("Inspect the bounded fixture.".into()),
+        model: Some("test-model".into()),
+        reasoning_effort: None,
+        status: "running".into(),
+        result: None,
+        error: None,
+        created_at: 10,
+        updated_at: 10,
+    }
+}
+
+fn subagent_entry(id: &str, text: &str, created_at: i64) -> SubagentTranscriptEntry {
+    SubagentTranscriptEntry {
+        id: id.into(),
+        role: "assistant".into(),
+        text: text.into(),
+        created_at,
+    }
+}
+
 #[test]
 fn exclusive_owner_releases_lease_on_drop() {
     let path = directory();
@@ -98,6 +127,60 @@ fn event_edits_deletes_and_reordering_survive_reopen() {
     drop(store);
     let (store, reopened, _, _) = Store::open(path.clone()).unwrap();
     assert_eq!(reopened.events, snapshot.events);
+    drop(store);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn subagent_projection_round_trips_updates_and_deletes_atomically() {
+    let path = directory();
+    let (store, mut snapshot, hosts, attachments) = Store::open(path.clone()).unwrap();
+    snapshot.subagent_sessions = vec![subagent_session("child")];
+    snapshot.subagent_transcripts.insert(
+        "child".into(),
+        vec![
+            subagent_entry("entry-1", "small captured detail", 11),
+            subagent_entry("entry-2", "still deliberately bounded", 12),
+        ],
+    );
+    store.save(&snapshot, &hosts, &attachments).unwrap();
+
+    let before = snapshot.clone();
+    snapshot.subagent_sessions[0].status = "completed".into();
+    snapshot.subagent_sessions[0].result = Some("done".into());
+    snapshot.subagent_sessions[0].updated_at = 13;
+    snapshot
+        .subagent_transcripts
+        .get_mut("child")
+        .unwrap()
+        .push(subagent_entry("entry-3", "final bounded detail", 13));
+    store
+        .save_update(
+            (&before, &hosts, &attachments),
+            (&snapshot, &hosts, &attachments),
+        )
+        .unwrap();
+    drop(store);
+
+    let (store, reopened, reopened_hosts, reopened_attachments) =
+        Store::open(path.clone()).unwrap();
+    assert_eq!(reopened.subagent_sessions, snapshot.subagent_sessions);
+    assert_eq!(reopened.subagent_transcripts, snapshot.subagent_transcripts);
+
+    let mut deleted = reopened.clone();
+    deleted.subagent_sessions.clear();
+    deleted.subagent_transcripts.clear();
+    store
+        .save_update(
+            (&reopened, &reopened_hosts, &reopened_attachments),
+            (&deleted, &reopened_hosts, &reopened_attachments),
+        )
+        .unwrap();
+    drop(store);
+
+    let (store, reopened, _, _) = Store::open(path.clone()).unwrap();
+    assert!(reopened.subagent_sessions.is_empty());
+    assert!(reopened.subagent_transcripts.is_empty());
     drop(store);
     fs::remove_dir_all(path).unwrap();
 }

@@ -124,6 +124,13 @@ pub struct Task {
     /// existing native ACP session or its resumed transport.
     #[serde(default)]
     pub acp: Option<AcpLaunch>,
+    /// Display name of the agent that owned this task at the moment it was
+    /// archived because the agent was removed. The task's `provider` and
+    /// `model` already capture the LLM reference; this label keeps the
+    /// archived chat readable after the agent record is gone. Null for tasks
+    /// archived through the ordinary archive flow.
+    #[serde(default)]
+    pub archived_agent_name: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +154,18 @@ pub struct Message {
     pub attachments: Vec<crate::attachments::Attachment>,
 }
 
+/// A deliberately small, provider-neutral entry shown in the subagent visor.
+/// Native Codex thread items are normalized at the backend boundary so the UI
+/// never needs to understand the app-server protocol or expose raw rollouts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentTranscriptEntry {
+    pub id: String,
+    pub role: String,
+    pub text: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Collaboration {
@@ -163,6 +182,178 @@ pub struct Collaboration {
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A compact, durable projection of either a native Codex sub-agent or a
+/// Monitter-routed delegation.  It deliberately stores the latest useful
+/// state separately from the diagnostic event journal, which may be compacted
+/// for LAN clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentSession {
+    pub id: String,
+    /// `codex` for native collaboration tools, `acp` for a native ACP
+    /// `subagent_spawned` announcement (e.g. claude-agent-acp's Task tool),
+    /// `collaboration` for a routed Monitter delegation.
+    pub source: String,
+    pub parent_task_id: String,
+    #[serde(default)]
+    pub parent_thread_id: Option<String>,
+    #[serde(default)]
+    pub collaboration_id: Option<String>,
+    #[serde(default)]
+    pub agent_path: Option<String>,
+    #[serde(default)]
+    pub agent_thread_id: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Provider-normalized delta used by both app-server and stream-json Codex
+/// parsers.  Optional fields preserve facts learned from earlier events.
+#[derive(Debug, Clone, Default)]
+pub struct SubagentSessionUpdate {
+    pub id: String,
+    pub source: String,
+    pub parent_task_id: String,
+    pub parent_thread_id: Option<String>,
+    pub collaboration_id: Option<String>,
+    pub agent_path: Option<String>,
+    pub agent_thread_id: Option<String>,
+    pub prompt: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub status: Option<String>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+}
+
+fn terminal_subagent_status(status: &str) -> bool {
+    matches!(status, "completed" | "error" | "interrupted")
+}
+
+fn subagent_status_rank(status: &str) -> u8 {
+    if terminal_subagent_status(status) {
+        2
+    } else if status == "running" {
+        1
+    } else {
+        0
+    }
+}
+
+/// Upsert a native or routed sub-agent projection.  Terminal observations are
+/// sticky so an out-of-order `interacted` notification cannot resurrect a
+/// completed session.
+pub fn upsert_subagent_session(
+    sessions: &mut Vec<SubagentSession>,
+    update: SubagentSessionUpdate,
+    observed_at: i64,
+) {
+    if update.id.trim().is_empty() || update.parent_task_id.trim().is_empty() {
+        return;
+    }
+    let status = update.status.unwrap_or_else(|| "queued".into());
+    if let Some(existing) = sessions.iter_mut().find(|entry| entry.id == update.id) {
+        if subagent_status_rank(&status) >= subagent_status_rank(&existing.status) {
+            existing.status = status;
+        }
+        macro_rules! replace_if_some {
+            ($field:ident) => {
+                if update.$field.is_some() {
+                    existing.$field = update.$field;
+                }
+            };
+        }
+        replace_if_some!(parent_thread_id);
+        replace_if_some!(collaboration_id);
+        replace_if_some!(agent_path);
+        replace_if_some!(agent_thread_id);
+        replace_if_some!(prompt);
+        replace_if_some!(model);
+        replace_if_some!(reasoning_effort);
+        replace_if_some!(result);
+        replace_if_some!(error);
+        existing.updated_at = update.updated_at.unwrap_or(observed_at);
+        return;
+    }
+    sessions.push(SubagentSession {
+        id: update.id,
+        source: update.source,
+        parent_task_id: update.parent_task_id,
+        parent_thread_id: update.parent_thread_id,
+        collaboration_id: update.collaboration_id,
+        agent_path: update.agent_path,
+        agent_thread_id: update.agent_thread_id,
+        prompt: update.prompt,
+        model: update.model,
+        reasoning_effort: update.reasoning_effort,
+        status,
+        result: update.result,
+        error: update.error,
+        created_at: update.created_at.unwrap_or(observed_at),
+        updated_at: update.updated_at.unwrap_or(observed_at),
+    });
+}
+
+/// Close any child projections that never emitted their own terminal event
+/// before the owning task ended. Native Codex children can be interrupted
+/// without a final `subAgentActivity` notification; leaving those entries
+/// active would keep an empty visor dock mounted forever.
+pub fn finalize_subagent_sessions(
+    sessions: &mut [SubagentSession],
+    parent_task_id: &str,
+    parent_status: &str,
+    observed_at: i64,
+) -> usize {
+    let terminal = if parent_status == "completed" {
+        "completed"
+    } else {
+        "interrupted"
+    };
+    let mut finalized = 0;
+    for session in sessions.iter_mut().filter(|session| {
+        session.source != "collaboration"
+            && session.parent_task_id == parent_task_id
+            && !terminal_subagent_status(&session.status)
+    }) {
+        session.status = terminal.into();
+        session.updated_at = observed_at;
+        finalized += 1;
+    }
+    finalized
+}
+
+/// ACP subagents have no separately resumable thread to re-query on demand
+/// (unlike Codex's `thread/read`), so their transcript is captured inline as
+/// it streams and kept small; this bound matches the visor's "deliberately
+/// small" projection rather than trying to be an exhaustive log.
+const MAX_SUBAGENT_TRANSCRIPT_ENTRIES: usize = 200;
+
+pub fn append_subagent_transcript_entry(
+    transcripts: &mut std::collections::HashMap<String, Vec<SubagentTranscriptEntry>>,
+    subagent_id: &str,
+    entry: SubagentTranscriptEntry,
+) {
+    let entries = transcripts.entry(subagent_id.to_string()).or_default();
+    entries.push(entry);
+    if entries.len() > MAX_SUBAGENT_TRANSCRIPT_ENTRIES {
+        let excess = entries.len() - MAX_SUBAGENT_TRANSCRIPT_ENTRIES;
+        entries.drain(0..excess);
+    }
 }
 
 pub fn default_collaboration_enabled() -> bool {
@@ -548,6 +739,10 @@ pub struct Settings {
     pub chat_font: String,
     #[serde(default)]
     pub interface_font: String,
+    #[serde(default = "default_window_surface")]
+    pub window_surface: String,
+    #[serde(default = "default_window_transparency")]
+    pub window_transparency: u8,
     pub accent: String,
     pub theme: String,
     #[serde(default = "default_interface_scale")]
@@ -600,6 +795,12 @@ fn default_tab_style() -> String {
 }
 fn default_interface_density() -> String {
     "normal".into()
+}
+fn default_window_surface() -> String {
+    "opaque".into()
+}
+fn default_window_transparency() -> u8 {
+    18
 }
 fn default_chat_font_size() -> u8 {
     13
@@ -687,12 +888,53 @@ pub struct Snapshot {
     pub settings: Settings,
     #[serde(default)]
     pub collaborations: Vec<Collaboration>,
+    /// Durable user-facing projection of native and routed sub-agent work.
+    /// Missing in older state files means no sessions have been captured yet.
+    #[serde(default)]
+    pub subagent_sessions: Vec<SubagentSession>,
+    /// Inline-captured transcript for sources with no re-queryable native
+    /// thread (currently `acp`), keyed by `SubagentSession.id`. Codex and
+    /// `collaboration` sessions never populate this; their transcript is
+    /// fetched live or read from the child task's own messages.
+    #[serde(default)]
+    pub subagent_transcripts: std::collections::HashMap<String, Vec<SubagentTranscriptEntry>>,
     #[serde(default)]
     pub queued_messages: Vec<QueuedMessage>,
     #[serde(default)]
     pub approval_requests: Vec<ApprovalRequest>,
     #[serde(default)]
     pub approval_rules: Vec<ApprovalRule>,
+}
+
+/// Rebuild or refresh routed delegation entries while opening legacy state or
+/// after collaboration routing mutates its authoritative records. Native
+/// sessions have no collaboration counterpart and are left untouched.
+pub fn sync_collaboration_subagent_sessions(snapshot: &mut Snapshot) {
+    let updates = snapshot
+        .collaborations
+        .iter()
+        .filter(|item| item.kind == "delegation")
+        .map(|item| SubagentSessionUpdate {
+            id: format!("collaboration:{}", item.id),
+            source: "collaboration".into(),
+            parent_task_id: item.from_task_id.clone(),
+            parent_thread_id: None,
+            collaboration_id: Some(item.id.clone()),
+            agent_path: None,
+            agent_thread_id: None,
+            prompt: Some(item.text.clone()),
+            model: None,
+            reasoning_effort: None,
+            status: Some(item.status.clone()),
+            result: item.result.clone(),
+            error: item.error.clone(),
+            created_at: Some(item.created_at),
+            updated_at: Some(item.updated_at),
+        })
+        .collect::<Vec<_>>();
+    for update in updates {
+        upsert_subagent_session(&mut snapshot.subagent_sessions, update, now());
+    }
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -858,6 +1100,8 @@ pub fn default_snapshot() -> Snapshot {
         channels: vec![],
         projects: vec![],
         collaborations: vec![],
+        subagent_sessions: vec![],
+        subagent_transcripts: std::collections::HashMap::new(),
         queued_messages: vec![],
         approval_requests: vec![],
         approval_rules: vec![],
@@ -871,6 +1115,8 @@ pub fn default_snapshot() -> Snapshot {
             terminal_font: String::new(),
             chat_font: String::new(),
             interface_font: String::new(),
+            window_surface: default_window_surface(),
+            window_transparency: default_window_transparency(),
             accent: "#3f9d6a".into(),
             theme: "system".into(),
             interface_scale: default_interface_scale(),
@@ -921,6 +1167,7 @@ mod tests {
 
         assert!(settings.user_name.is_empty());
         assert_eq!(settings.interface_scale, 125);
+        assert_eq!(settings.window_surface, "opaque");
         assert_eq!(settings.chat_line_height, 1.65);
         assert_eq!(settings.terminal_line_height, 1.0);
         assert!(settings.show_tool_activity);
@@ -942,6 +1189,7 @@ mod tests {
 
         assert_eq!(value["userName"], "");
         assert_eq!(value["interfaceScale"], 125);
+        assert_eq!(value["windowSurface"], "opaque");
         assert_eq!(value["chatLineHeight"], 1.65);
         assert_eq!(value["terminalLineHeight"], 1.0);
         assert_eq!(value["showToolActivity"], true);
@@ -1082,6 +1330,140 @@ mod task_migration_tests {
         assert_eq!(snapshot.settings.chat_font_size, 13);
         assert_eq!(snapshot.settings.interface_font_size, 14);
         assert!(snapshot.approval_requests.is_empty());
+        assert!(snapshot.subagent_sessions.is_empty());
+    }
+
+    #[test]
+    fn terminal_subagent_projection_is_not_resurrected_by_late_activity() {
+        let mut sessions = vec![];
+        let mut completed = SubagentSessionUpdate {
+            id: "codex:child".into(),
+            source: "codex".into(),
+            parent_task_id: "parent".into(),
+            status: Some("completed".into()),
+            result: Some("done".into()),
+            ..Default::default()
+        };
+        upsert_subagent_session(&mut sessions, completed.clone(), 10);
+        completed.status = Some("running".into());
+        completed.agent_path = Some("/root/child".into());
+        completed.result = None;
+        upsert_subagent_session(&mut sessions, completed, 11);
+        assert_eq!(sessions[0].status, "completed");
+        assert_eq!(sessions[0].result.as_deref(), Some("done"));
+        assert_eq!(sessions[0].agent_path.as_deref(), Some("/root/child"));
+
+        let queued = SubagentSessionUpdate {
+            id: "codex:child".into(),
+            source: "codex".into(),
+            parent_task_id: "parent".into(),
+            status: Some("queued".into()),
+            ..Default::default()
+        };
+        upsert_subagent_session(&mut sessions, queued, 12);
+        assert_eq!(sessions[0].status, "completed");
+    }
+
+    #[test]
+    fn unfinished_subagents_follow_the_parent_to_a_terminal_state() {
+        let mut sessions = vec![
+            SubagentSession {
+                id: "codex:running".into(),
+                source: "codex".into(),
+                parent_task_id: "parent".into(),
+                parent_thread_id: None,
+                collaboration_id: None,
+                agent_path: None,
+                agent_thread_id: Some("running".into()),
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                status: "running".into(),
+                result: None,
+                error: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            SubagentSession {
+                id: "codex:done".into(),
+                source: "codex".into(),
+                parent_task_id: "parent".into(),
+                parent_thread_id: None,
+                collaboration_id: None,
+                agent_path: None,
+                agent_thread_id: Some("done".into()),
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                status: "completed".into(),
+                result: Some("kept".into()),
+                error: None,
+                created_at: 1,
+                updated_at: 2,
+            },
+        ];
+
+        assert_eq!(
+            finalize_subagent_sessions(&mut sessions, "parent", "interrupted", 10),
+            1
+        );
+        assert_eq!(sessions[0].status, "interrupted");
+        assert_eq!(sessions[0].updated_at, 10);
+        assert_eq!(sessions[1].status, "completed");
+        assert_eq!(sessions[1].result.as_deref(), Some("kept"));
+
+        sessions.push(SubagentSession {
+            id: "collaboration:still-live".into(),
+            source: "collaboration".into(),
+            parent_task_id: "parent".into(),
+            parent_thread_id: None,
+            collaboration_id: Some("still-live".into()),
+            agent_path: None,
+            agent_thread_id: None,
+            prompt: None,
+            model: None,
+            reasoning_effort: None,
+            status: "running".into(),
+            result: None,
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        });
+        assert_eq!(
+            finalize_subagent_sessions(&mut sessions, "parent", "completed", 11),
+            0
+        );
+        assert_eq!(sessions[2].status, "running");
+    }
+
+    #[test]
+    fn routed_delegation_has_the_same_durable_session_projection() {
+        let mut snapshot = default_snapshot();
+        snapshot.collaborations.push(Collaboration {
+            id: "delegation-1".into(),
+            kind: "delegation".into(),
+            from_agent_id: "parent-agent".into(),
+            from_task_id: "parent-task".into(),
+            to_agent_id: "child-agent".into(),
+            to_task_id: "child-task".into(),
+            text: "inspect this".into(),
+            request_id: "request-1".into(),
+            status: "completed".into(),
+            result: Some("finished".into()),
+            error: None,
+            created_at: 1,
+            updated_at: 2,
+        });
+        sync_collaboration_subagent_sessions(&mut snapshot);
+        let session = &snapshot.subagent_sessions[0];
+        assert_eq!(session.id, "collaboration:delegation-1");
+        assert_eq!(session.source, "collaboration");
+        assert_eq!(session.parent_task_id, "parent-task");
+        assert_eq!(session.result.as_deref(), Some("finished"));
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap()["subagentSessions"][0]["collaborationId"],
+            "delegation-1"
+        );
     }
 
     #[test]
@@ -1191,5 +1573,6 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
         acp: (agent.provider == "acp")
             .then(|| agent.acp.clone())
             .flatten(),
+        archived_agent_name: None,
     }
 }

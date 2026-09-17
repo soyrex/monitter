@@ -85,6 +85,8 @@ fn validate_blank_profile(
         && snapshot.channels.is_empty()
         && snapshot.projects.is_empty()
         && snapshot.collaborations.is_empty()
+        && snapshot.subagent_sessions.is_empty()
+        && snapshot.subagent_transcripts.is_empty()
         && snapshot.queued_messages.is_empty()
         && snapshot.approval_requests.is_empty()
         && snapshot.approval_rules.is_empty()
@@ -134,6 +136,8 @@ mod tests {
         assert!(snapshot.channels.is_empty());
         assert!(snapshot.projects.is_empty());
         assert!(snapshot.collaborations.is_empty());
+        assert!(snapshot.subagent_sessions.is_empty());
+        assert!(snapshot.subagent_transcripts.is_empty());
         assert!(snapshot.queued_messages.is_empty());
         assert!(snapshot.approval_requests.is_empty());
         assert!(snapshot.approval_rules.is_empty());

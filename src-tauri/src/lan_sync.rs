@@ -205,6 +205,9 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         if *count < MAX_LIVE_EVENTS_PER_TASK && newest_first.len() < MAX_LIVE_EVENTS {
             *count += 1;
             newest_first.push(compact_event(event));
+            if newest_first.len() == MAX_LIVE_EVENTS {
+                break;
+            }
         }
     }
     newest_first.reverse();
@@ -218,6 +221,8 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         projects: snapshot.projects.clone(),
         settings: snapshot.settings.clone(),
         collaborations: snapshot.collaborations.clone(),
+        subagent_sessions: snapshot.subagent_sessions.clone(),
+        subagent_transcripts: snapshot.subagent_transcripts.clone(),
         queued_messages: snapshot.queued_messages.clone(),
         approval_requests: snapshot.approval_requests.clone(),
         approval_rules: snapshot.approval_rules.clone(),

@@ -324,6 +324,17 @@ impl Service {
                 self.capture_usage(task_id, detail)?;
             }
         }
+        let subagent_updates = parsed
+            .event
+            .as_ref()
+            .filter(|(kind, _, _)| kind == "subagent")
+            .and_then(|(_, _, detail)| serde_json::from_str(detail).ok())
+            .map(|value: Value| {
+                let mut updates = crate::runner::parse_codex_subagent_updates(&value, task_id);
+                updates.extend(crate::runner::parse_acp_subagent_updates(&value, task_id));
+                updates
+            })
+            .unwrap_or_default();
         self.app_server_mutate(task_id, control, turn_id, |data, runs| {
             let task = data
                 .snapshot
@@ -353,6 +364,10 @@ impl Service {
                 runs.native_sessions.insert(key, task_id.into());
                 task.native_session_id = Some(native);
             }
+            let observed_at = now();
+            for update in subagent_updates {
+                upsert_subagent_session(&mut data.snapshot.subagent_sessions, update, observed_at);
+            }
             if let Some((kind, title, detail)) = parsed.event {
                 if kind == "computer_image" {
                     let image = attachments::generated_image(&detail)?;
@@ -376,6 +391,37 @@ impl Service {
                     }));
                 }
             }
+            Ok(())
+        })
+    }
+
+    /// Capture one entry of a native ACP subagent's inline transcript. Unlike
+    /// Codex, an ACP subagent has no separately re-queryable thread, so this
+    /// is the only durable record of its conversation; it is deliberately
+    /// small (see `model::append_subagent_transcript_entry`).
+    pub(crate) fn append_subagent_transcript_entry(
+        &self,
+        task_id: &str,
+        control: &Arc<RunControl>,
+        turn_id: Option<&str>,
+        subagent_id: &str,
+        role: &str,
+        text: String,
+    ) -> Result<(), String> {
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        self.app_server_mutate(task_id, control, turn_id, |data, _runs| {
+            append_subagent_transcript_entry(
+                &mut data.snapshot.subagent_transcripts,
+                subagent_id,
+                SubagentTranscriptEntry {
+                    id: id(),
+                    role: role.into(),
+                    text,
+                    created_at: now(),
+                },
+            );
             Ok(())
         })
     }

@@ -166,12 +166,25 @@ installation recovery, corruption/symlink rejection, transaction rollback,
 usage accounting, and readers progressing during a blocked terminal-error write.
 Later changes must be rerun, particularly integration with the main checkout.
 
+The integrated branch preserves the main checkout's pending native subagent,
+goal, archived-agent-name and appearance work. SQLite now atomically round-trips
+the subagent session list and inline transcript map too. Its combined native suite
+passed **444 tests, 0 failures, 9 ignored** (84.22 seconds, serial debug run).
+A preceding run had one unchanged PTY interrupt test timeout; its focused retry
+and the full rerun passed. Frontend performance, activity-grouping and snapshot
+index checks also passed, and integration did not change the already-built frontend.
+The original dirty checkout still matches its captured tracked-file snapshot.
+
 The first full-path SQLite benchmark exposed an expensive per-update history
 hash-index rebuild: mutation median 166.9 ms, p95 185.3 ms. An immutable-prefix
 fast path reduced a subsequent run to median 29.3 ms, p95 66.6 ms. This led to a
 stable-order differential path for content edits as well as appends, retaining
-SQLite primary-key rejection of duplicate appended IDs. Final benchmark results
-after that last optimization remain to be recorded; these are not GUI timings.
+SQLite primary-key rejection of duplicate appended IDs. A serial rerun after
+that optimization measured mutation median 11.15 ms / p95 11.61 ms, unchanged
+UI reads 5.79 / 8.96 microseconds, and full UI projection 35.10 / 35.46 ms.
+It used the same 53,000-event/4,000-message debug fixture and 20 updates, without
+concurrent compilation. This is the pre-main-feature-integration benchmark and
+does not include IPC or rendering; these are not GUI timings.
 
 Alex explicitly chose a completely blank profile, including no carried-over
 agents, chats, or preferences. The old profile must remain separately recoverable

@@ -203,6 +203,10 @@ fn recover_after_restart(snapshot: &mut Snapshot) {
             queued.error = Some("Monitter restarted before this queued message could be confirmed. Review and retry it manually.".into());
         }
     }
+    // Older collaboration records are the durable source for routed
+    // delegations. Rebuild their compact sub-agent projection before the
+    // recovery write below makes the upgraded state durable.
+    crate::model::sync_collaboration_subagent_sessions(snapshot);
     crate::Service::recover_collaborations(snapshot);
 }
 

@@ -35,7 +35,7 @@ No fake conversations, progress, token counts, host connections or model replies
   fabricated values.
 - `get_task_event_detail { taskId: string, eventId: string, offset?: number, limit?: number }` ->
   `{ chunk: string, nextOffset: number | null, totalBytes: number }`. Full tool detail remains in
-  the local journal and is read only after its activity row is expanded. Chunks default to 32 KiB
+  the local store and is read only after its activity row is expanded. Chunks default to 32 KiB
   and are capped at 64 KiB. Task and event IDs must match; offsets are UTF-8 byte boundaries.
 - `get_usage_overview { policy?: "cache-only" | "if-stale" | "refresh" }` -> `UsageOverview`.
   Owner desktop/LAN only. It combines the durable, locally observed per-run usage ledger with
@@ -78,7 +78,14 @@ No fake conversations, progress, token counts, host connections or model replies
   Monitter Admin record. Editing the existing admin preserves `internal: true`, the canonical "Monitter
   Admin" name, and `collaborationEnabled: false`, and may safely reset the resident task/session so a
   reconfigured transport replaces the previous one on next use.)
-- `delete_agent { id: string }` -> Snapshot (reject if tasks exist; reject internal agents)
+- `delete_agent { id: string, chatHandling?: "archive" | "delete" }` -> Snapshot (reject internal agents). The default
+  is `"archive"`. Archive keeps every chat owned by the removed agent under `Archived chats`, stamps each task with the
+  removed agent's display name so the LLM (`provider`/`model`) and the human-readable label remain identifiable after the
+  agent record is gone, and stops any resident run with an owner-removal-specific message. `"delete"` additionally
+  permanently removes those chats (including verified native session files where possible), dropping the task, its
+  transcript, queued messages, pending approvals, pending collaborations, activity events, subagent sessions, the per-task
+  host snapshot and the durable usage ledger for the task. Pending queued follow-ups are failed and pending approvals
+  expired under the same lock for either mode.
 - `save_project { project: Project }` -> Snapshot (empty id creates)
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
@@ -97,6 +104,13 @@ No fake conversations, progress, token counts, host connections or model replies
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot (routed through the resident Monitter Admin turn; see Internal agent)
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
+- `get_subagent_transcript { taskId: string, subagentId: string }` -> `SubagentTranscriptEntry[]`.
+  Read-only owner desktop/LAN lookup for a subagent reachable from that task's delegation tree.
+  For a native Codex child thread it uses `thread/read { includeTurns: true }` without resuming
+  the child or starting a turn, and normalizes user/assistant messages, reasoning summaries, and
+  tool activity; raw rollout records are never returned to the renderer. For a native ACP subagent
+  (`source: "acp"`) there is no separately re-queryable thread, so this instead returns the entries
+  already captured inline into `Snapshot.subagentTranscripts` while the subagent streamed.
 - `clear_task_goal { taskId: string }` -> void (Codex only; clears the native persisted goal without
   resuming the thread, starting a turn, changing its transcript, or completing the goal)
 - `delete_task { id: string }` -> Snapshot (archived only; reject running; preserve native CLI history)
@@ -724,6 +738,38 @@ status, result/error and timestamps. `Message.senderAgentId` and `collaborationI
 identify real peer messages/results. These records and their task links are persisted atomically.
 The Agent directory is available through the monitter menu and Cmd-P; profile editing and task run
 detail expose capabilities, collaboration availability, linked chats, delivery state and results.
+
+`Snapshot.subagentSessions` defaults to an empty array and is the durable, compact user-facing
+projection for all delegated work. A session has stable `id`, `source` (`codex`, `acp`, or
+`collaboration`), `parentTaskId`, optional native `parentThreadId`, `agentThreadId` and `agentPath`,
+optional `collaborationId`, prompt/model/reasoning effort, status, result/error, and timestamps. Native
+Codex items `collabAgentToolCall` (`spawnAgent`, `sendInput`, `wait`, `closeAgent`) contribute their
+receiver thread IDs, prompt/model/effort and `agentsStates`; `subAgentActivity` contributes its path and
+lifecycle (`started`, `interacted`, `completed`). An ACP agent that advertises the `subagents` client
+capability (sent unconditionally in Monitter's `initialize` handshake; currently honored by
+claude-agent-acp for its Task/Agent tool) may instead push `subagent_spawned` (identity, keyed by
+`agentThreadId` = its ACP `subagentSessionId`) and `subagent_state_update` (`completed`, `failed`,
+`disconnected`, `cancelled`) notifications on the parent session; an agent that does not advertise
+support keeps folding that activity into the root transcript as before. Monitter delegations contribute
+the same projection from their authoritative collaboration record. The latest projection is persisted in
+SQLite, retained in compact LAN snapshots, and is therefore not lost when the event timeline is
+limited, paged or restarted. Terminal native observations are sticky so late interaction notices cannot
+show a completed sub-agent as running again. Raw provider activity stays available in the normal
+diagnostic event store.
+
+Unlike Codex, an ACP subagent has no separately re-queryable native thread: its own nested
+`tool_call`/`tool_call_update`/`plan`/message/thought notifications arrive tagged with its
+`subagentSessionId` instead of the root session, and are captured inline into
+`Snapshot.subagentTranscripts` (keyed by the subagent session `id`, capped at 200 entries per
+subagent) as they stream, rather than fetched on demand.
+
+The composer subagent bar contains active sessions only. It is also the visor tab strip: opening a
+tab lifts that same strip and reveals a live transcript panel rather than rendering a second set of
+tabs. Monitter-routed delegations read transcript messages from their child task; native Codex
+subagents poll the bounded read-only transcript command while their visor is open, which for `acp`
+sessions instead returns the inline-captured entries directly. A terminal status removes the session
+from the bar/visor immediately, while the complete durable list continues to populate the right
+sidebar's separate Active and Recent sections.
 
 A process-local broker binds only to `127.0.0.1` on a random port. Every running task receives its own
 in-memory bearer grant; the broker derives caller identity from that grant, never from tool arguments.

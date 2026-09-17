@@ -45,6 +45,24 @@ pub(crate) fn clear_goal(host: &Host, task: &Task) -> Result<(), String> {
     result
 }
 
+/// Read a native Codex child thread without resuming it or starting a turn.
+/// The app-server payload is intentionally reduced to the same transcript
+/// vocabulary used by Monitter-owned delegated tasks.
+pub(crate) fn read_subagent_transcript(
+    host: &Host,
+    thread_id: &str,
+) -> Result<Vec<crate::model::SubagentTranscriptEntry>, String> {
+    if thread_id.trim().is_empty() {
+        return Err("A Codex subagent thread ID is required.".into());
+    }
+    let mut child = app_server_command(host)?.spawn().map_err(|error| {
+        format!("Could not start Codex app-server for subagent transcript lookup: {error}")
+    })?;
+    let result = read_subagent_transcript_from_child(&mut child, thread_id);
+    stop_child(&mut child);
+    result
+}
+
 fn app_server_command(host: &Host) -> Result<Command, String> {
     let mut command = if host.kind == "local" {
         let mut command = Command::new(resolve_local(&host.codex_path)?);
@@ -125,6 +143,32 @@ fn clear_goal_from_child(child: &mut Child, thread_id: &str) -> Result<(), Strin
     Ok(())
 }
 
+fn read_subagent_transcript_from_child(
+    child: &mut Child,
+    thread_id: &str,
+) -> Result<Vec<crate::model::SubagentTranscriptEntry>, String> {
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdin.".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdout.".to_string())?;
+    let lines = spawn_reader(stdout);
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let mut stdin = stdin;
+
+    send(&mut stdin, initialize_request())?;
+    response(&lines, 1, deadline, "subagent transcript lookup")
+        .and_then(|value| ensure_success(&value, "Codex app-server initialization"))?;
+    send(&mut stdin, initialized_notification())?;
+    send(&mut stdin, thread_read_request(thread_id))?;
+    let value = response(&lines, 2, deadline, "subagent transcript lookup")?;
+    ensure_success(&value, "Codex app-server thread/read")?;
+    normalize_transcript(&value)
+}
+
 fn initialize_request() -> Value {
     json!({
         "id": 1,
@@ -147,6 +191,131 @@ fn clear_goal_request(thread_id: &str) -> Value {
         "method": "thread/goal/clear",
         "params": { "threadId": thread_id }
     })
+}
+
+fn thread_read_request(thread_id: &str) -> Value {
+    json!({
+        "id": 2,
+        "method": "thread/read",
+        "params": { "threadId": thread_id, "includeTurns": true }
+    })
+}
+
+fn bounded_text(value: &str) -> String {
+    const LIMIT: usize = 12_000;
+    if value.chars().count() <= LIMIT {
+        value.to_string()
+    } else {
+        format!("{}\n…", value.chars().take(LIMIT).collect::<String>())
+    }
+}
+
+fn item_text(item: &Value) -> Option<(&'static str, String)> {
+    match item.get("type").and_then(Value::as_str)? {
+        "userMessage" => {
+            let text = item
+                .get("content")?
+                .as_array()?
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(("user", text))
+        }
+        "agentMessage" => item
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| ("assistant", text.to_string())),
+        "reasoning" => {
+            let text = item
+                .get("summary")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(("reasoning", text))
+        }
+        "plan" => item
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| ("activity", format!("Plan\n{text}"))),
+        "commandExecution" => {
+            let command = item.get("command").and_then(Value::as_str).unwrap_or("Command");
+            let status = item.get("status").and_then(Value::as_str).unwrap_or("running");
+            let output = item
+                .get("aggregatedOutput")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!("\n{}", bounded_text(value)))
+                .unwrap_or_default();
+            Some(("activity", format!("{status}: {command}{output}")))
+        }
+        "fileChange" => {
+            let count = item.get("changes").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+            let status = item.get("status").and_then(Value::as_str).unwrap_or("updated");
+            Some(("activity", format!("{status}: changed {count} {}", if count == 1 { "file" } else { "files" })))
+        }
+        "mcpToolCall" => {
+            let server = item.get("server").and_then(Value::as_str).unwrap_or("tool");
+            let tool = item.get("tool").and_then(Value::as_str).unwrap_or("call");
+            let status = item.get("status").and_then(Value::as_str).unwrap_or("running");
+            Some(("activity", format!("{status}: {server}.{tool}")))
+        }
+        "dynamicToolCall" => {
+            let tool = item.get("tool").and_then(Value::as_str).unwrap_or("tool");
+            let status = item.get("status").and_then(Value::as_str).unwrap_or("running");
+            Some(("activity", format!("{status}: {tool}")))
+        }
+        "collabAgentToolCall" => {
+            let tool = item.get("tool").and_then(Value::as_str).unwrap_or("delegation");
+            let status = item.get("status").and_then(Value::as_str).unwrap_or("running");
+            Some(("activity", format!("{status}: {tool}")))
+        }
+        "webSearch" => Some(("activity", "Searching the web".into())),
+        "imageView" => Some(("activity", "Inspecting an image".into())),
+        "sleep" => Some(("activity", "Waiting".into())),
+        _ => None,
+    }
+}
+
+fn normalize_transcript(value: &Value) -> Result<Vec<crate::model::SubagentTranscriptEntry>, String> {
+    let turns = value
+        .pointer("/result/thread/turns")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex app-server thread/read omitted result.thread.turns.".to_string())?;
+    let mut entries = Vec::new();
+    for turn in turns {
+        let created_at = turn
+            .get("startedAt")
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+            .saturating_mul(1000);
+        let turn_id = turn.get("id").and_then(Value::as_str).unwrap_or("turn");
+        for (index, item) in turn
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let Some((role, text)) = item_text(item) else { continue };
+            entries.push(crate::model::SubagentTranscriptEntry {
+                id: item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{turn_id}:{index}")),
+                role: role.into(),
+                text: bounded_text(&text),
+                created_at,
+            });
+        }
+    }
+    Ok(entries)
 }
 
 fn initialized_notification() -> Value {
@@ -302,6 +471,9 @@ mod tests {
             clear_goal_request("thread-1")["params"]["threadId"],
             "thread-1"
         );
+        assert_eq!(thread_read_request("child-1")["method"], "thread/read");
+        assert_eq!(thread_read_request("child-1")["params"]["threadId"], "child-1");
+        assert_eq!(thread_read_request("child-1")["params"]["includeTurns"], true);
     }
 
     #[test]
@@ -348,5 +520,26 @@ mod tests {
         assert_eq!(clear_result(&json!({ "result": { "cleared": true } })).unwrap(), true);
         assert_eq!(clear_result(&json!({ "result": { "cleared": false } })).unwrap(), false);
         assert!(clear_result(&json!({ "result": {} })).is_err());
+    }
+
+    #[test]
+    fn normalizes_subagent_messages_and_activity() {
+        let entries = normalize_transcript(&json!({
+            "result": { "thread": { "turns": [{
+                "id": "turn-1", "startedAt": 42,
+                "items": [
+                    {"type":"userMessage","id":"u1","content":[{"type":"text","text":"Check it","text_elements":[]}]},
+                    {"type":"reasoning","id":"r1","summary":["Inspecting files"],"content":[]},
+                    {"type":"commandExecution","id":"c1","command":"rg TODO","status":"completed","aggregatedOutput":"one"},
+                    {"type":"agentMessage","id":"a1","text":"Done"}
+                ]
+            }]}}
+        })).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].role, "user");
+        assert_eq!(entries[1].role, "reasoning");
+        assert_eq!(entries[2].text, "completed: rg TODO\none");
+        assert_eq!(entries[3].text, "Done");
+        assert_eq!(entries[3].created_at, 42_000);
     }
 }

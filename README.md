@@ -23,6 +23,14 @@ Monitter brings your existing CLI harnesses into one interface. It uses their na
 - **Cross-agent collaboration.** Let supported agents discover peers, exchange messages, and delegate linked tasks. The receiving agent uses its own harness and host, and results return to the originating conversation.
 - **Native and ACP harnesses.** Native adapters cover Codex, Claude Code, OpenCode, and Hermes. ACP connects compatible agents through a common protocol, locally or over SSH. Capabilities vary by harness; a successful connection is not a guarantee that every provider feature is supported.
 
+## Full keyboard control
+
+Keep your hands on the keyboard. The searchable **Controls palette** puts layouts, pane balancing, new chats, terminals, agent creation, and settings within reach. Use **↑ / ↓** to navigate, **Enter** to select, and **Esc** to dismiss.
+
+On macOS, **⌘P** opens Controls and **⌘K** jumps between chats, agents, projects, and channels. Keyboard shortcuts make it easy to move around the workspace without hunting through menus.
+
+![Searchable keyboard Controls palette with pane layouts and creation actions](docs/screenshots/keyboard-controls.png)
+
 ## Keep the work visible
 
 ![Live CPU and RAM history with the Monitter and harness process breakdown](docs/screenshots/resource-monitor-draft.jpg)
