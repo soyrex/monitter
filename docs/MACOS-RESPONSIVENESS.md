@@ -346,6 +346,31 @@ observation, not a reader-position acceptance pass. The task-owned fixture app
 and loopback server were stopped afterwards. The protected packaged SQLite
 candidate remains unchanged and does not yet contain these frontend fixes.
 
+#### Scrollback follow-up
+
+The loopback full-app fixture now has an explicit scroll-geometry inspection
+control and wheel-triggered readouts after two animation frames and 500 ms.
+They report scroll bounds, mounted row indexes, intersecting row boxes and
+spacers, without message contents. A fixture-only mask toggle supports isolating
+paint from range errors if the blank viewport recurs. These diagnostics are not
+loaded into the packaged app; their geometry reads make this a diagnostic run,
+not a clean latency benchmark.
+
+In the next native run, the blank viewport did not recur when scrolling within
+a 5,264 px streamed row, nor within a 9,724 px row after typing during streaming.
+The latter had row 999 intersecting the viewport at relative top -8,226 px.
+A deeper 20-page upward scroll mounted indexes 951–966 plus the retained
+970–999 tail; rows 957–960 intersected and were visibly readable. During renewed
+streaming, the held right pane stayed at scrollTop 116,607 / scrollHeight 128,878
+with the same intersecting row positions, while the live left pane grew from
+127,971 to 128,840 px. Its pending-update control remained live. Jump released
+the held history and the next scrollback remained visibly readable.
+
+This verifies those specific reader-hold/range cases, but does not explain or
+resolve the earlier single blank screenshot. No production virtualizer or mask
+change was made on that evidence. The synthetic app and server were stopped
+afterwards; its profile and diagnostic evidence were retained.
+
 ### Avoid unchanged document-wide appearance work
 
 The full snapshot application path called `applyAppearance` directly and again
