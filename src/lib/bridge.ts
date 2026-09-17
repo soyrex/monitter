@@ -40,6 +40,7 @@ import type {
   ApprovalDecision,
   UsageOverview,
   UsageRefreshPolicy,
+  SubagentTranscriptEntry,
 } from "./types";
 
 export interface MonitterBridge {
@@ -49,6 +50,7 @@ export interface MonitterBridge {
   getUsageOverview(policy?: UsageRefreshPolicy): Promise<UsageOverview>;
   getProcessMetrics(): Promise<ProcessMetricsSample>;
   getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
+  getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
   probeHost(host: Host): Promise<ProbeResult>;
@@ -97,6 +99,7 @@ export interface MonitterBridge {
   setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
   setTaskSandbox(taskId: string, sandbox: Sandbox): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
+  getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
   clearTaskGoal(taskId: string): Promise<void>;
   getTaskGitStatus(taskId: string, detectorSession?: string): Promise<TaskGitStatus>;
   waitForTaskGitMarker(taskId: string, detectorSession?: string): Promise<'found' | 'timeout' | 'already-present'>;
@@ -223,13 +226,15 @@ const nativeBridge: MonitterBridge = {
   getUsageOverview: (policy) => invoke<UsageOverview>('get_usage_overview', policy === undefined ? {} : { policy }),
   getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
   getTaskEventDetail: (taskId, eventId, offset, limit) => invoke<EventDetailChunk>('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
+  getSubagentTranscript: (taskId, subagentId) => invoke<SubagentTranscriptEntry[]>('get_subagent_transcript', { taskId, subagentId }),
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
   deleteHost: (id) => invoke<Snapshot>("delete_host", { id }),
   probeHost: (host) => invoke<ProbeResult>("probe_host", { host }),
   discoverAcpAgents: (hostId) => invoke<AcpCandidate[]>('discover_acp_agents', { hostId }),
   verifyAcpAgent: (hostId, launch) => invoke<AcpProbeResult>('verify_acp_agent', { hostId, launch }),
   saveAgent: (agent) => invoke<Snapshot>("save_agent", { agent }),
-  deleteAgent: (id) => invoke<Snapshot>("delete_agent", { id }),
+  deleteAgent: (id, chatHandling: 'archive' | 'delete' = 'archive') =>
+    invoke<Snapshot>("delete_agent", { id, chatHandling }),
   createTask: (input) => invoke<Task>("create_task", { input }),
   chooseLocalFolder: (initial = '') => isLanBrowser() ? desktopOnly() : invoke<string | null>("choose_local_folder", { initial }),
   renameTask: (id, title) => invoke<Snapshot>("rename_task", { id, title }),
@@ -267,6 +272,7 @@ const nativeBridge: MonitterBridge = {
   setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
   setTaskSandbox: (taskId, sandbox) => invoke<Snapshot>('set_task_sandbox', {taskId,sandbox}),
   getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
+  getSubagentTranscript: (taskId, subagentId) => invoke<SubagentTranscriptEntry[]>("get_subagent_transcript", { taskId, subagentId }),
   clearTaskGoal: taskId => invoke<void>("clear_task_goal", { taskId }),
   getTaskGitStatus: (taskId, detectorSession = '') => invoke<TaskGitStatus>("get_task_git_status", { taskId, detectorSession }),
   waitForTaskGitMarker: (taskId, detectorSession = '') => invoke<'found' | 'timeout' | 'already-present'>("wait_for_task_git_marker", { taskId, detectorSession }),
@@ -300,7 +306,7 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   queuedMessages: [],
   approvalRequests: [],
   approvalRules: [],
-  settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125, interfaceDensity: 'normal',
+  settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125, interfaceDensity: 'normal', windowSurface: 'opaque', windowTransparency: 18,
     showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard', busyMessageMode: 'queue' },
 });
 const emptyUsageOverview = (): UsageOverview => ({ generatedAt: Date.now(), capturedSince: null, subscriptions: [], providerTotals: [], recentRuns: [] });
@@ -318,6 +324,7 @@ const previewBridge: MonitterBridge = {
   getUsageOverview: async () => emptyUsageOverview(),
   getProcessMetrics: () => desktopOnly(),
   getTaskEventDetail: () => desktopOnly(),
+  getSubagentTranscript: () => desktopOnly(),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
   probeHost: () => desktopOnly(),
@@ -361,6 +368,7 @@ const previewBridge: MonitterBridge = {
   setTaskModelSettings: () => desktopOnly(),
   setTaskSandbox: () => desktopOnly(),
   getTaskGoal: async () => null,
+  getSubagentTranscript: async () => [],
   clearTaskGoal: async () => { throw new Error("Goal clearing requires a connected harness."); },
   getTaskGitStatus: () => desktopOnly(),
   waitForTaskGitMarker: () => desktopOnly(),
@@ -385,6 +393,7 @@ export function getBridge(): MonitterBridge {
       getUsageOverview: (policy) => test.invoke('get_usage_overview', policy === undefined ? {} : { policy }) as Promise<UsageOverview>,
       getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
+      getSubagentTranscript: (taskId, subagentId) => test.invoke('get_subagent_transcript', { taskId, subagentId }) as Promise<SubagentTranscriptEntry[]>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,
       deleteHost: (id) =>
@@ -395,8 +404,8 @@ export function getBridge(): MonitterBridge {
       verifyAcpAgent: (hostId, launch) => test.invoke('verify_acp_agent', { hostId, launch }) as Promise<AcpProbeResult>,
       saveAgent: (agent) =>
         test.invoke("save_agent", { agent }) as Promise<Snapshot>,
-      deleteAgent: (id) =>
-        test.invoke("delete_agent", { id }) as Promise<Snapshot>,
+      deleteAgent: (id, chatHandling: 'archive' | 'delete' = 'archive') =>
+        test.invoke("delete_agent", { id, chatHandling }) as Promise<Snapshot>,
       createTask: (input) =>
         test.invoke("create_task", { input }) as Promise<Task>,
       chooseLocalFolder: (initial = '') => test.invoke("choose_local_folder", { initial }) as Promise<string | null>,
@@ -448,6 +457,7 @@ export function getBridge(): MonitterBridge {
       setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
       setTaskSandbox: (taskId, sandbox) => test.invoke('set_task_sandbox', {taskId,sandbox}) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,
+      getSubagentTranscript: (taskId, subagentId) => test.invoke("get_subagent_transcript", {taskId, subagentId}) as Promise<SubagentTranscriptEntry[]>,
       clearTaskGoal: taskId => test.invoke("clear_task_goal", {taskId}) as Promise<void>,
       getTaskGitStatus: (taskId, detectorSession = '') => test.invoke("get_task_git_status", {taskId, detectorSession}) as Promise<TaskGitStatus>,
       waitForTaskGitMarker: (taskId, detectorSession = '') => test.invoke("wait_for_task_git_marker", {taskId, detectorSession}) as Promise<'found' | 'timeout' | 'already-present'>,

@@ -46,7 +46,7 @@ try {
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().channels[0].name)).toBe('Generated channel title');
   expect(await page.evaluate(() => window.__MONITTER_QA__.snapshot().channels[0].agentIds)).toEqual(['atlas']);
 
-  await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
+  await page.getByRole('button', { name: 'New terminal', exact: true }).click();
   await expect(page.locator('.terminal-pane .xterm-helper-textarea')).toBeAttached();
   const terminal = await page.evaluate(() => window.__MONITTER_QA__.terminals()[0]);
   await page.keyboard.press('Meta+p');

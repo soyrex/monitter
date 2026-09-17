@@ -26,7 +26,7 @@ for (const engine of engines) {
         if (kind === 'task') await page.locator('.sidebar .task-select[title="Target chat"]').click();
         if (kind === 'draft') await second.getByRole('button', { name: 'New chat', exact: true }).click();
         if (kind === 'settings') await page.getByRole('button', { name: 'Preferences', exact: true }).click();
-        if (kind === 'terminal') await second.getByRole('button', { name: 'Open terminal', exact: true }).click();
+        if (kind === 'terminal') await second.getByRole('button', { name: 'Terminal', exact: true }).click();
         const pane = page.locator('.pane-leaf').filter({ has: kind === 'terminal' ? page.locator('.terminal-tab') : kind === 'settings' ? page.locator('[data-tab-kind="settings"]') : kind === 'draft' ? page.locator('[data-tab-kind="draft"]') : page.locator('[data-tab-id="target"]') });
         await expect(pane).toHaveCount(1);
         const close = pane.locator(`.tab-entry[data-tab-kind="${kind}"] .close-tab`);

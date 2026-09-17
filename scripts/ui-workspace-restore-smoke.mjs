@@ -43,7 +43,7 @@ try {
   await expect(page.locator('.pane-leaf')).toHaveCount(2);
   await expect(main.getByRole('button', { name:'restore-a', exact:true })).toBeVisible();
   passed.push('Cmd/Ctrl-W closes only the selected tab in the active pane');
-  await restoredSecond.getByRole('button', {name:'Open terminal',exact:true}).click();
+  await restoredSecond.getByRole('button', {name:'Terminal',exact:true}).click();
   await expect(restoredSecond.locator('.terminal-pane .xterm-helper-textarea')).toBeAttached({timeout:30000});
   const oldTerminal = await page.evaluate(() => window.__MONITTER_QA__.terminals()[0]);
   await page.reload();

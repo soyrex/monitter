@@ -77,7 +77,10 @@
   ];
   const activeCategory = $derived(categories.some((item) => item.id === category) ? category as Category : "appearance");
   const densities = ['tight', 'normal', 'spacious'] as const;
+  const windowSurfaces = ['opaque', 'translucent', 'glass'] as const;
   const density = $derived(settings.interfaceDensity ?? 'normal');
+  const windowSurface = $derived(settings.windowSurface ?? 'opaque');
+  const windowTransparency = $derived(settings.windowTransparency ?? 18);
   const displayedInterfaceScale = $derived(interfaceScale ?? settings.interfaceScale ?? 125);
   const selectedTerminalTheme = $derived(terminalThemes.find(option=>option.id === $terminalTheme) ?? terminalThemes[0]);
   const selectedLightTheme = $derived(appThemePreset($appTheme.light));
@@ -246,6 +249,17 @@
           </div>
         </section>
 
+        <section class="setting-card" aria-labelledby="window-surface-heading">
+          <div class="card-heading"><h2 id="window-surface-heading">Window surface</h2><p>Choose how much of Monitter’s native macOS window lets the desktop show through.</p></div>
+          <div class="segmented" aria-label="Window surface">
+            {#each [{id:'opaque',label:'Opaque'},{id:'translucent',label:'Translucent'},{id:'glass',label:'Glass'}] as option}
+              <button type="button" class:chosen={(settings.windowSurface ?? 'opaque') === option.id} aria-pressed={(settings.windowSurface ?? 'opaque') === option.id}
+                onclick={() => void save({ windowSurface: option.id as NonNullable<Settings['windowSurface']> })}>{option.label}</button>
+            {/each}
+          </div>
+          <p class="hint">Opaque keeps the current solid surfaces. Translucent softens panels. Glass makes transparent gaps reveal the macOS desktop and other windows; blur and contrast may vary with wallpaper.</p>
+        </section>
+
         <section class="setting-card" aria-labelledby="app-theme-heading">
           <div class="card-heading"><h2 id="app-theme-heading">App theme</h2><p>Choose the palette Monitter uses in light and dark mode. System appearance switches between them automatically.</p></div>
           <div class="app-theme-selectors">
@@ -272,6 +286,21 @@
               </label>
             {/each}
           </div>
+        </section>
+
+        <section class="setting-card" aria-labelledby="window-surface-heading">
+          <div class="card-heading"><h2 id="window-surface-heading">Primary window surface</h2><p>Choose how much of the desktop shows through the Monitter background.</p></div>
+          <div class="segmented" aria-label="Primary window surface">
+            {#each windowSurfaces as surface}
+              <button type="button" class:chosen={windowSurface === surface} aria-pressed={windowSurface === surface}
+                onclick={() => void save({ windowSurface: surface })}>{surface}</button>
+            {/each}
+          </div>
+          <label class:disabled={windowSurface === 'opaque'} class="range-setting">Background transparency <strong>{windowTransparency}%</strong>
+            <input class="range" type="range" use:rangeFill={windowTransparency} aria-label="Background transparency" aria-valuetext={`${windowTransparency}%`} min="0" max="70" step="1" disabled={windowSurface === 'opaque'} value={windowTransparency} oninput={(event) => void save({ windowTransparency: Number(event.currentTarget.value) })} />
+          </label>
+          <div class="range-footer"><span>Opaque</span><button type="button" onclick={() => void save({ windowTransparency: 18 })}>Reset to default · 18%</button><span>70%</span></div>
+          <p class="hint">Opaque ignores this slider. Translucent and glass use it for the primary window background; glass also adds blur.</p>
         </section>
 
         <section class="setting-card" aria-labelledby="contrast-heading">

@@ -15,7 +15,7 @@ for (const engine of [chromium, webkit]) {
     for (const title of ['First chat','Previously active','Last in tab order']) await page.locator(`.sidebar .task-select[title="${title}"]`).click();
     // History, rather than visual order, must choose this tab after the move.
     await page.locator('.tab-entry[data-tab-id="previous"] .tab').click();
-    await page.getByRole('button',{name:'Open terminal'}).click();
+    await page.getByRole('button',{name:'New terminal',exact:true}).click();
     const terminal=page.locator('.tab-entry[data-tab-kind="terminal"]');
     await expect(terminal).toHaveCount(1);
     const from=await terminal.locator('.tab').boundingBox(),to=await page.locator('.pane-leaf').boundingBox();

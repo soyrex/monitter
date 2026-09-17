@@ -48,7 +48,7 @@ for (const engine of engines) {
     console.log(`${engine.name()}: motion-0 selector count ${await page.locator('.sidebar .task-select[title="motion-0"]').count()}`);
     await page.locator('.sidebar .task-select[title="motion-0"]').click();
     console.log(`${engine.name()}: motion-0 selected`);
-    await main.getByRole('button', { name: 'Open terminal', exact: true }).click();
+    await page.getByRole('button', { name: 'New terminal', exact: true }).click();
     await expect(main.locator('.terminal-pane .xterm')).toBeVisible();
     const terminalId = await page.evaluate(() => window.__MONITTER_QA__.terminals()[0].id);
     expect(await page.evaluate(() => window.__MONITTER_QA__.calls.filter(call => call.method === 'openTerminal').length)).toBe(1);

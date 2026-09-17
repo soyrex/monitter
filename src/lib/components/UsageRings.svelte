@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ChevronDown } from '@lucide/svelte';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import ProviderIcon from './ProviderIcon.svelte';
 
   /**
@@ -46,7 +46,9 @@
     { id: 'opencode-go', label: 'OpenCode Go', mark: 'Go' },
   ];
   const radius = 15.5;
-  const storageKey = 'monitter.sidebar-usage-expanded.v1';
+  const legacyStorageKey = 'monitter.sidebar-usage-expanded.v1';
+  const storageKey = 'monitter.sidebar-usage-layout.v2';
+  type UsageLayoutPhase = 0 | 1 | 2 | 3;
 
   let {
     usage = {},
@@ -57,19 +59,33 @@
   let showAbsoluteResets = $state(false);
   let currentTime = $state(Date.now());
   let ringsOnly = $state(false);
+  // A null phase leaves the initial presentation responsive to window height.
+  // The two horizontal phases make the toggle's full cycle explicit.
+  let layoutPhase = $state<UsageLayoutPhase | null>(null);
+  let pane = $state<HTMLElement>();
+  let horizontal = $state(false);
 
   /**
-   * Preserve the full usage view on tall windows, while keeping the sidebar
-   * light on shorter screens. This deliberately follows the window height,
-   * rather than the panel's own height, so it cannot oscillate between modes.
+   * Measure the full form before switching layouts. Measuring the compact form
+   * itself would immediately drop below the threshold and make it oscillate.
+   * The middle state keeps every provider's detail visible while shortening
+   * the labels to fit a short sidebar.
    */
   $effect(() => {
-    usage; compact; expanded;
-    const updateLayout = () => { ringsOnly = !compact && expanded && window.outerHeight < 1200; };
-    updateLayout();
-    const onResize = () => updateLayout();
+    usage; compact; expanded; layoutPhase; pane;
+    ringsOnly = !compact && expanded && (layoutPhase === 1 || layoutPhase === 3);
+    if (compact || !expanded || !pane || layoutPhase !== null) { horizontal = false; return; }
+    let cancelled = false;
+    async function measure() {
+      horizontal = false;
+      await tick();
+      if (!cancelled && pane) horizontal = pane.getBoundingClientRect().height > window.innerHeight * 0.3;
+    }
+    void measure();
+    const onResize = () => void measure();
     window.addEventListener('resize', onResize);
     return () => {
+      cancelled = true;
       window.removeEventListener('resize', onResize);
     };
   });
@@ -77,7 +93,19 @@
   onMount(() => {
     try {
       const stored = localStorage.getItem(storageKey);
-      if (stored === 'true' || stored === 'false') expanded = stored === 'true';
+      const parsed = stored ? JSON.parse(stored) : null;
+      if (parsed?.version === 2 && [0, 1, 2, 3].includes(parsed.phase)) {
+        layoutPhase = parsed.phase;
+        expanded = layoutPhase !== 0;
+      } else {
+        const legacy = localStorage.getItem(legacyStorageKey);
+        if (legacy === 'true' || legacy === 'false') {
+          // Preserve the previous visible state once, then make it deterministic.
+          layoutPhase = legacy === 'true' ? (window.outerHeight < 1200 ? 1 : 2) : 0;
+          expanded = layoutPhase !== 0;
+          persistLayoutPhase();
+        }
+      }
     } catch { /* Keep the expanded default when local storage is unavailable. */ }
 
     const refreshCurrentTime = () => { currentTime = Date.now(); };
@@ -94,9 +122,27 @@
     };
   });
 
-  function toggle() {
-    expanded = !expanded;
-    try { localStorage.setItem(storageKey, String(expanded)); } catch { /* The live state still works. */ }
+  function persistLayoutPhase(): void {
+    if (layoutPhase === null) return;
+    try { localStorage.setItem(storageKey, JSON.stringify({ version: 2, phase: layoutPhase })); } catch { /* The live state still works. */ }
+  }
+
+  function toggle(): void {
+    if (layoutPhase === null) {
+      // Advance from the responsive presentation currently visible to the next
+      // fixed phase: hidden → horizontal → vertical → horizontal → hidden.
+      layoutPhase = !expanded ? 1 : ringsOnly ? 2 : 3;
+    } else {
+      layoutPhase = ((layoutPhase + 1) % 4) as UsageLayoutPhase;
+    }
+    expanded = layoutPhase !== 0;
+    persistLayoutPhase();
+  }
+
+  function toggleAction(): string {
+    const current = layoutPhase ?? (!expanded ? 0 : ringsOnly ? 1 : 2);
+    const next = ((current + 1) % 4) as UsageLayoutPhase;
+    return ['Hide provider usage', 'Show provider usage horizontally', 'Show provider usage vertically', 'Show provider usage horizontally'][next];
   }
 
   function percent(value: number | null | undefined): number | null {
@@ -215,9 +261,9 @@
   }
 </script>
 
-<section class:compact class:expanded class={`usage-rings ${className}${ringsOnly ? ' rings-only' : ''}`.trim()} aria-label="Provider usage">
+<section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
   {#if !compact}
-    <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" onclick={toggle}>
+    <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" aria-label={toggleAction()} title={toggleAction()} onclick={toggle}>
       <span>MODEL USAGE</span>
       <small>{providers.length} PROVIDERS</small>
       <ChevronDown class="usage-chevron" size={13} aria-hidden="true" />
@@ -259,13 +305,11 @@
                   stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
                 />
               {/if}
-              <text class="ring-value" x="20" y="20" text-anchor="middle" dominant-baseline="middle">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</text>
             </svg>
-            <span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={12} /></span>
+            <span class="ring-value" aria-hidden="true">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</span>
           </div>
-          <small class="usage-ring-label">{provider.label}</small>
           <div class="usage-copy">
-            <div class="usage-heading"><strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
+            <div class="usage-heading">{#if !ringsOnly && !compact}<span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={12} /></span>{/if}<strong>{provider.label}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
             {#if hasValue}
               <div class="usage-detail">
                 <span>
@@ -279,7 +323,7 @@
                       <span class="usage-reset-long">Resets {absoluteReset(activeReset)}</span><span class="usage-reset-short">R: {absoluteReset(activeReset)}</span>
                     {:else}
                       {@const relative = relativeReset(activeReset)}
-                      <span class="usage-reset-long">{relative.prefix} </span><span class="usage-reset-short">R: </span><strong>{relative.value}</strong>
+                      <span class="usage-reset-long">{relative.prefix} <strong>{relative.value}</strong></span><span class="usage-reset-short">R: {relative.value}</span>
                     {/if}
                   </button>
                 {:else}
@@ -300,7 +344,7 @@
                         <span class="usage-reset-long">Resets {absoluteReset(weeklyReset)}</span><span class="usage-reset-short">R: {absoluteReset(weeklyReset)}</span>
                       {:else}
                         {@const relative = relativeReset(weeklyReset)}
-                        <span class="usage-reset-long">{relative.prefix} </span><span class="usage-reset-short">R: </span><strong>{relative.value}</strong>
+                        <span class="usage-reset-long">{relative.prefix} <strong>{relative.value}</strong></span><span class="usage-reset-short">R: {relative.value}</span>
                       {/if}
                     </button>
                   {:else}
@@ -318,6 +362,7 @@
               <div class="usage-detail usage-message">{data?.message?.trim() || 'Usage data is not available.'}</div>
             {/if}
           </div>
+          <small class="usage-ring-label">{#if ringsOnly}<span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={11} /></span>{/if}<span class="usage-label-text">{provider.label}</span></small>
         </article>
       {/each}
     </div>
@@ -335,17 +380,19 @@
   .usage-body { display:grid; gap:4px; padding:4px; border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
   .usage-provider { display:grid; grid-template-columns:40px minmax(0,1fr); align-items:center; gap:8px; min-width:0; padding:5px 6px; border:1px solid transparent; border-radius:8px; }
   .usage-provider:hover { background:color-mix(in srgb,var(--accent) 5%,transparent); border-color:color-mix(in srgb,var(--accent) 12%,transparent); }
-  .usage-ring-wrap { position:relative; width:40px; height:40px; }
-  .usage-ring { display:block; width:40px; height:40px; overflow:visible; transform:rotate(-90deg); }
-  .usage-provider-icon { position:absolute; top:-3px; right:-3px; display:grid; width:16px; height:16px; place-items:center; color:var(--ink); border:1px solid var(--line); border-radius:5px; background:var(--panel); box-shadow:0 1px 2px color-mix(in srgb,var(--ink) 12%,transparent); }
+  .usage-ring-wrap { position:relative; display:grid; width:40px; height:40px; place-items:center; }
+  .usage-ring { display:block; width:40px; height:40px; overflow:visible; }
+  .usage-provider-icon { display:grid; flex:0 0 auto; width:14px; height:14px; place-items:center; color:var(--ink); }
   .usage-provider-icon :global(.provider-icon) { width:12px; height:12px; }
   .usage-ring circle { fill:none; stroke-linecap:round; }
+  .ring-track,.ring-active,.ring-weekly { transform:rotate(-90deg); transform-box:view-box; transform-origin:center; }
   .ring-track { stroke:color-mix(in srgb,var(--muted) 20%,transparent); stroke-width:3; }
   .ring-active { stroke:var(--ring-active-color,var(--accent)); stroke-width:3; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
   .ring-weekly { stroke:color-mix(in srgb,var(--ring-weekly-color,var(--accent)) 45%,var(--muted)); stroke-width:1.5; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
-  .ring-value { fill:var(--ink); font:700 9px var(--mono); transform:rotate(90deg); transform-origin:20px 20px; }
+  .ring-value { position:absolute; inset:0; display:grid; place-items:center; color:var(--ink); font:700 9px var(--mono); line-height:1; pointer-events:none; }
   .usage-copy { display:grid; gap:1px; min-width:0; }
   .usage-heading,.usage-detail,.usage-weekly { display:flex; align-items:baseline; gap:6px; min-width:0; white-space:nowrap; }
+  .usage-heading { align-items:center; }
   .usage-detail-short,.usage-reset-short { display:none; }
   .usage-heading strong { overflow:hidden; text-overflow:ellipsis; font-size:calc(11.5px * var(--interface-font-ratio,1)); font-weight:550; }
   .usage-status { overflow:hidden; color:var(--muted); text-overflow:ellipsis; font:calc(9.5px * var(--interface-font-ratio,1)) var(--mono); }
@@ -360,8 +407,8 @@
   .usage-weekly span:last-child { color:var(--muted); }
   .usage-message { display:block; overflow:hidden; text-overflow:ellipsis; }
   .unavailable .ring-active { stroke:var(--muted); stroke-dasharray:2 4; opacity:.42; }
-  .unavailable .ring-value { fill:var(--muted); }
-  .loading .ring-active { stroke-dasharray:4 4; animation:usage-ring-spin 1.15s linear infinite; transform-origin:20px 20px; }
+  .unavailable .ring-value { color:var(--muted); }
+  .loading .ring-active { stroke-dasharray:4 4; animation:usage-ring-spin 1.15s linear infinite; }
   .stale .ring-active { stroke:color-mix(in srgb,var(--accent) 58%,var(--muted)); }
   .stale .usage-status { color:color-mix(in srgb,var(--accent) 68%,var(--muted)); }
   .error .ring-active { stroke:#c35b5b; }
@@ -376,7 +423,19 @@
   .rings-only .usage-provider { grid-template-columns:1fr; grid-template-rows:auto auto; justify-items:center; gap:2px; padding:3px 0; border:0; }
   .rings-only .usage-provider:hover { border-color:transparent; }
   .rings-only .usage-copy { display:none; }
-  .rings-only .usage-ring-label { display:block; max-width:100%; overflow:hidden; color:var(--muted); font:calc(8px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.01em; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
+  .rings-only .usage-ring-label { display:flex; align-items:center; justify-content:center; gap:3px; max-width:100%; overflow:hidden; color:var(--muted); font:calc(8px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.01em; text-align:center; white-space:nowrap; }
+  .rings-only .usage-ring-label .usage-provider-icon { width:13px; height:13px; }
+  .rings-only .usage-ring-label .usage-provider-icon :global(.provider-icon) { width:9px; height:9px; }
+  .rings-only .usage-label-text { overflow:hidden; text-overflow:ellipsis; }
+  .horizontal {
+    .usage-provider { align-items:start; }
+    .usage-ring { margin-top:2px; }
+    .usage-copy { gap:2px; }
+    .usage-detail,.usage-weekly { display:grid; grid-template-columns:minmax(0,1fr); gap:1px; align-items:baseline; white-space:normal; }
+    .usage-detail-long,.usage-reset-long { display:none; }
+    .usage-detail-short,.usage-reset-short { display:inline; }
+    .usage-reset { overflow:visible; text-overflow:clip; }
+  }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly,.usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }
 </style>

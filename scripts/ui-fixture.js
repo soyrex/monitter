@@ -85,6 +85,7 @@
     waitForTaskGitMarker:async()=> 'already-present',
     getTaskGitDiff:async(taskId,path,scope)=>{record('getTaskGitDiff',{taskId,path,scope});return clone(state.gitDiffs?.[taskId]?.[`${scope}:${path}`] ?? {repository:false});},
     getTaskGoal:async taskId=>{record('getTaskGoal',taskId);return clone(state.goals?.[taskId] ?? null);},
+    getSubagentTranscript:async(taskId,subagentId)=>{record('getSubagentTranscript',{taskId,subagentId});return clone(state.subagentTranscripts?.[subagentId] ?? []);},
     resumeTask:async taskId=>{record('resumeTask',{taskId});const task=state.tasks.find(t=>t.id===taskId);if(state.resumeFailure)throw Error(state.resumeFailure);if(!task?.nativeSessionId || task.archived || task.status==='running')throw Error('This session cannot be resumed.');task.status='running';state.messages.push({id:crypto.randomUUID(),taskId,role:'user',text:'Continue from where we left off. If the last request is complete, let me know and wait for my next instruction.',createdAt:Date.now()});notify();return copy();},
     getModelCatalog:async target=>{
       record('getModelCatalog',target);if(state.modelCatalogFailure)throw Error(state.modelCatalogFailure);

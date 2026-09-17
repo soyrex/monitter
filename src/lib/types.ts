@@ -74,6 +74,8 @@ export interface Task {
   hostId: string; cwd: string; provider: Provider; model: string; sandbox: Sandbox;
   acp?: AcpLaunch | null;
   modelSettings?: ModelSettings | null;
+  /** Captured when archived by removing the owning agent; null otherwise. */
+  archivedAgentName?: string | null;
 }
 export interface Message {
   streamStatus?: 'streaming' | 'complete' | 'interrupted';
@@ -90,8 +92,32 @@ export interface Collaboration {
   status: 'queued' | 'running' | 'completed' | 'error' | 'interrupted';
   result: string | null; error: string | null; createdAt: number; updatedAt: number;
 }
+/** Durable, provider-normalized delegated work. `source` is diagnostic and is never a UI label. */
+export interface SubagentSession {
+  id: string;
+  source: 'codex' | 'acp' | 'native' | 'collaboration';
+  parentTaskId: string;
+  parentThreadId?: string | null;
+  collaborationId?: string | null;
+  agentPath?: string | null;
+  agentThreadId?: string | null;
+  prompt?: string | null;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  status: 'queued' | 'running' | 'completed' | 'error' | 'interrupted';
+  result?: string | null;
+  error?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface SubagentTranscriptEntry {
+  id: string;
+  role: 'user' | 'assistant' | 'reasoning' | 'activity';
+  text: string;
+  createdAt: number;
+}
 export interface RunEvent {
-  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration';
+  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent';
   title: string; detail: string; createdAt: number;
 }
 /** A revision-aware, compact UI projection. A null snapshot means unchanged. */
@@ -160,8 +186,11 @@ export interface Settings {
   terminalFontSize?: number; chatFontSize?: number; interfaceFontSize?: number;
   chatLineHeight?: number; terminalLineHeight?: number;
   terminalFont?: string; chatFont?: string; interfaceFont?: string;
+  windowSurface?: 'opaque' | 'translucent' | 'glass';
+  windowTransparency?: number;
   showActivePaneBorder?: boolean; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
+  windowSurface?: 'opaque' | 'translucent' | 'glass';
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
   /** Legacy migration seed; active sidebar selection is client-local UI state. */
   sidebarView: SidebarView; busyMessageMode?: 'queue' | 'steer';
@@ -186,7 +215,12 @@ export interface Snapshot {
   hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
   collaborations: Collaboration[]; queuedMessages: QueuedMessage[];
+  /** Omitted by older runtimes; current runtimes always provide this durable projection. */
+  subagentSessions?: SubagentSession[];
+  /** Inline transcript for sources with no re-queryable native thread (`acp`), keyed by subagent id. */
+  subagentTranscripts?: Record<string, SubagentTranscriptEntry[]>;
   approvalRequests: ApprovalRequest[];
+  subagentSessions?: SubagentSession[];
   /** Omitted by older runtimes and deliberately absent from visitor projections. */
   approvalRules?: ApprovalRule[];
 }

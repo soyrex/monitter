@@ -423,8 +423,10 @@
       | "project"
       | "deleteProject"
       | "directory"
+      | "deleteAgent"
       | null
     >(null),
+    agentRemovalHandling = $state<"archive" | "delete">("archive"),
     agentDraft = $state<Agent | null>(null),
     hostDraft = $state<Host | null>(null),
     channelDraft = $state<Channel | null>(null),
@@ -1731,6 +1733,7 @@
     root.style.setProperty('--terminal-font-size', String(settings.terminalFontSize ?? 14));
     root.style.setProperty('--chat-line-height', String(settings.chatLineHeight ?? 1.65));
     root.style.setProperty('--terminal-line-height', String(settings.terminalLineHeight ?? 1));
+    root.style.setProperty('--window-transparency', `${settings.windowTransparency ?? 18}%`);
     const fontStack = (name: string | undefined, fallback: string) => name?.trim() ? `${JSON.stringify(name.trim())}, ${fallback}` : fallback;
     root.style.setProperty('--interface-font', fontStack(settings.interfaceFont, '"IBM Plex Sans", system-ui, sans-serif'));
     root.style.setProperty('--chat-font', fontStack(settings.chatFont, '"IBM Plex Sans", system-ui, sans-serif'));
@@ -2636,7 +2639,35 @@
   }
   $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && visibleAgents.length)untrack(()=>selectAgentEditor(visibleAgents[0]?.id??''));});
   function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(visibleAgents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
-  async function deleteEditedAgent(){if(!agentDraft?.id)return;const id=agentDraft.id;if(await run(()=>bridge.deleteAgent(id),'Agent removed.')){delete agentEdits[id];agentDraft=null;selectAgentEditor(visibleAgents[0]?.id??'');}}
+  function agentTaskCount(agentId: string): number {
+    return (snapshot?.tasks ?? []).filter(task => task.agentId === agentId).length;
+  }
+  function beginDeleteAgent() {
+    if (!agentDraft?.id) return;
+    const count = agentTaskCount(agentDraft.id);
+    if (count === 0) {
+      // No chats to archive: skip the modal so deleting an unused agent stays a single click.
+      void deleteEditedAgent('archive');
+      return;
+    }
+    agentRemovalHandling = 'archive';
+    modal = 'deleteAgent';
+  }
+  async function deleteEditedAgent(handling: 'archive' | 'delete' = 'archive') {
+    if (!agentDraft?.id) return;
+    const id = agentDraft.id;
+    if (await run(
+      () => bridge.deleteAgent(id, handling),
+      handling === 'delete'
+        ? 'Agent and chats deleted. Their native session files were also removed where safe.'
+        : 'Agent removed. Its chats are now archived with the agent name and LLM preserved.',
+    )) {
+      delete agentEdits[id];
+      agentDraft = null;
+      modal = null;
+      selectAgentEditor(visibleAgents[0]?.id ?? '');
+    }
+  }
   async function saveAgent() {
     if(!agentDraft)return;
     const oldId=agentDraft.id;
@@ -3139,8 +3170,8 @@
     ...Object.values(taskDrafts).map(draft => ({id:`draft:${draft.id}`,label:draft.title || 'New chat',group:'Draft chats',detail:visibleAgents.find(agent=>agent.id===draft.agentId)?.name ?? 'Agent'})),
     ...visibleTasks.filter(task=>!task.channelId).toSorted((a,b)=>b.updatedAt-a.updatedAt).map(task=>({
       id:`task:${task.id}`,label:task.title,group:task.archived ? "Archived chats" : "Chats",
-      detail:`${task.archived ? "Select to restore · " : ""}${visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? "Agent"}`,
-      keywords:`${task.provider} ${task.cwd}`,
+      detail:`${task.archived ? "Select to restore · " : ""}${visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? task.archivedAgentName ?? "Agent"}${task.archived && task.model ? ` · ${task.model}` : ""}`,
+      keywords:`${task.provider} ${task.model ?? ''} ${task.cwd} ${task.archivedAgentName ?? ''}`,
     })),
     ...(snapshot?.channels ?? []).map(channel=>({id:`channel:${channel.id}`,label:channel.name,group:"Channels",detail:channel.description})),
     ...visibleAgents.map(agent=>({id:`agent:${agent.id}`,label:agent.name,group:"Agents",detail:`${agent.provider} · ${agent.description}`})),
@@ -3516,16 +3547,14 @@
         {#if pane === 'project' && focusedProject}{@const ProjectIcon = projectIconComponent(focusedProject.icon)}<div class="tab-entry active"><button class="tab active" aria-pressed="true"><ProjectIcon size={13} style={`color:${focusedProject.color}`}/>{focusedProject.name}</button></div>{/if}
         </div>
       </nav>
+      {#if (pane==='empty' && (embedded || paneIds(layout).length>1)) || (mobileSidebar && ((pane==='task' && selectedTask) || (pane==='channel' && activeChannel)))}
       <div class="top-actions" data-tauri-drag-region>
         {#if pane==='empty' && (embedded || paneIds(layout).length>1)}<button class="icon" aria-label="Close empty pane" title="Close pane" onclick={closeOverview}><X size={16}/></button>{/if}
         {#if mobileSidebar && ((pane==='task' && selectedTask) || (pane==='channel' && activeChannel))}
           {@render rightSidebarControl()}
-        {:else}
-          <button class="icon" aria-label={terminalBusy?'Opening terminal':'Open terminal'} title="Open terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
         {/if}
-
-
       </div>
+      {/if}
       {/if}
     </header>{/if}
     {#if error}<PaneNotice message={error} blocking ondismiss={()=>error=''}/>{/if}
@@ -3813,9 +3842,11 @@
           </div>
         {/snippet}
         {#snippet subagentDock()}
-          <div class="subagent-dock" data-subagent-count={activeTaskSubagents.length}>
-            {#key subagentLifecycleRevision}<UnifiedSubagentVisor items={activeTaskSubagents} selectedId={selectedSubagentId} open={subagentVisorOpen} idPrefix={`${paneId}-subagent-visor`} transcriptLoading={selectedSubagentId ? !!subagentTranscriptLoading[selectedSubagentId] : false} transcriptError={selectedSubagentId ? subagentTranscriptErrors[selectedSubagentId] ?? '' : ''} onselect={inspectSubagent} onopenchange={(open) => subagentVisorOpen = open}/>{/key}
-          </div>
+          {#if activeTaskSubagents.length}
+            <div class="subagent-dock" data-subagent-count={activeTaskSubagents.length}>
+              {#key subagentLifecycleRevision}<UnifiedSubagentVisor items={activeTaskSubagents} selectedId={selectedSubagentId} open={subagentVisorOpen} idPrefix={`${paneId}-subagent-visor`} transcriptLoading={selectedSubagentId ? !!subagentTranscriptLoading[selectedSubagentId] : false} transcriptError={selectedSubagentId ? subagentTranscriptErrors[selectedSubagentId] ?? '' : ''} onselect={inspectSubagent} onopenchange={(open) => subagentVisorOpen = open}/>{/key}
+            </div>
+          {/if}
         {/snippet}
         {#key selectedTask.id}<TaskTranscript
           observers={observedTaskIds.has(selectedTask.id) ? observerNames : []}
@@ -3937,7 +3968,7 @@
 {#if !embedded}<RootSurfaceLifecycle start={startRootLifecycle}/>{/if}
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
-<main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
+  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
   {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
@@ -4115,6 +4146,42 @@
   </div>{/if}
 </Modal>
 
+<Modal title="Delete agent" open={modal === 'deleteAgent'} onclose={()=>{if(!busy)modal=null}}>
+  {#if agentDraft}{@const taskCount = agentTaskCount(agentDraft.id)}
+    <div class="form">
+      <p>Delete “{agentDraft.name}”?</p>
+      <p class="modal-copy">
+        This agent owns {taskCount} chat{taskCount === 1 ? '' : 's'}. Choose what should happen to {taskCount === 1 ? 'it' : 'them'}:
+      </p>
+      <fieldset class="agent-removal-options">
+        <legend class="sr-only">Chats handling</legend>
+        <label class:selected={agentRemovalHandling === 'archive'}>
+          <input type="radio" name="agent-removal" value="archive" checked={agentRemovalHandling === 'archive'} onchange={()=>{agentRemovalHandling = 'archive'}} />
+          <span>
+            <b>Archive chats</b>
+            <small>Keep every chat under Archived chats. Each one is labelled with “{agentDraft.name}” and the LLM ({agentDraft.provider}{agentDraft.model ? ` · ${agentDraft.model}` : ''}) so it stays readable after the agent is gone. Recommended.</small>
+          </span>
+        </label>
+        <label class:selected={agentRemovalHandling === 'delete'}>
+          <input type="radio" name="agent-removal" value="delete" checked={agentRemovalHandling === 'delete'} onchange={()=>{agentRemovalHandling = 'delete'}} />
+          <span>
+            <b>Delete chats permanently</b>
+            <small>Remove every chat, transcript and queued follow-up. Verified native session files are also deleted from disk where possible. This cannot be undone.</small>
+          </span>
+        </label>
+      </fieldset>
+      {#if error}<p class="error">{error}</p>{/if}
+      <footer>
+        <button type="button" class="secondary" disabled={busy} onclick={()=>{if(!busy)modal=null}}>Cancel</button>
+        <span></span>
+        <button type="button" class="danger" disabled={busy} onclick={()=>deleteEditedAgent(agentRemovalHandling)}>
+          <Trash2 size={15} /> {agentRemovalHandling === 'delete' ? 'Delete chats and agent' : 'Archive chats and delete agent'}
+        </button>
+      </footer>
+    </div>
+  {/if}
+</Modal>
+
 {#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each visibleAgents.filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small><ProviderIcon provider={agent.provider} size={12} />{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
 
 {#snippet agentEditor()}
@@ -4188,7 +4255,7 @@
           type="button"
           class="danger-text"
           disabled={!agentDraft.id || busy}
-          onclick={deleteEditedAgent}
+          onclick={beginDeleteAgent}
           ><Trash2 size={15} /> Delete</button
         ><span></span><button
           type="button"
@@ -4441,6 +4508,7 @@
     --line-base: var(--app-light-line, #d8d8d8);
     --soft-base: var(--app-light-soft, #eeeeee);
     --code-base: var(--app-light-code, #e8e8e8);
+    --window-transparency: 18%;
     --surface-tint-factor: 0.5;
     --effective-surface-tint: calc(var(--surface-tint, 5%) * var(--surface-tint-factor));
     --paper: color-mix(in srgb, var(--accent) var(--effective-surface-tint), var(--paper-base));
@@ -4590,9 +4658,9 @@
     background: var(--paper);
   }
   :global(:root[data-window-surface="translucent"]) {
-    --paper: color-mix(in srgb, var(--paper-base) 88%, transparent);
-    --sidebar: color-mix(in srgb, var(--sidebar-base) 88%, transparent);
-    --panel: color-mix(in srgb, var(--panel-base) 90%, transparent);
+    --paper: color-mix(in srgb, var(--paper-base) calc(100% - var(--window-transparency)), transparent);
+    --sidebar: color-mix(in srgb, var(--sidebar-base) calc(100% - var(--window-transparency)), transparent);
+    --panel: color-mix(in srgb, var(--panel-base) calc(100% - var(--window-transparency)), transparent);
   }
   :global(html[data-window-surface="glass"]),
   :global(html[data-window-surface="glass"] body),
@@ -4600,9 +4668,9 @@
     background: transparent;
   }
   :global(:root[data-window-surface="glass"]) .app-shell {
-    --paper: color-mix(in srgb, var(--paper-base) 58%, transparent);
-    --sidebar: color-mix(in srgb, var(--sidebar-base) 64%, transparent);
-    --panel: color-mix(in srgb, var(--panel-base) 72%, transparent);
+    --paper: color-mix(in srgb, var(--paper-base) calc(100% - var(--window-transparency)), transparent);
+    --sidebar: color-mix(in srgb, var(--sidebar-base) calc(100% - var(--window-transparency)), transparent);
+    --panel: color-mix(in srgb, var(--panel-base) calc(100% - var(--window-transparency)), transparent);
     backdrop-filter: blur(22px) saturate(125%);
     -webkit-backdrop-filter: blur(22px) saturate(125%);
   }
@@ -5638,6 +5706,7 @@
   .detail-tab {
     display: flex;
     align-items: center;
+    gap: 4px;
     flex-shrink: 0;
     min-height: var(--density-detail-tab-height);
     padding: 0 8px;
@@ -6183,6 +6252,14 @@
   .agent-directory small, .agent-directory p { margin: 0; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .agent-directory small { display:flex; align-items:center; gap:4px; }
   .agent-directory article.disabled { opacity: .58; }
+  .agent-removal-options { border: 1px solid var(--line); border-radius: 8px; padding: 4px; display: grid; gap: 4px; }
+  .agent-removal-options label { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 10px; border-radius: 6px; cursor: pointer; }
+  .agent-removal-options label.selected { background: var(--soft, rgba(255,255,255,0.04)); outline: 1px solid var(--accent); }
+  .agent-removal-options input[type="radio"] { margin: 4px 0 0; }
+  .agent-removal-options span { display: grid; gap: 4px; }
+  .agent-removal-options b { font-weight: 600; }
+  .agent-removal-options small { display: block; color: var(--muted); font-size: calc(11px * var(--interface-font-ratio, 1)); line-height: 1.4; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   .app-shell.embedded { height: 100%; width: 100%; grid-template-columns: minmax(0,1fr); }
   .embedded .topbar { height: var(--pane-tabbar-height,52px); min-height: 32px; padding: 0.5em 0.5em 0; }
   .compact-detail .run-detail { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px,calc(100% - 24px)); z-index: 22; box-shadow: -10px 0 30px #0003; }

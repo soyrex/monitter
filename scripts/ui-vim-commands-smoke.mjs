@@ -4,7 +4,7 @@ try {
   const page=await browser.newPage({viewport:{width:1500,height:950}}), errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   await page.addInitScript({path:'scripts/ui-fixture.js'}); await page.addInitScript(()=>{const q=window.__MONITTER_QA__,s=q.snapshot();s.settings.shortcutMode='vim';q.setSnapshot(s);});await page.goto('http://127.0.0.1:18433');
-  await expect(page.getByRole('button',{name:'Open terminal',exact:true})).toBeVisible({timeout:60000});
+  await expect(page.getByRole('button',{name:'New terminal',exact:true})).toBeVisible({timeout:60000});
   async function command(value) {
     await page.keyboard.press('Escape'); await page.keyboard.type(':');
     const input=page.getByRole('textbox',{name:'Monitter command'}); await expect(input).toBeVisible();

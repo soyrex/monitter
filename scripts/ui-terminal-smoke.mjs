@@ -8,7 +8,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript({ path: 'scripts/ui-fixture.js' }); await page.goto(url);
-  await expect(page.getByRole('button', { name: 'Open terminal', exact: true })).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole('button', { name: 'New terminal', exact: true })).toBeVisible({ timeout: 30000 });
   await page.evaluate(() => {
     const qa=window.__MONITTER_QA__, s=qa.snapshot();
     s.hosts.push({id:'ssh',name:'QA SSH',kind:'ssh',address:'qa.example',user:'',port:0,identityFile:'',defaultCwd:'~/remote',codexPath:'codex',claudePath:'',opencodePath:'',hermesPath:''});
@@ -26,7 +26,7 @@ try {
     await target.dispatchEvent('drop',{clientX:box.x+box.width/2,clientY:box.y+box.height/2,dataTransfer:data});
     await source.dispatchEvent('dragend').catch(()=>{});await data.dispose();
   }
-  await openTask('Local terminal task'); await main.getByRole('button',{name:'Open terminal',exact:true}).click();
+  await openTask('Local terminal task'); await page.getByRole('button',{name:'New terminal',exact:true}).click();
   await expect(page.locator('.terminal-pane .xterm')).toBeVisible();
   const localOpen=await page.evaluate(()=>window.__MONITTER_QA__.calls.findLast(call=>call.method==='openTerminal'));expect(localOpen.args.target).toEqual({taskId:'local-task'});
   const localId=await page.evaluate(()=>window.__MONITTER_QA__.terminals()[0].id); passed.push('opens local target and renders xterm');
@@ -56,7 +56,7 @@ try {
 
   await tab(second,'This Mac shell').click();const resizeBefore=await page.evaluate(()=>window.__MONITTER_QA__.calls.filter(call=>call.method==='resizeTerminal').length);await page.setViewportSize({width:1120,height:720});await expect.poll(()=>page.evaluate(()=>window.__MONITTER_QA__.calls.filter(call=>call.method==='resizeTerminal').length)).toBeGreaterThan(resizeBefore);
   expect(await page.evaluate(()=>document.documentElement.scrollHeight>innerHeight||document.documentElement.scrollWidth>innerWidth)).toBe(false);passed.push('resize has no document overflow');
-  await page.locator('.sidebar .task-select').filter({hasText:'SSH terminal task'}).first().click();const sshPane=page.locator('.pane-leaf').filter({has:page.locator('.tabs').getByRole('button',{name:'SSH terminal task',exact:true})});await sshPane.getByRole('button',{name:'Open terminal',exact:true}).click();
+  await page.locator('.sidebar .task-select').filter({hasText:'SSH terminal task'}).first().click();await page.getByRole('button',{name:'New terminal',exact:true}).click();
   const sshOpen=await page.evaluate(()=>window.__MONITTER_QA__.calls.findLast(call=>call.method==='openTerminal'));expect(sshOpen.args.target).toEqual({taskId:'ssh-task'});passed.push('opens SSH target');
   await page.evaluate(()=>{window.__MONITTER_QA__.terminalCloseFailure='Fixture close failure';});await page.getByRole('button',{name:/Close terminal QA SSH shell/,exact:true}).click();
   await expect(page.getByText(/Could not close terminal: Fixture close failure/)).toBeVisible();expect(await page.evaluate(()=>window.__MONITTER_QA__.terminals().some(item=>item.hostId==='ssh'))).toBe(true);

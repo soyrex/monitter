@@ -15,7 +15,7 @@ try {
       await page.keyboard.press('Meta+p');
       await page.getByRole('button', {name:/New terminal/}).click();
     } else {
-      await page.getByRole('button', {name:'Open terminal',exact:true}).first().click();
+      await page.getByRole('button', {name:'New terminal',exact:true}).click();
     }
     await expect(page.locator('.terminal-pane .xterm')).toBeVisible();
     await expect(page.locator('.terminal-pane')).toContainText('Monitter browser terminal');

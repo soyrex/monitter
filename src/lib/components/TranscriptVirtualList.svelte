@@ -30,6 +30,11 @@
   let committingOptions = false;
   let canFlushMeasurements = false;
   let followCommitPending = false;
+  // A transcript may stay mounted while its owning chat changes. Keep a
+  // stable row key from the current transcript so streaming appends and
+  // prepended history retain their measurements, while a replacement chat
+  // clears the old virtual range and size cache.
+  let transcriptAnchorKey: string | null = null;
   const controller = useTranscriptScrollController();
   const isFollowing = () => controller?.isFollowing() !== false;
 
@@ -125,6 +130,13 @@
   }
 
   $effect(() => {
+    const firstItem = items[0];
+    const firstKey = firstItem === undefined ? null : getKey(firstItem, 0);
+    const transcriptChanged = transcriptAnchorKey !== null &&
+      (firstKey === null || !items.some((item, index) => getKey(item, index) === transcriptAnchorKey));
+    if (transcriptChanged) instance().measure();
+    transcriptAnchorKey = firstKey;
+
     const stickyIndex = stickyKey ? items.findIndex((item, index) => getKey(item, index) === stickyKey) : -1;
     setVirtualizerOptions({
       count: items.length,

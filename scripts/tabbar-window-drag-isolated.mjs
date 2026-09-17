@@ -28,7 +28,7 @@ const html = `<!doctype html><style>
 ${css}
 .workspace{width:900px;height:180px;margin:0 0 20px;flex:none}
 </style>
-${['classic','modern'].map(style => `<section class="workspace ${style === 'modern' ? 'modern-tabs' : ''}" id="${style}"><header class="topbar" data-tauri-drag-region><nav class="tabs tab-picker" data-tauri-drag-region><div class="tab-picker-list"><div class="tab-entry task-tab"><button class="tab" draggable="false"><span>Chat tab</span></button><button class="close-tab" aria-label="Close chat">×</button></div></div></nav><div class="top-actions" data-tauri-drag-region><button class="icon" aria-label="Open terminal">T</button></div></header></section>`).join('')}
+${['classic','modern'].map(style => `<section class="workspace ${style === 'modern' ? 'modern-tabs' : ''}" id="${style}"><header class="topbar" data-tauri-drag-region><nav class="tabs tab-picker" data-tauri-drag-region><div class="tab-picker-list"><div class="tab-entry task-tab"><button class="tab" draggable="false"><span>Chat tab</span></button><button class="close-tab" aria-label="Close chat">×</button></div></div></nav></header></section>`).join('')}
 <script>
 window.calls=[];window.tabPresses=0;window.clicks=0;window.drops=0;
 window.__TAURI_INTERNALS__={invoke:cmd=>{window.calls.push(cmd);return Promise.resolve()}};
@@ -59,12 +59,11 @@ try {
     expect(await page.evaluate(()=>window.calls)).toEqual(['plugin:window|start_dragging']);
     await page.evaluate(()=>window.calls=[]);
     await page.locator(`#${style} .tab span`).click();
-    await page.getByRole('button',{name:'Open terminal'}).nth(style==='classic'?0:1).click();
     await page.locator(`#${style} .tab-entry`).hover();
     await page.locator(`#${style} .close-tab`).click();
     expect(await page.evaluate(()=>window.calls)).toEqual([]);
     expect(await page.evaluate(()=>window.tabPresses)).toBe(1);
-    expect(await page.evaluate(()=>window.clicks)).toBe(3);
+    expect(await page.evaluate(()=>window.clicks)).toBe(2);
     // Native HTML tab drops still reach the same nav target without invoking window movement.
     const dropAccepted = await bar.evaluate(node=>{
       const dataTransfer = new DataTransfer();dataTransfer.setData('application/x-monitter-tab','{}');

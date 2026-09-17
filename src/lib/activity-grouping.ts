@@ -3,6 +3,74 @@ import type { ApprovalRequest, Message, RunEvent } from '$lib/types';
 type RecordValue = Record<string, unknown>;
 const acpRecord = (value: unknown): value is RecordValue => !!value && typeof value === 'object' && !Array.isArray(value);
 
+export interface NativeSubagentActivity {
+  type: 'collabAgentToolCall' | 'subAgentActivity';
+  id: string;
+  action: string;
+  phase: string;
+  agentPath: string | null;
+  agentThreadId: string | null;
+  receiverThreadIds: string[];
+  prompt: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  agentsStates: Record<string, { status: string; message: string }>;
+}
+
+/** Structured Codex collaboration items, kept distinct from Monitter-routed delegations. */
+export function nativeSubagentActivity(event: RunEvent): NativeSubagentActivity | null {
+  if (event.kind !== 'tool' && event.kind !== 'subagent') return null;
+  let detail: unknown;
+  try { detail = JSON.parse(event.detail); }
+  catch { return null; }
+  if (!acpRecord(detail) || !['collabAgentToolCall', 'subAgentActivity'].includes(String(detail.type))) return null;
+  const states = acpRecord(detail.agentsStates)
+    ? Object.fromEntries(Object.entries(detail.agentsStates).flatMap(([id, value]) => acpRecord(value)
+      ? [[id, { status: typeof value.status === 'string' ? value.status : '', message: typeof value.message === 'string' ? value.message : '' }]]
+      : []))
+    : {};
+  return {
+    type: detail.type as NativeSubagentActivity['type'],
+    id: typeof detail.id === 'string' ? detail.id : event.id,
+    action: typeof detail.tool === 'string' ? detail.tool : typeof detail.kind === 'string' ? detail.kind : '',
+    phase: typeof detail.status === 'string' ? detail.status : '',
+    agentPath: typeof detail.agentPath === 'string' ? detail.agentPath : null,
+    agentThreadId: typeof detail.agentThreadId === 'string' ? detail.agentThreadId : null,
+    receiverThreadIds: Array.isArray(detail.receiverThreadIds) ? detail.receiverThreadIds.filter((value): value is string => typeof value === 'string') : [],
+    prompt: typeof detail.prompt === 'string' && detail.prompt.trim() ? detail.prompt.trim() : null,
+    model: typeof detail.model === 'string' && detail.model.trim() ? detail.model.trim() : null,
+    reasoningEffort: typeof detail.reasoningEffort === 'string' && detail.reasoningEffort.trim() ? detail.reasoningEffort.trim() : null,
+    agentsStates: states,
+  };
+}
+
+function nativeSubagentName(value: NativeSubagentActivity): string {
+  const leaf = value.agentPath?.split('/').filter(Boolean).at(-1)?.replaceAll(/[_-]+/g, ' ').trim();
+  return leaf ? leaf.replace(/\b\w/g, character => character.toUpperCase()) : 'Subagent';
+}
+
+/** Item start/completion envelopes share an item id; retain one semantic action. */
+function coalesceNativeSubagentActivity(events: RunEvent[]): RunEvent[] {
+  const result: RunEvent[] = [];
+  const positions = new Map<string, number>();
+  for (const event of events) {
+    const activity = nativeSubagentActivity(event);
+    if (!activity) { result.push(event); continue; }
+    const key = `${event.taskId}:${activity.type}:${activity.id}`;
+    const position = positions.get(key);
+    if (position === undefined) {
+      positions.set(key, result.length);
+      result.push(event);
+      continue;
+    }
+    const previous = result[position];
+    // Prefer the completion payload because it contains receiver IDs and final
+    // agent-state messages, while retaining the first timestamp for ordering.
+    result[position] = { ...event, createdAt: previous.createdAt };
+  }
+  return result;
+}
+
 /** ACP envelopes are retained in historical and current diagnostic journals. */
 function acpUpdate(event: RunEvent): RecordValue | null {
   try {
@@ -119,6 +187,33 @@ export function isNativeMessageTransportArtifact(event: RunEvent): boolean {
     const type = JSON.parse(event.detail)?.type;
     return typeof type === 'string' && ['usermessage', 'agentmessage'].includes(type.toLowerCase());
   } catch { return false; }
+}
+
+/** Read the thread linkage from a structured native subagent event, if present. */
+export interface NativeSubagentActivity {
+  agentThreadId: string;
+  receiverThreadIds: string[];
+}
+
+export function nativeSubagentActivity(event: RunEvent): NativeSubagentActivity | null {
+  try {
+    const parsed = JSON.parse(event.detail) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    const activity = record.activity && typeof record.activity === 'object' && !Array.isArray(record.activity)
+      ? record.activity as Record<string, unknown>
+      : record;
+    const agentThreadId = [activity.agentThreadId, activity.agent_thread_id]
+      .find(value => typeof value === 'string' && value.trim()) as string | undefined;
+    if (!agentThreadId) return null;
+    const receivers = activity.receiverThreadIds ?? activity.receiver_thread_ids;
+    const receiverThreadIds = Array.isArray(receivers)
+      ? receivers.filter((value): value is string => typeof value === 'string' && !!value.trim())
+      : [];
+    return { agentThreadId, receiverThreadIds };
+  } catch {
+    return null;
+  }
 }
 
 export type ConversationActivityItem =
@@ -260,6 +355,9 @@ function friendlyToolName(value: string): string {
 
 /** Map raw Codex, Claude and OpenCode names to one user-facing intent. */
 export function toolCategory(event: RunEvent): ToolCategory {
+  const nativeSubagent = nativeSubagentActivity(event);
+  if (nativeSubagent?.type === 'subAgentActivity' || nativeSubagent?.action === 'spawnAgent') return 'task';
+  if (nativeSubagent) return 'task_coordination';
   if (isShellActivity(event)) return 'shell';
   const identity = toolIdentity(event);
   const id = normalizeToolId(identity);
@@ -317,6 +415,23 @@ export function toolImage(event: RunEvent): ToolImage | null {
 
 /** Friendly label and icon; raw provider tool names stay in the expandable detail. */
 export function toolPresentation(event: RunEvent, inProgress: boolean): ToolPresentation {
+  const nativeSubagent = nativeSubagentActivity(event);
+  if (nativeSubagent) {
+    const name = nativeSubagentName(nativeSubagent);
+    if (nativeSubagent.type === 'subAgentActivity') {
+      if (nativeSubagent.action === 'started') return { icon: 'bot', label: `${name} started` };
+      if (nativeSubagent.action === 'interacted') return { icon: 'message-circle', label: `${name} sent an update` };
+      if (nativeSubagent.action === 'completed') return { icon: 'bot', label: `${name} finished` };
+      return { icon: 'bot', label: `${name} activity` };
+    }
+    inProgress = nativeSubagent.phase === 'inProgress';
+    const count = nativeSubagent.receiverThreadIds.length;
+    const target = count > 1 ? `${count} subagents` : 'a subagent';
+    if (nativeSubagent.action === 'spawnAgent') return { icon: 'bot', label: inProgress ? 'Starting a subagent' : 'Started a subagent' };
+    if (nativeSubagent.action === 'sendInput') return { icon: 'message-circle', label: inProgress ? `Sending an update to ${target}` : `Sent an update to ${target}` };
+    if (nativeSubagent.action === 'wait') return { icon: 'users', label: inProgress ? `Waiting for ${target}` : `Received updates from ${target}` };
+    if (nativeSubagent.action === 'closeAgent') return { icon: 'users', label: inProgress ? `Finishing with ${target}` : `Finished with ${target}` };
+  }
   const acp = acpUpdate(event);
   if (acp?.status === 'failed') return { icon: 'wrench', label: 'Tool failed' };
   if (acp?.status === 'completed') inProgress = false;
@@ -493,6 +608,23 @@ export function toolFileChanges(event: RunEvent): ToolFileChange[] {
 
 /** Convert provider JSON into the useful human-readable part of a tool event. */
 export function readableToolDetail(event: RunEvent): string {
+  const nativeSubagent = nativeSubagentActivity(event);
+  if (nativeSubagent) {
+    const lines: string[] = [];
+    if (nativeSubagent.type === 'subAgentActivity') {
+      const verb = nativeSubagent.action === 'started' ? 'started working' : nativeSubagent.action === 'completed' ? 'finished' : 'sent an update';
+      lines.push(`${nativeSubagentName(nativeSubagent)} ${verb}.`);
+    } else {
+      if (nativeSubagent.prompt) lines.push(`${nativeSubagent.action === 'sendInput' ? 'Update' : 'Task'}\n${nativeSubagent.prompt}`);
+      const configuration = [nativeSubagent.model, nativeSubagent.reasoningEffort].filter(Boolean).join(' · ');
+      if (configuration) lines.push(configuration);
+      for (const [index, state] of Object.values(nativeSubagent.agentsStates).entries()) {
+        const status = state.status ? state.status.replaceAll(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() : 'updated';
+        lines.push(`${nativeSubagent.receiverThreadIds.length > 1 ? `Subagent ${index + 1}` : 'Subagent'} · ${status}${state.message ? `\n${state.message}` : ''}`);
+      }
+    }
+    return truncateDetail(lines.join('\n\n') || 'Subagent activity updated.');
+  }
   const acp = acpReadableDetail(event);
   if (acp !== null) return truncateDetail(acp);
   const raw = event.detail.trim();
@@ -548,7 +680,7 @@ export function groupConversationActivity(
   approvals: ApprovalRequest[] = [],
 ): ConversationActivityItem[] {
   const sourceEvents = events;
-  events = coalesceAcpActivity(events, messages);
+  events = coalesceAcpActivity(coalesceNativeSubagentActivity(events), messages);
   const ordered = [
     ...messages.map(value => ({ type: 'message' as const, value, at: value.createdAt })),
     ...events.filter(event => !isNativeMessageTransportArtifact(event)).map(value => ({ type: 'activity' as const, value, at: value.createdAt })),
@@ -567,7 +699,7 @@ export function groupConversationActivity(
       }
       continue;
     }
-    if (item.type !== 'activity' || item.value.kind !== 'tool') {
+    if (item.type !== 'activity' || (item.value.kind !== 'tool' && item.value.kind !== 'subagent')) {
       // `at` is only a sorting aid; the richer item remains structurally
       // compatible with the public discriminated union returned from here.
       grouped.push(item);
@@ -579,7 +711,9 @@ export function groupConversationActivity(
     const previousCompactionId = previousCompaction ? contextCompactionId(previous!.values.at(-1)!) : null;
     const currentCompactionId = contextCompactionId(item.value);
     const compactionLifecycle = previousCompaction || currentCompaction;
-    if (previous?.type === 'tool-group' && (
+    const previousNativeSubagent = previous?.type === 'tool-group' ? nativeSubagentActivity(previous.values.at(-1)!) : null;
+    const currentNativeSubagent = nativeSubagentActivity(item.value);
+    if (previous?.type === 'tool-group' && !previousNativeSubagent && !currentNativeSubagent && (
       compactionLifecycle
         ? previousCompactionId !== null && previousCompactionId === currentCompactionId
         : toolFamily(previous.values[0]) === toolFamily(item.value)
@@ -621,7 +755,7 @@ export function groupConversationActivity(
       compacted.push(item);
       continue;
     }
-    if (item.type !== 'tool-group' || item.values.every(isContextCompaction)) {
+    if (item.type !== 'tool-group' || item.values.every(isContextCompaction) || item.values.some(nativeSubagentActivity)) {
       compacted.push(item);
       continue;
     }

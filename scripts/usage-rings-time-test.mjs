@@ -1,4 +1,4 @@
-import { chromium, expect as baseExpect } from '@playwright/test';
+import { chromium, webkit, expect as baseExpect } from '@playwright/test';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,20 +11,25 @@ const harness = mkdtempSync(join(root, 'verification', 'usage-rings-harness-'));
 
 writeFileSync(join(harness, 'index.html'), '<div id="app"></div><script type="module" src="/main.js"></script>');
 writeFileSync(join(harness, 'App.svelte'), `<script>
+  import '@fontsource/ibm-plex-mono/700.css';
+  import '@fontsource/ibm-plex-sans/400.css';
   import UsageRings from '${join(root, 'src/lib/components/UsageRings.svelte')}';
   const base = Date.now();
   const resetAfter = (days, hours, minutes) => base + (((days * 24 + hours) * 60 + minutes) * 60000);
-  const usage = {
+  let compact = $state(false);
+  let usage = $state({
     codex: { status: 'ready', active: { label: '5-hour', usedPercent: 98, resetsAt: resetAfter(3, 6, 23) }, weekly: { label: 'Week', usedPercent: 20, resetsAt: resetAfter(7, 0, 0) } },
     claude: { status: 'stale', active: { label: 'Current session', usedPercent: 80, resetsAt: resetAfter(0, 2, 5) } },
     minimax: { status: 'ready', active: { label: 'general 5-hour', usedPercent: 25, resetsAt: resetAfter(0, 4, 30) } },
     'opencode-go': { status: 'error', message: 'Router unavailable.' },
-  };
+  });
 </script>
-<main class="sidebar"><UsageRings {usage} expanded={true} /></main>
-<style>:global(:root){--ink:#28231c;--muted:#756b5c;--panel:#f5f1e8;--line:#d8d0c2;--soft:#eee8dc;--accent:#3f9d6a;--mono:ui-monospace,monospace}:global(body){margin:24px;background:#fbf8f2}.sidebar{width:252px;height:100vh}</style>`);
+<button id="loading" onclick={() => usage = {...usage, codex: {status: 'loading'}}}>Load</button>
+<button id="compact" onclick={() => compact = !compact}>Compact</button>
+<main class="sidebar"><UsageRings {usage} {compact} expanded={true} /></main>
+<style>:global(:root){--ink:#28231c;--muted:#756b5c;--panel:#f5f1e8;--line:#d8d0c2;--soft:#eee8dc;--accent:#3f9d6a;--mono:"IBM Plex Mono",monospace}:global(body){margin:24px;background:#fbf8f2;font-family:"IBM Plex Sans",sans-serif}.sidebar{width:252px;height:100vh}</style>`);
 writeFileSync(join(harness, 'main.js'), `import { mount } from 'svelte'; import App from './App.svelte'; mount(App, { target: document.querySelector('#app') });`);
-writeFileSync(join(harness, 'vite.config.mjs'), `import { svelte } from '@sveltejs/vite-plugin-svelte'; export default { plugins: [svelte()] };`);
+writeFileSync(join(harness, 'vite.config.mjs'), `import { svelte } from '@sveltejs/vite-plugin-svelte'; export default { cacheDir: './.vite', plugins: [svelte()] };`);
 
 const child = spawn(process.execPath, [join(root, 'node_modules/vite/bin/vite.js'), '--host', '127.0.0.1', '--port', '0'], {
   cwd: harness,
@@ -49,18 +54,28 @@ const url = await new Promise((resolve, reject) => {
 
 let browser;
 try {
-  browser = await chromium.launch();
+  browser = await (process.env.BROWSER === 'webkit' ? webkit : chromium).launch();
   const page = await browser.newPage({ viewport: { width: 760, height: 1400 } });
+  // Headless WebKit can report a stale outerHeight after a one-pixel resize.
+  // Model a window without browser chrome so breakpoint tests are deterministic.
+  await page.addInitScript(() => Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight }));
+  page.on('pageerror', error => console.error(error));
   await page.goto(url);
+  await page.evaluate(() => document.fonts.ready);
 
   const providers = page.locator('.usage-provider');
   const resetButtons = page.locator('button.usage-reset');
+  const uniqueSvgIds = async () => {
+    const ids = await page.locator('.usage-rings svg [id]').evaluateAll(nodes => nodes.map(node => node.id));
+    expect(new Set(ids).size).toBe(ids.length);
+  };
   await expect(providers).toHaveCount(4);
   await expect(resetButtons).toHaveCount(4);
 
   const codex = providers.filter({ hasText: 'Codex' });
   await expect.poll(() => codex.innerText()).toMatch(/98% used\.\s*Resets in\s*3d 6h 23m/);
-  await expect(page.locator('.usage-rings')).not.toHaveClass(/rings-only/);
+  await expect(page.locator('.usage-rings')).not.toHaveClass(/horizontal/);
+  await expect(page.locator('.usage-provider-icon')).toHaveCount(4);
   await expect(codex.locator('.usage-reset strong').first()).toHaveText('3d 6h 23m');
   expect(Number(await codex.locator('.usage-reset strong').first().evaluate(node => getComputedStyle(node).fontWeight))).toBeGreaterThanOrEqual(600);
   await expect(providers.filter({ hasText: 'MiniMax' })).toContainText('general 5-hour');
@@ -80,9 +95,19 @@ try {
   expect(green[1]).toBeGreaterThan(green[0]);
 
   const ringValue = codex.locator('.ring-value');
-  await expect(ringValue).toHaveAttribute('x', '20');
-  await expect(ringValue).toHaveAttribute('y', '20');
-  await expect(ringValue).toHaveAttribute('dominant-baseline', 'middle');
+  const centered = async (outer, inner) => {
+    const [a, b] = await Promise.all([outer.boundingBox(), inner.boundingBox()]);
+    expect(Math.abs(a.x + a.width / 2 - b.x - b.width / 2)).toBeLessThan(0.75);
+    expect(Math.abs(a.y + a.height / 2 - b.y - b.height / 2)).toBeLessThan(0.75);
+  };
+  await centered(codex.locator('.usage-ring'), ringValue);
+  const logoBeforeName = async label => {
+    const icon = await label.locator('.provider-icon').boundingBox();
+    const text = await label.locator('strong, .usage-provider-name, .usage-label-text').first().boundingBox();
+    expect(icon.x + icon.width).toBeLessThanOrEqual(text.x);
+    expect(Math.abs(icon.y + icon.height / 2 - text.y - text.height / 2)).toBeLessThan(1);
+  };
+
 
   await resetButtons.first().press('Enter');
   await expect(resetButtons.filter({ hasText: 'Resets ' })).toHaveCount(4);
@@ -94,24 +119,40 @@ try {
   await resetButtons.last().click();
   await expect(resetButtons.filter({ hasText: 'Resets in' })).toHaveCount(4);
 
-  await page.setViewportSize({ width: 760, height: 1200 });
-  await expect(page.locator('.usage-rings')).not.toHaveClass(/rings-only/);
-  await page.setViewportSize({ width: 760, height: 1199 });
-  await expect(page.locator('.usage-rings')).toHaveClass(/rings-only/);
+  await page.setViewportSize({ width: 760, height: 700 });
+  await expect(page.locator('.usage-rings')).toHaveClass(/horizontal/);
   await expect(page.locator('.usage-toggle')).toBeVisible();
-  await expect(codex).toHaveText(/98\s*Codex/);
-  await expect(codex.locator('.usage-copy')).toBeHidden();
-  await expect(page.locator('.usage-ring-label')).toHaveCount(4);
-  await expect(page.locator('.usage-ring-label').nth(1)).toHaveText('Claude');
-  const ringRow = await page.locator('.usage-provider').evaluateAll(nodes => nodes.map(node => {
+  await expect(codex).toContainText(/U:\s*98%/);
+  await expect(codex.locator('.usage-copy')).toBeVisible();
+  await expect(codex.locator('.usage-detail-short')).toBeVisible();
+  await expect(codex.locator('.usage-reset-short')).toBeVisible();
+  const providerRows = await page.locator('.usage-provider').evaluateAll(nodes => nodes.map(node => {
     const rect = node.getBoundingClientRect();
     return { left: rect.left, top: rect.top };
   }));
-  expect(new Set(ringRow.map(item => Math.round(item.top))).size).toBe(1);
-  expect(ringRow[0].left).toBeLessThan(ringRow[1].left);
-  expect(ringRow[1].left).toBeLessThan(ringRow[2].left);
-  expect(ringRow[2].left).toBeLessThan(ringRow[3].left);
-  console.log('Usage switches to a four-ring provider row below 1200px window height while retaining its toggle header.');
+  expect(new Set(providerRows.map(item => Math.round(item.top))).size).toBe(4);
+  expect(providerRows.every(item => item.left === providerRows[0].left)).toBe(true);
+  await page.setViewportSize({ width: 760, height: 1200 });
+  await expect(page.locator('.usage-rings')).not.toHaveClass(/horizontal/);
+  await expect(codex.locator('.usage-copy')).toBeVisible();
+  await logoBeforeName(codex.locator('.usage-heading'));
+  await uniqueSvgIds();
+  await page.locator('#loading').click();
+  const loading = providers.first();
+  const active = loading.locator('.ring-active');
+  for (const time of [0, 150, 350, 600, 900]) {
+    await active.evaluate((node, time) => {
+      for (const animation of node.getAnimations()) { animation.pause(); animation.currentTime = time; }
+    }, time);
+    await centered(loading.locator('.usage-ring'), active);
+  }
+  await page.locator('#compact').click();
+  await expect(page.locator('.usage-toggle')).toBeHidden();
+  await expect(providers).toHaveCount(4);
+  await centered(loading.locator('.usage-ring'), loading.locator('.ring-value'));
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect(await active.evaluate(node => getComputedStyle(node).animationName)).toBe('none');
+  console.log('Usage preserves detailed provider rows, adapts short-window details, and keeps ring geometry and reduced motion intact.');
 } finally {
   await browser?.close();
   if (child.exitCode === null && child.signalCode === null) {

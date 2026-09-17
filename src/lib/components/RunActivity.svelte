@@ -3,7 +3,7 @@
   import { AlarmClock, Archive, Bot, BookOpen, Brain, ChevronRight, Download, Eye, FilePen, FileSearch, FolderOpen, Globe, Image, ListChecks, MessageCircle, Monitor, Plug, Search, SquareTerminal, Terminal, Users, Wrench, X } from '@lucide/svelte';
   import type { AttachmentFileData, RunEvent } from '$lib/types';
   import { getBridge } from '$lib/bridge';
-  import { contextCompactionId, contextCompactionPhase, isContextCompaction, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, type ToolPresentation } from '$lib/activity-grouping';
+  import { contextCompactionId, contextCompactionPhase, isContextCompaction, nativeSubagentActivity, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, type ToolPresentation } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
   import Markdown from './Markdown.svelte';
   import AnimatedTitle from './AnimatedTitle.svelte';
@@ -19,7 +19,7 @@
   const summary = $derived(reasoning ? [...new Set(items.map(item=>reasoningSummary(item.detail)).filter(Boolean))].join('\n\n') : '');
   const summaryPreview = $derived(reasoning && summary ? summary.replace(/\s+/g, ' ').trim() : '');
   const emptyReasoning = $derived(reasoning && !summary);
-  const family = $derived(compressed && grouped ? 'Tool calls' : primary ? toolFamily(primary) : 'Tool activity');
+  const family = $derived(primary && nativeSubagentActivity(primary) ? 'Subagent activity' : compressed && grouped ? 'Tool calls' : primary ? toolFamily(primary) : 'Tool activity');
   const shell = $derived(items.length > 0 && items.every(isShellActivity));
   const compaction = $derived(items.length > 0 && items.every(isContextCompaction));
   const compactionId = $derived(compaction ? contextCompactionId(primary!) : null);
@@ -163,7 +163,7 @@
     {#if open && compressed && grouped}<div bind:this={panel} class="activity-expanded" role="region" aria-label="Expanded tool calls">
       <div class="calls" aria-label="Tool activity entries">
         {#each items as item (item.id)}{@const displayItem=expandedEvent(item)}<details class="call" open>
-          <summary><ChevronRight size={12} class="call-chevron"/><span>{item.title || 'Tool activity'}</span><time>{formatTime(item.createdAt)}</time></summary>
+          <summary><ChevronRight size={12} class="call-chevron"/><span>{nativeSubagentActivity(item) ? toolPresentation(item, false).label : item.title || 'Tool activity'}</span><time>{formatTime(item.createdAt)}</time></summary>
           <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable output must be keyboard reachable) -->
           <pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>
           {@render imagePreview(displayItem)}
@@ -181,7 +181,7 @@
       <header><strong>{family.replaceAll('_',' ')} <small>{items.length} {items.length===1?'entry':'entries'}</small></strong><button aria-label="Close activity history" onclick={()=>close()}><X size={15}/></button></header>
       <div class="calls" aria-label="Tool activity entries">
         {#each items as item (item.id)}{@const displayItem=expandedEvent(item)}<details class="call" open>
-          <summary><ChevronRight size={12} class="call-chevron"/><span>{item.title || 'Tool activity'}</span><time>{formatTime(item.createdAt)}</time></summary>
+          <summary><ChevronRight size={12} class="call-chevron"/><span>{nativeSubagentActivity(item) ? toolPresentation(item, false).label : item.title || 'Tool activity'}</span><time>{formatTime(item.createdAt)}</time></summary>
           <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable output must be keyboard reachable) -->
           <pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>
           {@render imagePreview(displayItem)}

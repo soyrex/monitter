@@ -2,10 +2,12 @@
   import { type Snippet } from 'svelte';
   import { Check, CircleStop, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
   import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, Message, RunEvent, Snapshot, Task } from '$lib/types';
+  import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
   import { floating } from '$lib/floating';
-  import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, showThinkingFallback, type ConversationActivityItem } from '$lib/activity-grouping';
+  import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, nativeSubagentActivity, showThinkingFallback, toolPresentation, type ConversationActivityItem } from '$lib/activity-grouping';
+  import type { UnifiedSubagent } from '$lib/unified-subagents';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
@@ -14,14 +16,14 @@
   import MessagePane from '$lib/components/MessagePane.svelte';
   import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
   import RunActivity from '$lib/components/RunActivity.svelte';
-  import SubagentActivity from '$lib/components/SubagentActivity.svelte';
+  import UnifiedSubagentItem from '$lib/components/UnifiedSubagentItem.svelte';
   import ThinkingStatus from '$lib/components/ThinkingStatus.svelte';
   import MessageMeta from '$lib/components/MessageMeta.svelte';
   import Markdown from '$lib/components/Markdown.svelte';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ExpandableUserRequest from '$lib/components/ExpandableUserRequest.svelte';
-  import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import SparkleField from '$lib/components/SparkleField.svelte';
+  import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
 
   type Avatar = Snippet<[Agent | null | undefined, number?]>;
   type Delivery = Snippet<[OptimisticMessage]>;
@@ -55,15 +57,18 @@
     paneExpand,
     rightSidebar,
     composer,
+    subagentDock,
     senderName,
     operatorMessageText,
     approvalEventText,
     collaborations,
-    collaborationWasSteering,
+    subagents,
+    collaborationWasSteering = () => false,
     menuOpen,
     onMenuChange,
     formatTime,
-    onOpenCollaboration,
+    onOpenSubagent,
+    onOpenCollaboration = () => {},
     onOpenApproval,
     onLoadFullEventDetail,
     liveError = '',
@@ -97,15 +102,18 @@
     paneExpand: EmptySnippet;
     rightSidebar: EmptySnippet;
     composer: EmptySnippet;
+    subagentDock: EmptySnippet;
     senderName: (message: Message) => string | null;
     operatorMessageText: (value: string) => string;
     approvalEventText: (request: ApprovalRequest) => string;
     collaborations: CollaborationRecord[];
-    collaborationWasSteering: (value: CollaborationRecord) => boolean;
+    subagents: UnifiedSubagent[];
+    collaborationWasSteering?: (value: CollaborationRecord) => boolean;
     menuOpen: boolean;
     onMenuChange: (open: boolean) => void;
     formatTime: (value: number) => string;
-    onOpenCollaboration: (value: CollaborationRecord) => void;
+    onOpenSubagent: (value: UnifiedSubagent) => void;
+    onOpenCollaboration?: (value: CollaborationRecord) => void;
     onOpenApproval: (request: ApprovalRequest) => void;
     onLoadFullEventDetail: (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
     liveError?: string;
@@ -115,11 +123,11 @@
   } = $props();
 
   let taskMenuAnchor = $state<HTMLButtonElement>();
-  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
-  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, optimisticMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
+  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
+  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, optimisticMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
   const transcriptBuffer = createTranscriptBuffer<TranscriptDisplay>(
     () => task.id,
-    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, conversationItems, optimisticMessages, confirmedDeliveryIds, collaborations, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
+    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, conversationItems, optimisticMessages, confirmedDeliveryIds, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
     () => transcriptFingerprint,
   );
   const display = $derived(transcriptBuffer.value());
@@ -129,6 +137,7 @@
   const displayOptimisticMessages = $derived(display.optimisticMessages);
   const displayConfirmedDeliveryIds = $derived(display.confirmedDeliveryIds);
   const displayCollaborations = $derived(display.collaborations);
+  const displaySubagents = $derived(display.subagents);
   const displayLatestUserRequest = $derived(displayItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
   const displayThinking = $derived.by(() => {
     if (displayTask.status !== 'running' || display.hasPendingApprovals) return false;
@@ -136,6 +145,29 @@
     return showThinkingFallback(displayItems, true) || (latest?.type === 'reasoning-group' && latest.values.every(isBlankReasoning));
   });
   function handleFollowChange(following: boolean) { transcriptBuffer.setFollowing(following); }
+  function routedLifecycle(item: UnifiedSubagent, title: string): UnifiedSubagent {
+    if (title === 'Collaboration queued') return { ...item, status: 'queued', activity: `${item.agentName} was assigned` };
+    if (title === 'Peer delivery started') return { ...item, status: 'running', activity: `${item.agentName} started working` };
+    if (/completed$/i.test(title)) return { ...item, status: 'completed', activity: `${item.agentName} finished` };
+    if (/error$/i.test(title)) return { ...item, status: 'error', activity: `${item.agentName} needs attention` };
+    if (/interrupted$/i.test(title)) return { ...item, status: 'interrupted', activity: `${item.agentName} stopped` };
+    return { ...item, activity: title };
+  }
+  function subagentForEvents(events: RunEvent[]) {
+    const collaborationId = events.find(event => event.kind === 'collaboration')?.detail;
+    if (collaborationId) {
+      const match = displaySubagents.find(item => item.collaborationId === collaborationId);
+      if (match) return routedLifecycle(match, events.at(-1)?.title ?? 'Subagent activity');
+    }
+    for (const event of [...events].reverse()) {
+      const activity = nativeSubagentActivity(event);
+      if (!activity) continue;
+      const threadIds = [activity.agentThreadId, ...activity.receiverThreadIds].filter((value): value is string => !!value);
+      const match = displaySubagents.find(item => !!item.agentThreadId && threadIds.includes(item.agentThreadId));
+      if (match) return { ...match, activity: toolPresentation(event, match.status === 'running').label };
+    }
+    return null;
+  }
 </script>
 
 {#if showHeader}<div class="conversation-head task-heading pane-task-header">
@@ -166,14 +198,15 @@
         {active}>
         {#snippet children(item, _index)}
           {#if item.type === 'activity'}
-            {@const collaboration=item.value.kind==='collaboration' ? displayCollaborations.find(value => value.id === item.value.detail) : null}
-            {#if collaboration}<SubagentActivity {collaboration} agent={display.agents.find(agent=>agent.id===collaboration.toAgentId)} eventTitle={item.value.title} steered={collaborationWasSteering(collaboration)} onclick={()=>onOpenCollaboration(collaboration)}/>{:else}<RunActivity active={active && !transcriptBuffer.held()} event={item.value} onloaddetail={onLoadFullEventDetail}/>{/if}
+            {@const inlineSubagent=subagentForEvents([item.value])}
+            {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} event={item.value} onloaddetail={onLoadFullEventDetail}/>{/if}
           {:else if item.type === 'reasoning-group'}
             <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} running={displayTask.status === 'running' && item === displayItems.at(-1) && !display.hasPendingApprovals}>
               {#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}
             </RunActivity>
           {:else if item.type === 'tool-group'}
-            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} compressed={display.settings.compressToolCalls === true} running={displayTask.status === 'running'}/>
+            {@const inlineSubagent=subagentForEvents(item.values)}
+            {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} compressed={display.settings.compressToolCalls === true} running={displayTask.status === 'running'}/>{/if}
           {:else if item.type === 'approval'}
             {@const approvalText=approvalEventText(item.value)}
             <button class={`approval-inline ${item.value.status}`} onclick={()=>onOpenApproval(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{formatTime(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
@@ -208,9 +241,11 @@
     </MessagePane>
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
     <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />
+    {#if subagentDock}{@render subagentDock()}{/if}
   <div class="composer-area">
     <SparkleField active={task.status === 'running'}/>
     {@render composer()}
+    {@render subagentDock()}
   </div>
 </section>
 
@@ -247,6 +282,8 @@
   .approval-inline:hover,.approval-inline:focus-visible { color:var(--ink); text-decoration:underline; text-decoration-color:var(--accent); text-underline-offset:3px; }
   .approval-inline time { margin-left:auto; flex:none; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); }
   .approval-inline.denied { color:#a54c44; }
+  .subagent-inline { margin:0 0 8px; }
+  .subagent-inline :global(.subagent-item) { border-color:var(--line); background:color-mix(in srgb,var(--accent) 4%,var(--panel)); }
   .message[data-participant] .human-avatar { background:color-mix(in srgb,var(--participant-colour) 25%,var(--panel));color:var(--ink); }
   .message.user.tinted { background:color-mix(in srgb,var(--participant-colour,var(--accent)) 16%,var(--panel)); }
   .message.user { margin-left:auto; padding:12px 14px; border-radius:10px 10px 3px 10px; background:var(--soft); }

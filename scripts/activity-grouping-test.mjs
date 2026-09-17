@@ -176,3 +176,30 @@ assert.equal(readableToolDetail(event('tools', 0, 'ToolSearch', '{"query":"selec
 assert.equal(readableToolDetail(event('image', 0, 'imageView', '{"type":"imageView","id":"opaque","path":"/tmp/screenshot.png"}')), 'Viewed /tmp/screenshot.png');
 assert.equal(readableToolDetail(event('gmail', 0, 'gmail.search_emails', JSON.stringify({ content: [{ type: 'text', text: 'Action completed.' }], structured_content: { emails: [{ subject: 'Shipment update', from_: 'Carrier' }, { subject: 'Invoice', from_: 'Supplier' }] } }))), '2 emails\n\n• Shipment update — Carrier\n\n• Invoice — Supplier');
 console.log('tool activity names are normalized into human-friendly labels and icons');
+
+const nativeStarted = event('native-start-envelope', 20, 'subAgentActivity', JSON.stringify({
+  type: 'subAgentActivity', id: 'native-item', kind: 'started',
+  agentPath: '/root/review_tests', agentThreadId: 'native-thread',
+}));
+const nativeCompletedEnvelope = { ...nativeStarted, id: 'native-complete-envelope', createdAt: 21 };
+assert.equal(category('subAgentActivity', nativeStarted.detail), 'task');
+assert.deepEqual(toolPresentation(nativeStarted, true), { icon: 'bot', label: 'Review Tests started' });
+assert.equal(readableToolDetail(nativeStarted), 'Review Tests started working.');
+const coalescedNative = groupConversationActivity([], [nativeStarted, nativeCompletedEnvelope]);
+assert.equal(coalescedNative.length, 1, 'app-server item start/completion envelopes render once');
+assert.equal(coalescedNative[0].type, 'tool-group');
+assert.equal(coalescedNative[0].values.length, 1);
+const durableNativeEvent = { ...nativeStarted, id: 'native-diagnostic-event', kind: 'subagent' };
+assert.deepEqual(toolPresentation(durableNativeEvent, true), { icon: 'bot', label: 'Review Tests started' });
+assert.equal(groupConversationActivity([], [durableNativeEvent])[0].type, 'tool-group', 'Normalized subagent diagnostics use the friendly activity row');
+
+const nativeSpawn = event('native-spawn', 22, 'spawnAgent', JSON.stringify({
+  type: 'collabAgentToolCall', id: 'spawn-item', tool: 'spawnAgent', status: 'completed',
+  receiverThreadIds: ['native-thread'], prompt: 'Review the test suite.', model: 'gpt-test',
+  reasoningEffort: 'medium', agentsStates: { 'native-thread': { status: 'running', message: 'Inspecting tests.' } },
+}));
+assert.equal(category('spawnAgent', nativeSpawn.detail), 'task');
+assert.deepEqual(toolPresentation(nativeSpawn, true), { icon: 'bot', label: 'Started a subagent' });
+assert.match(readableToolDetail(nativeSpawn), /^Task\nReview the test suite\./);
+assert.doesNotMatch(readableToolDetail(nativeSpawn), /native-thread/, 'opaque thread IDs stay out of friendly detail');
+console.log('native Codex subagent lifecycle is deduplicated and rendered in plain language');
