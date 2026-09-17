@@ -280,6 +280,72 @@ profile cutover still needs an explicitly coordinated quit/restart and protected
 old-profile/client-settings backup. Passing synthetic checks and native tests
 does not establish that real provider streaming can no longer beachball.
 
+### Native stack sample and immutable-message formatting
+
+A read-only native WebContent sample was collected from the sole new WebContent
+process appearing with the isolated test-app launch (PID 70255, launch time
+22:26:42, app PID 70246). This attribution is launch correlation, not verified
+process-coalition metadata. The retained reports and context are in
+`artifacts/webkit-profile-BU6cA8/` (about 3 MB; diagnostic evidence, not build cache).
+The three-second idle report had 1,136 of 1,263 main-thread observations waiting
+in `mach_msg`. In the 15-second streaming/switch report, 3,567 of 6,262 observations
+were waiting and 1,993 were in timer callbacks. A timer/microtask JavaScript chain
+contained 903 observations; one direct `Date.toLocaleString` branch contained
+75, with nested Intl/ICU formatter construction. These are sampled stack states,
+not CPU percentages, and nested/recursive counts must not be added together.
+No single runaway layout stack or multi-second beachball was demonstrated.
+
+The new read-only `scripts/macos-responsiveness-sample.mjs` records selected PID
+CPU/RSS and deltas of cumulative VM counters. It uses shell-free system tools,
+bounded duration/arguments, reports missing/reset counters as unavailable, and
+does not change processes or files. Its parser/self-tests pass. A 15.010-second
+sample from 20:28:24.933Z to 20:28:39.943Z recorded 132 swap-in pages (2,162,688
+bytes) and zero swap-outs/pageouts/compressions. Thus active swap thrashing was
+not evident in that window despite about 8.2 GB total swap used. Rolling CPU
+maxima were 54.6% for test WebContent, 2.2% for the test app, 100.6% for fseventsd,
+and 42.4% for WindowServer. Fseventsd had about 6.3 GiB RSS. The latter background
+load remains a confound, not an established explanation for Monitter's stalls;
+no system service was stopped or reconfigured.
+
+The stack evidence led to a reproducible Svelte dependency issue. MessageMeta's
+Date derived directly from a prop getter backed by a replaced message object.
+Even unchanged `createdAt` values rebuilt Date/Intl formatting on each snapshot.
+Markdown had the same pattern: its parse/sanitize derived directly from the
+message-backed text getter, so unchanged history was reparsed and resanitized.
+Both now have a primitive derived boundary before the expensive operation.
+
+The tests `node --conditions=browser scripts/message-meta-reactivity-test.mjs`
+and `node --conditions=browser scripts/markdown-reactivity-test.mjs` compile the
+actual component declarations and execute Svelte client reactivity without a
+browser/DOM. Over 1,000 unchanged parent-message replacements, the baseline
+performed 1,000 Date constructions/time/title formats and 1,000 Markdown
+parse/sanitize calls. The primitive-boundary versions performed zero additional
+calls. Changed timestamps/text still updated once, invalid dates stayed safe,
+and the Markdown test confirms sanitizer output remains the rendered value.
+The Markdown test mocks parse/sanitize to count invocations; it is not a new
+sanitizer-security test. Production DOMPurify use and image/link behaviour are
+unchanged. No transcript content or date formatting policy changed.
+
+The production frontend build passed after both primitive-boundary changes
+(existing ShareControl accessibility warning remains). A fresh full-app native
+fixture run at about 22:40 local time used four 1,000-message chats, four 100 ms
+streams, two panes, Light theme, and Motion System. It reached 589 stream ticks.
+Three chat switches measured median 139 ms / maximum 147 ms; open-to-mount
+maximum was 33 ms and first virtualizer change maximum 12 ms. The last 100
+reader/composer events measured p95 42 ms / maximum 43 ms; maximum visible frame
+gap was 144 ms. These are event-to-two-rAF proxies, not screen-paint timing.
+This small sequential run does not establish a causal improvement over the
+previous run, and chat switching still exceeds the 100 ms target.
+
+Both panes accepted typing during streaming and streamed content rendered.
+Scrolling the right message pane upward at about tick 568 exposed the live
+"new updates waiting" jump control, but the screenshot showed a blank message
+viewport despite history remaining in the accessibility tree. Clicking Jump
+restored the visible stream tail. This is an unresolved scrollback rendering
+observation, not a reader-position acceptance pass. The task-owned fixture app
+and loopback server were stopped afterwards. The protected packaged SQLite
+candidate remains unchanged and does not yet contain these frontend fixes.
+
 ### Avoid unchanged document-wide appearance work
 
 The full snapshot application path called `applyAppearance` directly and again
@@ -420,6 +486,9 @@ The shared debug `incremental` directory measured 1.2 GB in a later check; this
 task disables incremental compilation, so that directory is not assumed owned
 by this work. The synthetic WebKit test app and its loopback server have now
 been stopped; its generated profile/artifact files are retained for inspection.
+The same listed sizes were rechecked after the 22:40 frontend test, with 11 GiB
+available. No deletion or cache cleanup was performed. The 1.2 GB incremental
+directory is already included in the 5.4 GB debug total, not additional space.
 
 ## Native acceptance and rollout boundary
 
