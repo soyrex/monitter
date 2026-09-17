@@ -280,6 +280,53 @@ profile cutover still needs an explicitly coordinated quit/restart and protected
 old-profile/client-settings backup. Passing synthetic checks and native tests
 does not establish that real provider streaming can no longer beachball.
 
+### Actual SQLite / native IPC functional fixture
+
+The separate release app **Monitter Native IPC Fixture** was built in 4m36s,
+ad-hoc signed and verified, with bundle ID
+`com.monitter.native-ipc-fixture.20260917`. The protected test artifact and
+manifest are in `artifacts/native-ipc-fixture-2QMfOl/` (22 MB); its separately
+initialized profile is under Application Support with that bundle ID. It is
+not the blank-profile handoff candidate and was not installed in /Applications.
+The native UI initially showed zero user agents/chats. CUA then created one
+explicitly labelled synthetic agent, with Read only / YOLO off, and configured
+only that test host to use the copied local mock executable in the artifact.
+No real model requests were made. Normal app allowance probes still ran; this
+was not a network-isolated or synthetic-bridge frontend.
+
+`mock.mjs` now supports opt-in bounded 600-tick / at most 60-second streaming,
+unique per-process thread IDs and correct resumed-thread binding. Defaults
+remain deterministic and immediate. The focused Node harness tests default
+IDs/flow, accumulated output, invalid limits, interrupted/replaced streams,
+stale approval responses, isolated environment flags, and unique/resumed IDs.
+`node scripts/fixtures/codex-app-server/mock-streaming-test.mjs` passes. The mock
+does not execute its described command/file actions or contact a model service.
+
+The first native round sent four chats through the actual composer, SQLite
+Service, provider adapter, Tauri events/commands and frontend. Each reply
+reached 600 chunks / 12,489 characters. Two chats completed after command and
+file requests were denied and input responses submitted; two were explicitly
+interrupted at an approval prompt. After quitting, a read-only SQLite check
+showed two completed and two interrupted tasks, all four full reply texts,
+and `PRAGMA quick_check = ok`. Reopening the native app visibly restored both
+statuses, text, interaction history and the two-pane layout.
+
+All four distinct native thread IDs were then resumed after restart. The run
+exercised overlapping streams, chat switching, typing, pane movement and
+scrollback. While the left transcript was held, new output stayed pending but
+the next command approval appeared live. This is a functional test with short
+message history, not a matched high-history latency benchmark, and it does not
+prove four streams were emitting simultaneously throughout the UI actions.
+
+**New unresolved edge case:** after explicitly stopping all four resumed turns
+at their approval prompts, seven of eight total stored assistant replies ended
+in chunk 600, but the resumed third chat ended in chunk 599 (12,468 characters).
+The mock sends its last delta before requesting approval, so pending-delta
+flush/interrupt behavior needs investigation. Database integrity still passed;
+this is a stream-content completeness observation, not SQLite corruption.
+The task-owned app and mock processes were stopped. The profile and exact
+artifact/mock hashes are retained in the manifest; no test evidence was deleted.
+
 ### Native stack sample and immutable-message formatting
 
 A read-only native WebContent sample was collected from the sole new WebContent
@@ -494,11 +541,12 @@ The 2026-09-17 inventory (build sizes rechecked after the candidate build) was:
 | Exact build directory | Size | Cleanup status |
 | --- | ---: | --- |
 | `/Users/alex/code/monitter/src-tauri/target/debug` | 5.4 GB | Shared cache; contains a running user-used test app. Preserve until its consumers are stopped and exact disposable targets are agreed. |
-| `/Users/alex/code/monitter/src-tauri/target/release` | 1.1 GB | Task build cache; compilation finished. Retain through native QA and artifact handoff, then assess disposable intermediates. |
+| `/Users/alex/code/monitter/src-tauri/target/release` | 1.2 GB | Task build cache; remeasured after the native IPC fixture build. Retain through native QA and artifact handoff, then assess disposable intermediates. |
 | `/Users/alex/code/monitter-macos-responsiveness/build` | 4.1 MB | Built frontend for the packaged candidate and full-app fixture; retain through QA. |
 | `/Users/alex/code/monitter-macos-responsiveness/.svelte-kit` | 6.5 MB | Regenerable frontend intermediates; retain while frontend verification continues. |
 | `/Users/alex/code/monitter-macos-responsiveness/artifacts/sqlite-candidate-OaYQpq` | 22 MB | Protected signed candidate and manifest, not a build cache. Keep. |
 | `/Users/alex/code/monitter-macos-responsiveness/artifacts/webkit-profile-BU6cA8` | 3.0 MB | Native profiling evidence and context, not build cache. Keep. |
+| `/Users/alex/code/monitter-macos-responsiveness/artifacts/native-ipc-fixture-2QMfOl` | 22 MB | Signed real-IPC test app, copied mock and manifest. Preserve as test evidence, not disposable cache. |
 | `/Users/alex/Library/Caches/Monitter/builds` | 319 MB | Existing staged apps and 90 MB of packages; identify referenced deliverables before removing any exact staging directory. |
 | `/Users/alex/code/monitter/artifacts` | 5.4 GB | Mixed artifacts, not a disposable cache: includes 1.4 GB install backups and 3.0 GB idle-runtime diagnostics. Preserve pending exact classification/approval. |
 
