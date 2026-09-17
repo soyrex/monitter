@@ -5,6 +5,7 @@
   import { DEFAULT_SURFACE_TINT, setSurfaceTint, surfaceTint } from '$lib/surface-tint';
   import { borderOpacity, DEFAULT_BORDER_OPACITY, setBorderOpacity } from '$lib/border-opacity';
   import { appTheme, appThemes, appThemePreset, applyThemeContrast, mixThemeColour, setAppTheme, setAppThemeAccent, setAppThemeContrast, type AppThemeId, type AppThemeSelection } from '$lib/app-theme';
+  import { appearanceKey, browserChromeKey } from '$lib/appearance-key';
   import { initMotion, motionPreference, motionView, setMotionPreference, type MotionPreference } from '$lib/motion';
   import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
@@ -271,7 +272,6 @@
   $effect(() => {
     if (!embedded) {
       document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
-      if (snapshot) syncBrowserChrome(snapshot.settings, $appTheme, $surfaceTint);
     }
   });
   $effect(() => {
@@ -1698,9 +1698,16 @@
       dark: mixThemeColour(dark.sidebar, selectedTheme.accent ?? dark.accent, tint / 100),
     };
   }
+  // Plain caches: writing them must not become an effect dependency. Only the
+  // root surface renders document-wide appearance; embedded panes inherit it.
+  let lastAppearanceKey: string | undefined;
+  let lastBrowserChromeKey: string | undefined;
   function syncBrowserChrome(settings: Snapshot['settings'], selectedTheme: AppThemeSelection, tint: number) {
+    const systemDark = settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const key = browserChromeKey(settings, selectedTheme, tint, systemDark);
+    if (key === lastBrowserChromeKey) return;
     const colours = browserThemeColours(selectedTheme, tint),
-      dark = settings.theme === 'dark' || (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches),
+      dark = settings.theme === 'dark' || systemDark,
       colour = dark ? colours.dark : colours.light,
       root = document.documentElement,
       meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
@@ -1711,8 +1718,12 @@
       window.localStorage.setItem('monitter.appearance.browser-colours.v1', JSON.stringify(colours));
       window.localStorage.setItem('monitter.appearance.mode.v1', settings.theme);
     } catch { /* Live colour still applies when client storage is unavailable. */ }
+    lastBrowserChromeKey = key;
   }
   function applyAppearance(settings: Snapshot["settings"], selectedTheme: AppThemeSelection = $appTheme, scale = activeInterfaceScale) {
+    const tint = $surfaceTint;
+    const key = appearanceKey(settings, selectedTheme, scale, tint, nativeRuntime);
+    if (key === lastAppearanceKey) return;
     const root = document.documentElement,
       light = applyThemeContrast(appThemePreset(selectedTheme.light).light, 'light', selectedTheme.contrast),
       dark = applyThemeContrast(appThemePreset(selectedTheme.dark).dark, 'dark', selectedTheme.contrast),
@@ -1726,7 +1737,7 @@
     root.dataset.windowSurface = ['opaque', 'translucent', 'glass'].includes(settings.windowSurface ?? '')
       ? settings.windowSurface!
       : 'opaque';
-    syncBrowserChrome(settings, selectedTheme, $surfaceTint);
+    syncBrowserChrome(settings, selectedTheme, tint);
     root.dataset.density = ['tight', 'normal', 'spacious'].includes(settings.interfaceDensity ?? '')
       ? settings.interfaceDensity!
       : 'normal';
@@ -1764,9 +1775,11 @@
       appliedScale = scale;
       void getCurrentWebview().setZoom(scale / 100).catch(reason => {
         appliedScale = 0;
+        lastAppearanceKey = undefined;
         error = `Could not apply interface scale: ${text(reason)}`;
       });
     }
+    lastAppearanceKey = key;
   }
   $effect(() => {
     const selectedTheme = $appTheme;

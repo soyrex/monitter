@@ -280,6 +280,69 @@ profile cutover still needs an explicitly coordinated quit/restart and protected
 old-profile/client-settings backup. Passing synthetic checks and native tests
 does not establish that real provider streaming can no longer beachball.
 
+### Avoid unchanged document-wide appearance work
+
+The full snapshot application path called `applyAppearance` directly and again
+through its reactive effect. A separate tint/chrome effect also depended on the
+snapshot. Each changed snapshot could therefore repeat palette calculation,
+root CSS/dataset changes, and synchronous appearance localStorage writes even
+when agents changed only transcript content.
+
+`appearance-key.ts` now keys the renderer on its 12 consumed settings fields,
+four palette-selection fields, viewer scale, surface tint, and native-runtime
+mode. A separate browser-chrome key preserves system colour-scheme updates.
+Caches are plain variables, not reactive dependencies. Native zoom failures
+invalidate the appearance cache for a retry; embedded panes still inherit the
+root's document-wide appearance. The duplicate chrome call was removed from
+the tint-only CSS effect. No palette, animation, or user preference changed.
+
+`node scripts/appearance-update-test.mjs` executes the production renderer bodies
+with real colour helpers and mocked DOM/storage. The first render recorded 38
+style/meta calls, 13 legacy removals, five dataset writes, and two storage writes;
+1,000 fresh-but-equivalent snapshots added none. Tests cover every key input,
+unrelated-setting stability, font/scale/palette changes, system-colour changes,
+and a failed native zoom followed by a successful same-key retry. The paired
+theme, interface-scale preference, performance-contract, and diagnostic-hook
+tests pass. A direct Vite production build passed with the existing ShareControl
+accessibility warning. The standalone browser scale suite did not execute its
+cases because its browser executable was unavailable; no browser was installed.
+
+A subsequent native WebKit full-app synthetic run used two panes, four streams
+at 100 ms, and fresh 1,000-message chats. With the existing System motion setting,
+the three switch proxies had p50 150 ms / maximum 160 ms, with open-to-mount
+maximum 30 ms and first-virtualizer maximum 10 ms. The last 100 reader/composer
+input samples had p95 37 ms / maximum 64 ms. Visible frame-gap maximum was 154 ms.
+There were 590 generated stream ticks before stopping.
+
+Motion was then set to Off only in that test profile, verified in Controls, and
+the page reloaded to reset synthetic histories before repeating the workload.
+Three switch proxies had p50 128 ms / maximum 167 ms; mount maximum 34 ms and
+first-virtualizer maximum 11 ms. Reader/composer p95 was 76 ms / maximum 77 ms,
+with maximum frame gap 155 ms and 511 stream ticks before stopping. This small,
+sequential comparison does not establish a speedup; critically, disabling motion
+did not remove the >100 ms tail. Motion was restored to System. Light → Dark →
+Light was also verified through the native UI after the appearance guard.
+Attempted scroll actions in these full-app runs did not visibly confirm reader
+detachment, so these runs add no reader-position acceptance claim.
+
+These are event-to-two-rAF proxies, not physical paint latency. WebKit did not
+support Long Tasks observation. The fixture bypasses real provider/IPC storage
+delivery. No end-to-end beachball-resolution or causally measured GUI speedup
+is claimed. The test app and loopback server were stopped after the run; the
+protected `9684a3b` candidate was not rebuilt or altered with these later changes.
+
+The native-path review identified a separate remaining scaling risk: providers
+batch text at 100 ms, but every committed mutation still emits a tiny
+`monitter:changed` event, with no service-wide coalescer across parallel runs.
+Renderer refreshes coalesce, but this does not bound Tauri event evaluation.
+Furthermore, compact UI snapshots cap diagnostic events but still carry all
+message/channel/subagent transcript text. Rust projection runs off the UI
+thread, but serialization/IPC/WebKit parsing can still grow with history. Any
+future event coalescer must preserve the final update and approval/error wakeups,
+and account for the existing bridge 100 ms plus AppSurface 125 ms scheduling
+rather than simply stacking another delay. These are evidenced remaining risks,
+not proof that either caused the user's observed beachballs.
+
 ### Isolated native transcript geometry diagnostic
 
 `node scripts/transcript-geometry-preview.mjs` builds a small fixture in memory
