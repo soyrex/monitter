@@ -7,7 +7,6 @@
   import { autonaming } from '$lib/autoname-state';
   import { floating } from '$lib/floating';
   import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, nativeSubagentActivity, showThinkingFallback, toolPresentation, type ConversationActivityItem } from '$lib/activity-grouping';
-  import type { UnifiedSubagent } from '$lib/unified-subagents';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';

@@ -189,33 +189,6 @@ export function isNativeMessageTransportArtifact(event: RunEvent): boolean {
   } catch { return false; }
 }
 
-/** Read the thread linkage from a structured native subagent event, if present. */
-export interface NativeSubagentActivity {
-  agentThreadId: string;
-  receiverThreadIds: string[];
-}
-
-export function nativeSubagentActivity(event: RunEvent): NativeSubagentActivity | null {
-  try {
-    const parsed = JSON.parse(event.detail) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const record = parsed as Record<string, unknown>;
-    const activity = record.activity && typeof record.activity === 'object' && !Array.isArray(record.activity)
-      ? record.activity as Record<string, unknown>
-      : record;
-    const agentThreadId = [activity.agentThreadId, activity.agent_thread_id]
-      .find(value => typeof value === 'string' && value.trim()) as string | undefined;
-    if (!agentThreadId) return null;
-    const receivers = activity.receiverThreadIds ?? activity.receiver_thread_ids;
-    const receiverThreadIds = Array.isArray(receivers)
-      ? receivers.filter((value): value is string => typeof value === 'string' && !!value.trim())
-      : [];
-    return { agentThreadId, receiverThreadIds };
-  } catch {
-    return null;
-  }
-}
-
 export type ConversationActivityItem =
   | { type: 'message'; value: Message }
   | { type: 'activity'; value: RunEvent }
