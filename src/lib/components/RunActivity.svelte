@@ -17,6 +17,7 @@
   const grouped = $derived(items.length > 1);
   const reasoning = $derived(primary?.kind === 'reasoning');
   const summary = $derived(reasoning ? [...new Set(items.map(item=>reasoningSummary(item.detail)).filter(Boolean))].join('\n\n') : '');
+  const summaryPreview = $derived(reasoning && summary ? summary.replace(/\s+/g, ' ').trim() : '');
   const emptyReasoning = $derived(reasoning && !summary);
   const family = $derived(compressed && grouped ? 'Tool calls' : primary ? toolFamily(primary) : 'Tool activity');
   const shell = $derived(items.length > 0 && items.every(isShellActivity));
@@ -152,7 +153,7 @@
 {#if primary && emptyReasoning}
   <ThinkingStatus {running} {active} {avatar} startedAt={primary.createdAt}/>
 {:else if primary && reasoning}
-  <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning summary</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
+  <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning: {summaryPreview}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if primary && latest}
   <div class="activity" class:grouped class:compressed={compressed && grouped} class:compaction>
     <button class="activity-trigger" bind:this={anchor} aria-haspopup={compressed && grouped ? undefined : 'dialog'} aria-expanded={open} aria-label={compaction ? compactionDescription : `Tool activity: ${description}, ${items.length} ${items.length===1?'entry':'entries'}`} onclick={toggle}>
@@ -198,7 +199,7 @@
   </div>
 {/if}
 <style>
-  .activity{margin:4px 0 10px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  .activity{margin:4px 0 10px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{margin-bottom:1em;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
   summary,.activity-trigger{display:flex;align-items:center;gap:8px;padding:11px 12px;color:var(--muted);cursor:pointer;list-style:none;text-align:left}
   .activity-trigger{box-sizing:border-box;width:100%;font:inherit;padding:8px 4px 8px 0;background:transparent}.activity-trigger:hover{color:var(--ink)}
   summary::-webkit-details-marker{display:none}
