@@ -3,6 +3,7 @@
   import { flushSync, tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { useTranscriptScrollController } from '$lib/transcript-scroll-owner';
+  import { perfMark, perfMeasure } from '$lib/perf-phases';
 
   /** Bounded renderer with one virtualizer owning transcript geometry and scrolling. */
   let { items, getKey, children, footer, estimateHeight = 120, overscan = 6, keepRecent = 30, stickyKey, active = true }: {
@@ -30,6 +31,7 @@
   let committingOptions = false;
   let canFlushMeasurements = false;
   let followCommitPending = false;
+  let firstCommitMarked = false;
   // A transcript may stay mounted while its owning chat changes. Keep a
   // stable row key from the current transcript so streaming appends and
   // prepended history retain their measurements, while a replacement chat
@@ -54,6 +56,11 @@
   }
 
   const onVirtualizerChange = (_instance: unknown, sync: boolean) => {
+    if (!firstCommitMarked) {
+      firstCommitMarked = true;
+      perfMark('transcript-first-virtualizer-change');
+      perfMeasure('chat-switch.open-to-first-virtualizer-change', 'chat-open', 'transcript-first-virtualizer-change');
+    }
     // setOptions and initial measurement run during Svelte's own update. A
     // later ResizeObserver delivery is outside that update and must synchronously
     // commit its new range before core applies a scroll adjustment.

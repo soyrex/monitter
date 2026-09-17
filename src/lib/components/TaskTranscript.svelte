@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { type Snippet } from 'svelte';
+  import { onMount, type Snippet } from 'svelte';
   import { Check, CircleStop, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
   import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, Message, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
@@ -23,6 +23,7 @@
   import ExpandableUserRequest from '$lib/components/ExpandableUserRequest.svelte';
   import SparkleField from '$lib/components/SparkleField.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
+  import { perfMark, perfMeasure } from '$lib/perf-phases';
 
   type Avatar = Snippet<[Agent | null | undefined, number?]>;
   type Delivery = Snippet<[OptimisticMessage]>;
@@ -167,6 +168,7 @@
     }
     return null;
   }
+  onMount(() => { perfMark('transcript-mounted'); perfMeasure('chat-switch.open-to-mount', 'chat-open', 'transcript-mounted'); });
 </script>
 
 {#if showHeader}<div class="conversation-head task-heading pane-task-header">

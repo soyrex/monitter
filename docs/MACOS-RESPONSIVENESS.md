@@ -174,6 +174,10 @@ A preceding run had one unchanged PTY interrupt test timeout; its focused retry
 and the full rerun passed. Frontend performance, activity-grouping and snapshot
 index checks also passed, and integration did not change the already-built frontend.
 The original dirty checkout still matches its captured tracked-file snapshot.
+After adding the subprocess abrupt-exit WAL recovery test, the complete suite
+passed **446 tests, 0 failures, 9 ignored** (66.63 seconds, serial debug run).
+That test verifies committed event/usage recovery, rollback of an unfinished
+write, and OS release of the profile lease after a child exits without Drop.
 
 The first full-path SQLite benchmark exposed an expensive per-update history
 hash-index rebuild: mutation median 166.9 ms, p95 185.3 ms. An immutable-prefix
@@ -185,21 +189,96 @@ UI reads 5.79 / 8.96 microseconds, and full UI projection 35.10 / 35.46 ms.
 It used the same 53,000-event/4,000-message debug fixture and 20 updates, without
 concurrent compilation. This is the pre-main-feature-integration benchmark and
 does not include IPC or rendering; these are not GUI timings.
+A post-integration rerun with the same fixture measured mutation median
+12.25 ms / p95 13.16 ms, cached UI reads 7.92 / 9.58 microseconds, and full UI
+projection 36.48 / 37.60 ms (21.52-second run, no concurrent build).
+
+The isolated optimized WebKit test bundle built successfully and its ad-hoc
+signature verified. Its distinct profile was initialized by the built companion
+before first launch; an offline integrity check returned `ok`, with only one
+host row and two metadata rows, no agents/history. This is not the installed
+user profile. The loopback synthetic page uses browser-mode rendering inside
+WebKit and mocked snapshots; it deliberately has no native IPC permission.
+An initial fixture startup attempted a native escape-shield command and was
+correctly denied by ACL. The fixture marker was corrected without broadening
+permissions. Native backend and rendering tests remain separate, not a real
+provider-to-SQLite-to-IPC end-to-end performance result.
+
+The first WebKit fixture run (4,000 messages, four streams at 100 ms, token-style
+chunks) measured 87 reader/composer events at p50 35 ms / p95 102 ms / max 103 ms.
+Two fresh chat switches while streaming measured 227 ms and 278 ms; these miss
+the 100 ms target. Scrolling up exposed the jump-to-latest control with new
+updates waiting. The old frame-gap display retained only its latest 240 samples,
+so it cannot establish a whole-run maximum; the fixture now retains up to
+10,000 frames and explicitly reports whether Long Tasks observation is supported.
+System load included about 8.3 GB swap and a busy FSEvents process. Subsequent
+opt-in phase markers diagnose chat selection, transcript mount, and the first
+virtualizer change without claiming that a callback is a completed screen paint.
+Three instrumented chat switches measured control median 138 ms / max 222 ms,
+selection-to-first-virtualizer-change median 11 ms / max 14 ms, and selection-to-
+mount median 37 ms / max 53 ms. Later pane splitting exposed a stale diagnostic
+start timestamp; the helper now expires starts after 5 seconds and consumes the
+start after mount. The bogus later pane attribution is excluded from these
+selection measurements; these probes do not causally attribute multi-pane work.
+
+A subsequent two-pane/four-stream run retained the same grown message bodies.
+Its final 100 reader/composer samples were median 30 ms / p95 115 ms / max 120 ms;
+the measured visible frame-gap maximum was 282 ms over 2,809 frames. No
+multi-second gap appeared in that bounded run, but it still misses the p95 goal
+and is not proof the user's original beachball is resolved. The held right
+reader stayed visually on stream ticks 1049–1101 while the following left pane
+advanced from tick 1494 to 1684. Clicking Jump to latest released the queued
+right-pane updates, and both panes then reached tick 1713. All synthetic streams
+were stopped after the check; no provider/model requests were made.
 
 Alex explicitly chose a completely blank profile, including no carried-over
 agents, chats, or preferences. The old profile must remain separately recoverable
 and CLI authentication/configuration must not change. The new `monitter-state
 init-empty-profile` helper refuses existing directories and validates an empty
 reopened SQLite profile. This rollout does not require importing the old history.
+Run that companion CLI before the new profile's first GUI launch: the GUI itself
+creates its profile directory, and the helper deliberately refuses existing
+directories. On macOS its exact destination is `Library/Application Support/`
+plus the bundle identifier. A new identifier also isolates WebKit preferences
+for test runs. Resetting the installed identifier requires separately preserving
+its existing WebKit/client settings as well as its backend profile while stopped.
+Service startup creates one hidden internal housekeeping agent; this is not an
+imported user agent and does not automatically start a model turn.
 
 ## Handoff status
 
 Goal remains incomplete: native GUI acceptance has not been matched to the
 installed-app workload, and the initial browser GUI run missed the target. The
-SQLite implementation has passed the native tests above, but integration and
-GUI acceptance remain incomplete. The live app, user sessions, and main dirty checkout were not replaced or
-restarted. Complete the backup/export gate, final UI verification, integration
-with main's unrelated work, and explicit installation/restart reporting first.
+SQLite implementation and integration with the captured pending workspace work
+have passed the native tests above; GUI acceptance and rollout remain incomplete.
+The live app, user sessions, and main dirty checkout were not replaced or
+restarted. Complete the recoverable blank-profile cutover preparation, final UI
+verification, and explicit installation/restart reporting first.
+
+## Build-cache cleanup tracking
+
+Alex requested tracking build-cache cleanup alongside the responsiveness work.
+The 2026-09-17 inventory during the release build was:
+
+| Exact build directory | Size | Cleanup status |
+| --- | ---: | --- |
+| `/Users/alex/code/monitter/src-tauri/target/debug` | 5.4 GB | Shared cache; contains a running user-used test app. Preserve until its consumers are stopped and exact disposable targets are agreed. |
+| `/Users/alex/code/monitter/src-tauri/target/release` | 1.1 GB | Created for this task; active compilation. Retain through native QA and artifact handoff, then assess disposable intermediates. |
+| `/Users/alex/code/monitter-macos-responsiveness/build` | 4.1 MB | Built frontend used by the active loopback test fixture; retain through QA. |
+| `/Users/alex/Library/Caches/Monitter/builds` | 319 MB | Existing staged apps and 90 MB of packages; identify referenced deliverables before removing any exact staging directory. |
+| `/Users/alex/code/monitter/artifacts` | 5.4 GB | Mixed artifacts, not a disposable cache: includes 1.4 GB install backups and 3.0 GB idle-runtime diagnostics. Preserve pending exact classification/approval. |
+
+No cache directories were deleted for this inventory. Free disk space was about
+10 GiB at this check (earlier as low as 3.3 GiB; unrelated system activity changes
+it). Before cleanup, remeasure sizes, identify exact no-longer-used artifacts,
+and preserve the deliverable app, running apps, source worktrees, profiles,
+backups, CLI auth, and shared dependencies. Prefer recoverable removal; report
+actual free-space change separately, since moving files to Trash alone does not
+reclaim disk space. Never clean a cache while a build is using it.
+The shared debug `incremental` directory measured 1.2 GB in a later check; this
+task disables incremental compilation, so that directory is not assumed owned
+by this work. The synthetic WebKit test app and its loopback server have now
+been stopped; its generated profile/artifact files are retained for inspection.
 
 ## Native acceptance and rollout boundary
 

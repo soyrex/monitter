@@ -1,6 +1,8 @@
 use super::*;
 use crate::model::{id, RunEvent, SubagentSession, SubagentTranscriptEntry};
-use std::{fs, sync::Arc};
+use std::{fs, process::Command, sync::Arc};
+
+const CRASH_RECOVERY_DIRECTORY: &str = "MONITTER_STORE_CRASH_RECOVERY_DIRECTORY";
 
 #[test]
 fn save_is_private_and_preserves_task_hosts() {
@@ -244,6 +246,88 @@ fn rejected_transaction_preserves_state_and_requires_reopen() {
     let (store, reopened, _, _) = Store::open(path.clone()).unwrap();
     assert_eq!(reopened, before);
     assert!(store.usage_overview().unwrap().recent_runs.is_empty());
+    drop(store);
+    fs::remove_dir_all(path).unwrap();
+}
+
+/// This is invoked only by `crash_recovery_replays_committed_wal_after_process_exit`.
+/// Keeping the helper itself inert in ordinary test runs avoids touching any
+/// profile unless its parent supplies an exact, freshly-created temporary path.
+#[test]
+fn store_crash_recovery_child() {
+    let Ok(directory) = std::env::var(CRASH_RECOVERY_DIRECTORY) else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let (store, mut snapshot, hosts, attachments) = Store::open(directory.clone()).unwrap();
+    let before = snapshot.clone();
+    snapshot.events.push(event("committed-before-crash"));
+    store
+        .stage_usage(usage("committed-usage-before-crash", "delta", 17))
+        .unwrap();
+    store
+        .save_update(
+            (&before, &hosts, &attachments),
+            (&snapshot, &hosts, &attachments),
+        )
+        .unwrap();
+
+    // Leave an explicit write transaction open. process::exit skips Drop for
+    // both connections and the Store lease, reproducing an abrupt process
+    // death rather than a normal close/checkpoint.
+    let connection = rusqlite::Connection::open(directory.join(migration::DATABASE_NAME)).unwrap();
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO entities(collection,id,position,task_id,created_at,payload)
+             VALUES('crash-recovery-fixture','uncommitted',0,NULL,NULL,'{}');",
+        )
+        .unwrap();
+    std::process::exit(0);
+}
+
+#[test]
+fn crash_recovery_replays_committed_wal_after_process_exit() {
+    let path = directory();
+    let (store, _, _, _) = Store::open(path.clone()).unwrap();
+    drop(store);
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("store::tests::store_crash_recovery_child")
+        .arg("--nocapture")
+        .env(CRASH_RECOVERY_DIRECTORY, &path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let wal = path.join(format!("{}-wal", migration::DATABASE_NAME));
+    assert!(
+        fs::metadata(&wal).unwrap().len() > 0,
+        "the child should leave committed data in the WAL"
+    );
+
+    // The operating system releases the child lease and SQLite rolls back its
+    // unfinished transaction while replaying the committed WAL frames.
+    let (store, snapshot, _, _) = Store::open(path.clone()).unwrap();
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.id == "committed-before-crash"));
+    assert_eq!(
+        store.usage_overview().unwrap().recent_runs[0].tokens.total,
+        Some(17)
+    );
+    let connection = rusqlite::Connection::open(path.join(migration::DATABASE_NAME)).unwrap();
+    let uncommitted: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE collection='crash-recovery-fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(uncommitted, 0);
+    drop(connection);
     drop(store);
     fs::remove_dir_all(path).unwrap();
 }

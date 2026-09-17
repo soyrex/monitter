@@ -140,6 +140,7 @@
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import TaskTranscript from '$lib/components/TaskTranscript.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
+  import { perfMark } from '$lib/perf-phases';
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { balancePaneLayout, paneIds } from '$lib/panes';
@@ -2207,6 +2208,7 @@
     pane = overviewOpen ? "overview" : "empty";
   }
   export function openTask(task: Task, allowDuplicate = false) {
+    perfMark('chat-open');
     if (!taskBelongsToWorkspace(task, activeWorkspaceKey)) { workspaceNavigation.task(task); return; }
     if (!allowDuplicate && focusExistingChat('task', task.id, paneId)) return;
     saveCurrentDraft();
@@ -2222,6 +2224,7 @@
     focusedProjectId = null;
     pane = "task";
     scrollRevision += 1;
+    perfMark('chat-state-applied');
   }
   function closeTaskTab(id: string, collapse = true) {
     openTaskIds = openTaskIds.filter(openId => openId !== id);
