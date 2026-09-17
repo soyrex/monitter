@@ -47,7 +47,8 @@
 
 <style>
   .task-activity { flex: none; min-height: 0; max-height: 25%; overflow: auto; overscroll-behavior: contain; margin: 10px 20px 0; font-size: calc(12px * var(--interface-font-ratio, 1)); }
-  .task-activity.docked { position:relative; z-index:0; width:min(calc(var(--chat-content-max-width,900px) - 20px),calc(100% - 40px)); box-sizing:border-box; margin:0 auto -10px; }
+  /* Keep the goal dock aligned to the composer, with an exact 10px inset. */
+  .task-activity.docked { position:relative; z-index:0; width:min(calc(var(--chat-content-max-width,900px) - 10px),calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 10px)); box-sizing:border-box; margin:0 auto -10px; }
   .docked .goal-card { border-bottom-left-radius:0; border-bottom-right-radius:0; }
   .docked .goal-card:last-child { padding-bottom:20px; }
   .docked .goal-card:last-child::after { content:""; position:absolute; left:0; right:0; bottom:9px; height:14px; pointer-events:none; background:linear-gradient(to bottom,transparent,rgba(0,0,0,.14)); }

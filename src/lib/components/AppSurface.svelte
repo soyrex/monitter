@@ -2,10 +2,10 @@
   import { localUuid, isLanBrowser } from '$lib/lan';
   import { workspaceShareOpen, workspaceShareTaskId } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
-  import { surfaceTint } from '$lib/surface-tint';
-  import { borderOpacity } from '$lib/border-opacity';
-  import { appTheme, appThemePreset, applyThemeContrast, mixThemeColour, type AppThemeSelection } from '$lib/app-theme';
-  import { initMotion, motionView } from '$lib/motion';
+  import { DEFAULT_SURFACE_TINT, setSurfaceTint, surfaceTint } from '$lib/surface-tint';
+  import { borderOpacity, DEFAULT_BORDER_OPACITY, setBorderOpacity } from '$lib/border-opacity';
+  import { appTheme, appThemes, appThemePreset, applyThemeContrast, mixThemeColour, setAppTheme, setAppThemeAccent, setAppThemeContrast, type AppThemeId, type AppThemeSelection } from '$lib/app-theme';
+  import { initMotion, motionPreference, motionView, setMotionPreference, type MotionPreference } from '$lib/motion';
   import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
   import { collectWorkspaceSidebarTabs, settingsTabTitle, terminalTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
@@ -25,6 +25,7 @@
   import SettingsPane from "./SettingsPane.svelte";
   import AcpAgentPicker from "./AcpAgentPicker.svelte";
   import { saveSettingsPatch } from "$lib/settings-save";
+  import { setTerminalTheme, terminalTheme, terminalThemes, type TerminalThemeId } from '$lib/terminal-theme';
   import MentionComposer from "./MentionComposer.svelte";
   import ChannelMembers from "./ChannelMembers.svelte";
   import QueuedMessages from "./QueuedMessages.svelte";
@@ -106,6 +107,7 @@
     RunEvent,
     UsageOverview,
     UsageRefreshPolicy,
+    SubagentTranscriptEntry,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
   import { contrastForeground } from '$lib/accent-contrast';
@@ -116,7 +118,9 @@
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import { activeComputerTools } from "$lib/activity";
   import { groupConversationActivity, isNativeMessageTransportArtifact } from '$lib/activity-grouping';
-  import SubagentActivity from "$lib/components/SubagentActivity.svelte";
+  import UnifiedSubagentVisor from '$lib/components/UnifiedSubagentVisor.svelte';
+  import UnifiedSubagentSidebar from '$lib/components/UnifiedSubagentSidebar.svelte';
+  import { activeUnifiedSubagent, unifiedSubagentsFromSnapshot, type UnifiedSubagent } from '$lib/unified-subagents';
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import UsageRings from '$lib/components/UsageRings.svelte';
@@ -390,6 +394,12 @@
   let railAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
   let detailTab = $state<'run' | 'git' | 'timeline' | 'approvals' | 'subagents'>('run');
+  let selectedSubagentId = $state<string | null>(null);
+  let subagentVisorOpen = $state(false);
+  let subagentOwnerTaskId = $state<string | null>(null);
+  let nativeSubagentTranscripts = $state<Record<string, SubagentTranscriptEntry[]>>({});
+  let subagentTranscriptLoading = $state<Record<string, boolean>>({});
+  let subagentTranscriptErrors = $state<Record<string, string>>({});
   let timelinePages = $state<Record<string, { events: RunEvent[]; nextBefore: number | null; loading: boolean; error: string; loadedOlder: boolean }>>({});
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
   let gitPane = $state<GitPane>();
@@ -689,7 +699,7 @@
       id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
       createdAt: message.createdAt, attachments: message.attachments,
     }))],
-    visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning" || event.kind === "collaboration"),
+    visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning" || event.kind === "collaboration" || event.kind === "subagent"),
     snapshot?.settings.compressToolCalls === true,
     resolvedApprovalRequests,
   ));
@@ -722,10 +732,70 @@
   function approvalCount(scope: WorkspaceKey) { return globalPendingApprovals.filter(item => taskBelongsToWorkspace(item.task, scope)).length; }
   const collaborations = $derived(((snapshot as (Snapshot & { collaborations?: CollaborationRecord[] }) | null)?.collaborations ?? []));
   const taskCollaborations = $derived(selectedTask ? collaborations.filter(item => item.fromTaskId === selectedTask.id || item.toTaskId === selectedTask.id) : []);
-  const taskSubagents = $derived(taskCollaborations.filter(item => item.kind === 'delegation' && item.fromTaskId === selectedTask?.id).sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,30));
-  const runningSubagentCount = $derived(taskSubagents.filter(item => item.status === 'running' || item.status === 'queued').length);
-  const collaborationWasSteering = (item: CollaborationRecord) => item.kind === 'message' && snapshot?.tasks.find(task => task.id === item.toTaskId)?.status === 'running';
-  const openCollaborationTask = (item: CollaborationRecord) => { const id=item.fromTaskId===selectedTask?.id?item.toTaskId:item.fromTaskId; const task=snapshot?.tasks.find(candidate=>candidate.id===id); if(task)openTask(task); };
+  // Tauri's revisioned bridge may replace a deep snapshot while a child
+  // component still holds the prior array proxy. Give subagent surfaces an
+  // explicit lifecycle scalar so a spawn or terminal transition cannot leave
+  // the first observed child frozen in the visor/sidebar.
+  const subagentLifecycleRevision = $derived((snapshot?.subagentSessions ?? [])
+    .map(session => `${session.id}:${session.status}`)
+    .sort()
+    .join('|'));
+  const taskSubagents = $derived.by(() => {
+    subagentLifecycleRevision;
+    return selectedTask && snapshot ? unifiedSubagentsFromSnapshot(snapshot, selectedTask.id) : [];
+  });
+  const activeTaskSubagentRecords = $derived.by(() => {
+    subagentLifecycleRevision;
+    return taskSubagents.filter(activeUnifiedSubagent);
+  });
+  const activeTaskSubagents = $derived(activeTaskSubagentRecords.map(item => ({
+    ...item,
+    transcript: item.agentThreadId ? (nativeSubagentTranscripts[item.id] ?? item.transcript) : item.transcript,
+  })));
+  $effect(() => {
+    const owner = selectedTask?.id ?? null;
+    if (subagentOwnerTaskId !== owner) {
+      subagentOwnerTaskId = owner;
+      selectedSubagentId = null;
+      subagentVisorOpen = false;
+    } else if (selectedSubagentId && !activeTaskSubagentRecords.some(item => item.id === selectedSubagentId) && subagentVisorOpen) {
+      selectedSubagentId = activeTaskSubagentRecords[0]?.id ?? null;
+      subagentVisorOpen = activeTaskSubagentRecords.length > 0;
+    }
+  });
+  function inspectSubagent(item: UnifiedSubagent) {
+    selectedSubagentId = item.id;
+    subagentVisorOpen = activeUnifiedSubagent(item);
+  }
+  $effect(() => {
+    const taskId = selectedTask?.id;
+    const item = activeTaskSubagentRecords.find(value => value.id === selectedSubagentId) ?? activeTaskSubagentRecords[0];
+    if (!subagentVisorOpen || !taskId || !item?.agentThreadId) return;
+    const ownerTaskId = taskId;
+    const subagent = item;
+    let cancelled = false;
+    let reading = false;
+    async function refreshTranscript(ownerTaskId: string, subagent: UnifiedSubagent) {
+      if (reading) return;
+      reading = true;
+      subagentTranscriptLoading[subagent.id] = true;
+      try {
+        const transcript = await bridge.getSubagentTranscript(ownerTaskId, subagent.id);
+        if (!cancelled) {
+          nativeSubagentTranscripts[subagent.id] = transcript;
+          subagentTranscriptErrors[subagent.id] = '';
+        }
+      } catch (reason) {
+        if (!cancelled) subagentTranscriptErrors[subagent.id] = String(reason);
+      } finally {
+        reading = false;
+        if (!cancelled) subagentTranscriptLoading[subagent.id] = false;
+      }
+    }
+    void refreshTranscript(ownerTaskId, subagent);
+    const timer = setInterval(() => refreshTranscript(ownerTaskId, subagent), 2_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  });
   function taskIsStepping(task: Task) {
     if (task.status !== 'running') return false;
     const taskMessages = indexes?.messagesByTask.get(task.id) ?? [];
@@ -1648,6 +1718,9 @@
     root.dataset.appThemeLight = selectedTheme.light;
     root.dataset.appThemeDark = selectedTheme.dark;
     root.dataset.theme = settings.theme;
+    root.dataset.windowSurface = ['opaque', 'translucent', 'glass'].includes(settings.windowSurface ?? '')
+      ? settings.windowSurface!
+      : 'opaque';
     syncBrowserChrome(settings, selectedTheme, $surfaceTint);
     root.dataset.density = ['tight', 'normal', 'spacious'].includes(settings.interfaceDensity ?? '')
       ? settings.interfaceDensity!
@@ -1975,6 +2048,18 @@
     try {const session=await bridge.openTerminal(target,80,24);registerTerminal(session);openTerminalTab(session.id);}
     catch(reason){error=`Could not open terminal: ${text(reason)}`;}
     finally{terminalBusy=false;}
+  }
+  function nativeResumeCommand(provider: Provider, sessionId: string): string {
+    switch (provider) {
+      case 'claude': return `claude --resume ${sessionId}`;
+      case 'codex': return `codex resume ${sessionId}`;
+      default: return '';
+    }
+  }
+  function openNativeSessionTerminal(task: Task) {
+    if (!task.nativeSessionId) return;
+    const command = nativeResumeCommand(task.provider, task.nativeSessionId);
+    if (command) void runTerminalCommand(command);
   }
   export function openTerminalTab(id:string) {
     if(!$terminalSessions[id])return;
@@ -3073,7 +3158,10 @@
     {id:"new-channel",label:"New channel",group:"Create"},
     {id:"new-project",label:"New project",group:"Create"},
     ...(['standard','activity','projects'] as SidebarView[]).map(view=>({id:`sidebar:${view}`,label:`${view[0].toUpperCase()+view.slice(1)} sidebar view`,group:'Sidebar',checked:sidebarView===view})),
-    {id:"appearance",label:"Settings",detail:"Accent colour, scale, theme and conversation settings",group:"Settings"},
+    {id:"appearance",label:"Appearance settings",detail:"Themes, accent, scale, density and panes",group:"Settings"},
+    {id:"typography-settings",label:"Typography settings",detail:"Fonts, sizes and line heights",group:"Settings"},
+    {id:"behaviour-settings",label:"Behaviour settings",detail:"Shortcuts, focus and busy-agent behavior",group:"Settings"},
+    {id:"conversation-settings",label:"Conversation settings",detail:"Messages and activity display",group:"Settings"},
     {id:"hosts",label:"Manage hosts",detail:"Local and SSH connections",group:"Settings"},
     {id:"archived",label:"Archived chats",detail:"Restore or permanently delete archived chats",group:"Workspace"},
     {id:"tools",label:"Show tool activity",checked:snapshot?.settings.showToolActivity !== false,group:"Toggles"},
@@ -3083,11 +3171,40 @@
     {id:"active-pane-border",label:"Highlight active pane",checked:snapshot?.settings.showActivePaneBorder ?? true,group:"Toggles"},
     {id:"dim-panes",label:"Dim inactive panes",checked:snapshot?.settings.dimInactivePanes ?? true,group:"Toggles"},
     {id:"enter",label:"Enter to send",checked:snapshot?.settings.sendWithEnter ?? false,group:"Toggles"},
+    {id:"compress-tools",label:"Compress tool calls",checked:snapshot?.settings.compressToolCalls === true,group:"Toggles"},
+    {id:"tint-messages",label:"Tint my messages",checked:snapshot?.settings.tintUserMessages ?? false,group:"Toggles"},
+    {id:"show-tab-close",label:"Show tab close buttons",checked:snapshot?.settings.showTabCloseButtons !== false,group:"Toggles"},
+    {id:"auto-hide-tabs",label:"Auto-hide tabs",checked:snapshot?.settings.autoHideTabs === true,group:"Toggles"},
     {id:"detail",label:"Show run detail",checked:showDetail,group:"Toggles"},
     {id:"scale-up",label:"Increase interface scale",detail:`${activeInterfaceScale}% → up to 200%`,group:"Appearance",disabled:activeInterfaceScale>=200},
     {id:"scale-down",label:"Decrease interface scale",group:"Appearance",disabled:activeInterfaceScale<=80},
     {id:"scale-reset",label:"Reset interface scale to 125%",group:"Appearance"},
     ...["light","dark","system"].map(theme=>({id:`theme:${theme}`,label:`${theme[0].toUpperCase()+theme.slice(1)} theme`,checked:snapshot?.settings.theme===theme,group:"Appearance"})),
+    ...(['opaque','translucent','glass'] as const).map(surface=>({id:`window-surface:${surface}`,label:`Window surface: ${surface}`,checked:(snapshot?.settings.windowSurface ?? 'opaque')===surface,group:'Appearance'})),
+    ...appThemes.flatMap(theme=>[
+      {id:`apply-theme:${theme.id}`,label:`Apply theme: ${theme.label}`,checked:$appTheme.light===theme.id && $appTheme.dark===theme.id,group:'Appearance'},
+      {id:`app-theme-light:${theme.id}`,label:`Light app theme: ${theme.label}`,checked:$appTheme.light===theme.id,group:'Appearance'},
+      {id:`app-theme-dark:${theme.id}`,label:`Dark app theme: ${theme.label}`,checked:$appTheme.dark===theme.id,group:'Appearance'},
+    ]),
+    ...(['system','subtle','off'] as const).map(preference=>({id:`motion:${preference}`,label:`Motion: ${preference}`,checked:$motionPreference===preference,group:'Appearance'})),
+    ...(['tight','normal','spacious'] as const).map(density=>({id:`density:${density}`,label:`Interface density: ${density}`,checked:(snapshot?.settings.interfaceDensity ?? 'normal')===density,group:'Appearance'})),
+    ...(['classic','modern'] as const).map(style=>({id:`tab-style:${style}`,label:`Tab style: ${style}`,checked:(snapshot?.settings.tabStyle ?? 'classic')===style,group:'Appearance'})),
+    ...terminalThemes.map(theme=>({id:`terminal-theme:${theme.id}`,label:`Terminal theme: ${theme.label}`,checked:$terminalTheme===theme.id,group:'Appearance'})),
+    {id:'contrast-reset',label:'Reset theme contrast',detail:`Current ${$appTheme.contrast}%`,group:'Appearance'},
+    {id:'contrast-down',label:'Decrease theme contrast',detail:`${$appTheme.contrast}%`,group:'Appearance',disabled:$appTheme.contrast<=0},
+    {id:'contrast-up',label:'Increase theme contrast',detail:`${$appTheme.contrast}%`,group:'Appearance',disabled:$appTheme.contrast>=100},
+    {id:'accent-reset',label:'Use theme accent colours',checked:$appTheme.accent === null,group:'Appearance'},
+    {id:'tint-reset',label:`Reset surface tint to ${DEFAULT_SURFACE_TINT}%`,detail:`Current ${$surfaceTint}%`,group:'Appearance'},
+    {id:'tint-down',label:'Decrease surface tint',detail:`${$surfaceTint}%`,group:'Appearance',disabled:$surfaceTint<=0},
+    {id:'tint-up',label:'Increase surface tint',detail:`${$surfaceTint}%`,group:'Appearance',disabled:$surfaceTint>=50},
+    {id:'border-opacity-reset',label:`Reset border opacity to ${DEFAULT_BORDER_OPACITY}%`,detail:`Current ${$borderOpacity}%`,group:'Appearance'},
+    {id:'border-opacity-down',label:'Decrease border opacity',detail:`${$borderOpacity}%`,group:'Appearance',disabled:$borderOpacity<=0},
+    {id:'border-opacity-up',label:'Increase border opacity',detail:`${$borderOpacity}%`,group:'Appearance',disabled:$borderOpacity>=100},
+    {id:'pane-appearance-settings',label:'Pane appearance settings',detail:'Active highlight, dimming and inactive opacity',group:'Settings'},
+    {id:'inactive-opacity-down',label:'Decrease inactive pane opacity',detail:`${Math.round((snapshot?.settings.inactivePaneOpacity ?? 0.6) * 100)}%`,group:'Appearance',disabled:(snapshot?.settings.inactivePaneOpacity ?? 0.6)<=0.1},
+    {id:'inactive-opacity-up',label:'Increase inactive pane opacity',detail:`${Math.round((snapshot?.settings.inactivePaneOpacity ?? 0.6) * 100)}%`,group:'Appearance',disabled:(snapshot?.settings.inactivePaneOpacity ?? 0.6)>=0.9},
+    {id:'appearance-detail-settings',label:'Advanced appearance settings',detail:'Accent, contrast, tint and border opacity',group:'Settings'},
+    ...(['standard','vim'] as const).map(mode=>({id:`shortcut-mode:${mode}`,label:`Shortcut mode: ${mode}`,checked:(snapshot?.settings.shortcutMode ?? 'standard')===mode,group:'Behaviour'})),
     ...(selectedTask ? [{id:"archive",label:"Archive current chat",group:"Current chat",disabled:selectedTask.status==="running"},
       ...(selectedTask.status==="running" ? [{id:"stop",label:"Stop current chat",group:"Current chat"}] : [])] : []),
   ].map(item=>({...item,disabled:(!item.id.startsWith('sidebar:') && busy) || ("disabled" in item && item.disabled)})));
@@ -3118,6 +3235,11 @@
     const settings = snapshot?.settings;
     if (!settings || busy) return;
     if (id === "vim-command") { palette=null; openVimCommand(); }
+    else if (id === "appearance" || id === "appearance-detail-settings") { palette=null; routeSettings('appearance'); }
+    else if (id === "typography-settings") { palette=null; routeSettings('typography'); }
+    else if (id === "behaviour-settings") { palette=null; routeSettings('behaviour'); }
+    else if (id === "conversation-settings") { palette=null; routeSettings('conversation'); }
+    else if (id === "pane-appearance-settings") { palette=null; routeSettings('appearance'); }
     else if (id === "new-terminal") {palette=null;await newTerminal();}
     else if (id === "autoname") { palette=null; await autonameCurrentPane(); }
     else if (id.startsWith('layout:')) {palette=null;setLayout(id.slice(7) as 'single'|'columns'|'grid');}
@@ -3129,8 +3251,33 @@
     else if (id === "active-pane-border") await run(()=>saveSettingsPatch({showActivePaneBorder:!(settings.showActivePaneBorder ?? true)}));
     else if (id === "dim-panes") await run(()=>saveSettingsPatch({dimInactivePanes:!(settings.dimInactivePanes ?? true)}));
     else if (id === "enter") await run(()=>saveSettingsPatch({sendWithEnter:!settings.sendWithEnter}));
+    else if (id === "compress-tools") await run(()=>saveSettingsPatch({compressToolCalls:settings.compressToolCalls !== true}));
+    else if (id === "tint-messages") await run(()=>saveSettingsPatch({tintUserMessages:settings.tintUserMessages !== true}));
+    else if (id === "show-tab-close") await run(()=>saveSettingsPatch({showTabCloseButtons:settings.showTabCloseButtons === false}));
+    else if (id === "auto-hide-tabs") await run(()=>saveSettingsPatch({autoHideTabs:settings.autoHideTabs !== true}));
     else if (id === "detail") showDetail = !showDetail;
     else if (id.startsWith("scale-")) { if (id === "scale-reset") { scaleQueued = 125; flushScale(); } else queueScale(id === "scale-up" ? 5 : -5); }
+    else if (id.startsWith('window-surface:')) await run(()=>saveSettingsPatch({windowSurface:id.slice(15) as 'opaque'|'translucent'|'glass'}));
+    else if (id.startsWith('apply-theme:')) { palette=null; const theme=id.slice(12) as AppThemeId; setAppTheme('light',theme); setAppTheme('dark',theme); }
+    else if (id.startsWith('app-theme-light:')) { palette=null; setAppTheme('light',id.slice(16) as AppThemeId); }
+    else if (id.startsWith('app-theme-dark:')) { palette=null; setAppTheme('dark',id.slice(15) as AppThemeId); }
+    else if (id.startsWith('motion:')) { palette=null; setMotionPreference(id.slice(7) as MotionPreference); }
+    else if (id.startsWith('density:')) await run(()=>saveSettingsPatch({interfaceDensity:id.slice(8) as 'tight'|'normal'|'spacious'}));
+    else if (id.startsWith('tab-style:')) await run(()=>saveSettingsPatch({tabStyle:id.slice(10) as 'classic'|'modern'}));
+    else if (id.startsWith('terminal-theme:')) { palette=null; setTerminalTheme(id.slice(15) as TerminalThemeId); }
+    else if (id === 'contrast-reset') { palette=null; setAppThemeContrast(0); }
+    else if (id === 'contrast-down') { palette=null; setAppThemeContrast($appTheme.contrast - 10); }
+    else if (id === 'contrast-up') { palette=null; setAppThemeContrast($appTheme.contrast + 10); }
+    else if (id === 'accent-reset') { palette=null; setAppThemeAccent(null); }
+    else if (id === 'tint-reset') { palette=null; setSurfaceTint(DEFAULT_SURFACE_TINT); }
+    else if (id === 'tint-down') { palette=null; setSurfaceTint($surfaceTint - 5); }
+    else if (id === 'tint-up') { palette=null; setSurfaceTint($surfaceTint + 5); }
+    else if (id === 'border-opacity-reset') { palette=null; setBorderOpacity(DEFAULT_BORDER_OPACITY); }
+    else if (id === 'border-opacity-down') { palette=null; setBorderOpacity($borderOpacity - 5); }
+    else if (id === 'border-opacity-up') { palette=null; setBorderOpacity($borderOpacity + 5); }
+    else if (id === 'inactive-opacity-down') await run(()=>saveSettingsPatch({inactivePaneOpacity:Math.max(0.1,Math.round(((settings.inactivePaneOpacity ?? 0.6) - 0.05) * 100) / 100)}));
+    else if (id === 'inactive-opacity-up') await run(()=>saveSettingsPatch({inactivePaneOpacity:Math.min(0.9,Math.round(((settings.inactivePaneOpacity ?? 0.6) + 0.05) * 100) / 100)}));
+    else if (id.startsWith('shortcut-mode:')) await run(()=>saveSettingsPatch({shortcutMode:id.slice(14) as 'standard'|'vim'}));
     else if (id.startsWith("theme:")) await run(()=>saveSettingsPatch({theme:id.slice(6) as "light"|"dark"|"system"}));
     else {
       palette = null;
@@ -3518,7 +3665,7 @@
           </div>
         {/if}
         <section class="conversation">
-        <MessagePane active={embedded ? active : activePaneId === 'main'} pendingUpdates={channelTranscriptBuffer.pendingUpdates()} onfollowchange={channelTranscriptBuffer.setFollowing} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
+        {#key activeChannel.id}<MessagePane active={embedded ? active : activePaneId === 'main'} pendingUpdates={channelTranscriptBuffer.pendingUpdates()} onfollowchange={channelTranscriptBuffer.setFollowing} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
           <TranscriptVirtualList
               items={displayedChannelTranscript.messages}
               getKey={(message) => message.id}
@@ -3555,7 +3702,7 @@
                 </div>{/if}
               {/snippet}
             </TranscriptVirtualList>
-        </MessagePane>
+        </MessagePane>{/key}
         {#if channelTranscriptBuffer.held() && channelLiveErrors.length}<div class="live-channel-status" aria-live="polite">
           {#each channelLiveErrors as task}<p class="live-transcript-notice" role="status">{(events.filter(event=>event.taskId===task.id&&event.kind==='error').at(-1)?.detail || 'A channel task stopped with an error.').slice(0, 500)}</p>{/each}
         </div>{/if}
@@ -3665,7 +3812,12 @@
             <ContextUsageBar usage={selectedTaskContextUsage}/>
           </div>
         {/snippet}
-        <TaskTranscript
+        {#snippet subagentDock()}
+          <div class="subagent-dock" data-subagent-count={activeTaskSubagents.length}>
+            {#key subagentLifecycleRevision}<UnifiedSubagentVisor items={activeTaskSubagents} selectedId={selectedSubagentId} open={subagentVisorOpen} idPrefix={`${paneId}-subagent-visor`} transcriptLoading={selectedSubagentId ? !!subagentTranscriptLoading[selectedSubagentId] : false} transcriptError={selectedSubagentId ? subagentTranscriptErrors[selectedSubagentId] ?? '' : ''} onselect={inspectSubagent} onopenchange={(open) => subagentVisorOpen = open}/>{/key}
+          </div>
+        {/snippet}
+        {#key selectedTask.id}<TaskTranscript
           observers={observedTaskIds.has(selectedTask.id) ? observerNames : []}
           active={embedded ? active : activePaneId === 'main'}
           task={selectedTask}
@@ -3692,22 +3844,23 @@
           paneExpand={paneExpandControl}
           rightSidebar={rightSidebarControl}
           composer={taskComposer}
+          {subagentDock}
           {senderName}
           {operatorMessageText}
           {approvalEventText}
           {collaborations}
-          {collaborationWasSteering}
+          subagents={taskSubagents}
           menuOpen={taskMenu}
           onMenuChange={(open) => taskMenu = open}
           formatTime={date}
-          onOpenCollaboration={openCollaborationTask}
+          onOpenSubagent={inspectSubagent}
           onOpenApproval={openApprovalHistory}
           onLoadFullEventDetail={loadFullEventDetail}
           liveError={selectedTaskLiveError}
           onStop={() => { void run(() => bridge.cancelTask(selectedTask.id), "Stopping task…"); }}
           onEditTask={() => { renameTitle = selectedTask.title; taskProjectId = selectedTask.projectId ?? ''; modal = 'taskSettings'; }}
           onShare={shareSelectedChat}
-        />
+        />{/key}
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
           <SidebarResize side="right"/>
@@ -3722,8 +3875,7 @@
               {#each resolvedApprovalRequests as request (request.id)}<div id={`approval-history-${paneId}-${request.id}`} tabindex="-1"><ApprovalRequestCard {request}/></div>{:else}<p class="detail-empty">No resolved approvals for this chat.</p>{/each}
             </section>
             <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll subagent-panel" class:hidden={detailTab!=='subagents'} aria-label="Subagents">
-              <header><h3>SUBAGENTS</h3><span>{runningSubagentCount} running · {taskSubagents.length} recent</span></header>
-              {#each taskSubagents as collaboration (collaboration.id)}<SubagentActivity {collaboration} agent={visibleAgents.find(agent=>agent.id===collaboration.toAgentId)} steered={collaborationWasSteering(collaboration)} onclick={()=>openCollaborationTask(collaboration)}/>{:else}<p class="detail-empty">No subagents have run from this chat.</p>{/each}
+              {#key subagentLifecycleRevision}<UnifiedSubagentSidebar items={taskSubagents} selectedId={selectedSubagentId} onselect={inspectSubagent}/>{/key}
             </section>
             <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || detailTab==='subagents' || (detailTab==='git' && gitState.repository===true)}>
               <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small><ProviderIcon provider={selectedTask.provider} size={12} />{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
@@ -3748,8 +3900,8 @@
                 </div>
                 {#if selectedTask.nativeSessionId}<div>
                     <dt>native session</dt>
-                    <dd class="session-id" title={selectedTask.nativeSessionId}>
-                      {selectedTask.nativeSessionId}
+                    <dd>
+                      <button type="button" class="session-id-link" title="Open in terminal" onclick={()=>openNativeSessionTerminal(selectedTask)}>{selectedTask.nativeSessionId}</button>
                     </dd>
                   </div>{/if}
               </dl>
@@ -4319,6 +4471,9 @@
     --density-detail-tabs-height: 32px;
     --density-detail-tab-height: 24px;
     --density-tab-min-height: 28px;
+    --density-composer-margin-inline: 12px;
+    --density-composer-margin-bottom: 12px;
+    --density-draft-composer-margin-top: 12px;
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-family: var(--interface-font, "IBM Plex Sans", system-ui, sans-serif);
     color: var(--ink);
@@ -4341,6 +4496,9 @@
     --density-detail-tabs-height: 28px;
     --density-detail-tab-height: 22px;
     --density-tab-min-height: 24px;
+    --density-composer-margin-inline: 8px;
+    --density-composer-margin-bottom: 8px;
+    --density-draft-composer-margin-top: 8px;
   }
   :global(:root[data-density="spacious"]) {
     --density-tabbar-height: 54px;
@@ -4358,6 +4516,14 @@
     --density-detail-tabs-height: 38px;
     --density-detail-tab-height: 30px;
     --density-tab-min-height: 32px;
+    --density-composer-margin-inline: 18px;
+    --density-composer-margin-bottom: 18px;
+    --density-draft-composer-margin-top: 18px;
+  }
+  :global(:root[data-density="normal"]) {
+    --density-composer-margin-inline: 12px;
+    --density-composer-margin-bottom: 12px;
+    --density-draft-composer-margin-top: 12px;
   }
   :global(:root[data-theme="dark"]) {
     --surface-tint-factor: 1;
@@ -4422,6 +4588,23 @@
     display: grid;
     grid-template-columns: 252px minmax(0, 1fr);
     background: var(--paper);
+  }
+  :global(:root[data-window-surface="translucent"]) {
+    --paper: color-mix(in srgb, var(--paper-base) 88%, transparent);
+    --sidebar: color-mix(in srgb, var(--sidebar-base) 88%, transparent);
+    --panel: color-mix(in srgb, var(--panel-base) 90%, transparent);
+  }
+  :global(html[data-window-surface="glass"]),
+  :global(html[data-window-surface="glass"] body),
+  :global(html[data-window-surface="glass"]) .app-shell {
+    background: transparent;
+  }
+  :global(:root[data-window-surface="glass"]) .app-shell {
+    --paper: color-mix(in srgb, var(--paper-base) 58%, transparent);
+    --sidebar: color-mix(in srgb, var(--sidebar-base) 64%, transparent);
+    --panel: color-mix(in srgb, var(--panel-base) 72%, transparent);
+    backdrop-filter: blur(22px) saturate(125%);
+    -webkit-backdrop-filter: blur(22px) saturate(125%);
   }
   /* Tauri applies the preference as native WebView zoom. Browsers need an
      equivalent layout zoom: the inverse dimensions keep the scaled shell
@@ -4856,8 +5039,7 @@
   }
   .workspace.auto-hide-tabs > .topbar { margin-top:calc(-1 * var(--pane-tabbar-height)); transform:translateY(0); }
   .workspace.auto-hide-tabs > .topbar:hover, .workspace.auto-hide-tabs > .topbar:focus-within { transform:translateY(var(--pane-tabbar-height)); }
-  .workspace.auto-hide-tabs > .topbar::before { content:""; position:absolute; left:0; right:0; bottom:0; height:30px; transform:translateY(30px); }
-  .workspace.auto-hide-tabs > .topbar:hover::before { pointer-events:none; }
+  .workspace.auto-hide-tabs > .topbar::before { content:""; position:absolute; left:0; right:0; bottom:0; height:30px; transform:translateY(30px); pointer-events:auto; }
   @media (prefers-reduced-motion:reduce) { .topbar { transition:none; } }
   .workspace-context { display:grid; place-items:center; flex:none; width:var(--density-control-size); padding-bottom:var(--density-tabbar-inset); color:var(--muted); }
   .top-actions {
@@ -5321,7 +5503,7 @@
   .draft-intro h1 { margin: 8px 0; font-size: clamp(22px, 2.6vw, 32px); font-weight: 500; }
   .draft-intro > p:last-child { color: var(--muted); line-height: 1.6; }
   .draft-options { margin-bottom: 10px; }
-  .draft-composer.composer { max-height: none; margin: 16px 0 12px; }
+  .draft-composer.composer { max-height: none; margin: var(--density-draft-composer-margin-top) 0 var(--density-composer-margin-bottom); }
   .draft-composer.composer textarea { min-height:72px; }
   .draft-options label { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
   .draft-select { appearance:none; -webkit-appearance:none; width:100%; padding:10px 34px 10px 11px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--panel) linear-gradient(45deg,transparent 50%,var(--muted) 50%) calc(100% - 15px) 52% / 5px 5px no-repeat,linear-gradient(135deg,var(--muted) 50%,transparent 50%) calc(100% - 10px) 52% / 5px 5px no-repeat; font:inherit; }
@@ -5347,9 +5529,9 @@
     max-height: 40dvh;
     overflow: auto;
     overscroll-behavior: contain;
-    width: min(var(--chat-content-max-width), calc(100% - 20px));
+    width: min(var(--chat-content-max-width), calc(100% - (2 * var(--density-composer-margin-inline))));
     box-sizing: border-box;
-    margin: 0 auto 10px;
+    margin: 0 auto var(--density-composer-margin-bottom);
     padding: 11px 12px 9px;
     border: 1px solid var(--line);
     border-radius: 10px;
@@ -5510,30 +5692,50 @@
     display: grid;
     gap: 8px;
     margin: 0;
+    container-type: inline-size;
   }
   .run-detail dl div {
     display: flex;
-    justify-content: space-between;
+    align-items: baseline;
     gap: 10px;
     font: calc(10.5px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .run-detail dt {
+    flex: none;
     color: var(--muted);
+    font-size: calc(9px * var(--interface-font-ratio, 1));
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
   .run-detail dd {
-    max-width: 155px;
+    flex: 1;
+    min-width: 0;
     margin: 0;
     overflow: hidden;
-    text-align: right;
+    text-align: left;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .session-id {
-    color: var(--accent-ink);
+  @container (max-width: 210px) {
+    .run-detail dl div { flex-direction: column; align-items: flex-start; gap: 2px; }
   }
+  .session-id-link {
+    display: inline;
+    padding: 0;
+    border: 0;
+    color: var(--accent-ink);
+    background: none;
+    font: inherit;
+    text-align: inherit;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--accent-ink) 40%, transparent);
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .session-id-link:hover { text-decoration-color: var(--accent-ink); }
   .run-detail dl div.task-folder { align-items: flex-start; }
   .run-detail dd code { display: block; overflow-wrap: anywhere; white-space: normal; }
-  .run-detail .task-folder dd { max-width: 155px; white-space: normal; }
+  .run-detail .task-folder dd { white-space: normal; }
   .detail-section {
     margin-top: 21px;
     padding-top: 15px;
@@ -5893,7 +6095,7 @@
     .conversation-head, .overview { padding: 12px; }
     .conversation-head { gap: 8px; }
     .conversation-head h1 { font-size: calc(18px * var(--interface-font-ratio, 1)); }
-    .composer { margin: 0 10px 10px; }
+    .composer { margin: 0 var(--density-composer-margin-inline) var(--density-composer-margin-bottom); }
     .task-actions { flex-wrap: wrap; }
     .form-grid { grid-template-columns: minmax(0, 1fr); }
   }

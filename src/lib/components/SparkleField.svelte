@@ -31,11 +31,11 @@
 </div>{/if}
 
 <style>
-  .sparkle-field { position:absolute; left:0; right:0; bottom:0; height:220px; overflow:hidden; pointer-events:none; z-index:0; }
+  .sparkle-field { position:absolute; left:0; right:0; top:-80px; bottom:0; overflow:hidden; pointer-events:none; z-index:0; }
   .sparkle-field { opacity:.5; }
   :global([data-theme="dark"]) .sparkle-field { opacity:1; }
   @media (prefers-color-scheme:dark) { :global([data-theme="system"]) .sparkle-field { opacity:1; } }
-  .sparkle-glow { position:absolute; inset:auto 0 0 0; height:40px; background:linear-gradient(to top, color-mix(in srgb, var(--accent) 20%, transparent), transparent); }
+  .sparkle-glow { position:absolute; inset:0; background:linear-gradient(to top, color-mix(in srgb, var(--accent) 20%, transparent), transparent); }
   .sparkle { position:absolute; line-height:1; color:var(--accent-ink); text-shadow:0 0 8px var(--accent); opacity:0; animation:sparkle-fade-up 3.4s ease-in infinite; }
   @keyframes sparkle-fade-up {
     0% { opacity:0; transform:translateY(14px) scale(.5); }

@@ -5,7 +5,7 @@
   import { useTranscriptScrollController } from '$lib/transcript-scroll-owner';
 
   /** Bounded renderer with one virtualizer owning transcript geometry and scrolling. */
-  let { items, getKey, children, footer, estimateHeight = 120, overscan = 6, stickyKey, active = true }: {
+  let { items, getKey, children, footer, estimateHeight = 120, overscan = 6, keepRecent = 30, stickyKey, active = true }: {
     items: T[];
     getKey: (item: T, index: number) => string;
     children: Snippet<[item: T, index: number]>;
@@ -13,6 +13,8 @@
     footer?: Snippet;
     estimateHeight?: number;
     overscan?: number;
+    /** Keep the newest rows mounted so switching back to a chat is immediate. */
+    keepRecent?: number;
     /** Kept mounted by callers for their existing sticky CSS. */
     stickyKey?: string | null;
     active?: boolean;
@@ -80,7 +82,14 @@
 
   const instance = () => get(virtualizer);
   const rows = $derived($virtualizer.getVirtualItems().toSorted((left, right) => left.index - right.index));
-  const renderedEnd = $derived(rows.length ? rows.at(-1)!.end - scrollMargin : 0);
+  // The virtualizer may publish its previous range for one reactive turn while
+  // a held transcript, task switch, or refresh supplies a shorter item list.
+  // Never pass one of those stale indexes through to either a caller key or
+  // the row snippet.
+  const renderedRows = $derived(rows.filter(row =>
+    row.index >= 0 && row.index < items.length && row.key === getKey(items[row.index], row.index)
+  ));
+  const renderedEnd = $derived(renderedRows.length ? renderedRows.at(-1)!.end - scrollMargin : 0);
 
   function setVirtualizerOptions(options: Partial<VirtualizerOptions<HTMLElement, HTMLDivElement>>) {
     // The Svelte adapter publishes on every setOptions call. Effects that both
@@ -120,12 +129,19 @@
     setVirtualizerOptions({
       count: items.length,
       estimateSize: () => estimateHeight,
-      getItemKey: index => getKey(items[index], index),
+      getItemKey: index => {
+        const item = items[index];
+        return item === undefined ? `stale-row:${index}` : getKey(item, index);
+      },
       overscan,
       scrollMargin,
       paddingEnd: footerHeight,
       rangeExtractor: range => {
         const indexes = defaultRangeExtractor(range);
+        const recentStart = Math.max(0, items.length - keepRecent);
+        for (let index = recentStart; index < items.length; index += 1) {
+          if (!indexes.includes(index)) indexes.push(index);
+        }
         return stickyIndex >= 0 && !indexes.includes(stickyIndex) ? [...indexes, stickyIndex].sort((a, b) => a - b) : indexes;
       },
       // A deliberate upward read disables both append follow and end anchoring;
@@ -178,10 +194,10 @@
 </script>
 
 <div class="transcript-virtual-list" bind:this={root} role="feed" aria-busy={!active} aria-label="Conversation transcript">
-  {#if rows.length}<div aria-hidden="true" style:height={`${Math.max(0, rows[0].start - scrollMargin)}px`}></div>{/if}
-  {#each rows as row, index (row.key)}
-    {@const item = items[row.index]}
-    {#if index > 0}<div aria-hidden="true" style:height={`${Math.max(0, row.start - rows[index - 1].end)}px`}></div>{/if}
+  {#if renderedRows.length}<div aria-hidden="true" style:height={`${Math.max(0, renderedRows[0].start - scrollMargin)}px`}></div>{/if}
+  {#each renderedRows as row, index (row.key)}
+    {@const item = items[row.index]!}
+    {#if index > 0}<div aria-hidden="true" style:height={`${Math.max(0, row.start - renderedRows[index - 1].end)}px`}></div>{/if}
     <div class="transcript-row" data-index={row.index} use:measureRow>
       {@render children(item, row.index)}
     </div>
