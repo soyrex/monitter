@@ -8,7 +8,7 @@ identifier = "allow-local-monitter"
 description = "Allows Monitter's application commands from bundled local content."
 commands.allow = [
   "get_snapshot", "get_process_metrics", "get_extension_config", "save_extension_config",
-  "get_ui_snapshot", "get_task_events", "get_usage_overview", "get_task_event_detail",
+  "get_ui_snapshot", "get_task_events", "get_usage_overview", "get_task_event_detail", "read_markdown_file",
   "get_lan_server_info", "resolve_approval", "revoke_approval_rule", "resolve_input",
   "finish_quit", "read_attachment_file", "store_attachment", "save_host", "delete_host",
   "probe_host", "discover_acp_agents", "verify_acp_agent", "save_agent", "delete_agent",

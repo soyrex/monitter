@@ -37,6 +37,14 @@ No fake conversations, progress, token counts, host connections or model replies
   `{ chunk: string, nextOffset: number | null, totalBytes: number }`. Full tool detail remains in
   the local store and is read only after its activity row is expanded. Chunks default to 32 KiB
   and are capped at 64 KiB. Task and event IDs must match; offsets are UTF-8 byte boundaries.
+- `read_markdown_file { taskId: string, href: string, basePath?: string }` ->
+  `{ path: string, title: string, content: string }`. Native desktop only; it is absent from the
+  LAN/controller and visitor surfaces. The task must use a local host. It resolves a relative
+  `href` from `basePath` (when supplied) or the task folder; absolute paths and `file:///` URLs are
+  accepted only when they canonicalize under that same folder. The supplied base must also be a validated Markdown
+  file under the task folder. Remote URLs, non-Markdown extensions, non-regular files, escaping
+  symlinks, invalid UTF-8, and files over 2 MiB reject visibly. `path` is the canonical local path
+  for use as a subsequent base; `title` is the first H1 or the file stem.
 - `get_usage_overview { policy?: "cache-only" | "if-stale" | "refresh" }` -> `UsageOverview`.
   Owner desktop/LAN only. It combines the durable, locally observed per-run usage ledger with
   cached subscription allowance sources. A refresh may perform bounded, read-only local CLI

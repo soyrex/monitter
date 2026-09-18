@@ -35,6 +35,7 @@ import type {
   TaskEventsPage,
   ProcessMetricsSample,
   EventDetailChunk,
+  MarkdownDocument,
   SendAccepted,
   ExtensionConfig,
   ApprovalDecision,
@@ -50,6 +51,7 @@ export interface MonitterBridge {
   getUsageOverview(policy?: UsageRefreshPolicy): Promise<UsageOverview>;
   getProcessMetrics(): Promise<ProcessMetricsSample>;
   getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
+  readMarkdownFile(taskId: string, href: string, basePath?: string): Promise<MarkdownDocument>;
   getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
@@ -225,6 +227,7 @@ const nativeBridge: MonitterBridge = {
   getUsageOverview: (policy) => invoke<UsageOverview>('get_usage_overview', policy === undefined ? {} : { policy }),
   getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
   getTaskEventDetail: (taskId, eventId, offset, limit) => invoke<EventDetailChunk>('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
+  readMarkdownFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke<MarkdownDocument>('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   getSubagentTranscript: (taskId, subagentId) => invoke<SubagentTranscriptEntry[]>('get_subagent_transcript', { taskId, subagentId }),
   saveHost: (host) => invoke<Snapshot>("save_host", { host }),
   deleteHost: (id) => invoke<Snapshot>("delete_host", { id }),
@@ -322,6 +325,7 @@ const previewBridge: MonitterBridge = {
   getUsageOverview: async () => emptyUsageOverview(),
   getProcessMetrics: () => desktopOnly(),
   getTaskEventDetail: () => desktopOnly(),
+  readMarkdownFile: () => desktopOnly(),
   getSubagentTranscript: () => desktopOnly(),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
@@ -390,6 +394,7 @@ export function getBridge(): MonitterBridge {
       getUsageOverview: (policy) => test.invoke('get_usage_overview', policy === undefined ? {} : { policy }) as Promise<UsageOverview>,
       getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
+      readMarkdownFile: (taskId, href, basePath) => test.invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<MarkdownDocument>,
       getSubagentTranscript: (taskId, subagentId) => test.invoke('get_subagent_transcript', { taskId, subagentId }) as Promise<SubagentTranscriptEntry[]>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,

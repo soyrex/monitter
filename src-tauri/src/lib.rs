@@ -54,6 +54,7 @@ mod idle_runtime_live_tests;
 mod internal_agent_tests;
 mod lan;
 mod lan_sync;
+mod markdown;
 mod menu;
 pub mod model;
 mod models;
@@ -5628,6 +5629,22 @@ async fn get_task_event_detail(
     .map_err(|error| format!("Task event detail worker failed: {error}"))?
 }
 
+/// Native desktop only. This is intentionally absent from the LAN dispatcher.
+#[tauri::command]
+async fn read_markdown_file(
+    state: State<'_, AppState>,
+    task_id: String,
+    href: String,
+    base_path: Option<String>,
+) -> Result<markdown::MarkdownDocument, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.read_markdown_file(&task_id, &href, base_path.as_deref())
+    })
+    .await
+    .map_err(|_| "Markdown reader worker failed.".to_string())?
+}
+
 /// The token is generated in memory on each app launch and is never written to
 /// the workspace. It is intentionally returned only to the native renderer.
 #[tauri::command]
@@ -7654,6 +7671,7 @@ pub fn run() {
             get_task_events,
             get_usage_overview,
             get_task_event_detail,
+            read_markdown_file,
             get_lan_server_info,
             resolve_approval,
             revoke_approval_rule,

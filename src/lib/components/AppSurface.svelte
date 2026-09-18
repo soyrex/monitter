@@ -50,6 +50,7 @@
     Cloud,
     Command,
     Folder,
+    FileText,
     Code,
     Rocket,
     Globe,
@@ -176,8 +177,9 @@
       parentExpandedPaneId?:string|null; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: 'single' | 'columns' | 'grid') => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
-  type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
-  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
+  type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
+  type MarkdownDocument = { taskId: string; path: string; title: string };
+  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let pendingEmptyPaneIds = $state<string[]>([]);
   // Each AppSurface instance owns exactly one pane-local controller. The root
@@ -236,6 +238,38 @@
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
   const bridge = getBridge();
+  async function openMarkdownDocument(taskId: string, href: string, basePath?: string) {
+    const file = await bridge.readMarkdownFile(taskId, href, basePath);
+    let id = Object.keys(documents).find(key => openEmptyIds.includes(key) && documents[key].path === file.path);
+    if (!id) {
+      id = localUuid();
+      documents[id] = { taskId, path: file.path, title: file.title };
+      openEmptyIds = [...openEmptyIds, id];
+      rememberTab({ kind: 'empty', id });
+    }
+    documentContents[id] = file.content;
+    delete documentErrors[id];
+    saveCurrentDraft();
+    selectedEmptyId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; currentDraftId = null;
+    focusedAgentId = null; focusedProjectId = null; pane = 'empty';
+  }
+  setContext('monitter-open-markdown', openMarkdownDocument);
+  async function loadDocument(id: string) {
+    const doc = documents[id];
+    if (!doc || documentLoading[id]) return;
+    documentLoading[id] = true;
+    try {
+      const file = await bridge.readMarkdownFile(doc.taskId, doc.path);
+      if (documents[id]?.path !== doc.path) return;
+      documentContents[id] = file.content;
+      delete documentErrors[id];
+    } catch (reason) { documentErrors[id] = text(reason); }
+    finally { delete documentLoading[id]; }
+  }
+  $effect(() => {
+    const id = pane === 'empty' ? selectedEmptyId : null;
+    if (id && documents[id] && documentContents[id] === undefined && !documentErrors[id] && !documentLoading[id]) void loadDocument(id);
+  });
   type SharedUsageState = { overview: UsageOverview | null; loading: boolean; error: string };
   const localUsageState = $state<SharedUsageState>({ overview: null, loading: true, error: '' });
   const usageState = getContext<SharedUsageState>('monitter-usage-overview') ?? localUsageState;
@@ -320,6 +354,10 @@
   const visibleActivityTasks = $derived(indexes?.visibleActivityTasks ?? []);
   let openTerminalIds=$state<string[]>([]), selectedTerminalId=$state<string|null>(null), terminalBusy=$state(false);
   let openEmptyIds=$state<string[]>([]), selectedEmptyId=$state<string|null>(null);
+  let documents=$state<Record<string,MarkdownDocument>>({});
+  let documentContents=$state<Record<string,string>>({});
+  let documentErrors=$state<Record<string,string>>({});
+  let documentLoading=$state<Record<string,boolean>>({});
   const selectedTerminal=$derived(selectedTerminalId ? $terminalSessions[selectedTerminalId] ?? null : null);
   const openTerminals=$derived(openTerminalIds.flatMap(id=>$terminalSessions[id]?[$terminalSessions[id]]:[]));
   let showDetail = $state(true),
@@ -992,7 +1030,7 @@
   export function hasPending() { return terminalBusy || Object.values(composerPending).some(Boolean) || Object.values(pendingUploads).some(Boolean); }
   export function captureState():PaneState {
     // Persistence must only read reactive state: writing here can recursively trigger itself.
-    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
+    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
     const key=currentDraftKey();
     if(key)captured.drafts[key]=composer;
     if(pane==='channel' && selectedChannelId)captured.channelRecipients[selectedChannelId]=[...recipients];
@@ -1004,7 +1042,7 @@
   export function restoreState(value:PaneState) {
     value = applySharedComposers(value as unknown as Record<string, unknown>) as unknown as PaneState;
     agentDraft=value.settingsEditor?.draft??null;agentEdits=value.settingsEditor?.edits??{};
-    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
+    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
     paneLocal.restore(Array.isArray(value.tabOrder) ? value.tabOrder : [], availableTabs());
     composer=drafts[currentDraftKey() ?? ''] ?? '';
     recipients=selectedChannelId?channelRecipients[selectedChannelId]??[]:[];
@@ -1107,6 +1145,11 @@
       settingsCategory: ['profile','extensions','appearance','typography','behaviour','conversation','approvals','agents','directory','lan','remote'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openEmptyIds: Array.isArray(saved.openEmptyIds) ? saved.openEmptyIds : fallback.openEmptyIds,
+      documents: saved.documents && typeof saved.documents === 'object' && !Array.isArray(saved.documents)
+        ? Object.fromEntries(Object.entries(saved.documents).filter(([id, item]) => {
+            const doc = item as MarkdownDocument;
+            return saved.openEmptyIds?.includes(id) && typeof doc?.taskId === 'string' && typeof doc.path === 'string' && typeof doc.title === 'string';
+          })) : {},
       openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,
       openDraftIds: Array.isArray(saved.openDraftIds) ? saved.openDraftIds : fallback.openDraftIds,
       openChannelIds: Array.isArray(saved.openChannelIds) ? saved.openChannelIds : fallback.openChannelIds,
@@ -1197,7 +1240,7 @@
   }
   function emptyWorkspace() {
     const state = captureState();
-    return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openEmptyIds: [], selectedEmptyId: null, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
+    return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
   }
   async function switchWorkspace(next: WorkspaceKey): Promise<boolean> {
     if (next === activeWorkspaceKey) return true;
@@ -1236,7 +1279,7 @@
   $effect(() => {
     // Stringifying tracks nested pane edits, but capture/storage is coalesced
     // below so every composer keystroke does not clone the entire workspace.
-    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openEmptyIds, selectedEmptyId, openTaskIds, openDraftIds, openChannelIds, tabOrder:paneLocal.order, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
+    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openEmptyIds, selectedEmptyId, documents, openTaskIds, openDraftIds, openChannelIds, tabOrder:paneLocal.order, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
     workspaceReady;
     untrack(() => { if (embedded) onWorkspaceChange?.(); else workspaceSave.schedule(); });
   });
@@ -1267,9 +1310,11 @@
     if (composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`]) return null;
     if(tab.kind==='empty') {
       if (!openEmptyIds.includes(tab.id)) return null;
+      const document = documents[tab.id];
+      delete documents[tab.id]; delete documentContents[tab.id]; delete documentErrors[tab.id];
       openEmptyIds = openEmptyIds.filter(id => id !== tab.id);
       if (pane === 'empty' && selectedEmptyId === tab.id) { selectedEmptyId = null; openOverview(); }
-      forgetTab(tab); return { tab };
+      forgetTab(tab); return { tab, document };
     }
     if(tab.kind==='settings') {
       if(!settingsOpen)return null;
@@ -1303,7 +1348,7 @@
   }
   export function receiveTab(payload: TabPayload, before?: TabKey) {
     const {tab} = payload;
-    if(tab.kind==='empty') { if (!openEmptyIds.includes(tab.id)) openEmptyIds = [...openEmptyIds, tab.id]; selectedEmptyId=tab.id; selectedTaskId=null; selectedChannelId=null; selectedTerminalId=null; currentDraftId=null; pane='empty'; rememberTab(tab,before); return; }
+    if(tab.kind==='empty') { if (!openEmptyIds.includes(tab.id)) openEmptyIds = [...openEmptyIds, tab.id]; if(payload.document) documents[tab.id]=payload.document; selectedEmptyId=tab.id; selectedTaskId=null; selectedChannelId=null; selectedTerminalId=null; currentDraftId=null; pane='empty'; rememberTab(tab,before); return; }
     if(tab.kind==='settings') {agentDraft=payload.settingsEditor?.draft??null;agentEdits=payload.settingsEditor?.edits??{};settingsCategory=payload.settingsCategory??'appearance';openSettings();rememberTab(tab,before);return;}
     if(tab.kind==='terminal') {openTerminalTab(tab.id);rememberTab(tab,before);return;}
     if(tab.kind==='channel')channelRecipients[tab.id]=payload.recipients ?? [];
@@ -2269,6 +2314,7 @@
     focusSelectedTabInput();
   }
   function closeEmptyTab(id: string, collapse = true) {
+    delete documents[id]; delete documentContents[id]; delete documentErrors[id];
     openEmptyIds = openEmptyIds.filter(item => item !== id); forgetTab({ kind: 'empty', id });
     if (selectedEmptyId === id) { selectedEmptyId = null; openOverview(); }
     if (collapse) collapseTablessPane();
@@ -2476,6 +2522,7 @@
         else if(tab.kind==='task')closeTaskTab(tab.id);
         else if(tab.kind==='draft')closeTaskDraft(tab.id);
         else if(tab.kind==='channel'){openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);}
+        else if(tab.kind==='empty')closeEmptyTab(tab.id);
         else closeSettings();
       }
       if(keep)overviewOpen=false;
@@ -2993,7 +3040,7 @@
     if (pane === 'task') return currentDraftId ? taskDrafts[currentDraftId]?.title || 'New chat' : selectedTask?.title || 'Chat';
     if (pane === 'channel') return activeChannel?.name || 'Channel';
     if (pane === 'terminal') return selectedTerminal ? terminalTabTitle(selectedTerminal, snapshot?.hosts ?? []) : 'Terminal';
-    if (pane === 'empty') return 'New tab';
+    if (pane === 'empty') return selectedEmptyId && documents[selectedEmptyId]?.title || 'New tab';
     if (pane === 'settings') return settingsTabTitle(settingsCategory);
     if (pane === 'agent') return focusedAgent?.name || 'Agent';
     if (pane === 'project') return focusedProject?.name || 'Project';
@@ -3573,7 +3620,7 @@
             {@const terminalTitle=terminalTabTitle(session,snapshot?.hosts??[])}<div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><span class="tab-kind-icon" aria-hidden="true"><SquareTerminal size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={terminalTitle} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${terminalTitle}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'empty'}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}><Plus size={13}/><span>New tab</span></button><button class="close-tab" aria-label="Close empty tab" onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}<FileText size={13}/><span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {:else if tab.kind === 'settings'}
             <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} title={settingsTabTitle(settingsCategory)} onclick={()=>selectTabPicker(()=>openSettings())}><span class="tab-kind-icon" aria-hidden="true"><Settings2 size={13}/><span class="tab-shortcut"></span></span><span>{settingsTabTitle(settingsCategory)}</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={()=>{closeSettings();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
@@ -3605,6 +3652,14 @@
         <LoaderCircle size={22} /><span>Loading your workspace…</span
         >{#if error}<button onclick={reload}>Try again</button>{/if}
       </div>
+    {:else if pane === 'empty' && selectedEmptyId && documents[selectedEmptyId]}
+      {@const document=documents[selectedEmptyId]}
+      <section class="markdown-document" aria-label={`Markdown document ${document.title}`}>
+        <header><div><p class="eyebrow">MARKDOWN DOCUMENT</p><h1>{document.title}</h1><p class="document-path" title={document.path}>{document.path}</p></div><button class="secondary" type="button" disabled={!!documentLoading[selectedEmptyId]} onclick={()=>void loadDocument(selectedEmptyId!)}>Refresh</button></header>
+        {#if documentErrors[selectedEmptyId]}<p class="document-error" role="alert">{documentErrors[selectedEmptyId]}</p>{/if}
+        {#if documentContents[selectedEmptyId] !== undefined}<div class="document-body"><Markdown text={documentContents[selectedEmptyId]} taskId={document.taskId} basePath={document.path}/></div>
+        {:else if documentLoading[selectedEmptyId]}<p class="document-loading">Loading document…</p>{/if}
+      </section>
     {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
       <button class="pane-choice" disabled={busy} onkeydown={handleEmptyChoiceKeydown} onclick={()=>visibleAgents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
       <button class="pane-choice" disabled={terminalBusy} onkeydown={handleEmptyChoiceKeydown} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<SquareTerminal size={22}/>{/if}<span>Terminal</span></button>
@@ -3744,7 +3799,7 @@
                   {#snippet avatar()}{@render messageAvatar(displayedChannelTranscript.agents.find(agent=>agent.id===message.agentId))}{/snippet}
                   {#if displayedChannelTranscript.confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
-                <Markdown text={message.text} /><AttachmentList attachments={message.attachments ?? []}/>
+                <Markdown text={message.text} taskId={message.taskId ?? undefined}/><AttachmentList attachments={message.attachments ?? []}/>
               </article>{/snippet}
               {#snippet footer()}
               {#each displayedChannelTranscript.optimisticMessages as message (message.id)}
@@ -5247,6 +5302,21 @@
     }
   }
   .empty-pane { flex:1;min-width:0;min-height:0;overflow:auto;display:grid;place-items:center;padding:20px; }
+  .markdown-document { flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding:clamp(20px,4vw,48px);color:var(--ink); }
+  .markdown-document > header,.document-body,.document-error,.document-loading { max-width:800px;margin-inline:auto; }
+  .markdown-document > header { display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px;padding-bottom:18px;border-bottom:1px solid var(--line); }
+  .markdown-document h1 { margin:6px 0 8px;font-size:clamp(24px,3vw,34px);line-height:1.2;overflow-wrap:anywhere; }
+  .document-path { margin:0;color:var(--muted);font:12px var(--mono);overflow-wrap:anywhere; }
+  .document-body { font-size:15px;line-height:1.75; }
+  .document-body :global(.markdown h1),.document-body :global(.markdown h2),.document-body :global(.markdown h3) { line-height:1.3;margin:1.4em 0 .55em; }
+  .document-body :global(.markdown h1) { font-size:1.9em; }
+  .document-body :global(.markdown h2) { font-size:1.5em; }
+  .document-body :global(.markdown h3) { font-size:1.2em; }
+  .document-body :global(.markdown pre) { overflow-x:auto;text-overflow:clip; }
+  .document-body :global(.markdown table) { display:block;max-width:100%;overflow-x:auto;border-collapse:collapse; }
+  .document-body :global(.markdown th),.document-body :global(.markdown td) { border:1px solid var(--line);padding:6px 10px; }
+  .document-error { color:#b84c44; }
+  .document-loading { color:var(--muted); }
   .pane-choices { display:flex;flex-wrap:wrap;justify-content:center;gap:16px; }
   .pane-choice { display:flex;align-items:center;gap:12px;padding:20px 24px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--muted); }
   .pane-choice:hover { color:var(--ink);background:var(--soft);border-color:var(--accent); }

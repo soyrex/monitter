@@ -1,18 +1,23 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { getContext, onMount, tick } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import ImageLightbox from './ImageLightbox.svelte';
-  let { text }: { text: string } = $props();
+  let { text, taskId, basePath }: { text: string; taskId?: string; basePath?: string } = $props();
+  const contextTaskId = getContext<string | undefined>('monitter-markdown-task-id');
+  const openMarkdown = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-markdown');
   let container = $state<HTMLDivElement>();
   let linkError = $state("");
   let lightbox = $state<{ src: string; alt: string; title?: string } | null>(null);
   let lightboxOpener = $state<HTMLElement | null>(null);
+  // Preserve local Markdown file URLs for the scoped native reader. Other URI
+  // schemes retain DOMPurify's normal allowlist; the click handler owns opening.
+  const allowedMarkdownUris = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|file:\/\/\/[^?#]*\.(?:md|markdown)(?:[?#]|$)|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
   // Keep expensive parsing tied to the primitive content, not a replaced message object.
   const sourceText = $derived(text);
   const html = $derived(
-    DOMPurify.sanitize(marked.parse(sourceText, { async: false }) as string),
+    DOMPurify.sanitize(marked.parse(sourceText, { async: false }) as string, { ALLOWED_URI_REGEXP: allowedMarkdownUris }),
   );
   function makeImagesInteractive() {
     for (const image of container?.querySelectorAll<HTMLImageElement>('img') ?? []) {
@@ -40,6 +45,12 @@
       if (!anchor || !container?.contains(anchor)) return;
       event.preventDefault();
       const href = anchor.getAttribute("href")?.trim() ?? "";
+      if (/^(?:file:\/\/|\/|\.{0,2}\/|[^:/?#]+(?:\/[^:/?#]+)*\.(?:md|markdown)(?:[?#].*)?$)/i.test(href) && /\.(?:md|markdown)$/i.test(href.split(/[?#]/)[0])) {
+        if (!openMarkdown || !(taskId ?? contextTaskId)) { linkError = 'Markdown files can only be opened from a local task.'; return; }
+        try { linkError = ''; await openMarkdown(taskId ?? contextTaskId!, href, basePath); }
+        catch (reason) { linkError = reason instanceof Error ? reason.message : String(reason); }
+        return;
+      }
       if (!/^(https?:|mailto:)/i.test(href)) {
         linkError = "This link type is not supported in Monitter.";
         return;

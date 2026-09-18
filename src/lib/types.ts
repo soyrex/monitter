@@ -129,6 +129,8 @@ export interface TaskEventsPage { events: RunEvent[]; nextBefore: number | null;
 export interface ProcessMetricsProcess { pid: number; parentPid: number; name: string; startedAt: number; cpuTimeMs: number; residentMemoryBytes: number; }
 export interface ProcessMetricsSample { cpuTimeMs: number; residentMemoryBytes: number; sampledAt: number; rootPid: number; processes: ProcessMetricsProcess[]; }
 export interface EventDetailChunk { chunk: string; nextOffset: number | null; totalBytes: number; }
+/** A local Markdown document explicitly scoped to one local task folder. */
+export interface MarkdownDocument { path: string; title: string; content: string; }
 export interface ChannelMessage {
   id: string; role: 'user' | 'assistant'; agentId: string | null;
   text: string; createdAt: number; taskId: string | null;
