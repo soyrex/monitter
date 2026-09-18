@@ -165,20 +165,21 @@
   }
 </script>
 <svelte:window ondragend={()=>over=null}/>
-{#snippet branch(node:PaneLayout)}
+{#snippet branch(node:PaneLayout, topRight=false, bottomRight=false)}
+  <!-- Carry the window's right-hand corners through splits so inner pane edges stay square. -->
   <!-- Freeze each branch identity while a split is pruned or promoted. Outgoing
        children must not read child properties from an already-replaced parent. -->
   {#each [node] as item (item.id)}
   {#if 'axis' in item}
     <div class="pane-split" data-split-id={item.id} class:column={item.axis==='vertical'}>
-      <div class="split-child" class:focus-hidden={!!expandedPaneId && !paneIds(item.first).includes(expandedPaneId)} style={`flex:${expandedPaneId?1:item.ratio} 1 0%`}>{@render branch(item.first)}</div>
+      <div class="split-child" class:focus-hidden={!!expandedPaneId && !paneIds(item.first).includes(expandedPaneId)} style={`flex:${expandedPaneId?1:item.ratio} 1 0%`}>{@render branch(item.first, item.axis==='vertical' && topRight, false)}</div>
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (ARIA window splitter is a focusable separator with arrow-key resizing) -->
       <div class="pane-resizer" class:focus-hidden={!!expandedPaneId} role="separator" tabindex="0" aria-label="Resize panes" aria-orientation={item.axis==='horizontal'?'vertical':'horizontal'} aria-valuemin="15" aria-valuemax="85" aria-valuenow={Math.round(item.ratio*100)} onpointerdown={event=>resize(event,item)} onkeydown={event=>resizeKey(event,item)}></div>
-      <div class="split-child" class:focus-hidden={!!expandedPaneId && !paneIds(item.second).includes(expandedPaneId)} style={`flex:${expandedPaneId?1:1-item.ratio} 1 0%`}>{@render branch(item.second)}</div>
+      <div class="split-child" class:focus-hidden={!!expandedPaneId && !paneIds(item.second).includes(expandedPaneId)} style={`flex:${expandedPaneId?1:1-item.ratio} 1 0%`}>{@render branch(item.second, item.axis==='horizontal' && topRight, bottomRight)}</div>
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (contains independently interactive chat controls) -->
-    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:show-active-border={showActivePaneBorder} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
+    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:show-active-border={showActivePaneBorder} class:window-top-right={!!expandedPaneId || topRight} class:window-bottom-right={!!expandedPaneId || bottomRight} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
       {@render children(item.id)}
       <div class="pane-dim-overlay" aria-hidden="true"></div>
       {#if over?.id===item.id}<div class="pane-drop" data-edge={over.edge}><span>{over.edge==='center'?'Move tab here':`Split ${over.edge}`}</span></div>{/if}
@@ -186,7 +187,7 @@
   {/if}
   {/each}
 {/snippet}
-<div class="pane-grid-root" data-active-pane-border={showActivePaneBorder} bind:this={gridRoot}>{@render branch(layout)}</div>
+<div class="pane-grid-root" data-active-pane-border={showActivePaneBorder} bind:this={gridRoot}>{@render branch(layout, true, true)}</div>
 <style>
   :global([data-tab-insert="before"]){box-shadow:inset 2px 0 var(--accent)!important}
   :global([data-tab-insert="after"]){box-shadow:inset -2px 0 var(--accent)!important}
@@ -197,6 +198,8 @@
   .focus-hidden{display:none!important}
   .pane-split.column{flex-direction:column}.pane-leaf{position:relative;background:var(--paper)}.pane-leaf.active{outline:none}
   .pane-leaf.active.show-active-border::after{content:"";position:absolute;inset:0;z-index:25;border:2px solid var(--accent);pointer-events:none}
+  :global(.app-shell.native-mac:not(.native-fullscreen)) .pane-leaf.window-top-right.active.show-active-border::after{border-top-right-radius:16px}
+  :global(.app-shell.native-mac:not(.native-fullscreen)) .pane-leaf.window-bottom-right.active.show-active-border::after{border-bottom-right-radius:16px}
   :global(:root:has([data-active-modal])) .pane-leaf.active.show-active-border::after{content:none}
   .pane-dim-overlay{position:absolute;inset:0;z-index:20;pointer-events:none;opacity:var(--pane-dim-visible);background:color-mix(in srgb,#f4f4f4 calc(var(--pane-dim-strength) * 100%),transparent);transition:opacity .14s ease}
   :global(:root[data-theme="dark"]) .pane-dim-overlay{background:color-mix(in srgb,#000 calc(var(--pane-dim-strength) * 100%),transparent)}
