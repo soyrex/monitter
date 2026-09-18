@@ -27,12 +27,21 @@ pub struct DeletionPreview {
 }
 
 pub fn preview(snapshot: &Snapshot, task: &Task, host: &Host) -> DeletionPreview {
-    match eligible(snapshot, task) {
+    if host.kind == "ssh" && task.codex_home.is_some() {
+        return unsupported(
+            "A selected Codex account home can only run on this Mac, not over SSH.".into(),
+        );
+    }
+    match eligible(snapshot, task, host) {
         Err(reason) => unsupported(reason),
         Ok(()) if task.provider != "codex" => unsupported(
             "Native-file cleanup is currently supported only for Codex sessions.".into(),
         ),
-        Ok(()) => match files_for(host, task.native_session_id.as_deref().unwrap()) {
+        Ok(()) => match files_for(
+            host,
+            task.native_session_id.as_deref().unwrap(),
+            task.codex_home.as_deref(),
+        ) {
             Ok(files) if files.is_empty() => {
                 unsupported("No verified Codex session file was found.".into())
             }
@@ -53,18 +62,18 @@ pub fn remove_verified(snapshot: &Snapshot, task: &Task, host: &Host) -> Result<
         return Err(preview.reason);
     }
     let id = task.native_session_id.as_deref().unwrap();
-    let files = files_for(host, id)?;
+    let files = files_for(host, id, task.codex_home.as_deref())?;
     if display_paths(&files) != preview.files {
         return Err("Codex session-file preview changed; review it again before deleting.".into());
     }
     if host.kind == "ssh" {
         return remote_delete(host, id, &files);
     }
-    remove_local_files(&files, id)
+    remove_local_files(&files, id, task.codex_home.as_deref())
 }
 
-fn remove_local_files(files: &[PathBuf], id: &str) -> Result<(), String> {
-    let roots = local_roots()?;
+fn remove_local_files(files: &[PathBuf], id: &str, codex_home: Option<&str>) -> Result<(), String> {
+    let roots = local_roots(codex_home)?;
     for file in files {
         if !local_file_is_owned(file, &roots, id)? {
             return Err("A verified Codex session file changed before deletion.".into());
@@ -90,14 +99,17 @@ fn display_paths(files: &[PathBuf]) -> Vec<String> {
         .map(|path| path.display().to_string())
         .collect()
 }
-fn files_for(host: &Host, id: &str) -> Result<Vec<PathBuf>, String> {
+fn files_for(host: &Host, id: &str, codex_home: Option<&str>) -> Result<Vec<PathBuf>, String> {
     match host.kind.as_str() {
-        "local" => local_files(id),
-        "ssh" => remote_files(host, id),
+        "local" => local_files(id, codex_home),
+        "ssh" if codex_home.is_none() => remote_files(host, id),
+        "ssh" => {
+            Err("A selected Codex account home can only run on this Mac, not over SSH.".into())
+        }
         _ => Err("Host kind must be local or ssh.".into()),
     }
 }
-fn eligible(snapshot: &Snapshot, task: &Task) -> Result<(), String> {
+fn eligible(snapshot: &Snapshot, task: &Task, host: &Host) -> Result<(), String> {
     if !task.archived {
         return Err("Archive this chat before permanently deleting it.".into());
     }
@@ -114,19 +126,25 @@ fn eligible(snapshot: &Snapshot, task: &Task) -> Result<(), String> {
             && other.host_id == task.host_id
             && other.provider == task.provider
             && other.native_session_id.as_deref() == Some(id)
+            && (task.provider != "codex"
+                || host.kind != "local"
+                || same_local_home(other.codex_home.as_deref(), task.codex_home.as_deref()))
     }) {
         return Err("Another Monitter chat references this native session.".into());
     }
     Ok(())
 }
-fn codex_home() -> Result<PathBuf, String> {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-        .ok_or("Codex home is unavailable.".into())
+fn same_local_home(left: Option<&str>, right: Option<&str>) -> bool {
+    matches!(
+        (
+            crate::codex_accounts::effective_home(left),
+            crate::codex_accounts::effective_home(right)
+        ),
+        (Ok(left), Ok(right)) if left == right
+    )
 }
-fn local_roots() -> Result<Vec<PathBuf>, String> {
-    let home = codex_home()?;
+fn local_roots(codex_home: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    let home = PathBuf::from(crate::codex_accounts::effective_home(codex_home)?);
     let meta = fs::symlink_metadata(&home).map_err(|_| "Codex home is unavailable.")?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return Err("Codex home is not a real directory.".into());
@@ -151,8 +169,8 @@ fn local_roots() -> Result<Vec<PathBuf>, String> {
     }
     Ok(roots)
 }
-fn local_files(id: &str) -> Result<Vec<PathBuf>, String> {
-    let roots = local_roots()?;
+fn local_files(id: &str, codex_home: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    let roots = local_roots(codex_home)?;
     let mut files = Vec::new();
     let mut visited = HashSet::new();
     let mut entries = 0;
@@ -411,7 +429,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&good, home.join(format!("sessions/link-{id}.jsonl"))).unwrap();
         std::env::set_var("CODEX_HOME", &home);
-        let files = local_files(&id).unwrap();
+        let files = local_files(&id, Some(home.to_str().unwrap())).unwrap();
         std::env::remove_var("CODEX_HOME");
         assert_eq!(files, vec![fs::canonicalize(&good).unwrap()]);
         assert!(victim.exists());
@@ -430,7 +448,9 @@ mod tests {
             std::os::unix::fs::symlink(&outside, home.join("sessions")).unwrap();
         }
         std::env::set_var("CODEX_HOME", &home);
-        assert!(local_files(&id).unwrap().is_empty());
+        assert!(local_files(&id, Some(home.to_str().unwrap()))
+            .unwrap()
+            .is_empty());
         std::env::remove_var("CODEX_HOME");
         let _ = fs::remove_dir_all(home);
         let _ = fs::remove_dir_all(outside);
@@ -443,7 +463,7 @@ mod tests {
             fs::write(home.join(format!("sessions/{number}.txt")), "x").unwrap();
         }
         std::env::set_var("CODEX_HOME", &home);
-        let error = local_files(&id).unwrap_err();
+        let error = local_files(&id, Some(home.to_str().unwrap())).unwrap_err();
         std::env::remove_var("CODEX_HOME");
         assert!(error.contains("scan limit"));
         let _ = fs::remove_dir_all(home);
@@ -530,9 +550,34 @@ mod tests {
         let file = home.join(format!("sessions/rollout-{id}.jsonl"));
         write_session(&file, &id);
         std::env::set_var("CODEX_HOME", &home);
-        remove_local_files(&[fs::canonicalize(&file).unwrap()], &id).unwrap();
+        remove_local_files(
+            &[fs::canonicalize(&file).unwrap()],
+            &id,
+            Some(home.to_str().unwrap()),
+        )
+        .unwrap();
         std::env::remove_var("CODEX_HOME");
         assert!(!file.exists());
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn selected_home_scans_and_deletes_only_its_matching_session_file() {
+        let _guard = env_lock().lock().unwrap();
+        let (first_home, id) = fixture();
+        let (second_home, _) = fixture();
+        let first = first_home.join(format!("sessions/rollout-{id}.jsonl"));
+        let second = second_home.join(format!("sessions/rollout-{id}.jsonl"));
+        write_session(&first, &id);
+        write_session(&second, &id);
+
+        let selected = local_files(&id, Some(first_home.to_str().unwrap())).unwrap();
+        assert_eq!(selected, vec![fs::canonicalize(&first).unwrap()]);
+        remove_local_files(&selected, &id, Some(first_home.to_str().unwrap())).unwrap();
+        assert!(!first.exists());
+        assert!(second.exists());
+
+        let _ = fs::remove_dir_all(first_home);
+        let _ = fs::remove_dir_all(second_home);
     }
 }

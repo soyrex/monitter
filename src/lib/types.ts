@@ -12,6 +12,8 @@ export interface AllowanceBalance {
 }
 export interface SubscriptionUsageSource {
   provider: UsageProvider; hostId: string; source: string;
+  /** Owner-only local Codex profile identity; omitted from shared projections. */
+  codexHome?: string | null; accountLabel?: string | null;
   state: 'available' | 'unsupported' | 'not-applicable' | 'not-authenticated' | 'error';
   planType: string | null; fetchedAt: number | null; staleAfter: number | null;
   lastAttemptAt: number; windows: AllowanceWindow[]; balances: AllowanceBalance[]; error: string | null;
@@ -56,10 +58,13 @@ export interface Host {
   user: string; port: number; identityFile: string; defaultCwd: string;
   codexPath: string; claudePath: string; opencodePath: string; hermesPath: string;
 }
+export interface CodexAccount { home: string; label: string; }
 export interface Agent {
   id: string; name: string; description: string; instructions: string;
   avatar: string | null;
   provider: Provider; model: string; hostId: string; cwd: string;
+  /** Local Codex account home. Applies to chats created after saving. */
+  codexHome?: string | null;
   acp?: AcpLaunch | null;
   color: string; sandbox: Sandbox;
   expertise: string[]; responsibilities: string[]; skills: string[];
@@ -72,6 +77,8 @@ export interface Task {
   archived: boolean; status: TaskStatus; createdAt: number; updatedAt: number;
   parentTaskId: string | null; channelId: string | null; projectId: string | null;
   hostId: string; cwd: string; provider: Provider; model: string; sandbox: Sandbox;
+  /** Account home pinned when this chat was created. */
+  codexHome?: string | null;
   acp?: AcpLaunch | null;
   modelSettings?: ModelSettings | null;
   /** Captured when archived by removing the owning agent; null otherwise. */
@@ -274,7 +281,7 @@ export interface ModelSettings {
   reasoningEffort: string | null;
   fastMode: boolean | null;
 }
-export interface ModelTarget { taskId?: string; agentId?: string; projectId?: string | null; }
+export interface ModelTarget { taskId?: string; agentId?: string; projectId?: string | null; codexHome?: string | null; }
 export interface HarnessModel {
   id: string; name: string; description: string;
   reasoningEfforts: { id: string; description: string }[];

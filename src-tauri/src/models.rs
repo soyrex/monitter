@@ -18,8 +18,12 @@ use std::{
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_PAGES: usize = 32;
 
-pub(crate) fn read_codex_catalog(host: &Host, cwd: &str) -> Result<ModelCatalog, String> {
-    let mut child = app_server_command(host, cwd)?
+pub(crate) fn read_codex_catalog(
+    host: &Host,
+    cwd: &str,
+    codex_home: Option<&str>,
+) -> Result<ModelCatalog, String> {
+    let mut child = app_server_command(host, cwd, codex_home)?
         .spawn()
         .map_err(|e| format!("Could not start Codex app-server for read-only model lookup: {e}"))?;
     let result = read_from_child(&mut child);
@@ -95,7 +99,10 @@ fn parse_opencode_models(output: &str) -> Vec<CatalogModel> {
         .collect()
 }
 
-fn app_server_command(host: &Host, cwd: &str) -> Result<Command, String> {
+fn app_server_command(host: &Host, cwd: &str, codex_home: Option<&str>) -> Result<Command, String> {
+    if host.kind != "local" && codex_home.is_some() {
+        return Err("A selected Codex account home can only run on this Mac, not over SSH.".into());
+    }
     let mut command = if host.kind == "local" {
         let mut command = Command::new(resolve_local(&host.codex_path)?);
         command.arg("app-server");
@@ -122,6 +129,9 @@ fn app_server_command(host: &Host, cwd: &str) -> Result<Command, String> {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    if host.kind == "local" {
+        crate::codex_accounts::configure_command(&mut command, codex_home)?;
     }
     command
         .stdin(Stdio::piped())
@@ -376,6 +386,54 @@ mod tests {
     }
 
     #[test]
+    fn local_catalog_probe_receives_selected_codex_home() {
+        let host = Host {
+            id: "local".into(),
+            name: "local".into(),
+            kind: "local".into(),
+            address: "localhost".into(),
+            user: String::new(),
+            port: 0,
+            identity_file: String::new(),
+            default_cwd: "/tmp".into(),
+            codex_path: "/bin/echo".into(),
+            claude_path: String::new(),
+            opencode_path: String::new(),
+            hermes_path: String::new(),
+        };
+        let command = app_server_command(&host, "/tmp", Some("/tmp")).unwrap();
+        let home = command
+            .get_envs()
+            .find(|(key, _)| *key == "CODEX_HOME")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        assert!(
+            home == std::ffi::OsStr::new("/private/tmp") || home == std::ffi::OsStr::new("/tmp")
+        );
+    }
+
+    #[test]
+    fn selected_catalog_home_is_rejected_for_ssh() {
+        let host = Host {
+            id: "remote".into(),
+            name: "remote".into(),
+            kind: "ssh".into(),
+            address: "example.test".into(),
+            user: String::new(),
+            port: 22,
+            identity_file: String::new(),
+            default_cwd: "/tmp".into(),
+            codex_path: String::new(),
+            claude_path: String::new(),
+            opencode_path: String::new(),
+            hermes_path: String::new(),
+        };
+        assert!(app_server_command(&host, "/tmp", Some("/tmp"))
+            .unwrap_err()
+            .contains("only run on this Mac"));
+    }
+
+    #[test]
     #[ignore = "read-only live Codex app-server verification"]
     fn live_local_catalog() {
         let host = Host {
@@ -392,7 +450,7 @@ mod tests {
             opencode_path: String::new(),
             hermes_path: String::new(),
         };
-        let catalog = read_codex_catalog(&host, "/tmp").unwrap();
+        let catalog = read_codex_catalog(&host, "/tmp", None).unwrap();
         println!(
             "local models={} fast={}",
             catalog.models.len(),
@@ -422,7 +480,7 @@ mod tests {
             opencode_path: String::new(),
             hermes_path: String::new(),
         };
-        let catalog = read_codex_catalog(&host, "/tmp").unwrap();
+        let catalog = read_codex_catalog(&host, "/tmp", None).unwrap();
         println!(
             "mira models={} fast={}",
             catalog.models.len(),

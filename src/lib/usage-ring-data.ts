@@ -1,18 +1,20 @@
 import type { SubscriptionUsageSource, UsageOverview } from './types';
 
 type UsageRingWindow = { label: string; usedPercent: number | null; unlimited?: boolean; resetsAt?: number | null };
+type UsageRingAccount = { key: string; label: string; status: 'ready' | 'loading' | 'unavailable' | 'error' | 'stale'; active?: UsageRingWindow | null; weekly?: UsageRingWindow | null; message?: string | null };
 type UsageRingData = {
   status: 'ready' | 'loading' | 'unavailable' | 'error' | 'stale';
   active?: UsageRingWindow | null;
   weekly?: UsageRingWindow | null;
   message?: string | null;
   updatedAt?: number | null;
+  accounts?: UsageRingAccount[];
 };
 type UsageRingProvider = 'codex' | 'claude' | 'minimax' | 'opencode-go';
 type UsageRingMap = Record<UsageRingProvider, UsageRingData>;
 
-const providerSource = (overview: UsageOverview | null, provider: UsageRingProvider) =>
-  overview?.subscriptions.find(source => source.provider === provider || (provider === 'minimax' && source.source.includes('mmx')));
+const providerSources = (overview: UsageOverview | null, provider: UsageRingProvider) =>
+  overview?.subscriptions.filter(source => source.provider === provider || (provider === 'minimax' && source.source.includes('mmx'))) ?? [];
 
 function window(source: SubscriptionUsageSource, weekly: boolean): UsageRingWindow | null {
   const matching = source.windows.find(item => {
@@ -60,10 +62,27 @@ export function usageRingMap(
   requestError = '',
   now = Date.now(),
 ): UsageRingMap {
+  const sourceFor = (provider: UsageRingProvider) => {
+    const sources = providerSources(overview, provider);
+    const primary = sources[0];
+    const mapped = ring(primary, loading, requestError, now);
+    if (sources.length > 1) mapped.accounts = sources.map(source => {
+      const accountData = ring(source, loading, requestError, now);
+      return {
+        key: source.codexHome || `${source.provider}:${source.hostId}:${source.source}`,
+        label: source.accountLabel || source.codexHome || 'Default account',
+        status: accountData.status,
+        active: accountData.active,
+        weekly: accountData.weekly,
+        message: accountData.message,
+      };
+    });
+    return mapped;
+  };
   return {
-    codex: ring(providerSource(overview, 'codex'), loading, requestError, now),
-    claude: ring(providerSource(overview, 'claude'), loading, requestError, now),
-    minimax: ring(providerSource(overview, 'minimax'), loading, requestError, now),
-    'opencode-go': ring(providerSource(overview, 'opencode-go'), loading, requestError, now),
+    codex: sourceFor('codex'),
+    claude: sourceFor('claude'),
+    minimax: sourceFor('minimax'),
+    'opencode-go': sourceFor('opencode-go'),
   };
 }

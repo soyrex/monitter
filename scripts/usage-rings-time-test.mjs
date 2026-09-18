@@ -23,6 +23,13 @@ writeFileSync(join(harness, 'App.svelte'), `<script>
     minimax: { status: 'ready', active: { label: 'general 5-hour', usedPercent: 25, resetsAt: resetAfter(0, 4, 30) } },
     'opencode-go': { status: 'error', message: 'Router unavailable.' },
   });
+  window.setCodexAccounts = (personalFailed = false) => {
+    const accounts = [
+      { key: 'personal', label: 'Personal', status: personalFailed ? 'error' : 'ready', message: personalFailed ? 'Personal unavailable' : null, active: personalFailed ? null : { label: '5-hour', usedPercent: 12 }, weekly: { label: 'Week', usedPercent: 20 } },
+      { key: 'work', label: 'Work', status: 'ready', active: { label: '5-hour', usedPercent: 67, resetsAt: resetAfter(0, 2, 0) }, weekly: null },
+    ];
+    usage = { ...usage, codex: { ...accounts[0], accounts } };
+  };
 </script>
 <button id="loading" onclick={() => usage = {...usage, codex: {status: 'loading'}}}>Load</button>
 <button id="compact" onclick={() => compact = !compact}>Compact</button>
@@ -152,6 +159,22 @@ try {
   await centered(loading.locator('.usage-ring'), loading.locator('.ring-value'));
   await page.emulateMedia({ reducedMotion: 'reduce' });
   expect(await active.evaluate(node => getComputedStyle(node).animationName)).toBe('none');
+  await page.evaluate(() => window.setCodexAccounts());
+  const accountSelector = codex.getByLabel('Codex account', { exact: true });
+  await expect(accountSelector).toBeVisible();
+  await expect(ringValue).toHaveText('12');
+  await accountSelector.selectOption('work');
+  await expect(ringValue).toHaveText('67');
+  await expect(codex).toHaveAttribute('title', /67% used/);
+  await expect(codex.locator('.usage-heading')).toContainText('Work');
+  await expect(codex.locator('.usage-weekly')).toHaveCount(0);
+  await page.evaluate(() => window.setCodexAccounts(true));
+  await accountSelector.selectOption('personal');
+  await expect(codex).toHaveClass(/error/);
+  await expect(codex.locator('.usage-message')).toContainText('Personal unavailable');
+  await accountSelector.selectOption('work');
+  await expect(ringValue).toHaveText('67');
+  await expect(codex).not.toHaveClass(/error/);
   console.log('Usage preserves detailed provider rows, adapts short-window details, and keeps ring geometry and reduced motion intact.');
 } finally {
   await browser?.close();

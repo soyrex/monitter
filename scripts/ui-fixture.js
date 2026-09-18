@@ -41,12 +41,17 @@
     record('createTask',input);
     const a=state.agents.find(a=>a.id===input.agentId);
     const project=state.projects.find(p=>p.id===input.projectId);
-    const task={id:crypto.randomUUID(),agentId:a.id,title:input.title,nativeSessionId:input.nativeSessionId||null,status:'idle',archived:false,createdAt:Date.now(),updatedAt:Date.now(),parentTaskId:input.parentTaskId||null,channelId:input.channelId||null,projectId:input.projectId||null,hostId:a.hostId,cwd:project?.workspaces.find(w=>w.hostId===a.hostId)?.cwd || a.cwd,provider:a.provider,model:input.modelSettings?.model || a.model,modelSettings:input.modelSettings || null,sandbox:a.sandbox};
+    const task={id:crypto.randomUUID(),agentId:a.id,title:input.title,nativeSessionId:input.nativeSessionId||null,status:'idle',archived:false,createdAt:Date.now(),updatedAt:Date.now(),parentTaskId:input.parentTaskId||null,channelId:input.channelId||null,projectId:input.projectId||null,hostId:a.hostId,cwd:project?.workspaces.find(w=>w.hostId===a.hostId)?.cwd || a.cwd,provider:a.provider,model:input.modelSettings?.model || a.model,modelSettings:input.modelSettings || null,sandbox:a.sandbox,codexHome:a.codexHome||null};
     state.tasks.push(task);notify();return clone(task);
   };
   window.__MONITTER_QA__ = { calls, snapshot:copy, emit:notify, setSnapshot:s=>{state=clone(s);notify();}, terminals:()=>clone([...terminals.values()]), terminalOutput:(id,data)=>{const terminal=terminals.get(id);if(!terminal)throw Error('Terminal was not found.');terminalChunk(terminal,data);}, terminalCloseFailure:null };
   window.__MONITTER_BRIDGE__ = {
     available:true, getSnapshot:async()=>copy(),
+    listCodexAccounts:async()=>[{home:'/Users/alex/.codex',label:'Personal'},{home:'/Users/alex/.codex-work',label:'Work'}],
+    getUsageOverview:async()=>({generatedAt:Date.now(),capturedSince:null,providerTotals:[],recentRuns:[],subscriptions:[
+      {provider:'codex',hostId:'local',source:'codex app-server',codexHome:'/Users/alex/.codex',accountLabel:'Personal',state:'available',planType:'Pro',fetchedAt:Date.now(),staleAfter:Date.now()+60000,lastAttemptAt:Date.now(),windows:[{key:'primary',label:'5-hour',metric:'requests',usedPercent:12,used:12,limit:100,unit:'requests',resetsAt:Date.now()+3600000},{key:'secondary',label:'Week',metric:'requests',usedPercent:20,used:20,limit:100,unit:'requests',resetsAt:Date.now()+86400000}],balances:[],error:null},
+      {provider:'codex',hostId:'local',source:'codex app-server',codexHome:'/Users/alex/.codex-work',accountLabel:'Work',state:'available',planType:'Team',fetchedAt:Date.now(),staleAfter:Date.now()+60000,lastAttemptAt:Date.now(),windows:[{key:'primary',label:'5-hour',metric:'requests',usedPercent:67,used:67,limit:100,unit:'requests',resetsAt:Date.now()+7200000},{key:'secondary',label:'Week',metric:'requests',usedPercent:81,used:81,limit:100,unit:'requests',resetsAt:Date.now()+86400000}],balances:[],error:null},
+    ]}),
     getProcessMetrics:async()=>{const index=metricIndex++%metricCpu.length;metricCpuTime+=metricCpu[index]*20;return {cpuTimeMs:metricCpuTime,residentMemoryBytes:metricMemoryMib[index]*1024*1024,sampledAt:10_000+metricIndex*2_000};},
     setChannelMembership:async(channelId,agentId,member)=>{record('setChannelMembership',{channelId,agentId,member});const c=state.channels.find(c=>c.id===channelId);if(!c||!state.agents.some(a=>a.id===agentId))throw Error('Channel or agent was not found.');c.agentIds=member?[...new Set([...c.agentIds,agentId])]:c.agentIds.filter(id=>id!==agentId);if(!member)state.tasks.filter(t=>t.channelId===channelId&&t.agentId===agentId&&t.status==='running').forEach(t=>t.status='interrupted');notify();return copy();},
     saveHost:async h=>{record('saveHost',h);return save('hosts',h);},

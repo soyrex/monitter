@@ -107,6 +107,7 @@
     ApprovalRule,
     Sandbox,
     RunEvent,
+    CodexAccount,
     UsageOverview,
     UsageRefreshPolicy,
     SubagentTranscriptEntry,
@@ -238,6 +239,10 @@
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
   const bridge = getBridge();
+  let codexAccounts = $state<CodexAccount[]>([]);
+  let codexAccountsError = $state('');
+  let codexAccountsLoading = $state(false);
+  let codexAccountsLoaded = $state(false);
   async function openMarkdownDocument(taskId: string, href: string, basePath?: string) {
     const file = await bridge.readMarkdownFile(taskId, href, basePath);
     let id = Object.keys(documents).find(key => openEmptyIds.includes(key) && documents[key].path === file.path);
@@ -294,6 +299,14 @@
       void refreshUsage('cache-only');
     }, 500);
   }
+  async function refreshCodexAccounts() {
+    codexAccountsLoading = true;
+    codexAccountsError = '';
+    try { codexAccounts = await bridge.listCodexAccounts(); codexAccountsLoaded = true; }
+    catch (reason) { codexAccountsError = text(reason); }
+    finally { codexAccountsLoading = false; }
+  }
+  onMount(() => { void refreshCodexAccounts(); });
   let motionReady = $state(false);
   onMount(() => { if (!embedded) motionReady = true; });
   onMount(() => {
@@ -1685,6 +1698,7 @@
     avatar: null,
     expertise: [], responsibilities: [], skills: [], collaborationEnabled: true,
     sandbox: "read-only",
+    codexHome: null,
   });
   const blankChannel = (): Channel => ({
     id: "",
@@ -2733,8 +2747,19 @@
     if(!agentDraft)return;
     const oldId=agentDraft.id;
     const submitted={...agentDraft,id:oldId||localUuid(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean)};
-    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===submitted.id)??submitted));}
+    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===submitted.id)??submitted));void refreshCodexAccounts();}
   }
+  function codexAccountOptions(agent: Agent) {
+    const saved = agent.codexHome?.trim();
+    const discovered = codexAccounts;
+    return saved && !codexAccounts.some(account => account.home === saved)
+      ? [{ home: saved, label: `${saved} (saved path unavailable)` }, ...discovered]
+      : discovered;
+  }
+  const codexAccountLabel = (home: string | null | undefined) => {
+    if (!home) return 'Inherited default account';
+    return codexAccounts.find(account => account.home === home)?.label ?? (codexAccountsLoaded ? `${home} (saved path unavailable)` : home);
+  };
   async function saveHost() {
     if (
       hostDraft &&
@@ -3881,7 +3906,7 @@
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render slashMenu()}
             <textarea bind:value={composer} aria-label="Task message" placeholder="Describe what you want this agent to do…" oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
-            <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
+      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
           </div>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -3923,7 +3948,7 @@
             <div class="composer-footer">
               <div class="composer-left">{@render attachmentTools()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
               <div class="composer-right">
-                <ModelPicker target={{taskId:selectedTask.id}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeModel}/>
+                <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeModel}/>
 {#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}
                 <button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
               </div>
@@ -4013,6 +4038,10 @@
                   <dt>host</dt>
                   <dd>{selectedHost?.name ?? "Unknown host"}</dd>
                 </div>
+                {#if selectedTask.provider === 'codex'}<div>
+                  <dt>Codex account</dt>
+                  <dd>{codexAccountLabel(selectedTask.codexHome)}</dd>
+                </div>{/if}
                 <div class="task-folder"><dt>folder</dt><dd><code>{selectedTask.cwd || "No folder set"}</code></dd></div>
                 <div><dt>project</dt><dd>{projects.find(project=>project.id===selectedTask.projectId)?.name ?? 'No project'}</dd></div>
                 <div>
@@ -4308,7 +4337,7 @@
       <div class="form-grid">
         <label
           >Harness<select aria-label="Harness" bind:value={agentDraft.provider}
-            onchange={event => { if (agentDraft) { agentDraft.sandbox = event.currentTarget.value === "codex" ? "read-only" : "harness-configured"; agentDraft.model = ""; } }}
+            onchange={event => { if (agentDraft) { agentDraft.sandbox = event.currentTarget.value === "codex" ? "read-only" : "harness-configured"; agentDraft.model = ""; if (event.currentTarget.value !== 'codex') agentDraft.codexHome = null; } }}
             ><option value="codex">Codex</option><option value="claude">Claude Code</option>
             <option value="opencode">OpenCode (legacy)</option><option value="hermes">Hermes</option><option value="acp">ACP — browse agents / custom</option></select
           ></label
@@ -4318,7 +4347,7 @@
             placeholder={agentDraft.provider === "hermes" ? "Harness default, or provider/model" : "Harness default"}
           /></label
         ><label
-          >Host<select bind:value={agentDraft.hostId}
+          >Host<select bind:value={agentDraft.hostId} onchange={event => { const hostId = event.currentTarget.value; if (agentDraft && (snapshot?.hosts.find(host => host.id === hostId)?.kind !== 'local' || agentDraft.provider !== 'codex')) agentDraft.codexHome = null; }}
             >{#each snapshot?.hosts ?? [] as host}<option value={host.id}
                 >{host.name} · {host.kind}</option
               >{/each}</select
@@ -4328,7 +4357,14 @@
             bind:value={agentDraft.cwd}
             placeholder="/path/to/project"
           /></label
-        ><label
+        >{#if agentDraft.provider === "codex" && agentDraft.hostId === localHost?.id}<label
+          >Codex account<select aria-label="Codex account" bind:value={agentDraft.codexHome}
+            ><option value={null}>Inherited default account</option
+            >{#each codexAccountOptions(agentDraft) as account (account.home)}<option value={account.home}>{account.label}</option>{/each}</select
+          ><small>New chats use this account. Existing chats keep their pinned account.</small>{#if codexAccountsLoading}<small>Finding local Codex accounts…</small>{/if}{#if codexAccountsError}<small class="error" role="alert">Could not discover Codex accounts: {codexAccountsError}</small>{/if}</label
+          ><label
+            >Custom home <span class="optional">Optional</span><input aria-label="Custom Codex account home" value={agentDraft.codexHome ?? ''} oninput={event=>{if(agentDraft)agentDraft.codexHome=event.currentTarget.value.trim()||null}} placeholder="/Users/you/.codex-work" /><small>Use an existing CODEX_HOME directory. Monitter does not create or modify it.</small></label>{/if}
+        <label
           >Permissions<select aria-label="Permissions" bind:value={agentDraft.sandbox}
             >{#if agentDraft.provider === "codex"}<option value="read-only">Read only</option><option
               value="workspace-write">Workspace write</option>
