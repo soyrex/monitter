@@ -26,6 +26,7 @@
     "test:usage-rings": "node scripts/usage-rings-time-test.mjs",
     "test:codex-accounts:ui": "node scripts/codex-accounts-ui-test.mjs",
     "test:native": "node scripts/native-smoke.mjs",
+    "test:permissions": "node scripts/permission-contract-test.mjs",
     "build:mac:local": "node scripts/build-macos.mjs --debug",
     "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py",
     "test:controller": "node scripts/controller-protocol-test.mjs",
