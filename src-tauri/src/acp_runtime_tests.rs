@@ -44,13 +44,14 @@ import readline from 'node:readline'; import fs from 'node:fs';
 let turns=0, session='fixture-session', configAcknowledged=true;
 const reply=(id,result)=>console.log(JSON.stringify({jsonrpc:'2.0',id,result}));
 const update=(text)=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text},id:`message-${turns}`}}}));
+const commandUpdate=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'available_commands_update',availableCommands:[{name:'usage',description:'Show fixture usage',input:{hint:'window'}}]}}}));
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
  if(frame.method==='initialize') { const recovery=process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}; const http=process.argv[2]==='managed-no-http'?{}:{mcpCapabilities:{http:true}}; reply(frame.id,{protocolVersion:1,agentCapabilities:{...recovery,...http}}); }
- else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); }
+ else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
 });
@@ -156,6 +157,71 @@ fn resident_fixture_delivers_context_and_two_distinct_turns() {
         .map(|message| message.text)
         .collect::<Vec<_>>();
     assert_eq!(replies, vec!["reply-1", "reply-2"]);
+}
+
+#[test]
+fn resident_fixture_advertises_and_executes_a_raw_slash_command() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-commands-{}", crate::id()));
+    let fixture = fixture_with_args(
+        "commands",
+        vec!["commands".into(), capture.to_string_lossy().into_owned()],
+    );
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "ACP command fixture".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let first = fixture
+        .accept_send(task.id.clone(), "establish session".into(), vec![])
+        .unwrap()
+        .unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(first));
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "completed")
+    });
+
+    let commands = fixture.task_slash_commands(&task.id).unwrap();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].name, "usage");
+    assert_eq!(commands[0].input_hint.as_deref(), Some("window"));
+    let result = fixture
+        .execute_task_slash_command(task.id.clone(), "/usage week".into())
+        .unwrap();
+    assert_eq!(result.effect, "sent");
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .messages
+            .iter()
+            .filter(|message| {
+                message.task_id == task.id
+                    && message.role == "assistant"
+                    && message.stream_status.as_deref() == Some("complete")
+            })
+            .count()
+            == 2
+    });
+    let captured = fs::read_to_string(&capture).unwrap_or_default();
+    assert!(
+        captured.lines().any(|line| line == "prompt:/usage week"),
+        "provider did not receive the exact slash prompt: {captured}"
+    );
+    assert!(fixture.snapshot().unwrap().messages.iter().any(|message| {
+        message.task_id == task.id && message.role == "user" && message.text == "/usage week"
+    }));
+    let _ = fs::remove_file(capture);
 }
 
 #[test]

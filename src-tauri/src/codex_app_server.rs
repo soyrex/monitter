@@ -89,7 +89,11 @@ fn observe_subsequent_turn_clock(
     control: &RunControl,
     stage_clock: &mut Option<StageClock>,
 ) {
-    if started && stage_clock.is_none() && control.has_app_server_turn_request() {
+    if started
+        && stage_clock.is_none()
+        && (control.has_app_server_turn_request()
+            || control.has_app_server_native_turn_request())
+    {
         *stage_clock = Some(StageClock::start(RequestStage::SubsequentTurn));
     }
 }
@@ -377,11 +381,17 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             continue;
         }
         if let Some(id) = value.get("id").and_then(Value::as_i64) {
+            if let Some(waiter) = control.take_app_server_query(id) {
+                let _ = waiter.send(value);
+                continue;
+            }
             let is_turn_request = control.take_app_server_turn_request(id);
+            let native_turn_request = control.take_app_server_native_turn_request(id);
             let steer_request = control.take_app_server_steer_request(id);
             let known_request = id == INITIALIZE_ID
                 || id == THREAD_ID
                 || is_turn_request
+                || native_turn_request.is_some()
                 || steer_request.is_some();
             if !known_request {
                 service.complete_app_server_turn(
@@ -422,6 +432,59 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     &steer.expected_turn_id,
                     &steer.queued_message_id,
                 );
+                continue;
+            }
+            if let Some(command) = native_turn_request {
+                if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+                    let _ = control.take_pending_native_turn();
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        None,
+                        "error",
+                        Some(format!("Codex command failed: {error}")),
+                    );
+                    stage_clock = None;
+                    continue;
+                }
+                let turn_already_observed = !control.has_pending_native_turn();
+                if stage_clock.map(|clock| clock.stage) != Some(RequestStage::SubsequentTurn)
+                    && !turn_already_observed
+                {
+                    let _ = control.take_pending_native_turn();
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        None,
+                        "error",
+                        Some("Codex returned a native command response out of order.".into()),
+                    );
+                    stage_clock = None;
+                    continue;
+                }
+                if command == crate::runner::NativeTurnCommand::Review {
+                    let Some(turn_id) = value.pointer("/result/turn/id").and_then(Value::as_str)
+                    else {
+                        let _ = control.take_pending_native_turn();
+                        service.complete_app_server_turn(
+                            &task_id,
+                            &control,
+                            None,
+                            "error",
+                            Some("Codex review response omitted its turn ID.".into()),
+                        );
+                        stage_clock = None;
+                        continue;
+                    };
+                    control.set_app_server_turn(turn_id.into());
+                    let _ = control.take_pending_native_turn();
+                }
+                // Compaction returns `{}` before announcing its real turn
+                // through `turn/started`. Keep both the pending marker and
+                // absolute stage deadline until that notification arrives.
+                if command == crate::runner::NativeTurnCommand::Review {
+                    stage_clock = None;
+                }
                 continue;
             }
             if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
@@ -566,6 +629,31 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 stage_clock = None;
             }
             continue;
+        }
+        if value.get("method").and_then(Value::as_str) == Some("turn/started")
+            && control.has_pending_native_turn()
+        {
+            let params = value.get("params").unwrap_or(&Value::Null);
+            if let Some(turn_id) = params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))
+            {
+                // Current app-server schemas omit `threadId` from this
+                // notification. Older versions included it, so validate when
+                // present and otherwise retain the already-owned thread.
+                let thread_matches = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .map(|thread_id| control.matches_app_server_thread(thread_id))
+                    .unwrap_or(true);
+                if thread_matches && !turn_id.is_empty() {
+                    control.set_app_server_turn(turn_id.into());
+                    let _ = control.take_pending_native_turn();
+                    stage_clock = None;
+                    started = true;
+                }
+            }
         }
         handle_notification(
             &service,

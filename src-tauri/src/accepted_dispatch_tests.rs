@@ -40,6 +40,7 @@ fn stale_receipt_failure_cannot_cancel_a_later_turn_on_the_same_owner() {
                 AcceptedTurn {
                     receipt: "old".into(),
                     prompt: "old prompt".into(),
+                    slash_command: None,
                 },
             );
             Ok(())
@@ -91,6 +92,7 @@ fn native_session_conflict_is_rejected_without_replacing_the_existing_owner() {
                 AcceptedTurn {
                     receipt: "second".into(),
                     prompt: "p".into(),
+                    slash_command: None,
                 },
             );
             Ok(())
@@ -102,6 +104,7 @@ fn native_session_conflict_is_rejected_without_replacing_the_existing_owner() {
         AcceptedTurn {
             receipt: "second".into(),
             prompt: "p".into(),
+            slash_command: None,
         },
     );
     assert!(service
@@ -143,6 +146,7 @@ fn cancelled_waiting_receipt_cannot_start_after_retirement_releases() {
                 AcceptedTurn {
                     receipt: "old".into(),
                     prompt: "old prompt".into(),
+                    slash_command: None,
                 },
             );
             Ok(())
@@ -165,6 +169,7 @@ fn cancelled_waiting_receipt_cannot_start_after_retirement_releases() {
                 AcceptedTurn {
                     receipt: "old".into(),
                     prompt: "old prompt".into(),
+                    slash_command: None,
                 },
             )
         })
@@ -187,6 +192,7 @@ fn cancelled_waiting_receipt_cannot_start_after_retirement_releases() {
                 AcceptedTurn {
                     receipt: "new".into(),
                     prompt: "new prompt".into(),
+                    slash_command: None,
                 },
             );
             Ok(())
@@ -230,6 +236,7 @@ fn waiting_receipt_starts_once_after_retiring_owner_releases() {
             let accepted = AcceptedTurn {
                 receipt: "wait".into(),
                 prompt: "one".into(),
+                slash_command: None,
             };
             data.accepted_turns
                 .insert(task.id.clone(), accepted.clone());

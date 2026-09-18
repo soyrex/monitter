@@ -36,6 +36,14 @@ export interface UsageOverview {
 }
 /** Explicit stdio launcher, never a shell command. Copied into each new task. */
 export interface AcpLaunch { command: string; args: string[]; }
+export interface SlashCommand {
+  /** Command name without the leading slash. */
+  name: string; description: string; inputHint?: string | null;
+  source: 'monitter' | 'codex' | 'acp'; provider: Provider;
+}
+export interface SlashCommandExecution {
+  effect: 'sent' | 'notice' | 'openModel' | 'refreshGoal'; message?: string | null;
+}
 /** Finding an executable does not prove protocol support or authentication. */
 export interface AcpCandidate {
   id: string; name: string; description: string; sourceUrl: string;

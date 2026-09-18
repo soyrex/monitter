@@ -524,6 +524,7 @@ impl Service {
                 prompt: instructions
                     .map(|instructions| format!("{instructions}\n\n{peer_context}"))
                     .unwrap_or(peer_context),
+                slash_command: None,
             };
             data.accepted_turns
                 .insert(item.to_task_id.clone(), accepted.clone());

@@ -40,6 +40,35 @@ pub struct AcpLaunch {
     pub args: Vec<String>,
 }
 
+/// A provider-advertised or Monitter-native composer command. Provider wire
+/// payloads never cross this boundary: the renderer receives only bounded
+/// display metadata and sends the selected command text back to the owner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommand {
+    /// Command name without its leading slash.
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_hint: Option<String>,
+    /// `monitter`, `codex`, or `acp`.
+    pub source: String,
+    /// Provider icon key used by the owner UI.
+    pub provider: String,
+}
+
+/// Result of owner-only slash command dispatch. Long provider output is
+/// deliberately returned as text rather than inserted into durable model
+/// history; commands that start a provider turn return `sent`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommandExecution {
+    /// `sent`, `notice`, `openModel`, or `refreshGoal`.
+    pub effect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 pub fn valid_acp_launch(launch: &AcpLaunch) -> bool {
     // Keep launch data bounded before it reaches state.json or a process API.
     // NUL is rejected because it cannot be represented in an argv element.

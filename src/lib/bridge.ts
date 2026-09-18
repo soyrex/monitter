@@ -43,6 +43,8 @@ import type {
   UsageOverview,
   UsageRefreshPolicy,
   SubagentTranscriptEntry,
+  SlashCommand,
+  SlashCommandExecution,
 } from "./types";
 
 export interface MonitterBridge {
@@ -103,6 +105,8 @@ export interface MonitterBridge {
   setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
   setTaskSandbox(taskId: string, sandbox: Sandbox): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
+  getTaskSlashCommands(taskId: string): Promise<SlashCommand[]>;
+  executeTaskSlashCommand(taskId: string, command: string): Promise<SlashCommandExecution>;
   clearTaskGoal(taskId: string): Promise<void>;
   getTaskGitStatus(taskId: string, detectorSession?: string): Promise<TaskGitStatus>;
   waitForTaskGitMarker(taskId: string, detectorSession?: string): Promise<'found' | 'timeout' | 'already-present'>;
@@ -277,6 +281,8 @@ const nativeBridge: MonitterBridge = {
   setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
   setTaskSandbox: (taskId, sandbox) => invoke<Snapshot>('set_task_sandbox', {taskId,sandbox}),
   getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
+  getTaskSlashCommands: taskId => invoke<SlashCommand[]>("get_task_slash_commands", { taskId }),
+  executeTaskSlashCommand: (taskId, command) => invoke<SlashCommandExecution>("execute_task_slash_command", { taskId, command }),
   clearTaskGoal: taskId => invoke<void>("clear_task_goal", { taskId }),
   getTaskGitStatus: (taskId, detectorSession = '') => invoke<TaskGitStatus>("get_task_git_status", { taskId, detectorSession }),
   waitForTaskGitMarker: (taskId, detectorSession = '') => invoke<'found' | 'timeout' | 'already-present'>("wait_for_task_git_marker", { taskId, detectorSession }),
@@ -374,6 +380,8 @@ const previewBridge: MonitterBridge = {
   setTaskModelSettings: () => desktopOnly(),
   setTaskSandbox: () => desktopOnly(),
   getTaskGoal: async () => null,
+  getTaskSlashCommands: async () => [],
+  executeTaskSlashCommand: () => desktopOnly(),
   clearTaskGoal: async () => { throw new Error("Goal clearing requires a connected harness."); },
   getTaskGitStatus: () => desktopOnly(),
   waitForTaskGitMarker: () => desktopOnly(),
@@ -464,6 +472,8 @@ export function getBridge(): MonitterBridge {
       setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
       setTaskSandbox: (taskId, sandbox) => test.invoke('set_task_sandbox', {taskId,sandbox}) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,
+      getTaskSlashCommands: taskId => test.invoke("get_task_slash_commands", {taskId}) as Promise<SlashCommand[]>,
+      executeTaskSlashCommand: (taskId, command) => test.invoke("execute_task_slash_command", {taskId, command}) as Promise<SlashCommandExecution>,
       clearTaskGoal: taskId => test.invoke("clear_task_goal", {taskId}) as Promise<void>,
       getTaskGitStatus: (taskId, detectorSession = '') => test.invoke("get_task_git_status", {taskId, detectorSession}) as Promise<TaskGitStatus>,
       waitForTaskGitMarker: (taskId, detectorSession = '') => test.invoke("wait_for_task_git_marker", {taskId, detectorSession}) as Promise<'found' | 'timeout' | 'already-present'>,

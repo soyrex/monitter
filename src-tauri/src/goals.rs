@@ -47,6 +47,35 @@ pub(crate) fn clear_goal(host: &Host, task: &Task) -> Result<(), String> {
     result
 }
 
+/// Set or update the persisted Codex goal without starting a model turn.
+pub(crate) fn set_goal(
+    host: &Host,
+    task: &Task,
+    objective: Option<&str>,
+    status: &str,
+) -> Result<Value, String> {
+    let thread_id = task
+        .native_session_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "A Codex session ID is required to update its goal.".to_string())?;
+    if let Some(objective) = objective {
+        let length = objective.chars().count();
+        if objective.trim().is_empty() || length > 4_000 {
+            return Err("Goal objective must contain 1 to 4,000 characters.".into());
+        }
+    }
+    if !matches!(status, "active" | "paused") {
+        return Err("Goal status must be active or paused.".into());
+    }
+    let mut child = app_server_command(host, task.codex_home.as_deref())?.spawn().map_err(|error| {
+        format!("Could not start Codex app-server to update the goal: {error}")
+    })?;
+    let result = set_goal_from_child(&mut child, thread_id, objective, status);
+    stop_child(&mut child);
+    result
+}
+
 /// Read a native Codex child thread without resuming it or starting a turn.
 /// The app-server payload is intentionally reduced to the same transcript
 /// vocabulary used by Monitter-owned delegated tasks.
@@ -150,6 +179,44 @@ fn clear_goal_from_child(child: &mut Child, thread_id: &str) -> Result<(), Strin
     // response, never a locally assumed clear.
     let _ = clear_result(&value)?;
     Ok(())
+}
+
+fn set_goal_from_child(
+    child: &mut Child,
+    thread_id: &str,
+    objective: Option<&str>,
+    status: &str,
+) -> Result<Value, String> {
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdin.".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not open Codex app-server stdout.".to_string())?;
+    let lines = spawn_reader(stdout);
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let mut stdin = stdin;
+    send(&mut stdin, initialize_request())?;
+    response(&lines, 1, deadline, "goal update")
+        .and_then(|value| ensure_success(&value, "Codex app-server initialization"))?;
+    send(&mut stdin, initialized_notification())?;
+    let mut request = json!({
+        "id": 2,
+        "method": "thread/goal/set",
+        "params": { "threadId": thread_id, "status": status }
+    });
+    if let Some(objective) = objective {
+        request["params"]["objective"] = Value::String(objective.trim().into());
+    }
+    send(&mut stdin, request)?;
+    let value = response(&lines, 2, deadline, "goal update")?;
+    ensure_success(&value, "Codex app-server thread/goal/set")?;
+    value
+        .pointer("/result/goal")
+        .cloned()
+        .ok_or_else(|| "Codex app-server goal update omitted its goal.".to_string())
 }
 
 fn read_subagent_transcript_from_child(

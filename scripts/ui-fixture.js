@@ -90,6 +90,13 @@
     waitForTaskGitMarker:async()=> 'already-present',
     getTaskGitDiff:async(taskId,path,scope)=>{record('getTaskGitDiff',{taskId,path,scope});return clone(state.gitDiffs?.[taskId]?.[`${scope}:${path}`] ?? {repository:false});},
     getTaskGoal:async taskId=>{record('getTaskGoal',taskId);return clone(state.goals?.[taskId] ?? null);},
+    getTaskSlashCommands:async taskId=>{record('getTaskSlashCommands',{taskId});const task=state.tasks.find(task=>task.id===taskId);return task?.provider==='codex'&&task.nativeSessionId?[
+      {name:'compact',description:'Compact this Codex thread context',inputHint:null,source:'codex',provider:'codex'},
+      {name:'goal',description:'View or update this Codex thread goal',inputHint:'objective or clear',source:'codex',provider:'codex'},
+      {name:'model',description:'Choose the model and reasoning effort',inputHint:null,source:'codex',provider:'codex'},
+      {name:'usage',description:'Show current Codex account usage',inputHint:null,source:'codex',provider:'codex'},
+    ]:[];},
+    executeTaskSlashCommand:async(taskId,command)=>{record('executeTaskSlashCommand',{taskId,command});if(command==='/model')return {effect:'openModel',message:null};if(command==='/goal')return {effect:'refreshGoal',message:'No active goal.'};if(command==='/usage')return {effect:'notice',message:'5-hour: 12% used\nWeek: 20% used'};return {effect:'sent',message:null};},
     getSubagentTranscript:async(taskId,subagentId)=>{record('getSubagentTranscript',{taskId,subagentId});return clone(state.subagentTranscripts?.[subagentId] ?? []);},
     resumeTask:async taskId=>{record('resumeTask',{taskId});const task=state.tasks.find(t=>t.id===taskId);if(state.resumeFailure)throw Error(state.resumeFailure);if(!task?.nativeSessionId || task.archived || task.status==='running')throw Error('This session cannot be resumed.');task.status='running';state.messages.push({id:crypto.randomUUID(),taskId,role:'user',text:'Continue from where we left off. If the last request is complete, let me know and wait for my next instruction.',createdAt:Date.now()});notify();return copy();},
     getModelCatalog:async target=>{

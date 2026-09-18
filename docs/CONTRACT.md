@@ -115,6 +115,15 @@ No fake conversations, progress, token counts, host connections or model replies
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot (routed through the resident Monitter Admin turn; see Internal agent)
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
+- `get_task_slash_commands { taskId: string }` -> `SlashCommand[]`. Owner desktop/LAN only.
+  Native Codex tasks expose Monitter's protocol-backed Codex catalog once a native thread exists;
+  resident ACP tasks expose the latest replacement snapshot advertised through ACP
+  `available_commands_update`. ACP discovery is runtime state and is empty while disconnected.
+- `execute_task_slash_command { taskId: string, command: string }` ->
+  `{ effect: "sent" | "notice" | "openModel" | "refreshGoal", message?: string | null }`.
+  Owner desktop/LAN only. The command name must exist in that task's current provider catalog.
+  ACP commands are sent as the raw slash prompt; Codex commands use the app-server or the same
+  authoritative Monitter services used by the corresponding UI, never an ordinary model prompt.
 - `get_subagent_transcript { taskId: string, subagentId: string }` -> `SubagentTranscriptEntry[]`.
   Read-only owner desktop/LAN lookup for a subagent reachable from that task's delegation tree.
   For a native Codex child thread it uses `thread/read { includeTurns: true }` without resuming
@@ -731,19 +740,32 @@ fabricated objective/status/token metrics. OpenCode plans are not presented as n
 
 ## Slash menu
 
-Typing `/` opens a filtered, keyboard-accessible menu labelled Monitter commands. These are app
-actions: `/new` and `/clear` reset the active chat's provider context while preserving its visible transcript; outside an active chat `/new` opens an independent draft. `/settings` opens preferences, `/project` selects the
-chat's project, `/stop` cancels a running task, `/resume` continues the saved native session in this chat, and
-`/goal` reads the available Codex goal. Task-specific actions only appear in applicable contexts.
+Typing `/` opens one filtered, keyboard-accessible command dock. It is 10px narrower than the
+composer and rises from behind it, matching the goal dock's visual ownership. Every entry includes
+its source: Monitter actions use the Monitter command mark and provider commands use that provider's
+icon. These app actions remain available in applicable contexts: `/new` and `/clear` reset the active chat's provider context while preserving its visible transcript; outside an active chat `/new` opens an independent draft. `/settings` opens preferences, `/project` selects the
+chat's project, and `/stop` cancels a running task. Task-specific actions only appear in applicable contexts.
 `/autoname` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming routes through the resident Monitter Admin agent (see Internal agent) on its saved provider, model, host, cwd, and sandbox. The admin uses no Spark/Luna/Mini mini-model selection, no provider fallback, and no persisted admin prompt/reply. Concurrent requests are rejected; the request is bounded to 45 seconds; the final target mutation (task title, channel name, or terminal rename) is reported through `monitter:changed` exactly like any other rename.
 `/terminal` opens a terminal tab in the current host and folder; `/terminal <command>` runs that shell command in the new interactive tab (for example `/terminal npm build`). The command is written to the PTY after the shell starts, so the tab stays interactive when it finishes.
 Selection supports arrows, Enter, Escape and clicking. IME composition does not select an action.
 
-The current CLI transports do not expose a shared native slash-command catalog. Unknown commands
-and command arguments such as `/goal objective` produce a visible explanation without sending them
-as ordinary model text. The Send button and keyboard use the same dispatch rule. `//` explicitly
-escapes a literal leading slash; paths such as `/path/to/file` remain ordinary messages. Full native
-command discovery/execution needs separate harness adapters and is not implied by this menu.
+ACP has no request for listing commands. Instead, a resident agent may send ACP
+`session/update` with `available_commands_update`; Monitter validates and bounds that replacement
+snapshot, displays it with the configured provider icon, and invokes a selected command by sending
+the exact `/name arguments` text in `session/prompt`. A reconnect starts with an empty catalog and
+cannot reuse stale commands from a retired transport.
+
+Native Codex has no app-server command-catalog endpoint, so Monitter owns a conservative static
+catalog whose entries all have explicit implementations: `/compact` uses `thread/compact/start`,
+`/review [instructions]` uses `review/start`, `/goal [objective|clear|pause|resume]` uses the native
+goal API, `/model` opens the task model picker, `/usage` reads the authoritative allowance source,
+`/status` reports the persisted runtime selection, and `/skills` plus `/mcp` issue read-only
+app-server list queries. `/compact` and `/review` enter the normal task lifecycle and transcript;
+informational commands return a bounded local notice and do not create fake provider messages.
+
+Unknown commands and invalid arguments produce a visible explanation without sending ordinary
+model text. The Send button and keyboard use the same dispatch rule. `//` explicitly escapes a
+literal leading slash; paths such as `/path/to/file` remain ordinary messages.
 
 ## Internal agent
 

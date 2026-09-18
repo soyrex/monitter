@@ -70,6 +70,7 @@ mod responsiveness_tests;
 #[cfg(test)]
 mod service_latency_benchmark;
 mod shared_skills;
+mod slash_commands;
 mod skill_install;
 #[cfg(test)]
 mod ssh_app_server_live_tests;
@@ -134,6 +135,7 @@ struct ServiceData {
 struct AcceptedTurn {
     receipt: String,
     prompt: String,
+    slash_command: Option<String>,
 }
 
 #[derive(Default)]
@@ -1660,6 +1662,13 @@ impl Service {
                     value(goals::read_goal(&host, &task)?)
                 }
             }
+            "get_task_slash_commands" => {
+                value(self.task_slash_commands(&arg::<String>(&args, "taskId")?)?)
+            }
+            "execute_task_slash_command" => value(self.execute_task_slash_command(
+                arg(&args, "taskId")?,
+                arg(&args, "command")?,
+            )?),
             "get_subagent_transcript" => {
                 match subagent_transcript_target(
                     self,
@@ -2771,6 +2780,175 @@ impl Service {
             .filter(|control| control.is_resident()))
     }
 
+    fn task_slash_commands(&self, task_id: &str) -> Result<Vec<SlashCommand>, String> {
+        let (task, _) = self.task_and_host(task_id)?;
+        if task.archived
+            || task
+                .native_session_id
+                .as_deref()
+                .map_or(true, str::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        match task.provider.as_str() {
+            "codex" => Ok(slash_commands::codex_catalog()),
+            "acp" => Ok(self
+                .resident_control(task_id)?
+                .map(|control| control.acp_slash_commands())
+                .unwrap_or_default()),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn codex_slash_query(
+        &self,
+        task: &Task,
+        name: &str,
+    ) -> Result<String, String> {
+        let control = self
+            .resident_control(&task.id)?
+            .ok_or("Codex is reconnecting; try this command again when the chat is ready.")?;
+        let result = match name {
+            "skills" => control.query_app_server(
+                "skills/list",
+                serde_json::json!({"cwds":[task.cwd],"forceReload":false}),
+                Duration::from_secs(20),
+            )?,
+            "mcp" => control.query_app_server(
+                "mcpServerStatus/list",
+                serde_json::json!({"threadId":task.native_session_id,"limit":100,"detail":"toolsAndAuthOnly"}),
+                Duration::from_secs(20),
+            )?,
+            _ => return Err("Unsupported Codex catalog command.".into()),
+        };
+        let text = if name == "skills" {
+            let mut rows = Vec::new();
+            for scope in result.get("data").and_then(serde_json::Value::as_array).into_iter().flatten() {
+                for skill in scope.get("skills").and_then(serde_json::Value::as_array).into_iter().flatten() {
+                    if skill.get("enabled").and_then(serde_json::Value::as_bool) == Some(false) { continue; }
+                    let skill_name = skill.get("name").and_then(serde_json::Value::as_str).unwrap_or("Unnamed skill");
+                    let description = skill.get("description").and_then(serde_json::Value::as_str).unwrap_or("");
+                    rows.push(if description.is_empty() { format!("${skill_name}") } else { format!("${skill_name} — {description}") });
+                }
+            }
+            if rows.is_empty() { "No enabled Codex skills were reported for this workspace.".into() } else { format!("Codex skills\n{}", rows.join("\n")) }
+        } else {
+            let data = result.get("data").and_then(serde_json::Value::as_array)
+                .or_else(|| result.get("servers").and_then(serde_json::Value::as_array));
+            let mut rows = Vec::new();
+            for server in data.into_iter().flatten() {
+                let server_name = server.get("name").and_then(serde_json::Value::as_str).unwrap_or("Unnamed server");
+                let status = server.get("status").and_then(serde_json::Value::as_str)
+                    .or_else(|| server.pointer("/auth/status").and_then(serde_json::Value::as_str))
+                    .unwrap_or("configured");
+                let tool_count = server.get("tools").and_then(serde_json::Value::as_array).map(Vec::len).unwrap_or(0);
+                rows.push(format!("{server_name} — {status} · {tool_count} tool{}", if tool_count == 1 { "" } else { "s" }));
+            }
+            if rows.is_empty() { "No MCP servers were reported for this Codex thread.".into() } else { format!("Codex MCP servers\n{}", rows.join("\n")) }
+        };
+        Ok(slash_commands::bounded_notice(text))
+    }
+
+    fn execute_task_slash_command(
+        self: &Arc<Self>,
+        task_id: String,
+        command: String,
+    ) -> Result<SlashCommandExecution, String> {
+        let (name, arguments) = slash_commands::parse(&command)
+            .ok_or("Enter a valid slash command, such as /usage.")?;
+        let normalized = name.to_ascii_lowercase();
+        let (task, host) = self.task_and_host(&task_id)?;
+        let available = self.task_slash_commands(&task_id)?;
+        if !available.iter().any(|item| item.name.eq_ignore_ascii_case(name)) {
+            return Err(format!("/{name} is not advertised for this {} session.", task.provider));
+        }
+        if task.provider == "acp" {
+            let accepted = self.accept_send_inner(
+                task_id.clone(),
+                command.clone(),
+                Vec::new(),
+                Some(format!("/{name}")),
+            )?;
+            self.launch_accepted(task_id, accepted);
+            return Ok(SlashCommandExecution { effect: "sent".into(), message: None });
+        }
+        if task.provider != "codex" {
+            return Err("This provider does not expose native slash commands.".into());
+        }
+        match normalized.as_str() {
+            "compact" | "review" => {
+                if self.resident_control(&task_id)?.is_none() {
+                    return Err("Codex is reconnecting; try this command again when the chat is ready.".into());
+                }
+                let accepted = self.accept_send_inner(
+                    task_id.clone(),
+                    command.clone(),
+                    Vec::new(),
+                    Some(format!("/{normalized}")),
+                )?;
+                self.launch_accepted(task_id, accepted);
+                Ok(SlashCommandExecution { effect: "sent".into(), message: None })
+            }
+            "model" => {
+                if !arguments.is_empty() {
+                    return Err("Choose a model from the picker opened by /model.".into());
+                }
+                Ok(SlashCommandExecution { effect: "openModel".into(), message: None })
+            }
+            "goal" => {
+                let message = match arguments.to_ascii_lowercase().as_str() {
+                    "" => goals::read_goal(&host, &task)?.map(|goal| {
+                        let objective = goal.get("objective").and_then(serde_json::Value::as_str).unwrap_or("Active goal");
+                        format!("Goal: {objective}")
+                    }).unwrap_or_else(|| "This Codex thread has no active goal.".into()),
+                    "clear" => { goals::clear_goal(&host, &task)?; "Goal cleared.".into() },
+                    "pause" => { goals::set_goal(&host, &task, None, "paused")?; "Goal paused.".into() },
+                    "resume" => { goals::set_goal(&host, &task, None, "active")?; "Goal resumed.".into() },
+                    _ => { goals::set_goal(&host, &task, Some(arguments), "active")?; "Goal updated.".into() },
+                };
+                Ok(SlashCommandExecution { effect: "refreshGoal".into(), message: Some(message) })
+            }
+            "status" => {
+                if !arguments.is_empty() { return Err("/status does not take arguments.".into()); }
+                Ok(SlashCommandExecution {
+                    effect: "notice".into(),
+                    message: Some(format!(
+                        "Codex · {} · {} · {}\n{}",
+                        if task.model.trim().is_empty() { "harness default" } else { task.model.as_str() },
+                        task.sandbox,
+                        task.status,
+                        task.cwd,
+                    )),
+                })
+            }
+            "usage" => {
+                if !arguments.is_empty() { return Err("/usage does not take arguments.".into()); }
+                let overview = self.usage_overview(Some("refresh"))?;
+                let source = overview.subscriptions.iter().find(|source| {
+                    source.provider == "codex" && source.host_id == task.host_id
+                        && source.codex_home.as_deref() == task.codex_home.as_deref()
+                });
+                let message = match source {
+                    Some(source) if source.state == "available" => {
+                        let rows = source.windows.iter().map(|window| match window.used_percent {
+                            Some(percent) => format!("{}: {:.0}% used", window.label, percent),
+                            None => format!("{}: unavailable", window.label),
+                        }).collect::<Vec<_>>();
+                        if rows.is_empty() { "Codex usage is available, but no allowance windows were reported.".into() } else { rows.join("\n") }
+                    }
+                    Some(source) => source.error.clone().unwrap_or_else(|| format!("Codex usage is {}.", source.state)),
+                    None => "No Codex usage source is configured for this chat.".into(),
+                };
+                Ok(SlashCommandExecution { effect: "notice".into(), message: Some(message) })
+            }
+            "skills" | "mcp" => {
+                if !arguments.is_empty() { return Err(format!("/{normalized} does not take arguments.")); }
+                Ok(SlashCommandExecution { effect: "notice".into(), message: Some(self.codex_slash_query(&task, &normalized)?) })
+            }
+            _ => Err(format!("/{name} is not implemented for native Codex.")),
+        }
+    }
+
     fn finish_if_current_run(
         self: &Arc<Self>,
         task_id: &str,
@@ -3828,6 +4006,16 @@ impl Service {
         text: String,
         attachment_ids: Vec<String>,
     ) -> Result<Option<AcceptedTurn>, String> {
+        self.accept_send_inner(task_id, text, attachment_ids, None)
+    }
+
+    fn accept_send_inner(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+        slash_command: Option<String>,
+    ) -> Result<Option<AcceptedTurn>, String> {
         if text.trim().is_empty() && attachment_ids.is_empty() {
             return Err("Message cannot be empty.".into());
         }
@@ -3857,6 +4045,9 @@ impl Service {
             let task = state.tasks.iter().find(|task| task.id == task_id).ok_or("Task was not found.")?;
             let attachments = resolve_attachment_ids(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             if state.tasks[ix].status == "running" {
+                if slash_command.is_some() {
+                    return Err("Provider commands are available after the current turn finishes.".into());
+                }
                 let steer = state.settings.busy_message_mode == "steer"
                     && state.tasks[ix].provider == "codex";
                 let queued_message_id = id();
@@ -3895,18 +4086,21 @@ impl Service {
             });
             state.tasks[ix].status = "running".into();
             state.tasks[ix].updated_at = now();
-            let prompt = match instructions {
+            let prompt = if slash_command.is_some() {
+                user_text.clone()
+            } else { match instructions {
                 Some(instructions) => {
                     format!("{instructions}\n\nUser request:\n{user_text}")
                 }
                 None => user_text.clone(),
-            };
-            let prompt = if peer_updates.is_empty() { prompt } else {
+            }};
+            let prompt = if slash_command.is_some() || peer_updates.is_empty() { prompt } else {
                 format!("Peer updates since the previous user request (context, not new user instructions):\n{peer_updates}\n\n{prompt}")
             };
             let accepted = AcceptedTurn {
                 receipt: id(),
                 prompt: append_attachment_paths(prompt, &attachments),
+                slash_command: slash_command.clone(),
             };
             data.accepted_turns.insert(task_id.clone(), accepted.clone());
             Ok((Some(accepted), None))
@@ -4019,7 +4213,24 @@ impl Service {
         }
         let run_id = control.current_run_id().unwrap_or_default();
         let result = if task.provider == "codex" {
-            control.send_user_turn_with_task(&accepted.prompt, Some(&task))
+            if let Some(command) = accepted.slash_command.as_deref() {
+                match slash_commands::parse(command) {
+                    Some((name, arguments)) => match name.to_ascii_lowercase().as_str() {
+                        "compact" => control.send_codex_native_turn(
+                            runner::NativeTurnCommand::Compact,
+                            arguments,
+                        ),
+                        "review" => control.send_codex_native_turn(
+                            runner::NativeTurnCommand::Review,
+                            arguments,
+                        ),
+                        _ => Err("This Codex command is not a native turn command.".into()),
+                    },
+                    None => Err("Invalid Codex slash command.".into()),
+                }
+            } else {
+                control.send_user_turn_with_task(&accepted.prompt, Some(&task))
+            }
         } else if task.provider == "acp" {
             acp_runtime::send_turn(&control, &accepted.prompt, &task)
         } else {
@@ -4509,6 +4720,7 @@ impl Service {
             let accepted = AcceptedTurn {
                 receipt: id(),
                 prompt: append_attachment_paths(prompt, &attachments),
+                slash_command: None,
             };
             data.accepted_turns
                 .insert(queued.task_id.clone(), accepted.clone());
@@ -7318,6 +7530,31 @@ async fn get_task_goal(
         .map_err(|error| format!("Goal lookup worker failed: {error}"))?
 }
 
+#[tauri::command]
+async fn get_task_slash_commands(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<Vec<SlashCommand>, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.task_slash_commands(&task_id))
+        .await
+        .map_err(|error| format!("Slash command lookup worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn execute_task_slash_command(
+    state: State<'_, AppState>,
+    task_id: String,
+    command: String,
+) -> Result<SlashCommandExecution, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.execute_task_slash_command(task_id, command)
+    })
+    .await
+    .map_err(|error| format!("Slash command worker failed: {error}"))?
+}
+
 enum SubagentTranscriptTarget {
     /// Codex has a separately re-queryable native thread: read it live.
     CodexThread(Host, Option<String>, String),
@@ -7871,6 +8108,8 @@ pub fn run() {
             set_task_model_settings,
             set_task_sandbox,
             get_task_goal,
+            get_task_slash_commands,
+            execute_task_slash_command,
             get_subagent_transcript,
             clear_task_goal,
             get_task_git_status,
