@@ -1,7 +1,9 @@
 use crate::{
     adapters,
     collaboration_transport::SessionGrant,
-    model::{valid_sandbox_for_provider, Host, Task, UsageContext, UsageTokens},
+    model::{
+        valid_sandbox_for_provider, Host, SubagentSessionUpdate, Task, UsageContext, UsageTokens,
+    },
     ApprovalDecision, CreateApprovalRequest, Service,
 };
 use serde_json::Value;
@@ -1179,6 +1181,178 @@ fn json_detail(value: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
+fn normalized_subagent_status(status: &str) -> Option<String> {
+    match status {
+        "pendingInit" | "pending" | "queued" => Some("queued".into()),
+        "running" | "started" | "interacted" | "inProgress" => Some("running".into()),
+        "completed" => Some("completed".into()),
+        "failed" | "error" => Some("error".into()),
+        "interrupted" | "cancelled" | "canceled" | "closed" => Some("interrupted".into()),
+        _ => None,
+    }
+}
+
+/// Extract the durable sub-agent facts from Codex's collaboration items. The
+/// item is intentionally parsed as JSON rather than inferred from its title:
+/// the native protocol provides stable thread IDs, state and optional output.
+pub fn parse_codex_subagent_updates(
+    value: &Value,
+    parent_task_id: &str,
+) -> Vec<SubagentSessionUpdate> {
+    let item = value.get("item").unwrap_or(value);
+    let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+    if item_type == "collabAgentToolCall" {
+        let states = item.get("agentsStates").and_then(Value::as_object);
+        return item
+            .get("receiverThreadIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|thread| !thread.trim().is_empty())
+            .map(|thread| {
+                let state = states.and_then(|states| states.get(thread));
+                let raw_status = state
+                    .and_then(|state| state.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                SubagentSessionUpdate {
+                    id: format!("codex:{thread}"),
+                    source: "codex".into(),
+                    parent_task_id: parent_task_id.into(),
+                    parent_thread_id: item
+                        .get("senderThreadId")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned),
+                    collaboration_id: None,
+                    agent_path: None,
+                    agent_thread_id: Some(thread.into()),
+                    prompt: item
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned),
+                    model: item
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned),
+                    reasoning_effort: item
+                        .get("reasoningEffort")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned),
+                    status: normalized_subagent_status(raw_status),
+                    result: state
+                        .and_then(|state| state.get("message"))
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned),
+                    error: None,
+                    created_at: None,
+                    updated_at: None,
+                }
+            })
+            .collect();
+    }
+    if item_type != "subAgentActivity" {
+        return vec![];
+    }
+    let Some(thread) = item
+        .get("agentThreadId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return vec![];
+    };
+    vec![SubagentSessionUpdate {
+        id: format!("codex:{thread}"),
+        source: "codex".into(),
+        parent_task_id: parent_task_id.into(),
+        parent_thread_id: None,
+        collaboration_id: None,
+        agent_path: item
+            .get("agentPath")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+        agent_thread_id: Some(thread.into()),
+        prompt: None,
+        model: None,
+        reasoning_effort: None,
+        status: item
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(normalized_subagent_status),
+        result: None,
+        error: None,
+        created_at: None,
+        updated_at: None,
+    }]
+}
+
+/// Extract the durable sub-agent facts from an ACP agent's native subagent
+/// protocol extension (currently implemented by claude-agent-acp's Task/Agent
+/// tool handling). Unlike Codex, there is no separately re-queryable thread:
+/// `subagent_spawned` announces identity and `subagent_state_update` reports
+/// its terminal outcome; everything in between streams inline and is captured
+/// by the ACP runtime directly into `Snapshot.subagentTranscripts`.
+pub fn parse_acp_subagent_updates(value: &Value, parent_task_id: &str) -> Vec<SubagentSessionUpdate> {
+    let item = value.get("item").unwrap_or(value);
+    let update_kind = item
+        .get("sessionUpdate")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let Some(subagent_session_id) = item
+        .get("subagentSessionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return vec![];
+    };
+    match update_kind {
+        "subagent_spawned" => vec![SubagentSessionUpdate {
+            id: format!("acp:{subagent_session_id}"),
+            source: "acp".into(),
+            parent_task_id: parent_task_id.into(),
+            agent_thread_id: Some(subagent_session_id.into()),
+            agent_path: item
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
+            prompt: item
+                .get("task")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
+            status: Some("running".into()),
+            ..Default::default()
+        }],
+        "subagent_state_update" => {
+            let state = item.get("state").and_then(Value::as_str).unwrap_or("");
+            let status = match state {
+                "completed" => Some("completed".into()),
+                "failed" | "disconnected" => Some("error".into()),
+                "cancelled" => Some("interrupted".into()),
+                _ => None,
+            };
+            vec![SubagentSessionUpdate {
+                id: format!("acp:{subagent_session_id}"),
+                source: "acp".into(),
+                parent_task_id: parent_task_id.into(),
+                agent_thread_id: Some(subagent_session_id.into()),
+                status,
+                error: matches!(state, "failed" | "disconnected")
+                    .then(|| format!("ACP subagent {state}.")),
+                ..Default::default()
+            }]
+        }
+        _ => vec![],
+    }
+}
+
 pub fn parse_codex_event(value: &Value) -> Parsed {
     let ty = value.get("type").and_then(Value::as_str).unwrap_or("");
     let native_session_id = ["thread_id", "threadId", "session_id", "sessionId"]
@@ -1198,6 +1372,19 @@ pub fn parse_codex_event(value: &Value) -> Parsed {
         .or_else(|| item.get("content").and_then(Value::as_str))
         .or_else(|| value.get("text").and_then(Value::as_str))
         .map(str::to_owned);
+
+    if !parse_codex_subagent_updates(item, "event").is_empty() {
+        return Parsed {
+            native_session_id,
+            assistant: None,
+            event: Some((
+                "subagent".into(),
+                "Sub-agent activity".into(),
+                item.to_string(),
+            )),
+            failed: false,
+        };
+    }
 
     // Computer Use returns screenshots as a real MCP result image. This is
     // distinct from a UserMessage local_image and is safe to associate with
@@ -3582,6 +3769,7 @@ mod tests {
             sandbox: "read-only".into(),
             project_id: None,
             acp: None,
+            archived_agent_name: None,
         }
     }
 
@@ -4422,6 +4610,96 @@ mod tests {
             "type":"turn.failed","error":{"message":"capacity"}
         }));
         assert_eq!(failed.event.unwrap().2, "capacity");
+    }
+
+    #[test]
+    fn normalizes_native_subagent_tool_and_activity_items() {
+        let spawned = parse_codex_subagent_updates(
+            &serde_json::json!({
+                "type":"collabAgentToolCall", "tool":"spawnAgent",
+                "senderThreadId":"parent-thread", "receiverThreadIds":["child-thread"],
+                "prompt":"check the parser", "model":"gpt-5.6-luna", "reasoningEffort":"medium",
+                "agentsStates":{"child-thread":{"status":"pendingInit","message":null}}
+            }),
+            "parent-task",
+        );
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].id, "codex:child-thread");
+        assert_eq!(
+            spawned[0].parent_thread_id.as_deref(),
+            Some("parent-thread")
+        );
+        assert_eq!(spawned[0].status.as_deref(), Some("queued"));
+        assert_eq!(spawned[0].prompt.as_deref(), Some("check the parser"));
+        assert_eq!(spawned[0].model.as_deref(), Some("gpt-5.6-luna"));
+
+        let completed = parse_codex_subagent_updates(
+            &serde_json::json!({
+                "type":"collabAgentToolCall", "tool":"wait",
+                "receiverThreadIds":["child-thread"],
+                "agentsStates":{"child-thread":{"status":"completed","message":"done"}}
+            }),
+            "parent-task",
+        );
+        assert_eq!(completed[0].status.as_deref(), Some("completed"));
+        assert_eq!(completed[0].result.as_deref(), Some("done"));
+
+        let activity = parse_codex_subagent_updates(
+            &serde_json::json!({
+                "type":"subAgentActivity", "agentThreadId":"child-thread",
+                "agentPath":"/root/check", "kind":"interacted"
+            }),
+            "parent-task",
+        );
+        assert_eq!(activity[0].agent_path.as_deref(), Some("/root/check"));
+        assert_eq!(activity[0].status.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn normalizes_acp_subagent_spawn_and_terminal_state() {
+        let spawned = parse_acp_subagent_updates(
+            &serde_json::json!({
+                "sessionUpdate":"subagent_spawned", "subagentSessionId":"child-session",
+                "name":"math-helper", "task":"Compute 127 x 43 + 58"
+            }),
+            "parent-task",
+        );
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].id, "acp:child-session");
+        assert_eq!(spawned[0].source, "acp");
+        assert_eq!(spawned[0].agent_thread_id.as_deref(), Some("child-session"));
+        assert_eq!(spawned[0].agent_path.as_deref(), Some("math-helper"));
+        assert_eq!(
+            spawned[0].prompt.as_deref(),
+            Some("Compute 127 x 43 + 58")
+        );
+        assert_eq!(spawned[0].status.as_deref(), Some("running"));
+
+        let completed = parse_acp_subagent_updates(
+            &serde_json::json!({
+                "sessionUpdate":"subagent_state_update", "subagentSessionId":"child-session",
+                "state":"completed"
+            }),
+            "parent-task",
+        );
+        assert_eq!(completed[0].status.as_deref(), Some("completed"));
+        assert_eq!(completed[0].error, None);
+
+        let failed = parse_acp_subagent_updates(
+            &serde_json::json!({
+                "sessionUpdate":"subagent_state_update", "subagentSessionId":"child-session",
+                "state":"failed"
+            }),
+            "parent-task",
+        );
+        assert_eq!(failed[0].status.as_deref(), Some("error"));
+        assert!(failed[0].error.is_some());
+
+        assert!(parse_acp_subagent_updates(
+            &serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"x"}),
+            "parent-task"
+        )
+        .is_empty());
     }
 
     #[test]

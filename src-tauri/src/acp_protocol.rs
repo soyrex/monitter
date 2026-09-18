@@ -129,7 +129,10 @@ pub fn error_response(id: Value, code: i64, message: &str) -> Value {
 pub fn initialize_params() -> Value {
     json!({"protocolVersion":PROTOCOL_VERSION,
         "clientInfo":{"name":"monitter","title":"Monitter","version":env!("CARGO_PKG_VERSION")},
-        "clientCapabilities":{}})
+        // Advertising `subagents` asks agents that support it (e.g. claude-agent-acp) to
+        // announce Task/Agent-tool delegation as `subagent_spawned`/`subagent_state_update`
+        // notifications instead of silently folding that activity into the root transcript.
+        "clientCapabilities":{"subagents":{}}})
 }
 
 /// Only explicit capabilities enable optional methods. Null is not support.
@@ -268,7 +271,10 @@ mod tests {
         assert_eq!(caps.recovery_method().unwrap(), "session/load");
         let caps = Capabilities::from_initialize(&json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}})).unwrap();
         assert_eq!(caps.recovery_method().unwrap(), "session/resume");
-        assert_eq!(initialize_params()["clientCapabilities"], json!({}));
+        assert_eq!(
+            initialize_params()["clientCapabilities"],
+            json!({"subagents":{}})
+        );
     }
 
     #[test]

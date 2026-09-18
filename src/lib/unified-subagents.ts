@@ -1,5 +1,5 @@
 import type { Agent, Collaboration, Message, RunEvent, Snapshot, SubagentSession, SubagentTranscriptEntry, Task, TaskStatus } from '$lib/types';
-import { nativeSubagentActivity, toolPresentation } from '$lib/activity-grouping';
+import { subagentThreadLink, toolPresentation } from '$lib/activity-grouping';
 
 /**
  * A presentation-only task view. Both native child tasks and Monitter
@@ -128,12 +128,12 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
     const agent = agentById.get(task?.agentId ?? collaboration?.toAgentId ?? '');
     const matchingEvents = events.filter(event => {
       if (event.kind !== 'subagent' || event.taskId !== session.parentTaskId) return false;
-      const activity = nativeSubagentActivity(event);
+      const activity = subagentThreadLink(event);
       return !!activity && [activity.agentThreadId, ...activity.receiverThreadIds].includes(session.agentThreadId ?? '');
     });
     const latestEvent = matchingEvents.sort((a, b) => b.createdAt - a.createdAt)[0]
       ?? (task ? events.filter(event => event.taskId === task.id).sort((a, b) => b.createdAt - a.createdAt)[0] : undefined);
-    const latestActivity = latestEvent ? nativeSubagentActivity(latestEvent) : null;
+    const latestActivity = latestEvent ? subagentThreadLink(latestEvent) : null;
     const agentName = agent?.name ?? humanName(session.agentPath);
     const prompt = session.prompt ?? collaboration?.text ?? null;
     const result = session.result ?? collaboration?.result ?? null;

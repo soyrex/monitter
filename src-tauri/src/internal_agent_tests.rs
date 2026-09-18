@@ -281,7 +281,7 @@ fn delete_agent_rejects_the_internal_admin() {
     let admin_id = fixture.service.internal_admin().unwrap().id;
     let error = fixture
         .service
-        .delete_agent(&admin_id)
+        .delete_agent(&admin_id, crate::DeleteAgentChatHandling::Archive)
         .expect_err("delete_agent must refuse to remove the admin");
     assert!(
         error.contains("Monitter Admin agent cannot be deleted"),
@@ -305,7 +305,7 @@ fn delete_agent_still_removes_normal_agents() {
     let normal_id = fixture.service.snapshot().unwrap().agents[0].id.clone();
     fixture
         .service
-        .delete_agent(&normal_id)
+        .delete_agent(&normal_id, crate::DeleteAgentChatHandling::Archive)
         .expect("normal agent deletion must still work");
     let agents = fixture.service.snapshot().unwrap().agents;
     assert!(agents.iter().all(|agent| agent.id != normal_id));
@@ -599,5 +599,328 @@ fn lan_invoke_delete_agent_rejects_the_internal_admin() {
     assert!(
         error.contains("Monitter Admin agent cannot be deleted"),
         "unexpected error: {error}"
+    );
+}
+
+fn user_agent(fixture: &ServiceFixture) -> crate::model::Agent {
+    fixture
+        .service
+        .snapshot()
+        .unwrap()
+        .agents
+        .into_iter()
+        .find(|agent| !agent.internal)
+        .expect("the fixture must seed at least one user agent")
+}
+
+#[test]
+fn delete_agent_default_archives_tasks_and_preserves_agent_and_llm_reference() {
+    let fixture = fixture("delete-archive-default");
+    let agent = user_agent(&fixture);
+    let original_name = agent.name.clone();
+    let original_provider = agent.provider.clone();
+    let original_model = agent.model.clone();
+    let first = fixture
+        .service
+        .create_task(crate::model::CreateTaskInput {
+            agent_id: agent.id.clone(),
+            title: "Keep me".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let second = fixture
+        .service
+        .create_task(crate::model::CreateTaskInput {
+            agent_id: agent.id.clone(),
+            title: "Keep me too".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    // Seed a queued follow-up and a pending approval so we can assert they
+    // are cleaned up while the underlying tasks are archived.
+    fixture
+        .service
+        .mutate(None, |snapshot| {
+            snapshot.queued_messages.push(crate::model::QueuedMessage {
+                id: "queued-1".into(),
+                task_id: first.id.clone(),
+                channel_id: None,
+                text: "follow-up".into(),
+                attachment_ids: vec![],
+                created_at: 0,
+                status: "queued".into(),
+                error: None,
+                sender_agent_id: None,
+                origin: None,
+            });
+            snapshot.approval_requests.push(crate::model::ApprovalRequest {
+                id: "approval-1".into(),
+                task_id: second.id.clone(),
+                provider: original_provider.clone(),
+                run_id: "run-1".into(),
+                tool: "shell".into(),
+                summary: "rm -rf".into(),
+                detail: String::new(),
+                risk: "high".into(),
+                status: "pending".into(),
+                created_at: 0,
+                resolved_at: None,
+                decision: None,
+                input: None,
+                response: None,
+                rememberable: false,
+                session_scope: None,
+                rule_id: None,
+                approval_scope: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+
+    fixture
+        .service
+        .delete_agent(&agent.id, crate::DeleteAgentChatHandling::Archive)
+        .expect("default archive must succeed");
+
+    let snapshot = fixture.service.snapshot().unwrap();
+    assert!(
+        snapshot.agents.iter().all(|a| a.id != agent.id),
+        "agent must be removed"
+    );
+    let archived: Vec<&crate::model::Task> = snapshot
+        .tasks
+        .iter()
+        .filter(|t| t.id == first.id || t.id == second.id)
+        .collect();
+    assert_eq!(archived.len(), 2, "both chats must remain in the snapshot");
+    for task in archived {
+        assert!(task.archived, "task must be archived: {task:?}");
+        assert_eq!(
+            task.archived_agent_name.as_deref(),
+            Some(original_name.as_str()),
+            "agent display name must be captured so the chat stays labelled"
+        );
+        assert_eq!(task.provider, original_provider);
+        assert_eq!(task.model, original_model);
+    }
+    assert!(
+        snapshot
+            .queued_messages
+            .iter()
+            .filter(|m| m.task_id == first.id || m.task_id == second.id)
+            .all(|m| m.status == "error" && m.error.as_deref() == Some("Owner agent removed.")),
+        "queued follow-ups for the removed agent must be failed with an owner-removal reason"
+    );
+    assert!(
+        snapshot
+            .approval_requests
+            .iter()
+            .filter(|r| r.task_id == first.id || r.task_id == second.id)
+            .all(|r| r.status == "expired"),
+        "approval requests for the removed agent must be expired"
+    );
+}
+
+#[test]
+fn delete_agent_with_delete_handling_drops_tasks_and_history() {
+    let fixture = fixture("delete-chats");
+    let agent = user_agent(&fixture);
+    let task = fixture
+        .service
+        .create_task(crate::model::CreateTaskInput {
+            agent_id: agent.id.clone(),
+            title: "Erase me".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    fixture
+        .service
+        .mutate(None, |snapshot| {
+            snapshot.messages.push(crate::model::Message {
+                stream_status: None,
+                phase: None,
+                id: "m-1".into(),
+                task_id: task.id.clone(),
+                role: "user".into(),
+                text: "hello".into(),
+                created_at: 0,
+                sender_agent_id: None,
+                collaboration_id: None,
+                attachments: vec![],
+            });
+            Ok(())
+        })
+        .unwrap();
+
+    fixture
+        .service
+        .delete_agent(&agent.id, crate::DeleteAgentChatHandling::Delete)
+        .expect("delete mode must succeed");
+
+    let snapshot = fixture.service.snapshot().unwrap();
+    assert!(
+        snapshot.agents.iter().all(|a| a.id != agent.id),
+        "agent must be removed"
+    );
+    assert!(
+        snapshot.tasks.iter().all(|t| t.id != task.id),
+        "task must be removed in delete mode"
+    );
+    assert!(
+        snapshot.messages.iter().all(|m| m.task_id != task.id),
+        "messages for the deleted task must be removed"
+    );
+    assert!(
+        snapshot.events.iter().all(|e| e.task_id != task.id),
+        "activity events for the deleted task must be removed"
+    );
+}
+
+#[test]
+fn delete_agent_with_running_task_cancels_then_archives() {
+    let fixture = fixture("delete-running");
+    let agent = user_agent(&fixture);
+    let task = fixture
+        .service
+        .create_task(crate::model::CreateTaskInput {
+            agent_id: agent.id.clone(),
+            title: "running".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    fixture
+        .service
+        .mutate(None, |snapshot| {
+            let task = snapshot
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == task.id)
+                .unwrap();
+            task.status = "running".into();
+            Ok(())
+        })
+        .unwrap();
+
+    fixture
+        .service
+        .delete_agent(&agent.id, crate::DeleteAgentChatHandling::Archive)
+        .expect("archive of an agent with a running task must succeed");
+
+    let snapshot = fixture.service.snapshot().unwrap();
+    let archived = snapshot
+        .tasks
+        .iter()
+        .find(|t| t.id == task.id)
+        .expect("task must remain archived in the snapshot");
+    assert!(archived.archived);
+    assert_eq!(
+        archived.status, "interrupted",
+        "running task must be cancelled before being archived"
+    );
+    assert_eq!(
+        archived.archived_agent_name.as_deref(),
+        Some(agent.name.as_str()),
+        "agent reference must still be captured after cancellation"
+    );
+    let system_message = snapshot
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.task_id == task.id && m.role == "system" && m.text.contains("owning agent was removed"))
+        .expect("cancellation must leave an owner-removal system boundary message");
+    assert_eq!(system_message.role, "system");
+    let status_event = snapshot
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.task_id == task.id && event.title.contains("owning agent was removed"))
+        .expect("diagnostic timeline must record the owner-removal status");
+    assert_eq!(status_event.kind, "status");
+}
+
+#[test]
+fn delete_agent_with_unknown_handling_value_rejects_visibly() {
+    let fixture = fixture("delete-bad-handling");
+    let agent = user_agent(&fixture);
+    let error = fixture
+        .service
+        .lan_invoke("delete_agent", json!({"id": agent.id, "chatHandling": "nuke"})) // (del intended)
+        .expect_err("unknown chatHandling must be rejected");
+    assert!(
+        error.contains("Unknown chat handling mode"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        fixture
+            .service
+            .snapshot()
+            .unwrap()
+            .agents
+            .iter()
+            .any(|a| a.id == agent.id),
+        "rejected delete must leave the agent untouched"
+    );
+}
+
+#[test]
+fn lan_invoke_delete_agent_archives_by_default() {
+    let fixture = fixture("lan-delete-default");
+    let agent = user_agent(&fixture);
+    let task = fixture
+        .service
+        .create_task(crate::model::CreateTaskInput {
+            agent_id: agent.id.clone(),
+            title: "lan-default".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    fixture
+        .service
+        .lan_invoke("delete_agent", json!({"id": agent.id}))
+        .expect("LAN delete with no chatHandling must default to archive");
+    let snapshot = fixture.service.snapshot().unwrap();
+    assert!(
+        snapshot.agents.iter().all(|a| a.id != agent.id),
+        "agent must be removed through the LAN path too"
+    );
+    let archived = snapshot
+        .tasks
+        .iter()
+        .find(|t| t.id == task.id)
+        .expect("task must survive when archive is the default");
+    assert!(archived.archived);
+    assert_eq!(
+        archived.archived_agent_name.as_deref(),
+        Some(agent.name.as_str())
     );
 }

@@ -58,12 +58,29 @@ try {
   });
   await expect(pane.getByRole('tablist',{name:'Subagent tasks'}).getByText('Review lifecycle updates',{exact:true})).toBeVisible();
   expect(await pane.locator('.composer-area').evaluate(node => node.lastElementChild?.classList.contains('subagent-dock'))).toBe(true);
+  await expect(pane.locator('.subagent-dock')).toHaveCount(1);
+  const bounds=await pane.evaluate(node => {
+    const box=selector => node.querySelector(selector).getBoundingClientRect();
+    const composer=box('.composer-area .composer'),visor=box('.subagent-visor'),chat=box('.conversation');
+    return {composer:{left:composer.left,right:composer.right,bottom:composer.bottom},visor:{left:visor.left,right:visor.right,top:visor.top},chat:{left:chat.left,right:chat.right}};
+  });
+  expect(bounds.visor.left).toBeCloseTo(bounds.composer.left,0);
+  expect(bounds.visor.right).toBeCloseTo(bounds.composer.right,0);
+  expect(bounds.visor.top).toBeGreaterThanOrEqual(bounds.composer.bottom);
+  expect(bounds.visor.left).toBeGreaterThanOrEqual(bounds.chat.left);
+  expect(bounds.visor.right).toBeLessThanOrEqual(bounds.chat.right);
   const closedTabsY=(await pane.getByRole('tablist',{name:'Subagent tasks'}).boundingBox()).y;
   await pane.getByRole('tablist',{name:'Subagent tasks'}).getByRole('tab',{name:/Inspect accessibility and report/}).click();
   const visor=pane.getByRole('region',{name:'Subagent activity'});
   await page.waitForTimeout(300);
   const openTabsY=(await pane.getByRole('tablist',{name:'Subagent tasks'}).boundingBox()).y;
   expect(openTabsY).toBeLessThan(closedTabsY-80);
+  const openBounds=await pane.evaluate(node => {
+    const composer=node.querySelector('.composer-area .composer').getBoundingClientRect();
+    const panel=node.querySelector('.subagent-visor .visor-panel').getBoundingClientRect();
+    return {composerBottom:composer.bottom,panelTop:panel.top};
+  });
+  expect(openBounds.panelTop).toBeGreaterThanOrEqual(openBounds.composerBottom);
   await expect(visor).toContainText('Assignment');
   await expect(visor).toContainText('Inspect accessibility and report.');
   await expect(visor).toContainText('gpt-test · high');
@@ -74,6 +91,17 @@ try {
   const sidebar=pane.getByRole('region',{name:'Subagents'});
   await expect(sidebar.getByRole('heading',{name:'Active 3'})).toBeVisible();
   await expect(sidebar.getByRole('heading',{name:'Recent 1'})).toBeVisible();
+  const expandedBounds=await pane.evaluate(node => {
+    const box=selector => node.querySelector(selector).getBoundingClientRect();
+    const chat=box('.task-layout > .conversation'),composer=box('.composer-area .composer');
+    const visor=box('.subagent-visor'),panel=box('.subagent-visor .visor-panel');
+    const rightSidebar=box('.task-layout > .run-detail');
+    return {chatRight:chat.right,composerRight:composer.right,visorRight:visor.right,panelRight:panel.right,sidebarLeft:rightSidebar.left};
+  });
+  expect(expandedBounds.chatRight).toBeLessThanOrEqual(expandedBounds.sidebarLeft+1);
+  expect(expandedBounds.composerRight).toBeLessThanOrEqual(expandedBounds.sidebarLeft+1);
+  expect(expandedBounds.visorRight).toBeLessThanOrEqual(expandedBounds.sidebarLeft+1);
+  expect(expandedBounds.panelRight).toBeLessThanOrEqual(expandedBounds.sidebarLeft+1);
   await expect(sidebar.getByText('Review tests',{exact:true})).toBeVisible();
   await expect(sidebar.getByText('Inspect protocol',{exact:true})).toBeVisible();
   await expect(sidebar.getByText('Inspect accessibility and report.',{exact:true})).toBeVisible();

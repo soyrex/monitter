@@ -57,6 +57,8 @@ struct CoreState<'a> {
     projects: &'a [crate::model::Project],
     settings: &'a crate::model::Settings,
     collaborations: &'a [crate::model::Collaboration],
+    subagent_sessions: &'a [crate::model::SubagentSession],
+    subagent_transcripts: &'a HashMap<String, Vec<crate::model::SubagentTranscriptEntry>>,
     queued_messages: &'a [crate::model::QueuedMessage],
     approval_requests: &'a [crate::model::ApprovalRequest],
     approval_rules: &'a [crate::model::ApprovalRule],
@@ -88,6 +90,8 @@ impl<'a> CoreState<'a> {
             projects: &snapshot.projects,
             settings: &snapshot.settings,
             collaborations: &snapshot.collaborations,
+            subagent_sessions: &snapshot.subagent_sessions,
+            subagent_transcripts: &snapshot.subagent_transcripts,
             queued_messages: &snapshot.queued_messages,
             approval_requests: &snapshot.approval_requests,
             approval_rules: &snapshot.approval_rules,
@@ -214,6 +218,14 @@ impl Store {
                 queued.error = Some("Monitter restarted before this queued message could be confirmed. Review and retry it manually.".into());
                 recovered = true;
             }
+        }
+        // State files created before the sub-agent projection only have their
+        // routed collaboration records. Rehydrate those entries once; native
+        // sessions are captured from future provider events.
+        let subagent_count = snapshot.subagent_sessions.len();
+        crate::model::sync_collaboration_subagent_sessions(&mut snapshot);
+        if snapshot.subagent_sessions.len() != subagent_count {
+            recovered = true;
         }
         let had_running_deliveries = snapshot
             .collaborations

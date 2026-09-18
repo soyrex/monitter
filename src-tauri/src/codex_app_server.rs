@@ -6,7 +6,7 @@
 
 use crate::{
     model::{InputOption, InputQuestion, InteractionInput, Task},
-    runner::{resolve_local, RunControl},
+    runner::{parse_codex_subagent_updates, resolve_local, RunControl},
     ApprovalDecision, CreateApprovalRequest, Parsed, Service,
 };
 use serde_json::{json, Value};
@@ -1491,6 +1491,18 @@ fn finish_request(lifecycle: &Mutex<RequestLifecycle>, rpc_id: &str) -> bool {
 
 fn parse_item(item: &Value, started: bool) -> Parsed {
     let ty = item.get("type").and_then(Value::as_str).unwrap_or("");
+    if !parse_codex_subagent_updates(item, "event").is_empty() {
+        return Parsed {
+            native_session_id: None,
+            assistant: None,
+            event: Some((
+                "subagent".into(),
+                "Sub-agent activity".into(),
+                item.to_string(),
+            )),
+            failed: false,
+        };
+    }
     // Conversation lifecycle envelopes are transport metadata, not tool work.
     // Their authoritative content is persisted through app_server_message (or
     // already exists as the user-authored transcript entry), so recording the

@@ -897,6 +897,11 @@ fn run(
     // be appended to the narration that preceded the activity.
     let mut anonymous_message_item = 0usize;
     let mut last_reasoning_flush = Instant::now();
+    // Populated from `subagent_spawned` announcements (see `acp_protocol::
+    // initialize_params`'s `subagents` capability). Nested tool/message
+    // notifications tagged with one of these session IDs, rather than the
+    // root thread, belong to that subagent's own inline transcript.
+    let mut known_subagents = HashSet::<String>::new();
     let mut resolved_cwd = task.cwd.clone();
     let mut seen_permission_ids = HashSet::<String>::new();
     let pending_permissions = Arc::new(AtomicUsize::new(0));
@@ -1533,8 +1538,10 @@ fn run(
                 }
                 continue;
             }
-            if !control.matches_app_server_thread(notification_session)
-                || !control.matches_app_server_turn(&turn)
+            let is_root_session = control.matches_app_server_thread(notification_session);
+            let is_subagent_session =
+                !is_root_session && known_subagents.contains(notification_session);
+            if (!is_root_session && !is_subagent_session) || !control.matches_app_server_turn(&turn)
             {
                 continue;
             }
@@ -1568,7 +1575,125 @@ fn run(
                 }
                 continue;
             }
-            if matches!(kind, "agent_message_chunk" | "agent_message") {
+            if matches!(kind, "subagent_spawned" | "subagent_state_update") {
+                let update = &params["update"];
+                if kind == "subagent_spawned" {
+                    if let Some(child_id) = update.get("subagentSessionId").and_then(Value::as_str)
+                    {
+                        if !child_id.trim().is_empty() {
+                            known_subagents.insert(child_id.to_string());
+                        }
+                    }
+                }
+                let title = if kind == "subagent_spawned" {
+                    "Subagent spawned"
+                } else {
+                    "Subagent state update"
+                };
+                let result = service.app_server_event(
+                    &task_id,
+                    &control,
+                    (!turn.is_empty()).then_some(turn.as_str()),
+                    Parsed {
+                        native_session_id: None,
+                        assistant: None,
+                        event: Some(("subagent".into(), title.into(), update.to_string())),
+                        failed: false,
+                    },
+                );
+                if let Err(error) = result {
+                    fail(&service, &task_id, &control, error);
+                    return;
+                }
+                if kind == "subagent_spawned" {
+                    if let Some(child_id) =
+                        update.get("subagentSessionId").and_then(Value::as_str)
+                    {
+                        if let Some(task_text) = update.get("task").and_then(Value::as_str) {
+                            let result = service.append_subagent_transcript_entry(
+                                &task_id,
+                                &control,
+                                (!turn.is_empty()).then_some(turn.as_str()),
+                                &format!("acp:{child_id}"),
+                                "user",
+                                task_text.to_string(),
+                            );
+                            if let Err(error) = result {
+                                fail(&service, &task_id, &control, error);
+                                return;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if is_subagent_session {
+                // This subagent's own activity is captured into its inline
+                // transcript rather than mixed into the parent task's
+                // messages/events; the visor reads it back on demand.
+                let subagent_id = format!("acp:{notification_session}");
+                match kind {
+                    "agent_message_chunk" | "agent_message" => {
+                        if let Some(text) = update_text(&value) {
+                            let result = service.append_subagent_transcript_entry(
+                                &task_id,
+                                &control,
+                                (!turn.is_empty()).then_some(turn.as_str()),
+                                &subagent_id,
+                                "assistant",
+                                text.to_string(),
+                            );
+                            if let Err(error) = result {
+                                fail(&service, &task_id, &control, error);
+                                return;
+                            }
+                        }
+                    }
+                    "agent_thought_chunk" => {
+                        if let Some(text) = update_text(&value) {
+                            let result = service.append_subagent_transcript_entry(
+                                &task_id,
+                                &control,
+                                (!turn.is_empty()).then_some(turn.as_str()),
+                                &subagent_id,
+                                "reasoning",
+                                text.to_string(),
+                            );
+                            if let Err(error) = result {
+                                fail(&service, &task_id, &control, error);
+                                return;
+                            }
+                        }
+                    }
+                    "tool_call" | "tool_call_update" | "plan" => {
+                        control.mark_tool_work_observed();
+                        let params = value.get("params").unwrap_or(&Value::Null);
+                        let normalized = match normalized_activity(params, kind, &mut tool_updates)
+                        {
+                            Ok(value) => value,
+                            Err(error) => {
+                                fail(&service, &task_id, &control, error);
+                                return;
+                            }
+                        };
+                        if let Some((title, _detail)) = normalized {
+                            let result = service.append_subagent_transcript_entry(
+                                &task_id,
+                                &control,
+                                (!turn.is_empty()).then_some(turn.as_str()),
+                                &subagent_id,
+                                "activity",
+                                title,
+                            );
+                            if let Err(error) = result {
+                                fail(&service, &task_id, &control, error);
+                                return;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else if matches!(kind, "agent_message_chunk" | "agent_message") {
                 let content = &value["params"]["update"]["content"];
                 let content_type = content["type"].as_str().unwrap_or("text");
                 let placeholder = match content_type {

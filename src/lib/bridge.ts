@@ -57,7 +57,7 @@ export interface MonitterBridge {
   discoverAcpAgents(hostId: string): Promise<AcpCandidate[]>;
   verifyAcpAgent(hostId: string, launch: AcpLaunch): Promise<AcpProbeResult>;
   saveAgent(agent: Agent): Promise<Snapshot>;
-  deleteAgent(id: string): Promise<Snapshot>;
+  deleteAgent(id: string, chatHandling?: 'archive' | 'delete'): Promise<Snapshot>;
   createTask(input: CreateTaskInput): Promise<Task>;
   chooseLocalFolder(initial?: string): Promise<string | null>;
   renameTask(id: string, title: string): Promise<Snapshot>;
@@ -99,7 +99,6 @@ export interface MonitterBridge {
   setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
   setTaskSandbox(taskId: string, sandbox: Sandbox): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
-  getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
   clearTaskGoal(taskId: string): Promise<void>;
   getTaskGitStatus(taskId: string, detectorSession?: string): Promise<TaskGitStatus>;
   waitForTaskGitMarker(taskId: string, detectorSession?: string): Promise<'found' | 'timeout' | 'already-present'>;
@@ -272,7 +271,6 @@ const nativeBridge: MonitterBridge = {
   setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
   setTaskSandbox: (taskId, sandbox) => invoke<Snapshot>('set_task_sandbox', {taskId,sandbox}),
   getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
-  getSubagentTranscript: (taskId, subagentId) => invoke<SubagentTranscriptEntry[]>("get_subagent_transcript", { taskId, subagentId }),
   clearTaskGoal: taskId => invoke<void>("clear_task_goal", { taskId }),
   getTaskGitStatus: (taskId, detectorSession = '') => invoke<TaskGitStatus>("get_task_git_status", { taskId, detectorSession }),
   waitForTaskGitMarker: (taskId, detectorSession = '') => invoke<'found' | 'timeout' | 'already-present'>("wait_for_task_git_marker", { taskId, detectorSession }),
@@ -368,7 +366,6 @@ const previewBridge: MonitterBridge = {
   setTaskModelSettings: () => desktopOnly(),
   setTaskSandbox: () => desktopOnly(),
   getTaskGoal: async () => null,
-  getSubagentTranscript: async () => [],
   clearTaskGoal: async () => { throw new Error("Goal clearing requires a connected harness."); },
   getTaskGitStatus: () => desktopOnly(),
   waitForTaskGitMarker: () => desktopOnly(),
@@ -457,7 +454,6 @@ export function getBridge(): MonitterBridge {
       setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
       setTaskSandbox: (taskId, sandbox) => test.invoke('set_task_sandbox', {taskId,sandbox}) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,
-      getSubagentTranscript: (taskId, subagentId) => test.invoke("get_subagent_transcript", {taskId, subagentId}) as Promise<SubagentTranscriptEntry[]>,
       clearTaskGoal: taskId => test.invoke("clear_task_goal", {taskId}) as Promise<void>,
       getTaskGitStatus: (taskId, detectorSession = '') => test.invoke("get_task_git_status", {taskId, detectorSession}) as Promise<TaskGitStatus>,
       waitForTaskGitMarker: (taskId, detectorSession = '') => test.invoke("wait_for_task_git_marker", {taskId, detectorSession}) as Promise<'found' | 'timeout' | 'already-present'>,

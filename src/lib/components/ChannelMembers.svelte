@@ -1,24 +1,18 @@
 <script lang="ts">
-  import { Bot, Briefcase, Code, Database, Globe, Layers, Network, Rocket, Terminal, UserMinus, Plus, Settings2, Wrench, X, Square } from '@lucide/svelte';
+  import { UserMinus, Plus, Settings2, X, Square } from '@lucide/svelte';
   import type { Channel, Agent, Host, Task } from '$lib/types';
+  import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   let {channel,agents,hosts,tasks,busy=false,onmembership,onadmin,onclose,onconversation,onstopconversation}: {channel:Channel;agents:Agent[];hosts:Host[];tasks:Task[];busy?:boolean;onmembership:(id:string,member:boolean)=>void;onadmin:()=>void;onclose:()=>void;onconversation:(enabled:boolean,turnLimit:number)=>void;onstopconversation:()=>void}=$props();
   let inviteId=$state('');
   const members=$derived(agents.filter(agent=>channel.agentIds.includes(agent.id)));
   const available=$derived(agents.filter(agent=>!channel.agentIds.includes(agent.id)));
-  const agentAvatarIcons = [Bot, Terminal, Code, Rocket, Wrench, Layers, Briefcase, Database, Globe, Network];
-  const agentAvatarIcon = (agent: Agent) => {
-    const seed = agent.id || agent.name;
-    let hash = 0;
-    for (let index = 0; index < seed.length; index += 1) hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
-    return agentAvatarIcons[hash % agentAvatarIcons.length];
-  };
 </script>
 <header><strong>Members <span>{members.length}</span></strong><button aria-label="Hide channel members" title="Hide members" onclick={onclose}><X size={16}/></button></header>
 <div class="member-content">
   {#if channel.description}<p class="topic">{channel.description}</p>{/if}
   {#each members as agent (agent.id)}
     <div class="member">
-      <span class="member-avatar">{#if agent.avatar && /^data:image\/(png|jpeg|webp);base64,/i.test(agent.avatar)}<img src={agent.avatar} alt=""/>{:else}{@const Icon = agentAvatarIcon(agent)}<Icon size={14} strokeWidth={1.8} aria-hidden="true" />{/if}</span>
+      <span class="member-avatar">{#if agent.avatar && /^data:image\/(png|jpeg|webp);base64,/i.test(agent.avatar)}<img src={agent.avatar} alt=""/>{:else}<span class="model-avatar-mark"><ProviderIcon provider={agent.provider} model={agent.model} size={16} /></span>{/if}</span>
       <div class="member-copy"><b>{agent.name}</b><small>{tasks.some(task=>task.channelId===channel.id&&task.agentId===agent.id&&task.status==='running')?'Working · ':''}{hosts.find(host=>host.id===agent.hostId)?.name??'Unknown host'}</small></div>
       <button disabled={busy} aria-label={`Remove ${agent.name} from channel`} title={`Remove ${agent.name}`} onclick={()=>onmembership(agent.id,false)}><UserMinus size={15}/></button>
     </div>
@@ -45,6 +39,7 @@
   .member-content { flex:1;min-height:0;overflow:auto;padding:12px; }
   .member { display:flex;align-items:center;gap:9px;padding:9px 0; }
   .member-avatar { width:26px;height:26px;border-radius:6px;flex:none;display:grid;place-items:center;color:var(--on-accent,#fff);background:var(--accent);overflow:hidden; } img { width:100%;height:100%;object-fit:cover; }
+  .model-avatar-mark { display:grid;place-items:center;width:100%;height:100%;background:var(--soft);color:var(--ink); }
   .member-copy { flex:1;min-width:0; } b,small { display:block;overflow-wrap:anywhere; } b { font-size:calc(12px * var(--interface-font-ratio,1)); } small { font-size:calc(10px * var(--interface-font-ratio,1));margin-top:3px; }
   .agent-conversation { margin:16px 0;padding:12px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:calc(11px * var(--interface-font-ratio,1)); }
   .conversation-toggle,.turn-limit { display:flex;align-items:center;justify-content:space-between;gap:10px; }

@@ -189,13 +189,13 @@ export function isNativeMessageTransportArtifact(event: RunEvent): boolean {
   } catch { return false; }
 }
 
-/** Read the thread linkage from a structured native subagent event, if present. */
-export interface NativeSubagentActivity {
+/** Read thread linkage from native events, including older nested activity records. */
+export interface SubagentThreadLink {
   agentThreadId: string;
   receiverThreadIds: string[];
 }
 
-export function nativeSubagentActivity(event: RunEvent): NativeSubagentActivity | null {
+export function subagentThreadLink(event: RunEvent): SubagentThreadLink | null {
   try {
     const parsed = JSON.parse(event.detail) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;

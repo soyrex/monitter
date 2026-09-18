@@ -1582,13 +1582,6 @@
     const value = agent?.avatar;
     return value && /^data:image\/(png|jpeg|webp);base64,/i.test(value) ? value : null;
   };
-  const agentAvatarIcons = [Bot, Terminal, Code, Rocket, Wrench, Layers, Briefcase, Database, Globe, Network];
-  const agentAvatarIcon = (agent: Agent | null | undefined) => {
-    const seed = agent?.id || agent?.name || 'agent';
-    let hash = 0;
-    for (let index = 0; index < seed.length; index += 1) hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
-    return agentAvatarIcons[hash % agentAvatarIcons.length];
-  };
   async function chooseAvatar(file?: File) {
     if (!agentDraft || !file) return;
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 2 * 1024 * 1024) { error = 'Choose a PNG, JPEG, or WebP image up to 2 MiB.'; return; }
@@ -2253,6 +2246,7 @@
     selectedEmptyId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; currentDraftId = null;
     focusedAgentId = null; focusedProjectId = null; composer = ''; pane = 'empty';
     rememberTab({ kind: 'empty', id });
+    focusSelectedTabInput();
   }
   function closeEmptyTab(id: string, collapse = true) {
     openEmptyIds = openEmptyIds.filter(item => item !== id); forgetTab({ kind: 'empty', id });
@@ -2954,9 +2948,21 @@
         ? root.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')
         : pane === 'task' || pane === 'channel'
           ? root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Task message"], textarea[aria-label="Channel message"]')
+          : pane === 'empty'
+            ? root.querySelector<HTMLButtonElement>('.empty-pane .pane-choice')
           : null;
       if (target && !target.hasAttribute('disabled')) target.focus({ preventScroll: true });
     });
+  }
+  function handleEmptyChoiceKeydown(event: KeyboardEvent) {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (!(event.target instanceof HTMLButtonElement) || !event.target.matches('.pane-choice')) return;
+    const choices = [...(event.target.closest('.pane-choices')?.querySelectorAll<HTMLButtonElement>('.pane-choice:not(:disabled)') ?? [])];
+    const index = choices.indexOf(event.target);
+    if (index < 0 || choices.length < 2) return;
+    event.preventDefault();
+    const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
+    choices[(index + direction + choices.length) % choices.length].focus({ preventScroll: true });
   }
   function selectTabPicker(select: () => void) {
     select();
@@ -3455,8 +3461,7 @@
   {#if avatarSrc(agent)}
     <img src={avatarSrc(agent)!} alt="" />
   {:else}
-    {@const Icon = agentAvatarIcon(agent)}
-    <Icon {size} strokeWidth={1.8} aria-hidden="true" />
+    <span class="model-avatar-mark"><ProviderIcon provider={agent?.provider ?? 'acp'} model={agent?.model} {size} /></span>
   {/if}
 {/snippet}
 
@@ -3581,8 +3586,8 @@
         >{#if error}<button onclick={reload}>Try again</button>{/if}
       </div>
     {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
-      <button class="pane-choice" disabled={busy} onclick={()=>visibleAgents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
-      <button class="pane-choice" disabled={terminalBusy} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<SquareTerminal size={22}/>{/if}<span>Terminal</span></button>
+      <button class="pane-choice" disabled={busy} onkeydown={handleEmptyChoiceKeydown} onclick={()=>visibleAgents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
+      <button class="pane-choice" disabled={terminalBusy} onkeydown={handleEmptyChoiceKeydown} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<SquareTerminal size={22}/>{/if}<span>Terminal</span></button>
     </div></section>
     {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface">{#if !mobileSidebar}<div class="terminal-pane-overlay">{@render paneExpandControl()}</div>{/if}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
     {:else if pane === 'project' && focusedProject}
@@ -4878,6 +4883,7 @@
     background: var(--accent);
     font: calc(11px * var(--interface-font-ratio, 1)) var(--mono);
   }
+  .model-avatar-mark { display:grid; place-items:center; width:100%; height:100%; background:var(--soft); color:var(--ink); }
   .agent-avatar-toggle { position:relative; padding:0; border:0; overflow:hidden; cursor:pointer; }
   .avatar-toggle-overlay { position:absolute; inset:0; display:grid; place-items:center; background:rgba(0,0,0,.75); color:#fff; opacity:0; pointer-events:none; border-radius:inherit; }
   .agent-avatar-toggle:focus-visible .avatar-toggle-overlay { opacity:1; }
@@ -5222,6 +5228,7 @@
   .pane-choices { display:flex;flex-wrap:wrap;justify-content:center;gap:16px; }
   .pane-choice { display:flex;align-items:center;gap:12px;padding:20px 24px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--muted); }
   .pane-choice:hover { color:var(--ink);background:var(--soft);border-color:var(--accent); }
+  .pane-choice:focus { color:var(--ink);background:var(--soft);border-color:var(--accent); }
   .overview {
     --scroll-fade: 20px;
     -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--scroll-fade), #000 calc(100% - var(--scroll-fade)), transparent 100%);
