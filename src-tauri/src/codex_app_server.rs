@@ -179,6 +179,12 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Err(error) =
+        crate::codex_accounts::configure_command(&mut command, task.codex_home.as_deref())
+    {
+        service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
+        return;
+    }
     crate::runner::isolate_child(&mut command);
     if let Some(grant) = &grant {
         command

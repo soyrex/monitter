@@ -94,6 +94,9 @@ No fake conversations, progress, token counts, host connections or model replies
   transcript, queued messages, pending approvals, pending collaborations, activity events, subagent sessions, the per-task
   host snapshot and the durable usage ledger for the task. Pending queued follow-ups are failed and pending approvals
   expired under the same lock for either mode.
+- `list_codex_accounts {}` -> `{ home: string, label: string }[]`.
+  Owner desktop/LAN only. Lists existing local Codex home directories and saved selections;
+  discovery does not read credentials, log in, start a harness or query plan entitlements.
 - `save_project { project: Project }` -> Snapshot (empty id creates)
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
@@ -439,6 +442,29 @@ ordinary lists and remain discoverable through Cmd-K. Projects participate in th
 include new project and sidebar view selection.
 
 ## Runtime and persistence
+
+### Multiple local Codex accounts
+
+`Agent.codexHome` is an optional absolute path to an existing local Codex home.
+Null selects Monitter's inherited `CODEX_HOME`, falling back to `$HOME/.codex`.
+Explicit account homes are supported only for local Codex agents. Monitter validates
+and canonicalizes the selected directory without copying credentials or rewriting
+Codex configuration. Directory labels identify a local setup, not verified account
+identity or subscription status.
+
+Every newly created local Codex task snapshots its resolved home in `Task.codexHome`,
+including channel and delegated chats. Changing an agent's account affects future
+chats. Existing chats retain their home for launches, resume, model and goal probes,
+and native-session file lookup. Legacy tasks without this field retain the inherited
+home behavior. Session ownership distinguishes Codex homes. Each child process gets
+its own `CODEX_HOME`; Monitter never changes its process-global environment.
+
+Subscription allowance sources carry optional `codexHome` and `accountLabel` fields.
+Each discovered/saved local Codex home has an independent quota source, including
+failures; caches and UI identities distinguish those homes. These are separate
+account allowances, not pooled credits. Model-catalog caches also distinguish homes.
+Account paths are owner configuration and are omitted from shared-visitor projections.
+
 
 ACP is a generic transport (`provider: "acp"`), not an agent-brand enum. Its
 optional `Agent.acp` / `Task.acp` launcher contains an executable `command` and

@@ -11,7 +11,7 @@ commands.allow = [
   "get_ui_snapshot", "get_task_events", "get_usage_overview", "get_task_event_detail", "read_markdown_file",
   "get_lan_server_info", "resolve_approval", "revoke_approval_rule", "resolve_input",
   "finish_quit", "read_attachment_file", "store_attachment", "save_host", "delete_host",
-  "probe_host", "discover_acp_agents", "verify_acp_agent", "save_agent", "delete_agent",
+  "probe_host", "list_codex_accounts", "discover_acp_agents", "verify_acp_agent", "save_agent", "delete_agent",
   "create_task", "choose_local_folder", "save_project", "delete_project", "set_task_project",
   "rename_task", "autoname", "delete_task", "preview_task_deletion", "delete_archived_task",
   "set_task_archived", "clear_task_context", "send_message", "send_message_fast", "resume_task",

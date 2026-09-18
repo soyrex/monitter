@@ -267,6 +267,7 @@ mod tests {
             host_id: id(),
             cwd: "/tmp".into(),
             provider: "claude".into(),
+            codex_home: None,
             model: model.into(),
             model_settings: None,
             sandbox: "read-only".into(),
