@@ -748,8 +748,12 @@ fabricated objective/status/token metrics. OpenCode plans are not presented as n
 Typing `/` opens one filtered, keyboard-accessible command dock. It is 10px narrower than the
 composer and rises from behind it, matching the goal dock's visual ownership. Every entry includes
 its source: Monitter actions use the Monitter command mark and provider commands use that provider's
-icon. These app actions remain available in applicable contexts: `/new` and `/clear` reset the active chat's provider context while preserving its visible transcript; outside an active chat `/new` opens an independent draft. `/settings` opens preferences, `/project` selects the
-chat's project, and `/stop` cancels a running task. Task-specific actions only appear in applicable contexts.
+icon. These app actions remain available in applicable contexts: `/new` and `/clear` reset the
+active chat's provider context while preserving its visible transcript. In an active chat,
+`/new <title>` performs that reset first and then renames the pane to the supplied title; a failed
+reset leaves the title unchanged. Outside an active chat `/new` opens an independent draft.
+`/settings` opens preferences, `/project` selects the chat's project, and `/stop` cancels a running
+task. Task-specific actions only appear in applicable contexts.
 `/autoname` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming routes through the resident Monitter Admin agent (see Internal agent) on its saved provider, model, host, cwd, and sandbox. The admin uses no Spark/Luna/Mini mini-model selection, no provider fallback, and no persisted admin prompt/reply. Concurrent requests are rejected; the request is bounded to 45 seconds; the final target mutation (task title, channel name, or terminal rename) is reported through `monitter:changed` exactly like any other rename.
 `/terminal` opens a terminal tab in the current host and folder; `/terminal <command>` runs that shell command in the new interactive tab (for example `/terminal npm build`). The command is written to the PTY after the shell starts, so the tab stays interactive when it finishes.
 Selection supports arrows, Enter, Escape and clicking. IME composition does not select an action.

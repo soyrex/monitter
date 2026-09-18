@@ -2925,7 +2925,7 @@
   const slashItems = $derived<SlashPaletteItem[]>([
     ...(pane === "channel" ? channelCommands.map(item => monitterSlash(item.id, item.label, item.detail)) : []),
     ...(pane === "task" ? [
-      monitterSlash("context-new", "/new", "Clear context and start fresh"),
+      monitterSlash("context-new", "/new", "Clear context; add a title to rename this pane"),
       monitterSlash("context-clear", "/clear", "Alias for /new"),
     ] : [monitterSlash("new", "/new", "Open a local New chat draft")]),
     monitterSlash("settings", "/settings", "Open Monitter preferences"),
@@ -2993,6 +2993,10 @@
     if(channelCommand) { void executeChannelCommand(channelCommand.name,channelCommand.args,composer); return true; }
     const terminalCommand = composer.trim().match(/^\/terminal(?:\s+([\s\S]*))?$/i);
     if (terminalCommand) { void runTerminalCommand(terminalCommand[1]?.trim() ?? ''); return true; }
+    if (pane === 'task' && /^\/new(?:\s|$)/i.test(composer.trim())) {
+      void selectSlash(slashItems.find(item => item.id === 'context-new'));
+      return true;
+    }
     const command = composer.trim().split(/\s+/, 1)[0].toLowerCase();
     const item = slashItems.find(item => item.label === command);
     void selectSlash(item?.source === 'monitter' && composer.trim().toLowerCase() !== command ? undefined : item);
@@ -3010,7 +3014,7 @@
       await executeChannelCommand(name,'',composer); return;
     }
     if (item.id === 'terminal') { composer = '/terminal '; slashOpen = false; return; }
-    if (item.source === 'monitter' && /\s/.test(composer.trim())) {
+    if (item.source === 'monitter' && item.id !== 'context-new' && /\s/.test(composer.trim())) {
       error = `${item.label} does not take arguments.`;
       return;
     }
@@ -3043,6 +3047,9 @@
       }
       return;
     }
+    const requestedPaneTitle = item.id === 'context-new'
+      ? composer.trim().match(/^\/new(?:\s+([\s\S]*))?$/i)?.[1]?.trim() ?? ''
+      : '';
     const agentId = currentDraftId ? taskAgentId : selectedAgent?.id ?? null;
     const projectId = currentDraftId ? taskProjectId : task?.projectId ?? focusedProjectId;
     composer = "";
@@ -3051,8 +3058,19 @@
     notice = "";
     saveCurrentDraft();
     if ((item.id === "context-new" || item.id === "context-clear") && task) {
-      await run(() => bridge.clearTaskContext(task.id), "Context cleared.");
-      scrollRevision += 1;
+      const cleared = await run(
+        () => bridge.clearTaskContext(task.id),
+        requestedPaneTitle ? "Context cleared. Updating pane title…" : "Context cleared.",
+      );
+      if (cleared !== null) {
+        scrollRevision += 1;
+        if (requestedPaneTitle) {
+          await run(
+            () => bridge.renameTask(task.id, requestedPaneTitle),
+            "Context cleared and pane title updated.",
+          );
+        }
+      }
     }
     else if (item.id === "new") openTaskComposer(null, agentId, projectId);
     else if (item.id === "settings") routeSettings();
@@ -3075,6 +3093,7 @@
     const typedChannelCommand = pane==='channel' ? parseChannelCommand(composer) : null;
     if(event.key==='Enter' && !event.shiftKey && typedChannelCommand && (typedChannelCommand.args || !['invite','kick'].includes(typedChannelCommand.name))) { event.preventDefault(); handleSlashSubmit(); return; }
     if(event.key==='Enter' && !event.shiftKey && /^\/terminal(?:\s|$)/i.test(composer.trim())) { event.preventDefault(); handleSlashSubmit(); return; }
+    if(event.key==='Enter' && !event.shiftKey && pane === 'task' && /^\/new(?:\s|$)/i.test(composer.trim())) { event.preventDefault(); handleSlashSubmit(); return; }
     if (slashOpen && isSlashCommand(composer)) {
       if (event.key === "ArrowDown") { event.preventDefault(); slashIndex = Math.min(slashIndex + 1, Math.max(0, slashVisibleItems.length - 1)); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); slashIndex = Math.max(0, slashIndex - 1); return; }
