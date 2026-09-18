@@ -227,6 +227,16 @@ export interface ExtensionConfig {
   revision?: string;
   mcpServers: McpServerConfig[]; skills: ManagedSkill[];
 }
+/** Redacted desktop-only metadata. Secret values are never returned to the renderer. */
+export interface EnvironmentSecretMetadata {
+  name: string;
+  description: string;
+  updatedAt: number;
+}
+export interface EnvironmentSecretsConfig {
+  revision: string;
+  entries: EnvironmentSecretMetadata[];
+}
 export interface Snapshot {
   hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;

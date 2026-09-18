@@ -45,6 +45,7 @@ mod collaboration_runtime;
 mod collaboration_transport;
 mod deletion;
 mod dev_ui;
+mod environment_secrets;
 mod extensions;
 mod extensions_runtime;
 mod git;
@@ -307,6 +308,7 @@ pub(crate) struct Service {
     store: store::Store,
     extensions: extensions::ExtensionStore,
     extension_writes: Mutex<()>,
+    environment_secrets: environment_secrets::EnvironmentSecretsStore,
     // Serialize mutations independently from readers. Readers see the last
     // durable state while a new candidate is being encoded and synced.
     state_writes: Mutex<()>,
@@ -608,6 +610,7 @@ impl Service {
             store,
             extensions,
             extension_writes: Mutex::new(()),
+            environment_secrets: environment_secrets::EnvironmentSecretsStore::new(),
             state_writes: Mutex::new(()),
             data: Mutex::new(Arc::new(ServiceData {
                 snapshot,
@@ -785,6 +788,25 @@ impl Service {
             .tasks
             .iter()
             .any(|task| task.id == task_id && task.agent_id == admin_id)
+    }
+
+    /// Environment injection must stay closed for every internal agent record,
+    /// including a malformed legacy state that contains more than one. A lock
+    /// failure is also treated as internal so a transient state problem cannot
+    /// grant a secret to a harness by accident.
+    fn is_internal_agent_task(&self, task_id: &str) -> bool {
+        self.data
+            .lock()
+            .ok()
+            .and_then(|data| {
+                let task = data.snapshot.tasks.iter().find(|task| task.id == task_id)?;
+                data.snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == task.agent_id)
+                    .map(|agent| agent.internal)
+            })
+            .unwrap_or(true)
     }
 
     /// Mark the lazy internal admin task as `running` so the next
@@ -1232,6 +1254,61 @@ impl Service {
             })?;
         }
         self.extensions.save(saved, &agent_ids)
+    }
+
+    /// This Keychain-backed configuration is deliberately outside Snapshot and
+    /// every LAN/controller/visitor response. Values never enter its result.
+    fn environment_secrets(&self) -> Result<environment_secrets::EnvironmentSecretsConfig, String> {
+        self.environment_secrets.list()
+    }
+
+    fn set_environment_secret(
+        &self,
+        revision: String,
+        name: String,
+        value: String,
+        description: String,
+    ) -> Result<environment_secrets::EnvironmentSecretsConfig, String> {
+        self.environment_secrets
+            .set(revision, name, value, description)
+    }
+
+    fn delete_environment_secret(
+        &self,
+        revision: String,
+        name: String,
+    ) -> Result<environment_secrets::EnvironmentSecretsConfig, String> {
+        self.environment_secrets.delete(revision, name)
+    }
+
+    /// Values are attached only while constructing a new local user-agent
+    /// process. Existing resident sessions, SSH agents, and Monitter Admin do
+    /// not receive them.
+    pub(crate) fn apply_environment_secrets_to_local_user_command(
+        &self,
+        task_id: &str,
+        host: &Host,
+        command: &mut std::process::Command,
+    ) -> Result<(), String> {
+        if environment_secrets::should_inject_into_local_user_command(
+            &host.kind,
+            self.is_internal_agent_task(task_id),
+        ) {
+            self.environment_secrets.apply_to_command(command)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn environment_secrets_for_local_user_task(
+        &self,
+        task_id: &str,
+        host: &Host,
+    ) -> Option<&environment_secrets::EnvironmentSecretsStore> {
+        environment_secrets::should_inject_into_local_user_command(
+            &host.kind,
+            self.is_internal_agent_task(task_id),
+        )
+        .then_some(&self.environment_secrets)
     }
 
     /// Saved agent IDs eligible to be referenced by an MCP server or managed
@@ -5972,6 +6049,46 @@ async fn save_extension_config(
         .map_err(|_| "Extension configuration worker failed.".to_string())?
 }
 
+/// Native desktop only. This returns redacted metadata from macOS Keychain;
+/// neither a Snapshot nor LAN/controller/visitor surface can invoke it.
+#[tauri::command]
+async fn list_environment_secrets(
+    state: State<'_, AppState>,
+) -> Result<environment_secrets::EnvironmentSecretsConfig, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.environment_secrets())
+        .await
+        .map_err(|_| "Environment & Secrets worker failed.".to_string())?
+}
+
+#[tauri::command]
+async fn set_environment_secret(
+    state: State<'_, AppState>,
+    revision: String,
+    name: String,
+    value: String,
+    description: String,
+) -> Result<environment_secrets::EnvironmentSecretsConfig, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.set_environment_secret(revision, name, value, description)
+    })
+    .await
+    .map_err(|_| "Environment & Secrets worker failed.".to_string())?
+}
+
+#[tauri::command]
+async fn delete_environment_secret(
+    state: State<'_, AppState>,
+    revision: String,
+    name: String,
+) -> Result<environment_secrets::EnvironmentSecretsConfig, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.delete_environment_secret(revision, name))
+        .await
+        .map_err(|_| "Environment & Secrets worker failed.".to_string())?
+}
+
 #[tauri::command]
 async fn get_ui_snapshot(
     state: State<'_, AppState>,
@@ -8148,6 +8265,9 @@ pub fn run() {
             get_process_metrics,
             get_extension_config,
             save_extension_config,
+            list_environment_secrets,
+            set_environment_secret,
+            delete_environment_secret,
             get_ui_snapshot,
             get_task_events,
             get_usage_overview,

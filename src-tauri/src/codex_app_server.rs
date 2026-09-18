@@ -174,6 +174,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             .as_ref()
             .map(|grant| (grant.endpoint.as_str(), grant.token.as_str())),
         &control,
+        service.environment_secrets_for_local_user_task(&task_id, &host),
     ) {
         Ok(transport) => transport,
         Err(error) => {

@@ -3594,6 +3594,7 @@ pub(crate) fn spawn_codex_app_server(
     task: &Task,
     collaboration: Option<(&str, &str)>,
     control: &RunControl,
+    environment_secrets: Option<&crate::environment_secrets::EnvironmentSecretsStore>,
 ) -> Result<SpawnedAppServer, String> {
     if task.provider != "codex" {
         return Err("Codex app-server requires a Codex task.".into());
@@ -3649,6 +3650,9 @@ pub(crate) fn spawn_codex_app_server(
             command
                 .env("MONITTER_ENDPOINT", endpoint)
                 .env("MONITTER_TOKEN", token);
+        }
+        if let Some(environment_secrets) = environment_secrets {
+            environment_secrets.apply_to_command(&mut command)?;
         }
     }
     command
@@ -4164,6 +4168,17 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 return;
             }
         };
+        if let Err(error) = service.apply_environment_secrets_to_local_user_command(
+            &task_id,
+            &host,
+            &mut command,
+        ) {
+            if let Some(remote) = remote_collaboration.take() {
+                abort_remote_collaboration(remote);
+            }
+            service.finish(&task_id, "error", Some(error));
+            return;
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -5006,7 +5021,13 @@ for line in sys.stdin.buffer:
     fn selected_codex_home_is_rejected_for_ssh_app_server() {
         let mut scoped = task(None, "");
         scoped.codex_home = Some("/tmp".into());
-        let error = match spawn_codex_app_server(&host("ssh"), &scoped, None, &RunControl::new(false)) {
+        let error = match spawn_codex_app_server(
+            &host("ssh"),
+            &scoped,
+            None,
+            &RunControl::new(false),
+            None,
+        ) {
             Ok(_) => panic!("selected account must be rejected for SSH"),
             Err(error) => error,
         };

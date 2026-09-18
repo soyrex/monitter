@@ -3513,6 +3513,7 @@
     {id:"typography-settings",label:"Typography settings",detail:"Fonts, sizes and line heights",group:"Settings"},
     {id:"behaviour-settings",label:"Behaviour settings",detail:"Shortcuts, focus and busy-agent behavior",group:"Settings"},
     {id:"conversation-settings",label:"Conversation settings",detail:"Messages and activity display",group:"Settings"},
+    {id:"environment-secrets",label:"Environment & Secrets",detail:"Shared API keys for local agents",keywords:"credentials environment variables tokens",group:"Settings"},
     {id:"hosts",label:"Manage hosts",detail:"Local and SSH connections",group:"Settings"},
     {id:"archived",label:"Archived chats",detail:"Restore or permanently delete archived chats",group:"Workspace"},
     {id:"tools",label:"Show tool activity",checked:snapshot?.settings.showToolActivity !== false,group:"Toggles"},
@@ -3590,6 +3591,7 @@
     else if (id === "typography-settings") { palette=null; routeSettings('typography'); }
     else if (id === "behaviour-settings") { palette=null; routeSettings('behaviour'); }
     else if (id === "conversation-settings") { palette=null; routeSettings('conversation'); }
+    else if (id === "environment-secrets") { palette=null; routeSettings('environment'); }
     else if (id === "pane-appearance-settings") { palette=null; routeSettings('appearance'); }
     else if (id === "new-terminal") {palette=null;await newTerminal();}
     else if (id === "autoname") { palette=null; await autonameCurrentPane(); }

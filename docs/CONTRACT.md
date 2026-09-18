@@ -182,6 +182,23 @@ diagnostics, browser storage, command previews, or shared snapshots.
 Reads include an opaque revision. Saves from an older settings pane are rejected
 instead of overwriting newer edits; the UI retains the unsaved draft.
 
+## Environment & Secrets
+
+Settings → Environment & Secrets is a native macOS-only vault. `list_environment_secrets {}`
+returns only `{ revision, entries: [{ name, description, updatedAt }] }`.
+`set_environment_secret { revision, name, value, description }` and
+`delete_environment_secret { revision, name }` return the same redacted shape.
+Values are stored together in the macOS Keychain and are never returned after a
+write. These three commands are local Tauri commands only: they are absent from
+the LAN dispatcher, controller and visitor command surfaces, and from `Snapshot`
+and `Settings`.
+
+Names use the ASCII environment-name form and reject reserved runtime names,
+including `PATH`, `HOME`, `SHELL`, `TMPDIR`, `CODEX_HOME`, `MONITTER_*`, and
+`OPENCODE_CONFIG_CONTENT`. Vault changes apply when a local user-agent harness
+next launches through Codex app-server, Claude, OpenCode, Hermes, or ACP. They
+do not restart existing sessions and never apply to SSH agents or Monitter Admin.
+
 Internal Monitter Admin prompts, replies, and per-request IDs are similarly
 runtime-only and must never enter workspace exports, diagnostics, browser
 storage, command previews, shared snapshots, compact LAN UI projections, or

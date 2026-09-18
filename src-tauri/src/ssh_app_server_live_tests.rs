@@ -63,7 +63,7 @@ fn live_ssh_codex_app_server_handshake() {
         stderr,
         cwd,
         ..
-    } = runner::spawn_codex_app_server(&host, &task, None, &control).expect("SSH startup failed");
+    } = runner::spawn_codex_app_server(&host, &task, None, &control, None).expect("SSH startup failed");
     assert!(cwd.starts_with('/'), "Remote cwd must be absolute");
     let stdout = child.stdout.take().expect("SSH stdout");
     let stdin = child.stdin.take().expect("SSH stdin");

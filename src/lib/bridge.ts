@@ -39,6 +39,7 @@ import type {
   MarkdownDocument,
   SendAccepted,
   ExtensionConfig,
+  EnvironmentSecretsConfig,
   ApprovalDecision,
   UsageOverview,
   UsageRefreshPolicy,
@@ -84,6 +85,9 @@ export interface MonitterBridge {
   saveSettings(settings: Settings): Promise<Snapshot>;
   getExtensionConfig(): Promise<ExtensionConfig>;
   saveExtensionConfig(config: ExtensionConfig): Promise<ExtensionConfig>;
+  listEnvironmentSecrets(): Promise<EnvironmentSecretsConfig>;
+  setEnvironmentSecret(revision: string, name: string, value: string, description: string): Promise<EnvironmentSecretsConfig>;
+  deleteEnvironmentSecret(revision: string, name: string): Promise<EnvironmentSecretsConfig>;
   saveChannel(channel: Channel): Promise<Snapshot>;
   setChannelAgentConversation(channelId: string, enabled: boolean, turnLimit: number): Promise<Snapshot>;
   stopChannelAgentConversation(channelId: string): Promise<Snapshot>;
@@ -264,6 +268,9 @@ const nativeBridge: MonitterBridge = {
   saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
   getExtensionConfig: () => isLanBrowser() ? desktopOnly() : invoke<ExtensionConfig>('get_extension_config'),
   saveExtensionConfig: (config) => isLanBrowser() ? desktopOnly() : invoke<ExtensionConfig>('save_extension_config', { config }),
+  listEnvironmentSecrets: () => isLanBrowser() ? desktopOnly() : invoke<EnvironmentSecretsConfig>('list_environment_secrets'),
+  setEnvironmentSecret: (revision, name, value, description) => isLanBrowser() ? desktopOnly() : invoke<EnvironmentSecretsConfig>('set_environment_secret', { revision, name, value, description }),
+  deleteEnvironmentSecret: (revision, name) => isLanBrowser() ? desktopOnly() : invoke<EnvironmentSecretsConfig>('delete_environment_secret', { revision, name }),
   saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
   setChannelAgentConversation: (channelId, enabled, turnLimit) => invoke<Snapshot>("set_channel_agent_conversation", {channelId, enabled, turnLimit}),
   stopChannelAgentConversation: (channelId) => invoke<Snapshot>("stop_channel_agent_conversation", {channelId}),
@@ -364,6 +371,9 @@ const previewBridge: MonitterBridge = {
   saveSettings: () => desktopOnly(),
   getExtensionConfig: () => desktopOnly(),
   saveExtensionConfig: () => desktopOnly(),
+  listEnvironmentSecrets: () => desktopOnly(),
+  setEnvironmentSecret: () => desktopOnly(),
+  deleteEnvironmentSecret: () => desktopOnly(),
   saveChannel: () => desktopOnly(),
   setChannelAgentConversation: () => desktopOnly(),
   stopChannelAgentConversation: () => desktopOnly(),
@@ -448,6 +458,9 @@ export function getBridge(): MonitterBridge {
         test.invoke("save_settings", { settings }) as Promise<Snapshot>,
       getExtensionConfig: () => test.invoke('get_extension_config') as Promise<ExtensionConfig>,
       saveExtensionConfig: (config) => test.invoke('save_extension_config', { config }) as Promise<ExtensionConfig>,
+      listEnvironmentSecrets: () => test.invoke('list_environment_secrets') as Promise<EnvironmentSecretsConfig>,
+      setEnvironmentSecret: (revision, name, value, description) => test.invoke('set_environment_secret', { revision, name, value, description }) as Promise<EnvironmentSecretsConfig>,
+      deleteEnvironmentSecret: (revision, name) => test.invoke('delete_environment_secret', { revision, name }) as Promise<EnvironmentSecretsConfig>,
       saveChannel: (channel) =>
         test.invoke("save_channel", { channel }) as Promise<Snapshot>,
       setChannelAgentConversation: (channelId, enabled, turnLimit) => test.invoke("set_channel_agent_conversation", {channelId,enabled,turnLimit}) as Promise<Snapshot>,

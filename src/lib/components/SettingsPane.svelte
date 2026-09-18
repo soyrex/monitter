@@ -1,6 +1,6 @@
 <script lang="ts">
   import { rangeFill } from '$lib/range-fill';
-  import { Bot, Users, Check, ChevronDown, LoaderCircle, MessageSquare, Palette, ShieldCheck, Smartphone, Type, UserRound, Blocks } from "@lucide/svelte";
+  import { Bot, Users, Check, ChevronDown, KeyRound, LoaderCircle, MessageSquare, Palette, ShieldCheck, Smartphone, Type, UserRound, Blocks } from "@lucide/svelte";
   import type { Agent, ApprovalRule, Host, Settings } from "$lib/types";
   import { getBridge } from '$lib/bridge';
   import { surfaceTint, setSurfaceTint, DEFAULT_SURFACE_TINT } from '$lib/surface-tint';
@@ -13,8 +13,9 @@
   import LanSettings from './LanSettings.svelte';
   import SavedApprovalRules from './SavedApprovalRules.svelte';
   import ExtensionsSettings from './ExtensionsSettings.svelte';
+  import EnvironmentSecretsSettings from './EnvironmentSecretsSettings.svelte';
 
-  type Category = "profile" | "appearance" | "typography" | "behaviour" | "conversation" | "approvals" | "agents" | "directory" | "lan" | "remote" | "extensions";
+  type Category = "profile" | "appearance" | "typography" | "behaviour" | "conversation" | "approvals" | "agents" | "directory" | "lan" | "remote" | "extensions" | "environment";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
   type LineHeightKey = "chatLineHeight" | "terminalLineHeight";
@@ -64,6 +65,7 @@
     { id: "directory", label: "Agent directory", detail: "Discover skills and responsibilities", icon: Users },
     { id: "agents", label: "Agents", detail: "Identity, harness and skills", icon: Bot },
     { id: "extensions", label: "MCP & Plugins", detail: "Servers, skills and safety", icon: Blocks },
+    { id: "environment", label: "Environment & Secrets", detail: "Shared keys for local agents", icon: KeyRound },
     { id: "appearance", label: "Appearance", detail: "Theme, accent and panes", icon: Palette },
     { id: "typography", label: "Typography", detail: "Fonts and base sizes", icon: Type },
     { id: "behaviour", label: "Permissions & behaviour", detail: "Focus and busy messages", icon: ShieldCheck },
@@ -193,7 +195,7 @@
         {#if activeCategory === "lan"}<span>Local network</span>
         {:else if activeCategory === "remote"}<span>Desktop pairing</span>
         {:else if activeCategory === "directory"}<span>Browse available agents</span>
-      {:else if activeCategory === "extensions"}<span>Applies on next harness launch</span>
+      {:else if activeCategory === "extensions" || activeCategory === "environment"}<span>Applies on next harness launch</span>
       {:else if activeCategory === "agents"}Save changes with Save agent
         {:else if activeCategory === "approvals"}<span>Rules update immediately</span>
         {:else if pending > 0}<LoaderCircle class="spin" size={14} /> Saving…
@@ -222,6 +224,8 @@
       <div class="section-stack">{#if agentEditor}{@render agentEditor()}{/if}</div>
     {:else if activeCategory === "extensions"}
       <ExtensionsSettings {agents}/>
+    {:else if activeCategory === "environment"}
+      <EnvironmentSecretsSettings />
     {:else if activeCategory === "approvals"}
       <div class="section-stack" data-approval-rules-settings>
         <section class="setting-card" aria-labelledby="saved-approvals-heading">

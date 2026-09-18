@@ -760,6 +760,17 @@ fn run(
             return;
         }
     };
+    if let Err(error) = service.apply_environment_secrets_to_local_user_command(
+        &task_id,
+        &host,
+        &mut command,
+    ) {
+        if let Some(remote) = remote_collaboration.take() {
+            runner::abort_remote_collaboration(remote);
+        }
+        fail(&service, &task_id, &control, error);
+        return;
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
