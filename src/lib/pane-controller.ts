@@ -9,6 +9,7 @@ import type { TabKey } from '$lib/tab-order';
  * workspace-persistence semantics.
  */
 export type PaneSurfaceHandle<State, Payload> = {
+  currentVimTab: () => TabKey | null;
   focusExistingTab: (tab: TabKey) => boolean;
   selectRelativeTab: (direction: 1 | -1) => boolean;
   openAgentSettings: (draft: Agent) => void;

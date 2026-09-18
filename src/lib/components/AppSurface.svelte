@@ -1369,7 +1369,7 @@
       if (channel) receiver.openChannel(channel, true);
     }
   }
-  async function dropTab(targetId: string, edge: DropEdge, tab: PaneTabTransfer, before?: TabKey) {
+  async function dropTab(targetId: string, edge: DropEdge, tab: PaneTabTransfer, before?: TabKey, keepEmptySource = false) {
     if(embedded) { onTabDrop?.(targetId,edge,tab,before); return; }
     if (workspaceTransition || composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`] || terminalBusy) { notice='Wait for the current action before moving this tab.'; return; }
     const ids=paneIds(layout);
@@ -1414,7 +1414,7 @@
     } finally {workspaceTransition=false;persistWorkspace();}
     if(moved){
       const remaining=tab.sourcePaneId==='main'?captureState():paneRefs[tab.sourcePaneId]?.captureState();
-      if (remaining && tabCount(remaining) === 0) await removeEmptyPane(tab.sourcePaneId);
+      if (!keepEmptySource && remaining && tabCount(remaining) === 0) await removeEmptyPane(tab.sourcePaneId);
     }
   }
 
@@ -2358,7 +2358,7 @@
     if (index < 0 || target < 0 || target >= tabs.length) return false;
     return selectVimTab({ kind: 'index', index: target + 1 });
   }
-  function currentVimTab(): TabKey | null {
+  export function currentVimTab(): TabKey | null {
     if (pane === 'task') return currentDraftId ? {kind:'draft',id:currentDraftId} : selectedTaskId ? {kind:'task',id:selectedTaskId} : null;
     if (pane === 'channel' && selectedChannelId) return {kind:'channel',id:selectedChannelId};
     if (pane === 'terminal' && selectedTerminalId) return {kind:'terminal',id:selectedTerminalId};
@@ -3011,6 +3011,18 @@
     focusPaneElement(next);
     return true;
   }
+  async function moveFocusedTab(direction: 'left' | 'right' | 'up' | 'down') {
+    const current = activePaneId === 'main' ? currentVimTab() : paneRefs[activePaneId]?.currentVimTab();
+    if (!current) return;
+    const sourcePaneId = activePaneId;
+    const neighbor = adjacentPaneElement(direction);
+    const edge: DropEdge = neighbor ? 'center' : direction === 'up' ? 'top' : direction === 'down' ? 'bottom' : direction;
+    await dropTab(neighbor?.dataset.paneId ?? sourcePaneId, edge, { sourcePaneId, ...current }, undefined, !neighbor);
+    if (activePaneId === sourcePaneId) return;
+    await tick();
+    const destination = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"]`);
+    if (destination) focusPaneElement(destination);
+  }
   $effect(() => {
     if (embedded || !nativeRuntime) return;
     const enabled = vimShortcuts;
@@ -3041,10 +3053,6 @@
   function openFocusedTerminal() {
     if (activePaneId === 'main') void newTerminal();
     else void paneRefs[activePaneId]?.newTerminal();
-  }
-  function swapFocusedTab(direction: 1 | -1) {
-    if (activePaneId === 'main') swapActiveTab(direction);
-    else paneRefs[activePaneId]?.swapActiveTab(direction);
   }
   function selectAdjacentTab(direction: 1 | -1) {
     const current = activePaneId === 'main' ? { selectRelativeTab } : paneRefs[activePaneId];
@@ -3084,18 +3092,20 @@
       balanceWorkspacePanes();
       return;
     }
-    if (!embedded && commandModifier && event.altKey && !event.shiftKey && !event.isComposing && (event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !document.querySelector('[role="dialog"]')) {
+    if (!embedded && commandModifier && event.altKey && !event.shiftKey && !event.isComposing && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && !document.querySelector('[role="dialog"]')) {
       event.preventDefault();
-      selectAdjacentTab(event.key === 'ArrowLeft' ? -1 : 1);
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') selectAdjacentTab(event.key === 'ArrowLeft' ? -1 : 1);
+      else focusAdjacentPane(event.key === 'ArrowUp' ? 'up' : 'down');
+      return;
+    }
+    if (!embedded && commandModifier && event.shiftKey && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      const direction = ({ ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' } as const)[event.key as 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown'];
+      void moveFocusedTab(direction).catch(reason => { error = text(reason); });
       return;
     }
     if (!embedded && !vimShortcuts && commandModifier && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId) {
       const key = event.key.toLowerCase();
-      if (event.shiftKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
-        event.preventDefault();
-        swapFocusedTab(event.key === 'ArrowLeft' ? -1 : 1);
-        return;
-      }
       if (key === 't') {
         event.preventDefault();
         if (event.shiftKey) openFocusedTerminal(); else openFocusedEmptyTab();

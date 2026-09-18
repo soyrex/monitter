@@ -425,7 +425,7 @@
         <section class="setting-card" aria-labelledby="shortcut-heading">
           <div class="card-heading"><h2 id="shortcut-heading">Keyboard shortcuts</h2><p>Choose how workspace commands and pane navigation behave.</p></div>
           <label>Shortcut mode<select aria-label="Shortcut mode" value={settings.shortcutMode ?? 'standard'} onchange={event=>void save({shortcutMode:event.currentTarget.value as 'standard'|'vim'})}><option value="standard">Standard</option><option value="vim">Vim</option></select></label>
-          <p class="hint">{#if settings.shortcutMode === 'vim'}Escape then : opens commands. Ctrl/Cmd-W then an arrow or h/j/k/l moves between panes. Use :q to close a tab. Terminal keystrokes stay with the terminal.{:else}Cmd/Ctrl-W closes the current tab. Preferences and the command palette keep their standard shortcuts.{/if}</p>
+          <p class="hint">{#if settings.shortcutMode === 'vim'}Escape then : opens commands. Ctrl/Cmd-W then an arrow or h/j/k/l moves between panes. Use :q to close a tab. Terminal keystrokes stay with the terminal.{:else}Cmd/Ctrl-W closes the current tab. Preferences and the command palette keep their standard shortcuts.{/if} Cmd/Ctrl+Shift+arrow moves the current tab to a pane in that direction, creating one if needed. Cmd/Ctrl+Option/Alt+Up/Down focuses the pane above or below.</p>
         </section>
         <section class="setting-card" aria-labelledby="focus-heading">
           <div class="card-heading"><h2 id="focus-heading">Workspace focus</h2><p>Set how split panes respond as you move through them.</p></div>

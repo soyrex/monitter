@@ -362,6 +362,9 @@ Cmd/Ctrl+minus adjust the active viewer by five percentage points within 80–20
 the browser's own page-zoom command.
 Cmd+Option+= on macOS and Ctrl+Alt+= on Windows/Linux balance every open pane to the same area while
 preserving the current split arrangement. The same action is available as Balance panes in Controls.
+Cmd/Ctrl+Shift+arrow moves the selected tab into the pane in that direction. If no pane exists there,
+it creates a split and keeps the empty source pane. Cmd/Ctrl+Option/Alt+Left/Right selects the adjacent
+tab, crossing a pane boundary when needed; Up/Down focuses the pane above or below.
 Activity toggles filter both inline blocks and run detail without deleting captured events.
 Cancelling a running task writes a durable system transcript record, `You cancelled this run.`,
 and a matching diagnostic status event. The transcript record appears inline in the owning
