@@ -4137,13 +4137,12 @@
         </div>
       </section>
     {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
-        {#snippet detailTabs(showClose = true)}<div class="detail-tabs" role="tablist" aria-label="Run detail views">
+        {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Run detail views">
           <div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Run detail</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>Approvals</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>Subagents <span>{taskSubagents.length}</span></button></div>
           {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
-          {#if showClose}<button class="detail-close" aria-label="Close run detail" onclick={() => (showDetail = false)}><X size={14} /></button>{/if}
         </div>{/snippet}
         {#snippet taskComposer()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
@@ -4223,7 +4222,7 @@
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
           <SidebarResize side="right"/>
-            {@render detailTabs(compactDetail || mobileSidebar)}
+            {@render detailTabs()}
             <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="git-slot" class:hidden={detailTab!=='git' || gitState.repository!==true}>
               <GitPane bind:this={gitPane} taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} onStatus={value=>{gitState=value}}/>
             </div>
@@ -6066,7 +6065,8 @@
     display: flex;
     align-self: flex-end;
     align-items: stretch;
-    flex-shrink: 0;
+    flex: 1 1 auto;
+    min-width: 0;
     margin-bottom: -1px;
     border: 1px solid transparent;
     border-bottom: 0;
@@ -6074,11 +6074,14 @@
   }
   .detail-tab {
     display: flex;
+    flex: 1;
     align-items: center;
+    justify-content: center;
     gap: 4px;
-    flex-shrink: 0;
+    min-width: 0;
     min-height: var(--density-detail-tab-height);
     padding: 0 8px;
+    overflow: hidden;
     border: 0;
     border-radius: 5px 5px 0 0;
     color: var(--muted);
@@ -6094,20 +6097,6 @@
   .modern-tabs .detail-tabs { border-bottom:0; box-shadow:inset 0 -1px 0 var(--line); }
   .modern-tabs .detail-tab-entry.active { margin-bottom:0; }
   .modern-tabs .detail-tab { border-radius:0; }
-  .detail-tabs .detail-close {
-    position: sticky;
-    right: 0;
-    flex: none;
-    background: var(--paper);
-    width: 30px;
-    min-height: 30px;
-    margin: 0 0 0 auto;
-    padding: 0;
-    border: 0;
-    border-radius: 6px;
-    color: var(--accent-ink);
-    align-self: center;
-  }
   .channel-members { display:flex;flex-direction:column;overflow:hidden;padding:0; }
   .run-detail.closed, .hidden { display: none; }
   .git-slot { flex: 1; min-height: 0; overflow: hidden; }
