@@ -995,6 +995,15 @@ pub struct CreateTaskInput {
     pub sandbox: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffTaskInput {
+    pub source_task_id: String,
+    pub agent_id: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {

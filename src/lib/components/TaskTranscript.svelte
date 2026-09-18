@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
-  import { Check, CircleStop, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
+  import { ArrowRightLeft, Check, CircleStop, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
   import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, Message, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
@@ -75,6 +75,7 @@
     onStop,
     onEditTask,
     onShare,
+    onHandoff,
   }: {
     active: boolean;
     task: Task;
@@ -120,6 +121,7 @@
     onStop: () => void;
     onEditTask: () => void;
     onShare: () => void;
+    onHandoff: () => void;
   } = $props();
 
   // The keyed transcript is recreated when the selected task changes.
@@ -147,6 +149,7 @@
     const latest = displayItems.at(-1);
     return showThinkingFallback(displayItems, true) || (latest?.type === 'reasoning-group' && latest.values.every(isBlankReasoning));
   });
+  const usageExhausted = $derived(/(?:credits? exhausted|usage limit|rate limit|quota[^\n]*exhaust|limit reached|out of credits)/i.test(liveError));
   function handleFollowChange(following: boolean) { transcriptBuffer.setFollowing(following); }
   function routedLifecycle(item: UnifiedSubagent, title: string): UnifiedSubagent {
     if (title === 'Collaboration queued') return { ...item, status: 'queued', activity: `${item.agentName} was assigned` };
@@ -184,6 +187,7 @@
       <div class="task-overflow">
         <button bind:this={taskMenuAnchor} class="icon" aria-label="Chat actions" aria-haspopup="menu" aria-expanded={menuOpen} onclick={()=>onMenuChange(!menuOpen)}><MoreHorizontal size={17}/></button>
         {#if menuOpen && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Chat actions">
+          <button role="menuitem" disabled={busy || task.status === 'running'} title={task.status === 'running' ? 'Stop the current turn before handing off' : 'Continue this chat with another harness'} onclick={()=>{onMenuChange(false);onHandoff();}}><ArrowRightLeft size={15}/>Hand off…</button>
           {#if canShare}<button role="menuitem" onclick={()=>{onMenuChange(false);onShare();}}><Share2 size={15}/>Share this chat</button>{/if}
         </div>{/if}
       </div>
@@ -247,6 +251,7 @@
     <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />
   <div class="composer-area">
     <SparkleField active={task.status === 'running'}/>
+    {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
     {@render composer()}
     {@render subagentDock()}
   </div>
@@ -257,6 +262,7 @@
   .avatar :global(img) { width:100%; height:100%; object-fit:cover; border-radius:inherit; }
   .icon { display:grid; place-items:center; width:var(--density-control-size); height:var(--density-control-size); border-radius:6px; }
   .icon:hover { background:var(--soft); }
+  .handoff-suggestion{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 20px 8px;padding:8px 10px;border:1px solid color-mix(in srgb,var(--danger,#c44c79) 42%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--danger,#c44c79) 8%,var(--panel));font-size:calc(12px * var(--interface-font-ratio,1));}.handoff-suggestion span{color:var(--danger,#c44c79);font-weight:600}.handoff-suggestion button{display:inline-flex;align-items:center;gap:5px;padding:5px 7px;border-radius:5px;background:var(--soft);color:var(--ink);font:inherit}.handoff-suggestion button:hover:not(:disabled){background:var(--panel)}.handoff-suggestion button:disabled{opacity:.55}
   .floating-panel { position:fixed; inset:auto; z-index:50; margin:0; box-sizing:border-box; overflow:auto; overscroll-behavior:contain; padding:5px; border:1px solid var(--line); border-radius:9px; color:var(--ink); background:var(--panel); box-shadow:0 12px 30px #0003; }
   .pane-task-header { grid-column: 1 / -1; grid-row: 1; }
   .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }

@@ -256,6 +256,10 @@ export interface CreateTaskInput {
   modelSettings?: ModelSettings | null;
   sandbox?: Sandbox | null;
 }
+/** Start a new harness with a bounded, visible continuation brief from an idle chat. */
+export interface HandoffTaskInput {
+  sourceTaskId: string; agentId: string; note?: string | null;
+}
 
 export interface Goal {
   objective: string; status: string; tokenBudget?: number | null;
