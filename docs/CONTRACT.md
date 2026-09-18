@@ -871,7 +871,10 @@ The same Rust catalogue supplies the native harness tool allowlists:
 - `skills_help`: explain supported shared skill installation and activation.
 - `list_shared_skills`: list shared skill metadata without private MCP configuration.
 - `install_shared_skill`: download public Markdown instructions for all current/future user agents.
-- `list_agents`: search configured, published agents by profile.
+- `list_agents`: search configured, published agents by profile. Optional `active_only: true`
+  limits discovery to agents whose task has a currently active runtime turn, using the live run
+  registry rather than persisted task status. Results expose `active`, `active_task_ids`, and the
+  newest `current_task_id`; omitting the option keeps inactive profiles available for delegation.
 - `delegate_task`: create a child chat, inherit its parent's project, apply the recipient's saved
   host/folder/model/permissions, and durably queue the supplied brief.
 - `send_message`: send a brief to a peer, optionally using a directly connected collaboration chat.

@@ -22,7 +22,9 @@ the same checkout. Agents' declared skills do not grant new permissions.
 
 ## Callable tools
 
-- `list_agents(query?)` discovers published saved profiles.
+- `list_agents(query?, active_only?)` discovers published saved profiles. Set `active_only: true`
+  to return only agents with a currently active runtime turn; each result includes live activity
+  fields sourced from Monitter's process-local run registry.
 - `delegate_task(to_agent_id, title, message, request_id)` queues a linked task.
 - `send_message(to_agent_id, message, request_id, task_id?)` queues peer context.
 - `get_task_result(collaboration_id)` and `wait_for_task(collaboration_id, timeout_seconds?)`

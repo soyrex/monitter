@@ -48,7 +48,11 @@ impl Service {
         self.require_collaboration_caller(caller_task)?;
         validate_tool_args(tool, args)?;
         match tool {
-            "list_agents" => self.list_agents_protocol(caller_task, string_arg(args, "query")?),
+            "list_agents" => self.list_agents_protocol(
+                caller_task,
+                string_arg(args, "query")?,
+                bool_arg(args, "active_only")?.unwrap_or(false),
+            ),
             "delegate_task" => self.queue_protocol(caller_task, args, "delegation"),
             "send_message" => self.queue_protocol(caller_task, args, "message"),
             "get_task_result" => {
@@ -106,12 +110,17 @@ impl Service {
         &self,
         caller_task: &str,
         query: Option<&str>,
+        active_only: bool,
     ) -> Result<Value, String> {
         let needle = query.unwrap_or_default().trim().to_lowercase();
         let data = self
             .data
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let runs = self
+            .runs
+            .lock()
+            .map_err(|_| "Monitter run registry lock failed.".to_string())?;
         let agents = data
             .snapshot
             .agents
@@ -119,20 +128,30 @@ impl Service {
             .filter(|agent| !agent.internal)
             .filter(|agent| agent.collaboration_enabled)
             .filter(|agent| profile_matches(agent, &needle))
+            .filter_map(|agent| {
+                let active_task_ids = data
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .rev()
+                    .filter(|task| task.agent_id == agent.id)
+                    .filter(|task| {
+                        runs.tasks
+                            .get(&task.id)
+                            .is_some_and(|control| control.is_active())
+                    })
+                    .map(|task| task.id.clone())
+                    .collect::<Vec<_>>();
+                (!active_only || !active_task_ids.is_empty()).then_some((agent, active_task_ids))
+            })
             .take(MAX_DIRECTORY)
-            .map(|agent| {
+            .map(|(agent, active_task_ids)| {
                 let host = data
                     .snapshot
                     .hosts
                     .iter()
                     .find(|host| host.id == agent.host_id);
-                let current_task_id = data
-                    .snapshot
-                    .tasks
-                    .iter()
-                    .rev()
-                    .find(|task| task.agent_id == agent.id && task.status == "running")
-                    .map(|task| task.id.clone());
+                let current_task_id = active_task_ids.first().cloned();
                 json!({
                     "id": agent.id,
                     "name": truncate(&agent.name, 120),
@@ -144,11 +163,13 @@ impl Service {
                     "model": truncate(&agent.model, 120),
                     "host": host.map(|host| truncate(&host.name, 120)),
                     "configured": host.is_some(),
+                    "active": !active_task_ids.is_empty(),
+                    "active_task_ids": active_task_ids,
                     "current_task_id": current_task_id,
                 })
             })
             .collect::<Vec<_>>();
-        Ok(json!({"agents": agents, "caller_task_id": caller_task}))
+        Ok(json!({"agents": agents, "caller_task_id": caller_task, "active_only": active_only}))
     }
 
     fn terminal_run_protocol(
@@ -840,7 +861,7 @@ fn fail_queued_delivery(snapshot: &mut Snapshot, index: usize, error: &str) {
 }
 fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Result<(), String> {
     let allowed: &[&str] = match tool {
-        "list_agents" => &["query"],
+        "list_agents" => &["query", "active_only"],
         "delegate_task" => &["to_agent_id", "title", "message", "request_id"],
         "send_message" => &["to_agent_id", "message", "request_id", "task_id"],
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
@@ -875,6 +896,13 @@ fn string_arg<'a>(
         None => Ok(None),
         Some(Value::String(value)) => Ok(Some(value)),
         _ => Err(format!("{name} must be a string.")),
+    }
+}
+fn bool_arg(args: &serde_json::Map<String, Value>, name: &str) -> Result<Option<bool>, String> {
+    match args.get(name) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        _ => Err(format!("{name} must be a boolean.")),
     }
 }
 fn validate_request(to_agent: &str, title: &str, text: &str, request: &str) -> Result<(), String> {
@@ -1170,6 +1198,59 @@ mod tests {
                 json!({"collaboration_id":first["collaboration_id"],"timeout_seconds":"no"})
             )
             .is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn directory_active_filter_uses_live_runtime_phase_not_persisted_status() {
+        let (service, dir) = service("active-directory");
+        let live_agent = add_agent(&service, "Live reviewer");
+        let stale_agent = add_agent(&service, "Stale reviewer");
+        let caller = service.snapshot().unwrap().agents[0].clone();
+        let caller_task = task(&service, &caller, "Caller", None, None);
+        let live_task = task(&service, &live_agent, "Live task", None, None);
+        let stale_task = task(&service, &stale_agent, "Stale task", None, None);
+        running(&service, &caller_task.id);
+        running(&service, &live_task.id);
+        running(&service, &stale_task.id);
+
+        let live_control = service.reserve_run(&live_task.id).unwrap();
+        let active = service
+            .protocol(
+                &caller_task.id,
+                "list_agents",
+                json!({"query":"reviewer","active_only":true}),
+            )
+            .unwrap();
+        let agents = active["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["id"], live_agent.id);
+        assert_eq!(agents[0]["active"], true);
+        assert_eq!(agents[0]["current_task_id"], live_task.id);
+        assert_eq!(agents[0]["active_task_ids"], json!([live_task.id]));
+        assert_eq!(active["active_only"], true);
+
+        live_control.mark_idle();
+        let after_idle = service
+            .protocol(
+                &caller_task.id,
+                "list_agents",
+                json!({"query":"reviewer","active_only":true}),
+            )
+            .unwrap();
+        assert!(after_idle["agents"].as_array().unwrap().is_empty());
+
+        let directory = service
+            .protocol(&caller_task.id, "list_agents", json!({"query":"reviewer"}))
+            .unwrap();
+        assert_eq!(directory["agents"].as_array().unwrap().len(), 2);
+        assert!(directory["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|agent| agent["active"] == false));
+
+        service.release_run(&live_task.id);
         let _ = fs::remove_dir_all(dir);
     }
 
