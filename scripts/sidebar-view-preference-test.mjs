@@ -44,7 +44,7 @@ const mobile = readFileSync(new URL('../src/routes/mobile/+page.svelte', import.
 const contract = readFileSync(new URL('../docs/CONTRACT.md', import.meta.url), 'utf8');
 assert.match(desktop, /sidebarViewState.view\s*=\s*view;[\s\S]{0,180}saveSidebarViewPreference\(sidebarViewClient, view\)/);
 assert.doesNotMatch(desktop, /saveSettingsPatch\(\{\s*sidebarView\s*:/);
-assert.match(desktop, /const sidebarViewClient:[^\n]+isTauri\(\) \? 'desktop' : 'web'/);
+assert.match(desktop, /const sidebarViewClient:[^\n]+nativeRuntime \? 'desktop' : 'web'/);
 assert.match(mobile, /saveSidebarViewPreference\('mobile', view\)/);
 assert.match(contract, /stored locally and independently[\s\S]{0,100}native desktop, ordinary web and mobile clients/);
 

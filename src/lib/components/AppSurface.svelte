@@ -185,6 +185,7 @@
   type MarkdownDocument = { taskId: string; path: string; title: string };
   type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
+  let sidebarSelected = $state(false);
   let pendingEmptyPaneIds = $state<string[]>([]);
   // Each AppSurface instance owns exactly one pane-local controller. The root
   // coordinates the layout tree; it no longer owns tab ordering or selection
@@ -438,7 +439,7 @@
   const interfaceScaleViewer = $derived<ViewerType>(mobileSidebar ? 'mobile' : 'desktop');
   const activeInterfaceScale = $derived(mobileSidebar ? $mobileInterfaceScale : $desktopInterfaceScale);
   const backToChats = getContext<() => void>('monitter-back-to-chats')
-    ?? (() => { mobileMain = false; railAgentId = null; });
+    ?? (() => { mobileMain = false; railAgentId = null; railProjectId = null; });
   setContext('monitter-back-to-chats', backToChats);
   let mobileMain = $state(false);
   const sidebarCompressed = $derived(sidebarCollapsed && !mobileSidebar);
@@ -446,7 +447,7 @@
   onMount(() => {
     if (embedded) return;
     const viewport = window.matchMedia('(max-width: 760px)');
-    const update = () => { mobileSidebar = viewport.matches; railAgentId = null; };
+    const update = () => { mobileSidebar = viewport.matches; railAgentId = null; railProjectId = null; };
     const stopScaleWatch = watchViewerInterfaceScales();
     update();
     viewport.addEventListener('change', update);
@@ -455,6 +456,8 @@
   let collapsedAgents = $state<Record<string, boolean>>({});
   let railAgentId = $state<string | null>(null);
   let railAnchor = $state<HTMLButtonElement>();
+  let railProjectId = $state<string | null>(null);
+  let railProjectAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
   let detailTab = $state<'run' | 'git' | 'timeline' | 'approvals' | 'subagents'>('run');
   let selectedSubagentId = $state<string | null>(null);
@@ -529,6 +532,13 @@
   const selectRootSidebarView = getContext<(view: SidebarView) => void>('monitter-select-sidebar-view') ?? setSidebarView;
   setContext('monitter-select-sidebar-view', selectRootSidebarView);
   const sidebarView = $derived(sidebarViewState.view);
+  $effect(() => {
+    sidebarCompressed; sidebarView;
+    if (embedded || !untrack(() => sidebarSelected)) return;
+    void tick().then(() => {
+      if (sidebarSelected && motionSidebar) focusSidebar();
+    });
+  });
   let sidebarViewClientReady = $state(false);
   let sidebarViewInitialized = $state(false);
   const sidebarViewClient: SidebarViewClient = untrack(() => nativeRuntime ? 'desktop' : 'web');
@@ -547,7 +557,14 @@
   }
 
   const projects = $derived(indexes?.snapshot.projects ?? []);
+  const railProject = $derived(railProjectId && railProjectId !== 'unassigned'
+    ? indexes?.projectById.get(railProjectId) ?? null
+    : null);
   const focusedProject = $derived(focusedProjectId ? indexes?.projectById.get(focusedProjectId) ?? null : null);
+  $effect(() => {
+    if (!sidebarCompressed || sidebarView !== 'standard') railAgentId = null;
+    if (!sidebarCompressed || sidebarView !== 'projects') railProjectId = null;
+  });
   $effect(() => {
     if (embedded || !sidebarViewClientReady || sidebarViewInitialized || !snapshot) return;
     // Import the former shared preference once for a smooth migration, then
@@ -904,11 +921,24 @@
     void tick().then(() => document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(owner)}"]`)?.focus({ preventScroll: true }));
     return true;
   }
+  function focusRoutedPane() {
+    if (embedded || mobileSidebar || !sidebarSelected) return;
+    sidebarSelected = false;
+    railAgentId = null;
+    railProjectId = null;
+    const owner = activePaneId;
+    void tick().then(() => {
+      if (sidebarSelected || activePaneId !== owner || modal || palette) return;
+      const pane = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(owner)}"]`);
+      if (pane) focusPaneElement(pane);
+    });
+  }
   function routeTask(task: Task, newSplit = false) {
     mobileMain = true;
-    if (newSplit && !embedded) { void openSidebarChatInNewSplit('task', task.id); return; }
+    if (newSplit && !embedded) { void openSidebarChatInNewSplit('task', task.id).then(focusRoutedPane); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openTask(task); else openTask(task);
+    focusRoutedPane();
   }
   function routeSidebarTask(task: Task, newSplit: boolean) {
     const target: WorkspaceKey = sidebarView === 'standard' ? `agent:${task.agentId}` : sidebarView === 'projects' ? `project:${task.projectId ?? 'unassigned'}` : activeWorkspaceKey;
@@ -926,9 +956,10 @@
     mobileMain = true;
     if (embedded) { workspaceNavigation.channel(channel); return; }
     if (activeWorkspaceKey !== 'all') { void switchWorkspace('all').then(changed => { if (changed) routeChannel(channel, newSplit); }); return; }
-    if (newSplit) { void openSidebarChatInNewSplit('channel', channel.id); return; }
+    if (newSplit) { void openSidebarChatInNewSplit('channel', channel.id).then(focusRoutedPane); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openChannel(channel); else openChannel(channel);
+    focusRoutedPane();
   }
   function sidebarChannelContextMenu(event: MouseEvent, channel: Channel) {
     if (!event.ctrlKey) return;
@@ -941,6 +972,7 @@
     if (!embedded && scope !== activeWorkspaceKey) { void switchWorkspace(scope).then(changed => { if (changed) routeDraft(agentId); }); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openTaskComposer(null, agentId); else openTaskComposer(null, agentId);
+    focusRoutedPane();
   }
   function routeProjectDraft(projectId: string) {
     mobileMain = true;
@@ -948,6 +980,7 @@
     if (!embedded && scope !== activeWorkspaceKey) { void switchWorkspace(scope).then(changed => { if (changed) routeProjectDraft(projectId); }); return; }
     const target = !embedded && activePaneId !== 'main' ? paneRefs[activePaneId] : null;
     if (target) target.openTaskComposer(null, null, projectId); else openTaskComposer(null, null, projectId);
+    focusRoutedPane();
   }
   function resizeSplit(id: string, ratio: number) {
     function resize(node: PaneLayout): PaneLayout {
@@ -1018,6 +1051,7 @@
     activePaneId = owner;
     collapsedAgents[agentId] = false;
     railAgentId = null;
+    railProjectId = null;
     mobileMain = true;
     if (owner === 'main') focusExistingTab(tab);
     else paneRefs[owner]?.focusExistingTab(tab);
@@ -1284,10 +1318,12 @@
     if (!switched || activeWorkspaceKey !== 'all') return;
     mobileMain = true;
     railAgentId = null;
+    railProjectId = null;
     if (expandedPaneId) setPaneExpansion(null);
     activePaneId = 'main';
     overviewOpen = true;
     openOverview();
+    focusRoutedPane();
   }
   function routeTaskWorkspace(task: Task) {
     if (embedded) { workspaceNavigation.task(task); return; }
@@ -2084,6 +2120,7 @@
   function saveCurrentDraft() {
     taskMenu = false;
     railAgentId = null;
+    railProjectId = null;
     const key = currentDraftKey();
     if(pane==='channel' && selectedChannelId)channelRecipients[selectedChannelId]=[...recipients];
     if (key && drafts[key] !== composer) drafts[key] = composer;
@@ -2376,6 +2413,7 @@
     const owner=paneIds(layout).find(id=>(id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).some(tab=>tab.kind==='settings')) ?? activePaneId;
     activePaneId=owner;
     if(owner==='main')openSettings(category);else paneRefs[owner]?.openSettings(category);
+    focusRoutedPane();
   }
   function closeSettings(collapse = true) {
     settingsOpen=false;forgetTab({kind:'settings',id:'settings'});if(pane!=='settings'){if (collapse) collapseTablessPane();return;}
@@ -2449,7 +2487,24 @@
   async function executeWorkspaceVim(command: VimCommand) {
     if (embedded) { await onVimWorkspace?.(paneId,command); return; }
     const ids=paneIds(layout), current=activePaneId;
-    if(command.kind==='focus-pane') { const t=command.target; if(typeof t==='object'&&'direction'in t)focusAdjacentPane(t.direction); else { const index=t==='first'?0:t==='last'?ids.length-1:t==='next'?(ids.indexOf(current)+1)%ids.length:t==='previous'?(ids.indexOf(current)-1+ids.length)%ids.length:t.index-1; if(ids[index])activePaneId=ids[index]; } return; }
+    if(command.kind==='focus-pane') {
+      const target=command.target;
+      if(typeof target==='object'&&'direction'in target)focusAdjacentPane(target.direction);
+      else if(target==='first')focusSidebar();
+      else {
+        const columns=['sidebar',...ids];
+        const selected=sidebarSelected?'sidebar':current;
+        const index=target==='last'?columns.length-1
+          :target==='next'?(columns.indexOf(selected)+1)%columns.length
+          :target==='previous'?(columns.indexOf(selected)-1+columns.length)%columns.length
+          :target.index;
+        const id=columns[index];
+        if(id==='sidebar')focusSidebar();
+        else if(id){const pane=document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(id)}"]`);if(pane)focusPaneElement(pane);}
+      }
+      return;
+    }
+    if (sidebarSelected && command.kind !== 'equalize-panes') { notice='Select a content pane first.'; return; }
     if(command.kind==='only-pane') {
       const kept=current==='main'?captureState():paneRefs[current]?.captureState();
       await setLayout('single'); activePaneId='main';
@@ -2512,6 +2567,9 @@
   }
 
   async function executeVimCommand(command: VimCommand) {
+    if (sidebarSelected && !['help','focus-pane','equalize-panes'].includes(command.kind)) {
+      vimCommandError='Select a content pane first.'; return;
+    }
     if (command.kind === 'help') { vimCommandError = ''; vimHelpOpen = true; return; }
     if (command.kind === 'tabnew') {
       const tabs=orderedTabs(),current=currentVimTab(),currentIndex=current?tabs.findIndex(t=>t.kind===current.kind&&t.id===current.id):-1;
@@ -2706,6 +2764,7 @@
     const owner=paneIds(layout).find(id=>(id==='main'?allTabs():paneRefs[id]?.allTabs()??[]).some(tab=>tab.kind==='settings'))??activePaneId;
     activePaneId=owner;
     if(owner==='main')openAgentSettings(draft);else paneRefs[owner]?.openAgentSettings(draft);
+    focusRoutedPane();
   }
   $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && settingsAgents.length)untrack(()=>selectAgentEditor(settingsAgents[0]?.id??''));});
   function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
@@ -3116,6 +3175,7 @@
   function dismissMonitterMenu(event: PointerEvent) {
     if (!(event.target instanceof Element) || !event.target.closest('.task-overflow')) taskMenu = false;
     if (!(event.target instanceof Element) || !event.target.closest('.agent-rail, .rail-chats')) railAgentId = null;
+    if (!(event.target instanceof Element) || !event.target.closest('.project-rail, .rail-project-chats')) railProjectId = null;
     if (!(event.target instanceof Element) || !event.target.closest('.tab-picker')) tabPickerOpen = false;
   }
   let tabInputFocusRequest = 0;
@@ -3187,19 +3247,76 @@
     return candidates[0]?.node ?? null;
   }
   function focusPaneElement(next: HTMLElement) {
+    sidebarSelected = false;
     activePaneId = next.dataset.paneId!;
     const target = next.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')
       ?? next.querySelector<HTMLElement>('textarea[aria-label="Task message"], textarea[aria-label="Channel message"]')
       ?? next.querySelector<HTMLElement>('.messages') ?? next;
     target.focus({ preventScroll: true });
   }
+  function sidebarNavigationButtons() {
+    const primary = '.sidebar-tabs [role="tab"], .side-scroll .workspace-approval, .side-scroll .agent-name, .side-scroll .task-select, .side-scroll .project-name, .side-scroll .unassigned-folder, .side-scroll .channel-row, .agent-rail .sidebar-rail-view, .agent-rail .rail-avatar, .project-rail .sidebar-rail-view, .project-rail .rail-project, .activity-rail .sidebar-rail-view, .activity-rail .rail-activity, .rail-chats .task-select, .rail-project-chats .task-select';
+    return [...(motionSidebar?.querySelectorAll<HTMLButtonElement>(primary) ?? [])]
+      .filter(button => !button.disabled && button.getClientRects().length > 0 && !button.closest('[hidden], [inert]'));
+  }
+  function focusSidebar() {
+    if (embedded || mobileSidebar || !motionSidebar) return false;
+    sidebarSelected = true;
+    const target = motionSidebar.querySelector<HTMLElement>('.sidebar-tabs [aria-selected="true"]')
+      ?? motionSidebar.querySelector<HTMLElement>('.sidebar-rail-view[aria-selected="true"]')
+      ?? motionSidebar.querySelector<HTMLElement>('.side-scroll button.current')
+      ?? sidebarNavigationButtons()[0]
+      ?? motionSidebar;
+    target.focus({preventScroll:true});
+    return true;
+  }
   function focusAdjacentPane(direction: 'left' | 'right' | 'up' | 'down') {
+    if (sidebarSelected) {
+      if (direction !== 'right') return false;
+      const first = document.querySelector<HTMLElement>('.pane-leaf[data-pane-id]');
+      if (!first) return false;
+      focusPaneElement(first);
+      return true;
+    }
     const next = adjacentPaneElement(direction);
-    if (!next) return false;
+    if (!next) return direction === 'left' && focusSidebar();
     focusPaneElement(next);
     return true;
   }
+  function handleSidebarKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || paneFocusChord || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || (event.target instanceof HTMLElement && event.target.isContentEditable)) return;
+    const buttons = sidebarNavigationButtons();
+    const current = event.target instanceof HTMLButtonElement ? event.target : null;
+    if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && (current?.closest('.sidebar-tabs') || current?.matches('.sidebar-rail-view'))) {
+      event.preventDefault();
+      const index = sidebarViews.findIndex(view => view.id === sidebarView);
+      const next = sidebarViews[Math.max(0, Math.min(sidebarViews.length - 1, index + (event.key === 'ArrowRight' ? 1 : -1)))];
+      if (next) {
+        setSidebarView(next.id);
+        void tick().then(() => motionSidebar?.querySelector<HTMLElement>('.sidebar-tabs [aria-selected="true"], .sidebar-rail-view[aria-selected="true"]')?.focus({preventScroll:true}));
+      }
+      return;
+    }
+    const groupToggle = current?.closest('.agent-row')?.querySelector<HTMLButtonElement>('.agent-avatar-toggle')
+      ?? current?.closest('.project-row')?.querySelector<HTMLButtonElement>('.folder-toggle')
+      ?? (current?.hasAttribute('aria-expanded') ? current : null);
+    if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && groupToggle) {
+      const expanded = groupToggle.getAttribute('aria-expanded') === 'true';
+      if ((event.key === 'ArrowRight' && !expanded) || (event.key === 'ArrowLeft' && expanded)) {
+        event.preventDefault(); groupToggle.click(); current?.focus({preventScroll:true});
+      }
+      return;
+    }
+    if (!['ArrowUp','ArrowDown','Home','End'].includes(event.key) || !buttons.length) return;
+    event.preventDefault();
+    const index = current ? buttons.indexOf(current) : -1;
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : Math.max(0, Math.min(buttons.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+    buttons[next].focus();
+  }
   async function moveFocusedTab(direction: 'left' | 'right' | 'up' | 'down') {
+    if (sidebarSelected) return;
     const current = activePaneId === 'main' ? currentVimTab() : paneRefs[activePaneId]?.currentVimTab();
     if (!current) return;
     const sourcePaneId = activePaneId;
@@ -3227,6 +3344,7 @@
   });
   function cancelPaneFocusChord() { paneFocusChord=false; }
   function closeFocusedTab() {
+    if (sidebarSelected) return;
     const target = activePaneId === 'main' ? { closeActiveTab } : paneRefs[activePaneId];
     target?.closeActiveTab();
   }
@@ -3243,11 +3361,12 @@
     else void paneRefs[activePaneId]?.newTerminal();
   }
   function selectAdjacentTab(direction: 1 | -1) {
+    if (sidebarSelected) return direction > 0 && focusAdjacentPane('right');
     const current = activePaneId === 'main' ? { selectRelativeTab } : paneRefs[activePaneId];
     if (current?.selectRelativeTab(direction)) return true;
     const nextPane = adjacentPaneElement(direction < 0 ? 'left' : 'right');
     const nextPaneId = nextPane?.dataset.paneId;
-    if (!nextPane || !nextPaneId) return false;
+    if (!nextPane || !nextPaneId) return direction < 0 && focusSidebar();
     activePaneId = nextPaneId;
     const next = nextPaneId === 'main' ? { allTabs, focusExistingTab } : paneRefs[nextPaneId];
     const tabs = next?.allTabs() ?? [];
@@ -3267,7 +3386,7 @@
   function handleShortcuts(event: KeyboardEvent) {
     tabIndexModifier = macPlatform ? event.metaKey : event.ctrlKey;
     if (event.key === 'Escape' && tabPickerOpen) { event.preventDefault(); tabPickerOpen = false; return; }
-    if (!embedded && tabIndexModifier && !event.altKey && !event.shiftKey && !event.isComposing && /^[1-9]$/.test(event.key) && !document.querySelector('[role="dialog"]')) {
+    if (!embedded && !sidebarSelected && tabIndexModifier && !event.altKey && !event.shiftKey && !event.isComposing && /^[1-9]$/.test(event.key) && !document.querySelector('[role="dialog"]')) {
       event.preventDefault();
       const buttons=document.querySelectorAll<HTMLButtonElement>(`.pane-leaf[data-pane-id="${CSS.escape(activePaneId)}"] .tabs > .tab-picker-list > .tab-entry > button.tab`);
       buttons[Number(event.key)-1]?.click();
@@ -3286,30 +3405,33 @@
       else focusAdjacentPane(event.key === 'ArrowUp' ? 'up' : 'down');
       return;
     }
-    if (!embedded && commandModifier && event.shiftKey && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+    if (!embedded && commandModifier && event.shiftKey && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId && !railProjectId && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
       event.preventDefault();
+      if (sidebarSelected) { notice='Select a content pane first.'; return; }
       const direction = ({ ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' } as const)[event.key as 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown'];
       void moveFocusedTab(direction).catch(reason => { error = text(reason); });
       return;
     }
-    if (!embedded && !vimShortcuts && commandModifier && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId) {
+    if (!embedded && !vimShortcuts && commandModifier && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId && !railProjectId) {
       const key = event.key.toLowerCase();
       if (key === 't') {
         event.preventDefault();
+        if (sidebarSelected) { notice='Select a content pane first.'; return; }
         if (event.shiftKey) openFocusedTerminal(); else openFocusedEmptyTab();
         return;
       }
       if (event.shiftKey && key === 'c') {
+        if (sidebarSelected) { event.preventDefault(); notice='Select a content pane first.'; return; }
         event.preventDefault(); openFocusedTaskComposer(); return;
       }
       if (key === 'b') {
         event.preventDefault();
-        if (event.shiftKey) toggleFocusedDetail();
+        if (event.shiftKey) { if (!sidebarSelected) toggleFocusedDetail(); }
         else sidebarCollapsed = !sidebarCollapsed;
         return;
       }
     }
-    if (!embedded && !modal && !palette && !taskMenu && !railAgentId && !vimCommandOpen) {
+    if (!embedded && !modal && !palette && !taskMenu && !railAgentId && !railProjectId && !vimCommandOpen) {
       if (paneFocusChord) {
         cancelPaneFocusChord(); event.preventDefault(); event.stopPropagation();
         if(event.key==='Escape')return;
@@ -3325,15 +3447,15 @@
         return;
       }
     }
-    if(embedded ? !active : activePaneId !== 'main' && !modal && !palette) return;
+    if(embedded ? !active : activePaneId !== 'main' && !sidebarSelected && !modal && !palette) return;
     if (vimCommandOpen) return;
     if(inTerminal && event.ctrlKey && !event.metaKey) {
       if(event.shiftKey && ['p','k'].includes(event.key.toLowerCase())) {event.preventDefault();palette=event.key.toLowerCase()==='p'?'controls':'switch';return;}
       if(!event.shiftKey)return;
     }
-    if(!vimShortcuts && event.key==='Escape' && compactDetail && showDetail && !modal && !palette && !taskMenu && !railAgentId) {event.preventDefault();showDetail=false;return;}
-    if (event.key === 'Escape' && (taskMenu || railAgentId)) { event.preventDefault(); taskMenu = false; railAgentId = null; return; }
-    if (vimShortcuts && !inTerminal && !modal && !palette && !taskMenu && !railAgentId) {
+    if(!vimShortcuts && event.key==='Escape' && compactDetail && showDetail && !modal && !palette && !taskMenu && !railAgentId && !railProjectId) {event.preventDefault();showDetail=false;return;}
+    if (event.key === 'Escape' && (taskMenu || railAgentId || railProjectId)) { event.preventDefault(); taskMenu = false; railAgentId = null; railProjectId = null; return; }
+    if (vimShortcuts && !inTerminal && !modal && !palette && !taskMenu && !railAgentId && !railProjectId) {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); vimArmed = true; return; }
       if (vimArmed && event.key === ':' && !event.metaKey && !event.ctrlKey && !event.altKey) { event.preventDefault(); openVimCommand(); return; }
       if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.length === 1) vimArmed = false;
@@ -3341,7 +3463,7 @@
 
     if ((event.metaKey || event.ctrlKey) && event.key === ',' && !event.altKey && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
-      taskMenu = false; railAgentId = null;
+      taskMenu = false; railAgentId = null; railProjectId = null;
       palette = null; routeSettings();
       return;
     }
@@ -4177,8 +4299,10 @@
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
   <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
-  {#if !embedded}<aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} aria-label="Agents and tasks" inert={mobileSidebar && mobileMain}>
-    {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null}}/>{/if}
+  {#if !embedded}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the sidebar delegates arrow navigation among its focusable controls) -->
+  <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
+    {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null;railProjectId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
       {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Create">
@@ -4288,7 +4412,8 @@
           ></button
         >{/each}
     </nav>
-    {:else}<nav use:motionView={{key:"rail",initial:motionReady,x:-4,y:0,duration:160}} class="agent-rail" aria-label="Agents">
+    {:else}{#if sidebarView === 'standard'}<nav use:motionView={{key:"rail-agents",initial:motionReady,x:-4,y:0,duration:160}} class="agent-rail" aria-label="Agents">
+      <div class="sidebar-rail-tabs" role="tablist" aria-label="Sidebar views"><button class="icon sidebar-rail-view" type="button" role="tab" aria-selected="true" aria-label="Agents view" title="Expand Agents sidebar" onclick={()=>sidebarCollapsed=false}><Bot size={16}/></button></div>
       {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
       {#each sidebarSorted(visibleAgents,'agents') as agent}<button use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}} class="rail-avatar" class:current={railAgentId === agent.id || selectedAgent?.id === agent.id} aria-label={`Chats with ${agent.name}`} title={agent.name} aria-expanded={railAgentId === agent.id} onclick={(event)=>{railAnchor=event.currentTarget;railAgentId=railAgentId===agent.id?null:agent.id}}>
         <span class="avatar">{@render avatarVisual(agent, 15)}</span>
@@ -4296,11 +4421,28 @@
       </button>{/each}
       <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
       <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
-    </nav>{/if}
+    </nav>{:else if sidebarView === 'projects'}<nav use:motionView={{key:"rail-projects",initial:motionReady,x:-4,y:0,duration:160}} class="project-rail" aria-label="Projects">
+      <div class="sidebar-rail-tabs" role="tablist" aria-label="Sidebar views"><button class="icon sidebar-rail-view" type="button" role="tab" aria-selected="true" aria-label="Projects view" title="Expand Projects sidebar" onclick={()=>sidebarCollapsed=false}><Folder size={16}/></button></div>
+      {#each sidebarSorted(projects,'projects') as project (project.id)}{@const ProjectIcon = projectIconComponent(project.icon)}<button use:sidebarReorder={{group:'projects',id:project.id,move:moveSidebar}} class="rail-project" class:current={railProjectId === project.id || focusedProjectId === project.id || selectedTask?.projectId === project.id} aria-label={`Chats in ${project.name}`} title={project.name} aria-expanded={railProjectId === project.id} onclick={(event)=>{railProjectAnchor=event.currentTarget;railProjectId=railProjectId===project.id?null:project.id}}><ProjectIcon size={17} style={`color:${project.color}`}/>{#if activityTasks.some(task=>task.projectId===project.id && task.status==='running')}<span class="rail-running" aria-label="Running"></span>{/if}</button>{/each}
+      <button class="rail-project" class:current={railProjectId === 'unassigned' || (!selectedTask?.projectId && activeWorkspaceKey === 'project:unassigned')} aria-label="Chats with no project" title="No project" aria-expanded={railProjectId === 'unassigned'} onclick={(event)=>{railProjectAnchor=event.currentTarget;railProjectId=railProjectId==='unassigned'?null:'unassigned'}}><Folder size={17}/>{#if activityTasks.some(task=>!task.projectId && task.status==='running')}<span class="rail-running" aria-label="Running"></span>{/if}</button>
+      <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
+      <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
+    </nav>{:else}<nav use:motionView={{key:"rail-activity",initial:motionReady,x:-4,y:0,duration:160}} class="activity-rail" aria-label="Activity">
+      <div class="sidebar-rail-tabs" role="tablist" aria-label="Sidebar views"><button class="icon sidebar-rail-view" type="button" role="tab" aria-selected="true" aria-label="Activity view" title="Expand Activity sidebar" onclick={()=>sidebarCollapsed=false}><Activity size={16}/></button></div>
+      {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
+      {#each activityTasks as task (task.id)}{@const taskAgent = indexes?.agentById.get(task.agentId)}<button class="rail-activity" class:current={selectedTask?.id === task.id} aria-label={`Open activity chat ${task.title}`} title={task.title} onclick={()=>routeTaskWorkspace(task)}>{#if taskAgent}<span class="avatar">{@render avatarVisual(taskAgent, 14)}</span>{:else}<MessageSquare size={16}/>{/if}{#if task.status==='running'}<span class="rail-running" aria-label="Running"></span>{/if}</button>{/each}
+      <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
+      <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
+    </nav>{/if}{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
       <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}{@render sidebarWorkspacePanels(railAgent.id)}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
+    </div>{/if}
+    {#if railProjectId && railProjectAnchor}<div class="rail-project-chats floating-panel" role="dialog" aria-label={`${railProjectId === 'unassigned' ? 'No project' : railProject?.name ?? 'Deleted project'} chats`} use:floating={{anchor:railProjectAnchor,side:'right'}}>
+      <header><strong>{railProjectId === 'unassigned' ? 'No project' : railProject?.name ?? 'Deleted project'}</strong><button class="icon" aria-label="Close project chats" onclick={()=>railProjectId=null}><X size={14}/></button></header>
+      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>railProjectId === 'unassigned' ? !task.projectId : task.projectId === railProjectId),`project-chats:${railProjectId}`), true, railProjectId === 'unassigned' ? 'All chats are organised.' : 'No chats yet.')}</div>
+      {#if railProject}<button class="rail-new-chat" aria-label={`New chat in ${railProject.name}`} onclick={()=>routeProjectDraft(railProject!.id)}><Plus size={14}/>New chat</button>{/if}
     </div>{/if}
     <div class="sidebar-usage" class:compact={sidebarCompressed}><UsageRings usage={sidebarUsage} compact={sidebarCompressed} bind:expanded={usageExpanded}/></div>
     <SidebarClock compact={sidebarCompressed} bind:expanded={clockExpanded}/>
@@ -4313,9 +4455,9 @@
     </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
-    <PaneGrid {layout} {activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} showActivePaneBorder={snapshot?.settings.showActivePaneBorder ?? true} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>activePaneId=id} onresize={resizeSplit} ondropTab={dropTab}>
+    <PaneGrid {layout} activePaneId={sidebarSelected?'sidebar':activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} showActivePaneBorder={snapshot?.settings.showActivePaneBorder ?? true} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>{activePaneId=id;sidebarSelected=false}} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
-        <AppSurface embedded={true} paneId={id} active={activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey}
+        <AppSurface embedded={true} paneId={id} active={!sidebarSelected && activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
           onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={handleChildWorkspaceChange} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}
@@ -4906,6 +5048,10 @@
     border-right: 1px solid var(--line);
     background: var(--sidebar);
   }
+  .sidebar.keyboard-active::after { content:""; position:absolute; inset:0; z-index:25; border:2px solid var(--accent); pointer-events:none; }
+  :global(.app-shell.native-mac:not(.native-fullscreen)) .sidebar.keyboard-active::after { border-radius:16px 0 0 16px; }
+  :global(:root:has([data-active-modal])) .sidebar.keyboard-active::after { content:none; }
+  .sidebar.sidebar-selected :is(.sidebar-tabs, .side-scroll, .agent-rail, .project-rail, .activity-rail, .rail-chats, .rail-project-chats) button:focus { outline:2px solid var(--accent) !important; outline-offset:-2px; border-radius:5px; }
   .brand {
     position: relative;
     height: 38px;
@@ -6447,13 +6593,15 @@
   .sidebar-collapsed .brand { justify-content: center; padding: 0; height: var(--pane-tabbar-height,52px); }
   .native-mac.sidebar-collapsed { grid-template-columns: max(48px,calc(88px / var(--interface-scale,1))) minmax(0,1fr); }
   .native-mac.sidebar-collapsed:not(.native-fullscreen) .brand { height:calc(var(--pane-tabbar-height) + 36px); align-items:flex-end; padding-bottom:4px; }
-  .agent-rail { display: flex; align-items: center; gap: 8px; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; padding: 10px 4px; }
-  .rail-avatar { position: relative; flex: none; padding: 4px; border: 1px solid transparent; border-radius: 9px; }
-  .rail-avatar.current, .rail-avatar:hover { border-color: var(--line); background: var(--soft); }
-  .rail-avatar .avatar { width: 30px; height: 30px; font-size: calc(12px * var(--interface-font-ratio, 1)); }
+  .agent-rail, .project-rail, .activity-rail { display: flex; align-items: center; gap: 8px; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; padding: 10px 4px; }
+  .rail-avatar, .rail-project, .rail-activity { position: relative; flex: none; padding: 4px; border: 1px solid transparent; border-radius: 9px; }
+  .rail-avatar.current, .rail-project.current, .rail-activity.current, .rail-avatar:hover, .rail-project:hover, .rail-activity:hover { border-color: var(--line); background: var(--soft); }
+  .rail-avatar .avatar, .rail-activity .avatar { width: 30px; height: 30px; font-size: calc(12px * var(--interface-font-ratio, 1)); }
+  .rail-project { display:grid; place-items:center; width:38px; min-height:38px; color:var(--muted); }
+  .rail-activity { display:grid; place-items:center; width:38px; min-height:38px; }
   .rail-running { position: absolute; width: 6px; height: 6px; border: 2px solid var(--sidebar); border-radius: 50%; background: var(--accent); right: 0; bottom: 0; }
-  .rail-chats { width: 320px; }
-  .rail-chats header { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-size: calc(13px * var(--interface-font-ratio, 1)); }
+  .rail-chats, .rail-project-chats { width: 320px; }
+  .rail-chats header, .rail-project-chats header { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-size: calc(13px * var(--interface-font-ratio, 1)); }
   .rail-chat-list { max-height: min(50vh,420px); overflow: auto; }
   .rail-new-chat { display: flex; gap: 7px; align-items: center; width: 100%; padding: 10px; color: var(--accent-ink); font-size: calc(12px * var(--interface-font-ratio, 1)); }
 

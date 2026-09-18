@@ -1022,8 +1022,15 @@ workspace terminal references are preserved too; reload reuses live shells, whil
 open fresh shells at their saved host/folder, as described in Terminal tabs. Deleted/reassigned chats
 are reconciled against current agent/project membership without deleting their history or drafts.
 
-The main sidebar can collapse to agent avatars with chat popovers. Its client-local mini-tab row selects
-Agents, Projects or Activity; non-Agent chat rows include the owning agent's avatar. Chat archive
+The main sidebar can collapse while retaining its active Agents, Projects or Activity view. The
+collapsed Agents rail shows agent avatars with chat popovers, Projects shows project icons with chat
+popovers, and Activity shows recent chat controls. Its client-local mini-tab row selects the view;
+non-Agent chat rows include the owning agent's avatar. The sidebar participates in keyboard pane
+selection: moving left from the leftmost content pane selects the sidebar, moving right returns to
+content, and pane cycling includes the sidebar. Arrow Up/Down and Home/End move through visible
+sidebar controls, Arrow Left/Right changes the focused view tab or collapses and expands a focused
+group, and Enter/Space activates the focused control. The selected sidebar has the active pane
+indicator; its focused control remains visible even when the indicator setting is off. Chat archive
 buttons appear on hover or focus. The monitter menu contains Preferences, Hosts, Agent directory and
 Archived chats. Cmd+, opens Preferences on macOS; Ctrl+, is available on Windows/Linux, alongside the
 platform equivalents for the other shortcuts. The right sidebar uses a dismissible blade when its chat
@@ -1101,7 +1108,7 @@ The sole remaining pane stays as the workspace's empty view, and newly created e
 not removed without a close or completed move.
 `Settings.dimInactivePanes` defaults to true and `inactivePaneOpacity` to 0.6; Preferences
 provides a toggle and 10–90% slider, with validation requiring a finite value from 0.1 to 0.9.
-Pointer or keyboard focus immediately marks the receiving pane active; its opacity is always 1.
+Pointer or keyboard focus immediately marks the receiving pane or sidebar active; its opacity is always 1.
 
 
 Dimmed panes also desaturate completely; focusing a pane or disabling dimming restores its colour.

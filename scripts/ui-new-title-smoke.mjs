@@ -23,7 +23,7 @@ try {
   await page.locator('.sidebar .task-select').filter({ hasText: 'Old pane title' }).click();
   const composer = page.getByLabel('Task message', { exact: true });
   await composer.fill('/new Frontend Fixes');
-  await expect(page.getByRole('menu', { name: 'Monitter commands' })).toContainText('/new');
+  await expect(page.getByRole('menu', { name: 'Available slash commands' })).toContainText('/new');
   await composer.press('Enter');
 
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks[0].title)).toBe('Frontend Fixes');
