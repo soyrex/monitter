@@ -68,7 +68,7 @@ pub fn model_catalog(session: &Value) -> Result<crate::model::ModelCatalog, Stri
             optional_text(&session["models"]["currentModelId"], 512).unwrap_or_default(),
         )
     };
-    let warning = choices.is_empty().then(|| "Models become available after the ACP agent initializes a chat and advertises its choices. Its default model is used otherwise.".into());
+    let warning = choices.is_empty().then(|| "This ACP session did not advertise selectable models. Its configured default model will be used.".into());
     Ok(ModelCatalog {
         models: choices
             .into_iter()

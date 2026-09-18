@@ -281,7 +281,7 @@ export interface ModelSettings {
   reasoningEffort: string | null;
   fastMode: boolean | null;
 }
-export interface ModelTarget { taskId?: string; agentId?: string; projectId?: string | null; codexHome?: string | null; }
+export interface ModelTarget { taskId?: string; agentId?: string; projectId?: string | null; codexHome?: string | null; refresh?: boolean; }
 export interface HarnessModel {
   id: string; name: string; description: string;
   reasoningEfforts: { id: string; description: string }[];

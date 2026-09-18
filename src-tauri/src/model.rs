@@ -985,6 +985,10 @@ pub struct ModelCatalogTarget {
     pub project_id: Option<String>,
     #[serde(default)]
     pub codex_home: Option<String>,
+    /// Bypass the short-lived host catalog cache. This is useful after an
+    /// operator changes provider authentication or the harness configuration.
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
