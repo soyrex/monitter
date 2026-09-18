@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { compile } from 'svelte/compiler';
 import * as $ from 'svelte/internal/client';
-import { flushSync } from 'svelte';
 
 const source = fs.readFileSync(new URL('../src/lib/components/Markdown.svelte', import.meta.url), 'utf8');
 const compiled = compile(source, { generate: 'client', dev: false }).js.code;
@@ -34,18 +33,15 @@ function run(declarations, values) {
       return `sanitized:${html}`;
     },
   };
-  const declarationsFactory = new Function('$', '$$props', 'marked', 'DOMPurify', `${declarations}\nreturn { html };`);
-  const { html } = declarationsFactory($, props, marked, DOMPurify);
-  let observed = '';
-  const stop = $.effect_root(() => $.render_effect(() => { observed = $.get(html); }));
-  flushSync();
+  const declarationsFactory = new Function('$', '$$props', 'marked', 'DOMPurify', 'preserveLineBreaks', 'allowedMarkdownUris', `${declarations}\nreturn { html };`);
+  const { html } = declarationsFactory($, props, marked, DOMPurify, () => false, /.*/);
+  let observed = $.get(html);
   const initial = { ...counts };
   for (const text of values.slice(1)) {
     $.set(message, { text });
-    flushSync();
+    observed = $.get(html);
   }
   const result = { initial, final: { ...counts }, observed };
-  stop();
   return result;
 }
 

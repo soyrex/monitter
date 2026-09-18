@@ -25,7 +25,7 @@
       {#each messages as message (message.id)}
         <article class="message user optimistic-message" data-delivery-status="sending">
           <MessageMeta name="You" createdAt={message.createdAt}><AnimatedTitle text="Sending" active={true} activeTooltip="Sending your message…"/></MessageMeta>
-          <Markdown text={message.displayText}/><AttachmentList attachments={message.attachments}/>
+          <Markdown text={message.displayText} preserveLineBreaks/><AttachmentList attachments={message.attachments}/>
         </article>
       {/each}
     </MessagePane>

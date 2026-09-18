@@ -57,7 +57,7 @@
 </script>
 
 <div class="request-text" class:pinned class:expanded bind:this={body}>
-  <Markdown {text} />
+  <Markdown {text} preserveLineBreaks />
   {#if pinned && (overflowing || expanded)}
     <button type="button" aria-expanded={expanded} aria-label={expanded ? 'Collapse current request' : 'Expand current request'} onclick={toggle}>
       <span>{expanded ? 'Collapse' : 'Expand'}</span><ChevronDown size={14} aria-hidden="true" />

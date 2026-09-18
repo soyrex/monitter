@@ -272,6 +272,10 @@ Chat sends render a frontend-local outgoing message immediately and clear the ca
 text/attachments while the command is in flight. Sending, Sent and Not confirmed distinguish
 transport progress from agent execution; Sent means Monitter accepted the message, not that the
 agent read or completed it. New typing is never cleared by a delayed acknowledgement.
+Composer text is sent and stored with its newline characters intact. Pasting clipboard content
+that contains both text and files inserts the text and attaches the files. User chat bubbles render
+single newlines as visible line breaks, including optimistic and shared-chat messages; assistant
+Markdown keeps its normal parsing behavior.
 Snapshot reconciliation replaces the local echo with the persisted message or queue entry without
 duplicating it. A transport failure retains the outgoing content and offers explicit retry; retry
 first refreshes the snapshot and will not resend while acceptance cannot be checked. These delivery

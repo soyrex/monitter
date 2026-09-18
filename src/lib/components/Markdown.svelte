@@ -4,7 +4,7 @@
   import { marked } from "marked";
   import DOMPurify from "dompurify";
   import ImageLightbox from './ImageLightbox.svelte';
-  let { text, taskId, basePath }: { text: string; taskId?: string; basePath?: string } = $props();
+  let { text, taskId, basePath, preserveLineBreaks = false }: { text: string; taskId?: string; basePath?: string; preserveLineBreaks?: boolean } = $props();
   const contextTaskId = getContext<string | undefined>('monitter-markdown-task-id');
   const openMarkdown = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-markdown');
   let container = $state<HTMLDivElement>();
@@ -17,7 +17,7 @@
   // Keep expensive parsing tied to the primitive content, not a replaced message object.
   const sourceText = $derived(text);
   const html = $derived(
-    DOMPurify.sanitize(marked.parse(sourceText, { async: false }) as string, { ALLOWED_URI_REGEXP: allowedMarkdownUris }),
+    DOMPurify.sanitize(marked.parse(sourceText, { async: false, breaks: preserveLineBreaks }) as string, { ALLOWED_URI_REGEXP: allowedMarkdownUris }),
   );
   function makeImagesInteractive() {
     for (const image of container?.querySelectorAll<HTMLImageElement>('img') ?? []) {

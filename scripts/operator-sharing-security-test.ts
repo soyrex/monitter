@@ -61,6 +61,7 @@ assert.equal(validOperatorName('Alex\nVisitor'), false);
 const formatted = formatOperatorMessage([grant().primary, grant().visitor], grant().visitor, '  preserve this  ');
 assert.match(formatted, /Alex \(primary user\).*Sam \(visitor\)/);
 assert.ok(formatted.endsWith('@(Sam):   preserve this  '), 'Operator formatting must preserve raw user text.');
+assert.deepEqual(splitOperatorMessage(formatted), { name: 'Sam', text: '  preserve this  ' });
 assert.deepEqual(splitOperatorMessage('@(Sam): hello'), { name: 'Sam', text: 'hello' });
 
 const visitor = sharedSnapshot(source, grant());

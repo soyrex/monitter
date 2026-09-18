@@ -3831,7 +3831,7 @@ impl Service {
         if text.trim().is_empty() && attachment_ids.is_empty() {
             return Err("Message cannot be empty.".into());
         }
-        let user_text = text.trim().to_string();
+        let user_text = if text.trim().is_empty() { String::new() } else { text };
         let (execution_prompt, pending_steer) = self.mutate_data(Some(task_id.clone()), |data| {
             let state = &mut data.snapshot;
             let ix = state
@@ -6821,7 +6821,7 @@ fn send_channel_message_accepted(
     }
     agent_ids.sort();
     agent_ids.dedup();
-    let user_text = text.trim().to_string();
+    let user_text = if text.trim().is_empty() { String::new() } else { text };
     let runs = service.mutate_data(None, |data| {
         let state = &mut data.snapshot;
         let channel_ix = state

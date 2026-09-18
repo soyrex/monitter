@@ -219,11 +219,11 @@ async function attachFiles(files: File[]) {
 }
 function dropFiles(event: DragEvent) { event.preventDefault(); void attachFiles(Array.from(event.dataTransfer?.files ?? [])); }
 function pasteFiles(event: ClipboardEvent) { const files = Array.from(event.clipboardData?.files ?? []); if (files.length) {
-    event.preventDefault();
+    if (!event.clipboardData?.getData('text/plain')) event.preventDefault();
     void attachFiles(files);
 } }
 async function send() { if (!session || !selectedId || (!draft.trim() && !attachments.length) || sending || uploading || status !== 'connected')
-    return; const current = session, taskId = selectedId, text = draft.trim(), sentAttachments = [...attachments], localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`, baselineIds = new Set((snapshot?.messages ?? []).filter(x => x.taskId === taskId).map(x => x.id)); sending = true; localOutgoing = [...localOutgoing, { id: localId, taskId, name: name.trim(), text, timestamp: Date.now(), attachments: sentAttachments, role: 'user', delivery: 'sending', baselineIds }]; if (draft.trim() === text)
+    return; const current = session, taskId = selectedId, text = draft, sentAttachments = [...attachments], localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`, baselineIds = new Set((snapshot?.messages ?? []).filter(x => x.taskId === taskId).map(x => x.id)); sending = true; localOutgoing = [...localOutgoing, { id: localId, taskId, name: name.trim(), text, timestamp: Date.now(), attachments: sentAttachments, role: 'user', delivery: 'sending', baselineIds }]; if (draft === text)
     draft = ''; attachments = []; try {
     const next = await current.sendMessage(taskId, text, sentAttachments.map(x => x.id));
     if (session !== current)
@@ -363,7 +363,7 @@ onMount(() => {
 </aside>{/if}<div role="log" aria-label="Chat messages" class="messages" bind:this={messagesPane} onscroll={trackScroll} onwheel={e=>{if(e.deltaY<0)following=false}} ontouchmove={()=>following=false} aria-live="polite">{#each visibleMessages as item (item.id??`${item.timestamp}-${item.text}`)}<article class:final-answer={item.phase==='final_answer'} data-stream-status={item.streamStatus} class:user={item.role==='user'} style={isHuman(item)?`--participant:${participantColour(item.name)}`:''}>
 <div class="bubble">
 <MessageMeta name={item.name} createdAt={item.timestamp}>{#snippet avatar()}<span class="avatar" style={isHuman(item)?`background:${participantColour(item.name)}`:''}>{initials(item.name)}</span>{/snippet}{#if item.delivery}<span class:uncertain={item.delivery==='uncertain'} class="delivery">{item.delivery==='sending'?'Sending…':item.delivery==='sent'?'Sent':'Not confirmed'}</span>{/if}</MessageMeta>
-<Markdown text={item.text}/>{#if item.streamStatus==='streaming'}<small class="stream-state" role="status">Receiving…</small>{:else if item.streamStatus==='interrupted'}<small class="stream-state">Response interrupted</small>{/if}{#if item.attachments.length}<div class="attachment-list">{#each item.attachments as attachment (attachment.id)}<div>
+<Markdown text={item.text} preserveLineBreaks={item.role==='user'}/>{#if item.streamStatus==='streaming'}<small class="stream-state" role="status">Receiving…</small>{:else if item.streamStatus==='interrupted'}<small class="stream-state">Response interrupted</small>{/if}{#if item.attachments.length}<div class="attachment-list">{#each item.attachments as attachment (attachment.id)}<div>
 <span>▤</span>
 <b>{attachment.name}</b>
 <small>{Math.max(1,Math.round(attachment.size/1024))} KB</small>{#if attachment.previewDataUrl}<button class="preview-button" aria-label={`Preview ${attachment.name}`} onclick={()=>lightbox={src:attachment.previewDataUrl!,alt:attachment.name,title:attachment.name}}>

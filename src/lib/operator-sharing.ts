@@ -16,7 +16,7 @@ export interface ActiveOperatorShare {
 
 export const activeOperatorShare = writable<ActiveOperatorShare | null>(null);
 
-const operatorPrefix = /^@\(([^\n()]{1,48})\):\s*/;
+const operatorPrefix = /^@\(([^\n()]{1,48})\): ?/;
 const collaborationHeader = /^\[Two human operators are collaborating[^\r\n]*\]\r?\n/;
 
 export function validOperatorName(value: string): boolean {

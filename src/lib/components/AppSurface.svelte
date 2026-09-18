@@ -1551,7 +1551,7 @@
     const clear=()=>node.classList.remove('drop-files');
     const leave=(event:DragEvent)=>{if(!(event.relatedTarget instanceof Node) || !node.contains(event.relatedTarget))clear();};
     const drop=(event:DragEvent)=>{clear();const files=Array.from(event.dataTransfer?.files??[]);if(files.length){event.preventDefault();event.stopPropagation();void attachFiles(files);}};
-    const paste=(event:ClipboardEvent)=>{const files=Array.from(event.clipboardData?.files??[]);if(files.length){event.preventDefault();void attachFiles(files);}};
+    const paste=(event:ClipboardEvent)=>{const files=Array.from(event.clipboardData?.files??[]);if(files.length){if(!event.clipboardData?.getData('text/plain'))event.preventDefault();void attachFiles(files);}};
     node.addEventListener('dragover',over);node.addEventListener('dragleave',leave);node.addEventListener('drop',drop);node.addEventListener('paste',paste);
     return {destroy(){node.removeEventListener('dragover',over);node.removeEventListener('dragleave',leave);node.removeEventListener('drop',drop);node.removeEventListener('paste',paste);}};
   }
@@ -2942,8 +2942,7 @@
     return /^\/[a-zA-Z0-9_-]*(?:\s|$)/.test(value.trim());
   }
   function promptText(value: string) {
-    const trimmed = value.trim();
-    return trimmed.startsWith("//") ? trimmed.slice(1) : trimmed;
+    return value.replace(/^(\s*)\/\//, '$1/');
   }
   function updateSlash(value: string) {
     slashOpen = isSlashCommand(value);
@@ -3824,13 +3823,13 @@
                   {#snippet avatar()}{@render messageAvatar(displayedChannelTranscript.agents.find(agent=>agent.id===message.agentId))}{/snippet}
                   {#if displayedChannelTranscript.confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
-                <Markdown text={message.text} taskId={message.taskId ?? undefined}/><AttachmentList attachments={message.attachments ?? []}/>
+                <Markdown text={message.text} taskId={message.taskId ?? undefined} preserveLineBreaks={message.role==='user'}/><AttachmentList attachments={message.attachments ?? []}/>
               </article>{/snippet}
               {#snippet footer()}
               {#each displayedChannelTranscript.optimisticMessages as message (message.id)}
                 <article class="message user optimistic-message" data-delivery-status={message.status}>
                   <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
-                  <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
+                  <Markdown text={message.displayText} preserveLineBreaks/><AttachmentList attachments={message.attachments}/>
                 </article>
               {/each}
               {#each displayedChannelTranscript.waiting as waiting}
@@ -3899,7 +3898,7 @@
           {#each optimisticMessages.filter(message => message.kind === 'draft' && message.targetId === currentDraftId) as message (message.id)}
             <article class="message user optimistic-message" data-delivery-status={message.status}>
               <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
-              <Markdown text={message.displayText} /><AttachmentList attachments={message.attachments}/>
+              <Markdown text={message.displayText} preserveLineBreaks/><AttachmentList attachments={message.attachments}/>
             </article>
           {/each}
           <div class="composer draft-composer" use:fileDrop>

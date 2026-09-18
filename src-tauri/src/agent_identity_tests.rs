@@ -104,12 +104,12 @@ fn direct_first_prompt_uses_saved_identity_once_and_keeps_user_message_unchanged
         .unwrap();
     let task = task(&service, None);
     let prompt = service
-        .accept_send(task.id.clone(), "  ship it  ".into(), vec![])
+        .accept_send(task.id.clone(), "\n  ship it\nnext line  \n".into(), vec![])
         .unwrap()
         .unwrap();
     assert!(prompt.prompt.contains("You are acting as Planner"));
     assert!(prompt.prompt.contains("Agent settings and instructions:"));
-    assert!(prompt.prompt.ends_with("User request:\nship it"));
+    assert!(prompt.prompt.ends_with("User request:\n\n  ship it\nnext line  \n"));
     let stored = service
         .snapshot()
         .unwrap()
@@ -117,7 +117,7 @@ fn direct_first_prompt_uses_saved_identity_once_and_keeps_user_message_unchanged
         .into_iter()
         .find(|message| message.task_id == task.id && message.role == "user")
         .unwrap();
-    assert_eq!(stored.text, "ship it");
+    assert_eq!(stored.text, "\n  ship it\nnext line  \n");
 
     service
         .mutate(None, |snapshot| {
@@ -321,11 +321,15 @@ fn check_channel_delivery(instructions: &str) {
     crate::send_channel_message_accepted(
         service.service.clone(),
         channel_id.clone(),
-        "channel request".into(),
+        "channel request\nnext line\n".into(),
         vec![agent_id.clone()],
         None,
     )
     .unwrap();
+    assert_eq!(
+        service.snapshot().unwrap().channels.iter().find(|channel| channel.id == channel_id).unwrap().messages[0].text,
+        "channel request\nnext line\n"
+    );
     let task_id = service
         .snapshot()
         .unwrap()
@@ -346,7 +350,7 @@ fn check_channel_delivery(instructions: &str) {
         "Responsibilities:\n- Keep context",
         "Skills:\n- Summarising",
         instructions,
-        "New message:\nchannel request",
+        "New message:\nchannel request\nnext line\n",
     ] {
         assert!(
             prompt.contains(expected),
