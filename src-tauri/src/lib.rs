@@ -70,6 +70,10 @@ mod responsiveness_tests;
 mod service_latency_benchmark;
 mod shared_skills;
 mod skill_install;
+#[cfg(test)]
+mod ssh_app_server_live_tests;
+#[cfg(test)]
+mod ssh_app_server_tests;
 mod store;
 mod terminal;
 mod usage_quota;
@@ -8470,7 +8474,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        assert_eq!(arguments, ["app-server"]);
+        assert_eq!(arguments, ["app-server", "--listen", "stdio://"]);
         assert!(std::fs::read_to_string(prompt)
             .unwrap()
             .trim_end()
