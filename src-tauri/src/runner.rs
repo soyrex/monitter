@@ -1641,6 +1641,9 @@ pub struct RunControl {
     app_server_cwd: Mutex<Option<String>>,
     app_server_next_request: Mutex<i64>,
     app_server_turn_requests: Mutex<HashSet<i64>>,
+    app_server_native_turn_requests: Mutex<HashMap<i64, NativeTurnCommand>>,
+    app_server_pending_native_turn: Mutex<Option<NativeTurnCommand>>,
+    app_server_queries: Mutex<HashMap<i64, mpsc::SyncSender<Value>>>,
     // Steers share the current turn instead of beginning a new one. Keep the
     // durable queue record and its expected native turn together so the
     // reader can either confirm the send or safely return it to the queue.
@@ -1653,6 +1656,7 @@ pub struct RunControl {
     acp_prompt_after_config: Mutex<Option<String>>,
     mcp_fingerprint: Mutex<Option<String>>,
     acp_session_result: Mutex<Option<Value>>,
+    acp_slash_commands: Mutex<Vec<crate::model::SlashCommand>>,
     app_server_instance_id: String,
     acp_transport: AtomicBool,
     acp_control: Mutex<Option<mpsc::SyncSender<AcpControlFrame>>>,
@@ -1705,6 +1709,40 @@ pub(crate) struct AppServerSteerRequest {
     pub expected_turn_id: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeTurnCommand {
+    Compact,
+    Review,
+}
+
+fn codex_native_turn_frame(
+    thread_id: &str,
+    request_id: i64,
+    command: NativeTurnCommand,
+    arguments: &str,
+) -> Result<Value, String> {
+    let (method, params) = match command {
+        NativeTurnCommand::Compact => {
+            if !arguments.trim().is_empty() {
+                return Err("/compact does not take arguments.".into());
+            }
+            ("thread/compact/start", serde_json::json!({"threadId": thread_id}))
+        }
+        NativeTurnCommand::Review => {
+            let target = if arguments.trim().is_empty() {
+                serde_json::json!({"type":"uncommittedChanges"})
+            } else {
+                serde_json::json!({"type":"custom","instructions":arguments.trim()})
+            };
+            (
+                "review/start",
+                serde_json::json!({"threadId": thread_id, "delivery":"inline", "target":target}),
+            )
+        }
+    };
+    Ok(serde_json::json!({"id":request_id,"method":method,"params":params}))
+}
+
 impl RunControl {
     pub fn new(remote_supervised: bool) -> Arc<Self> {
         Arc::new(Self {
@@ -1732,12 +1770,16 @@ impl RunControl {
             app_server_cwd: Mutex::new(None),
             app_server_next_request: Mutex::new(10),
             app_server_turn_requests: Mutex::new(HashSet::new()),
+            app_server_native_turn_requests: Mutex::new(HashMap::new()),
+            app_server_pending_native_turn: Mutex::new(None),
+            app_server_queries: Mutex::new(HashMap::new()),
             app_server_steer_requests: Mutex::new(HashMap::new()),
             acp_config_requests: Mutex::new(HashSet::new()),
             acp_turn_reserved: Mutex::new(false),
             acp_prompt_after_config: Mutex::new(None),
             mcp_fingerprint: Mutex::new(None),
             acp_session_result: Mutex::new(None),
+            acp_slash_commands: Mutex::new(Vec::new()),
             app_server_instance_id: crate::model::id(),
             acp_transport: AtomicBool::new(false),
             acp_control: Mutex::new(None),
@@ -2386,6 +2428,74 @@ impl RunControl {
         Ok(())
     }
 
+    fn next_app_server_request_id(&self) -> Result<i64, String> {
+        let mut next = self
+            .app_server_next_request
+            .lock()
+            .map_err(|_| "Codex app-server request lock failed.".to_string())?;
+        let id = *next;
+        *next = next.saturating_add(1);
+        Ok(id)
+    }
+
+    /// Send a Codex operation that creates a real provider turn without
+    /// disguising it as model text. The resident reader owns response/event
+    /// correlation and completes the same durable Monitter turn.
+    pub(crate) fn send_codex_native_turn(
+        &self,
+        command: NativeTurnCommand,
+        arguments: &str,
+    ) -> Result<(), String> {
+        let thread_id = self
+            .current_app_server_thread()
+            .ok_or("Codex is still starting; this command is not ready yet.")?;
+        let request_id = self.next_app_server_request_id()?;
+        let frame = codex_native_turn_frame(&thread_id, request_id, command, arguments)?;
+        self.app_server_native_turn_requests
+            .lock()
+            .map_err(|_| "Codex command request lock failed.".to_string())?
+            .insert(request_id, command);
+        self.set_pending_native_turn(command);
+        if let Err(error) = self.send_control(&frame.to_string()) {
+            let _ = self.take_app_server_native_turn_request(request_id);
+            let _ = self.take_pending_native_turn();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Issue a bounded, read-only request on the existing Codex transport.
+    /// The app-server reader remains the only stdout consumer.
+    pub(crate) fn query_app_server(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let request_id = self.next_app_server_request_id()?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.app_server_queries
+            .lock()
+            .map_err(|_| "Codex query request lock failed.".to_string())?
+            .insert(request_id, sender);
+        let frame = serde_json::json!({"id":request_id,"method":method,"params":params});
+        if let Err(error) = self.send_control(&frame.to_string()) {
+            let _ = self.take_app_server_query(request_id);
+            return Err(error);
+        }
+        let response = match receiver.recv_timeout(timeout) {
+            Ok(response) => response,
+            Err(_) => {
+                let _ = self.take_app_server_query(request_id);
+                return Err(format!("Codex app-server {method} request timed out."));
+            }
+        };
+        if let Some(error) = response.pointer("/error/message").and_then(Value::as_str) {
+            return Err(format!("Codex app-server {method} failed: {error}"));
+        }
+        Ok(response.get("result").cloned().unwrap_or(Value::Null))
+    }
+
     /// Append a user follow-up to the current Codex app-server turn. Unlike a
     /// normal resident send this must not call `begin_run`, alter task
     /// settings, or clear the current turn identity.
@@ -2564,6 +2674,66 @@ impl RunControl {
         }
     }
 
+    pub(crate) fn replace_acp_slash_commands(&self, value: &Value) -> Result<(), String> {
+        let commands = value
+            .as_array()
+            .ok_or("ACP availableCommands must be an array.")?;
+        if commands.len() > 256 {
+            return Err("ACP advertised more than 256 slash commands.".into());
+        }
+        let mut names = HashSet::new();
+        let mut normalized = Vec::with_capacity(commands.len());
+        for command in commands {
+            let name = command
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| {
+                    !name.is_empty()
+                        && name.len() <= 128
+                        && !name.starts_with('/')
+                        && name.chars().all(|ch| {
+                            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.')
+                        })
+                })
+                .ok_or("ACP advertised an invalid slash command name.")?;
+            if !names.insert(name.to_ascii_lowercase()) {
+                return Err("ACP advertised duplicate slash command names.".into());
+            }
+            let description = command
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && value.len() <= 1024)
+                .ok_or("ACP slash command description is missing or too long.")?;
+            let input_hint = command
+                .pointer("/input/hint")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.chars().take(512).collect());
+            normalized.push(crate::model::SlashCommand {
+                name: name.into(),
+                description: description.into(),
+                input_hint,
+                source: "acp".into(),
+                provider: "acp".into(),
+            });
+        }
+        *self
+            .acp_slash_commands
+            .lock()
+            .map_err(|_| "ACP slash command catalog lock failed.".to_string())? = normalized;
+        Ok(())
+    }
+
+    pub(crate) fn acp_slash_commands(&self) -> Vec<crate::model::SlashCommand> {
+        self.acp_slash_commands
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn acp_model_catalog(&self) -> Result<crate::model::ModelCatalog, String> {
         let result = self
             .acp_session_result
@@ -2723,6 +2893,53 @@ impl RunControl {
             .and_then(|mut requests| requests.remove(&id))
     }
 
+    pub(crate) fn take_app_server_native_turn_request(
+        &self,
+        id: i64,
+    ) -> Option<NativeTurnCommand> {
+        self.app_server_native_turn_requests
+            .lock()
+            .ok()
+            .and_then(|mut requests| requests.remove(&id))
+    }
+
+    pub(crate) fn has_app_server_native_turn_request(&self) -> bool {
+        self.app_server_native_turn_requests
+            .lock()
+            .map(|requests| !requests.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn set_pending_native_turn(&self, command: NativeTurnCommand) {
+        if let Ok(mut pending) = self.app_server_pending_native_turn.lock() {
+            *pending = Some(command);
+        }
+    }
+
+    pub(crate) fn take_pending_native_turn(&self) -> Option<NativeTurnCommand> {
+        self.app_server_pending_native_turn
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+    }
+
+    pub(crate) fn has_pending_native_turn(&self) -> bool {
+        self.app_server_pending_native_turn
+            .lock()
+            .map(|pending| pending.is_some())
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn take_app_server_query(
+        &self,
+        id: i64,
+    ) -> Option<mpsc::SyncSender<Value>> {
+        self.app_server_queries
+            .lock()
+            .ok()
+            .and_then(|mut requests| requests.remove(&id))
+    }
+
     pub(crate) fn has_app_server_turn_request(&self) -> bool {
         self.app_server_turn_requests
             .lock()
@@ -2744,6 +2961,9 @@ impl RunControl {
     /// a prompt.
     pub(crate) fn retire_acp_transport(&self) {
         self.resident.store(false, Ordering::SeqCst);
+        if let Ok(mut commands) = self.acp_slash_commands.lock() {
+            commands.clear();
+        }
         self.close_acp_control();
     }
 
@@ -5753,6 +5973,69 @@ for line in sys.stdin.buffer:
         assert!(result.unwrap_err().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(5));
         let _ = std::fs::remove_file(executable);
+    }
+
+    #[test]
+    fn acp_slash_catalog_is_validated_and_replaced_as_a_snapshot() {
+        let control = RunControl::new(false);
+        control
+            .replace_acp_slash_commands(&serde_json::json!([
+                {"name":"search","description":"Search the workspace","input":{"hint":"query"}},
+                {"name":"usage","description":"Show provider usage"}
+            ]))
+            .unwrap();
+        let commands = control.acp_slash_commands();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].name, "search");
+        assert_eq!(commands[0].input_hint.as_deref(), Some("query"));
+        assert!(commands.iter().all(|item| item.source == "acp" && item.provider == "acp"));
+
+        control
+            .replace_acp_slash_commands(&serde_json::json!([
+                {"name":"fresh","description":"Replacement command"}
+            ]))
+            .unwrap();
+        assert_eq!(control.acp_slash_commands()[0].name, "fresh");
+        assert_eq!(control.acp_slash_commands().len(), 1);
+    }
+
+    #[test]
+    fn acp_slash_catalog_rejects_unsafe_or_ambiguous_names() {
+        let control = RunControl::new(false);
+        for commands in [
+            serde_json::json!([{"name":"/usage","description":"bad"}]),
+            serde_json::json!([{"name":"tmp/path","description":"bad"}]),
+            serde_json::json!([
+                {"name":"Usage","description":"one"},
+                {"name":"usage","description":"two"}
+            ]),
+        ] {
+            assert!(control.replace_acp_slash_commands(&commands).is_err());
+        }
+        assert!(control.acp_slash_commands().is_empty());
+    }
+
+    #[test]
+    fn codex_native_slash_frames_use_protocol_operations_not_prompt_text() {
+        let compact = codex_native_turn_frame("thread-1", 40, NativeTurnCommand::Compact, "")
+            .unwrap();
+        assert_eq!(compact["method"], "thread/compact/start");
+        assert_eq!(compact["params"], serde_json::json!({"threadId":"thread-1"}));
+        assert!(codex_native_turn_frame("thread-1", 41, NativeTurnCommand::Compact, "extra")
+            .is_err());
+
+        let review = codex_native_turn_frame(
+            "thread-1",
+            42,
+            NativeTurnCommand::Review,
+            " focus on auth ",
+        )
+        .unwrap();
+        assert_eq!(review["method"], "review/start");
+        assert_eq!(review["params"]["delivery"], "inline");
+        assert_eq!(review["params"]["target"], serde_json::json!({
+            "type":"custom", "instructions":"focus on auth"
+        }));
     }
 
     #[test]

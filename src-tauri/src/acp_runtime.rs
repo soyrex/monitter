@@ -1538,6 +1538,17 @@ fn run(
                 }
                 continue;
             }
+            if control.matches_app_server_thread(notification_session)
+                && notification_kind(&value) == "available_commands_update"
+            {
+                if let Err(error) = control.replace_acp_slash_commands(
+                    &params["update"]["availableCommands"],
+                ) {
+                    fail(&service, &task_id, &control, error);
+                    return;
+                }
+                continue;
+            }
             let is_root_session = control.matches_app_server_thread(notification_session);
             let is_subagent_session =
                 !is_root_session && known_subagents.contains(notification_session);

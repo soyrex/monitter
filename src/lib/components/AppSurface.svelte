@@ -111,6 +111,7 @@
     UsageOverview,
     UsageRefreshPolicy,
     SubagentTranscriptEntry,
+    SlashCommand,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
   import { contrastForeground } from '$lib/accent-contrast';
@@ -128,6 +129,7 @@
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import UsageRings from '$lib/components/UsageRings.svelte';
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
+  import SlashCommandPalette, { type SlashPaletteItem } from '$lib/components/SlashCommandPalette.svelte';
   import { usageRingMap } from '$lib/usage-ring-data';
   import ContextUsageBar from '$lib/components/ContextUsageBar.svelte';
   import { composerContextUsage } from '$lib/context-usage-data';
@@ -423,6 +425,9 @@
   const canSend=$derived(Boolean(composer.trim() || currentAttachments.length) && !filesBusy);
   let scaleQueued = $state<number | null>(null);
   let slashOpen = $state(false), slashIndex = $state(0);
+  let providerSlashCommands = $state<SlashCommand[]>([]);
+  let slashCommandsLoading = $state(false), slashCommandsError = $state('');
+  let slashCommandTask = '', slashCommandRevision = 0;
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
   let clockExpanded = $state(true);
@@ -2069,16 +2074,6 @@
       clearNativeDrop();
     };
   }
-  function slashFloating(node: HTMLElement) {
-    const anchor = node.closest<HTMLElement>('.composer');
-    if (!anchor) return;
-    const size = () => { node.style.width = `${Math.max(0, anchor.getBoundingClientRect().width - 20)}px`; };
-    size();
-    const popup = floating(node, {anchor, side:'above', focus:false});
-    const observer = new ResizeObserver(size);
-    observer.observe(anchor);
-    return {destroy() { observer.disconnect(); popup.destroy(); }};
-  }
   function currentDraftKey() {
     if (pane === "task" && currentDraftId) return `draft:${currentDraftId}`;
     if (pane === "task" && selectedTaskId) return `task:${selectedTaskId}`;
@@ -2924,20 +2919,64 @@
     focusedProjectId = null;
     pane = "agent";
   }
-  const slashItems = $derived([
-    ...(pane === "channel" ? channelCommands : []),
+  function monitterSlash(id: string, label: string, detail: string): SlashPaletteItem {
+    return { id, label, detail, name: label.slice(1), description: detail, source: 'monitter', provider: selectedTask?.provider ?? 'codex' };
+  }
+  const slashItems = $derived<SlashPaletteItem[]>([
+    ...(pane === "channel" ? channelCommands.map(item => monitterSlash(item.id, item.label, item.detail)) : []),
     ...(pane === "task" ? [
-      { id: "context-new", label: "/new", detail: "Clear context and start fresh" },
-      { id: "context-clear", label: "/clear", detail: "Alias for /new" },
-    ] : [{ id: "new", label: "/new", detail: "Open a local New chat draft" }]),
-    { id: "settings", label: "/settings", detail: "Open Monitter preferences" },
-    { id: "terminal", label: "/terminal", detail: "Run a command in a terminal tab: /terminal <command>" },
-    ...(pane === "task" ? [{ id: "project", label: "/project", detail: "Choose the project for this chat" }] : []),
-    ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel) ? [{ id: "autoname", label: "/autoname", detail: "Generate a title from recent content" }] : []),
-    ...(selectedTask?.status === "running" ? [{ id: "stop", label: "/stop", detail: "Stop this running task" }] : []),
-    ...(selectedTask?.provider === "codex" && selectedTask.nativeSessionId ? [{ id: "goal", label: "/goal", detail: "Read this Codex goal" }] : []),
+      monitterSlash("context-new", "/new", "Clear context and start fresh"),
+      monitterSlash("context-clear", "/clear", "Alias for /new"),
+    ] : [monitterSlash("new", "/new", "Open a local New chat draft")]),
+    monitterSlash("settings", "/settings", "Open Monitter preferences"),
+    monitterSlash("terminal", "/terminal", "Run a command in a terminal tab: /terminal <command>"),
+    ...(pane === "task" ? [monitterSlash("project", "/project", "Choose the project for this chat")] : []),
+    ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel) ? [monitterSlash("autoname", "/autoname", "Generate a title from recent content")] : []),
+    ...(selectedTask?.status === "running" ? [monitterSlash("stop", "/stop", "Stop this running task")] : []),
+    ...(pane === 'task' && selectedTask ? providerSlashCommands.map(item => ({
+      ...item,
+      id: `provider:${item.source}:${item.name}`,
+      label: `/${item.name}`,
+      detail: item.inputHint ? `${item.description} ${item.inputHint}` : item.description,
+    })) : []),
   ]);
-  const slashVisibleItems = $derived(slashItems.filter(item => item.label.startsWith(composer.trim().toLowerCase()) || composer.trim() === "/"));
+  const slashVisibleItems = $derived.by(() => {
+    const token = composer.trim().split(/\s+/, 1)[0].toLowerCase();
+    return slashItems.filter(item => item.label.toLowerCase().startsWith(token) || token === "/");
+  });
+  async function refreshProviderSlashCommands(taskId: string) {
+    const revision = ++slashCommandRevision;
+    slashCommandsLoading = true;
+    slashCommandsError = '';
+    try {
+      const commands = await bridge.getTaskSlashCommands(taskId);
+      if (revision !== slashCommandRevision || selectedTask?.id !== taskId) return;
+      providerSlashCommands = commands;
+      slashCommandTask = taskId;
+    } catch (reason) {
+      if (revision === slashCommandRevision && selectedTask?.id === taskId) slashCommandsError = text(reason);
+    } finally {
+      if (revision === slashCommandRevision) slashCommandsLoading = false;
+    }
+  }
+  $effect(() => {
+    const taskId = slashOpen && pane === 'task' ? selectedTask?.id ?? '' : '';
+    if (!taskId) {
+      slashCommandRevision += 1;
+      slashCommandTask = '';
+      providerSlashCommands = [];
+      slashCommandsLoading = false;
+      slashCommandsError = '';
+      return;
+    }
+    if (slashCommandTask !== taskId) {
+      slashCommandTask = taskId;
+      providerSlashCommands = [];
+      void refreshProviderSlashCommands(taskId);
+    }
+    const timer = setInterval(() => void refreshProviderSlashCommands(taskId), 1500);
+    return () => clearInterval(timer);
+  });
   function isSlashCommand(value: string) {
     return /^\/[a-zA-Z0-9_-]*(?:\s|$)/.test(value.trim());
   }
@@ -2954,11 +2993,12 @@
     if(channelCommand) { void executeChannelCommand(channelCommand.name,channelCommand.args,composer); return true; }
     const terminalCommand = composer.trim().match(/^\/terminal(?:\s+([\s\S]*))?$/i);
     if (terminalCommand) { void runTerminalCommand(terminalCommand[1]?.trim() ?? ''); return true; }
-    const command = composer.trim().toLowerCase();
-    void selectSlash(slashItems.find(item => item.label === command));
+    const command = composer.trim().split(/\s+/, 1)[0].toLowerCase();
+    const item = slashItems.find(item => item.label === command);
+    void selectSlash(item?.source === 'monitter' && composer.trim().toLowerCase() !== command ? undefined : item);
     return true;
   }
-  async function selectSlash(item?: { id: string }) {
+  async function selectSlash(item?: SlashPaletteItem) {
     if (busy) return;
     if (!item) {
       error = "This command is not available through Monitter. Use the native terminal for harness commands, or start with // to send a literal slash message.";
@@ -2970,7 +3010,39 @@
       await executeChannelCommand(name,'',composer); return;
     }
     if (item.id === 'terminal') { composer = '/terminal '; slashOpen = false; return; }
+    if (item.source === 'monitter' && /\s/.test(composer.trim())) {
+      error = `${item.label} does not take arguments.`;
+      return;
+    }
     const task = selectedTask;
+    if (item.id.startsWith('provider:')) {
+      if (!task) return;
+      const typed = composer.trim();
+      const argumentSuffix = typed.match(/^\S+([\s\S]*)$/)?.[1] ?? '';
+      const sentCommand = `${item.label}${argumentSuffix}`.trimEnd();
+      const previous = composer;
+      composer = '';
+      slashOpen = false;
+      error = '';
+      notice = '';
+      saveCurrentDraft();
+      try {
+        const result = await bridge.executeTaskSlashCommand(task.id, sentCommand);
+        if (result.message) notice = result.message;
+        if (result.effect === 'refreshGoal') {
+          goalRequestRevision += 1;
+          goal = await bridge.getTaskGoal(task.id);
+        } else if (result.effect === 'openModel') {
+          await tick();
+          document.querySelector<HTMLButtonElement>(`.pane-leaf[data-pane-id="${CSS.escape(paneId)}"] .model-trigger`)?.click();
+        }
+      } catch (reason) {
+        composer = previous;
+        updateSlash(composer);
+        error = text(reason);
+      }
+      return;
+    }
     const agentId = currentDraftId ? taskAgentId : selectedAgent?.id ?? null;
     const projectId = currentDraftId ? taskProjectId : task?.projectId ?? focusedProjectId;
     composer = "";
@@ -3500,16 +3572,15 @@
 {/if}
 
 {#snippet slashMenu()}
-  {#if slashOpen && isSlashCommand(composer)}
-    <div class="slash-menu" use:slashFloating role="menu" aria-label="Monitter commands"><div class="slash-options">
-      <p class="slash-caption">Monitter commands</p>
-      {#each slashVisibleItems as item, index}
-        <button type="button" role="menuitem" class:active={index===slashIndex} disabled={busy} onclick={()=>selectSlash(item)}><b>{item.label}</b><span>{item.detail}</span></button>
-      {:else}
-        <p>Use the native terminal for harness commands. Start with // to send a literal slash message.</p>
-      {/each}
-    </div></div>
-  {/if}
+  <SlashCommandPalette
+    open={slashOpen && isSlashCommand(composer)}
+    items={slashVisibleItems}
+    activeIndex={slashIndex}
+    loading={slashCommandsLoading}
+    error={slashCommandsError}
+    disabled={busy}
+    onselect={selectSlash}
+  />
 {/snippet}
 
 {#snippet sidebarChat(task: Task, detail = false, recent = false)}
@@ -3851,9 +3922,9 @@
         </div>{/if}
         <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
         <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
+        {@render slashMenu()}
         <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-          {@render slashMenu()}
           <MentionComposer bind:value={composer} agents={channelMentionAgents} oninput={updateSlash} onkeydown={handleComposerKeydown}/>
           <div class="composer-footer">
             {@render attachmentTools()}
@@ -3901,9 +3972,9 @@
               <Markdown text={message.displayText} preserveLineBreaks/><AttachmentList attachments={message.attachments}/>
             </article>
           {/each}
+          {@render slashMenu()}
           <div class="composer draft-composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-            {@render slashMenu()}
             <textarea bind:value={composer} aria-label="Task message" placeholder="Describe what you want this agent to do…" oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
       <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
           </div>
@@ -3934,9 +4005,9 @@
         {#snippet taskComposer()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
           <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
+          {@render slashMenu()}
           <div class="composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-            {@render slashMenu()}
             <textarea
               bind:value={composer}
               aria-label="Task message"
@@ -5720,14 +5791,6 @@
   .suggestions button:hover { border-color: var(--accent); color: var(--ink); }
   .draft-advanced { margin-top: 24px; color: var(--muted); font-size: calc(12px * var(--interface-font-ratio, 1)); }
   .draft-advanced summary { cursor: pointer; margin-bottom: 12px; }
-  .slash-menu { position:fixed; inset:auto; margin:0; padding:0; overflow:hidden; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--ink); box-shadow:0 5px 20px #0002; }
-  .slash-options { max-height:min(240px,38vh); overflow-y:auto; overscroll-behavior:contain; }
-
-  .slash-menu .slash-caption { font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .06em; }
-  .slash-menu button { width: 100%; display: flex; gap: 10px; text-align: left; padding: 9px 11px; }
-  .slash-menu button.active, .slash-menu button:hover { background: color-mix(in srgb, var(--accent) 13%, transparent); }
-  .slash-menu b { min-width: 78px; font: calc(12px * var(--interface-font-ratio, 1)) var(--mono); }
-  .slash-menu span, .slash-menu p { color: var(--muted); font-size: calc(12px * var(--interface-font-ratio, 1)); margin: 0; padding: 9px 11px; }
   .composer {
     container-type: inline-size;
     position: relative;
