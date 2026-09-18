@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -15,6 +16,51 @@ parser.add_argument("--coordinator", choices=["local", "mira"], default="local")
 parser.add_argument("--model", default="gpt-5.6-luna", help="Coordinator model supported by its installed Codex version")
 parser.add_argument("--peer-model", help="Optional peer model when hosts support different versions")
 args = parser.parse_args()
+
+
+SNAPSHOT_COLLECTIONS = (
+    "hosts", "agents", "tasks", "messages", "events", "channels", "projects",
+    "collaborations", "subagent_sessions", "queued_messages", "approval_requests",
+    "approval_rules",
+)
+
+
+def read_sqlite_snapshot(database):
+    """Read the Store's JSON payload rows for this isolated proof only."""
+    uri = f"file:{database.absolute()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        snapshot = {}
+        for collection in SNAPSHOT_COLLECTIONS:
+            rows = connection.execute(
+                "SELECT id, position, payload FROM entities "
+                "WHERE collection = ? ORDER BY position",
+                (collection,),
+            ).fetchall()
+            if collection in {"hosts", "agents", "tasks", "messages", "events",
+                              "channels", "projects", "collaborations", "subagent_sessions",
+                              "queued_messages", "approval_requests", "approval_rules"}:
+                snapshot[collection] = [json.loads(payload) for _, _, payload in rows]
+            else:
+                snapshot[collection] = {key: json.loads(payload) for key, _, payload in rows}
+        settings = connection.execute(
+            "SELECT value FROM meta WHERE key = 'settings'"
+        ).fetchone()
+        if settings is None:
+            raise RuntimeError("SQLite smoke profile has no persisted settings.")
+        snapshot["settings"] = json.loads(settings[0])
+        return snapshot
+
+
+def read_snapshot(directory):
+    """Support both pre-SQLite JSON profiles and the SQLite guard format."""
+    state_path = directory / "state.json"
+    database = directory / "state.sqlite3"
+    if database.is_file():
+        return read_sqlite_snapshot(database)
+    with state_path.open() as state_file:
+        return json.load(state_file)
+
+
 root = Path(__file__).resolve().parents[1]
 binary = root / "src-tauri/target/debug/monitter-smoke"
 if not binary.exists():
@@ -27,8 +73,11 @@ state_dir.mkdir(mode=0o700)
 workspace.mkdir(mode=0o700)
 
 # Only read connection definitions. No existing agents, messages, tasks or credentials are copied.
-settings_file = Path.home() / "Library/Application Support/com.monitter.desktop/state.json"
-configured = json.loads(settings_file.read_text()) if settings_file.exists() else {"hosts": []}
+settings_dir = Path.home() / "Library/Application Support/com.monitter.desktop"
+configured = read_snapshot(settings_dir) if (settings_dir / "state.sqlite3").is_file() else (
+    json.loads((settings_dir / "state.json").read_text())
+    if (settings_dir / "state.json").is_file() else {"hosts": []}
+)
 local = next((dict(h) for h in configured["hosts"] if h["kind"] == "local"), None)
 if local is None:
     local = dict(id="proof-local", name="This Mac", kind="local", address="", user="", port=0,
@@ -103,7 +152,7 @@ with (run / "process.stdout").open("w") as stdout, (run / "process.stderr").open
     except BaseException:
         stop_owned_smoke(process)
         raise
-snapshot = json.loads(state_path.read_text())
+snapshot = read_snapshot(state_dir)
 deliveries = snapshot.get("collaborations", [])
 delegations = [item for item in deliveries if item["kind"] == "delegation"]
 peer_messages = [item for item in deliveries if item["kind"] == "message"]

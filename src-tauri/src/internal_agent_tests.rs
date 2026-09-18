@@ -152,10 +152,12 @@ fn internal_admin_reports_readable_error_when_persisted_state_has_multiple() {
     let root = std::env::temp_dir().join(format!("monitter-internal-agent-multi-{}", crate::id()));
     let mut snapshot = crate::model::default_snapshot();
     snapshot.agents.push(crate::model::Agent {
+        id: crate::id(),
         internal: true,
         ..snapshot.agents[0].clone()
     });
     snapshot.agents.push(crate::model::Agent {
+        id: crate::id(),
         internal: true,
         ..snapshot.agents[0].clone()
     });

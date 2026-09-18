@@ -9,8 +9,10 @@
   let linkError = $state("");
   let lightbox = $state<{ src: string; alt: string; title?: string } | null>(null);
   let lightboxOpener = $state<HTMLElement | null>(null);
+  // Keep expensive parsing tied to the primitive content, not a replaced message object.
+  const sourceText = $derived(text);
   const html = $derived(
-    DOMPurify.sanitize(marked.parse(text, { async: false }) as string),
+    DOMPurify.sanitize(marked.parse(sourceText, { async: false }) as string),
   );
   function makeImagesInteractive() {
     for (const image of container?.querySelectorAll<HTMLImageElement>('img') ?? []) {

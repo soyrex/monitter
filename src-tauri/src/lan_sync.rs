@@ -7,7 +7,7 @@
 use crate::model::{RunEvent, Snapshot};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 pub const MAX_LIVE_EVENTS_PER_TASK: usize = 60;
 pub const MAX_LIVE_EVENTS: usize = 300;
@@ -185,7 +185,7 @@ fn compact_event(event: &RunEvent) -> RunEvent {
         task_id: event.task_id.clone(),
         kind: event.kind.clone(),
         title: event.title.clone(),
-        detail: compact_detail(event),
+        detail: compact_detail(event).into(),
         created_at: event.created_at,
     }
 }
@@ -205,6 +205,9 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         if *count < MAX_LIVE_EVENTS_PER_TASK && newest_first.len() < MAX_LIVE_EVENTS {
             *count += 1;
             newest_first.push(compact_event(event));
+            if newest_first.len() == MAX_LIVE_EVENTS {
+                break;
+            }
         }
     }
     newest_first.reverse();
@@ -213,7 +216,7 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         agents: snapshot.agents.clone(),
         tasks: snapshot.tasks.clone(),
         messages: snapshot.messages.clone(),
-        events: newest_first,
+        events: newest_first.into_iter().map(Arc::new).collect(),
         channels: snapshot.channels.clone(),
         projects: snapshot.projects.clone(),
         settings: snapshot.settings.clone(),
@@ -253,7 +256,7 @@ pub fn task_events(
         }
         let available = MAX_EVENT_PAGE_DETAIL_BYTES.saturating_sub(used);
         let detail = if event.detail.len() > available {
-            truncate_bytes(&event.detail, available)
+            truncate_bytes(&event.detail, available).into()
         } else {
             event.detail.clone()
         };
@@ -262,7 +265,7 @@ pub fn task_events(
             task_id: event.task_id.clone(),
             kind: event.kind.clone(),
             title: event.title.clone(),
-            detail,
+            detail: detail.into(),
             created_at: event.created_at,
         };
         used += event.detail.len();
@@ -284,15 +287,15 @@ mod tests {
     use super::*;
     use crate::model::default_snapshot;
 
-    fn event(task_id: &str, created_at: i64, kind: &str, detail: String) -> RunEvent {
-        RunEvent {
+    fn event(task_id: &str, created_at: i64, kind: &str, detail: String) -> Arc<RunEvent> {
+        Arc::new(RunEvent {
             id: format!("{task_id}-{created_at}"),
             task_id: task_id.into(),
             kind: kind.into(),
             title: "Event".into(),
-            detail,
+            detail: detail.into(),
             created_at,
-        }
+        })
     }
 
     #[test]

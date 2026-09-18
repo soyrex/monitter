@@ -306,14 +306,14 @@ impl Service {
             };
             data.snapshot.collaborations.push(collaboration.clone());
             sync_collaboration_subagent_sessions(&mut data.snapshot);
-            data.snapshot.events.push(RunEvent {
+            data.snapshot.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: caller_task.into(),
                 kind: "collaboration".into(),
                 title: "Collaboration queued".into(),
-                detail: collaboration.id.clone(),
+                detail: collaboration.id.clone().into(),
                 created_at: timestamp,
-            });
+            }));
             Ok(collaboration)
         })?;
         Ok(collaboration_value(&collaboration, false))
@@ -511,14 +511,14 @@ impl Service {
             snapshot.collaborations[index].status = "running".into();
             snapshot.collaborations[index].updated_at = now();
             sync_collaboration_subagent_sessions(snapshot);
-            snapshot.events.push(RunEvent {
+            snapshot.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: item.to_task_id.clone(),
                 kind: "collaboration".into(),
                 title: "Peer delivery started".into(),
-                detail: item.id.clone(),
+                detail: item.id.clone().into(),
                 created_at: now(),
-            });
+            }));
             let accepted = AcceptedTurn {
                 receipt: id(),
                 prompt: instructions
@@ -587,14 +587,14 @@ impl Service {
                 collaboration_id: Some(item.id.clone()),
                 attachments: vec![],
             });
-            snapshot.events.push(RunEvent {
+            snapshot.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: item.from_task_id,
                 kind: "collaboration".into(),
                 title: format!("Collaboration {terminal}"),
-                detail: item.id,
+                detail: item.id.into(),
                 created_at: finished,
-            });
+            }));
         }
         sync_collaboration_subagent_sessions(snapshot);
     }
@@ -828,14 +828,14 @@ fn fail_queued_delivery(snapshot: &mut Snapshot, index: usize, error: &str) {
         collaboration_id: Some(item.id.clone()),
         attachments: vec![],
     });
-    snapshot.events.push(RunEvent {
+    snapshot.events.push(Arc::new(RunEvent {
         id: id(),
         task_id: item.from_task_id,
         kind: "collaboration".into(),
         title: "Collaboration error".into(),
-        detail: item.id,
+        detail: item.id.into(),
         created_at: time,
-    });
+    }));
 }
 fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Result<(), String> {
     let allowed: &[&str] = match tool {

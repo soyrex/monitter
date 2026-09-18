@@ -3,6 +3,7 @@
   import { flushSync, tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { useTranscriptScrollController } from '$lib/transcript-scroll-owner';
+  import { perfGeometryStart, perfMark, perfMeasure } from '$lib/perf-phases';
 
   /** Bounded renderer with one virtualizer owning transcript geometry and scrolling. */
   let { items, getKey, children, footer, estimateHeight = 120, overscan = 6, keepRecent = 30, stickyKey, active = true }: {
@@ -30,6 +31,7 @@
   let committingOptions = false;
   let canFlushMeasurements = false;
   let followCommitPending = false;
+  let firstCommitMarked = false;
   // A transcript may stay mounted while its owning chat changes. Keep a
   // stable row key from the current transcript so streaming appends and
   // prepended history retain their measurements, while a replacement chat
@@ -47,17 +49,29 @@
     void tick().then(() => {
       followCommitPending = false;
       const viewport = scrollParent;
-      if (!isFollowing() || !viewport || !viewport.isConnected || viewport.clientHeight === 0) return;
-      const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-      if (Math.abs(viewport.scrollTop - bottom) > 1) instance().scrollToOffset(bottom, { behavior: 'instant' });
+      if (!isFollowing() || !viewport || !viewport.isConnected) return;
+      const finishProbe = perfGeometryStart('follow-layout');
+      try {
+        if (viewport.clientHeight === 0) return;
+        const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+        if (Math.abs(viewport.scrollTop - bottom) > 1) instance().scrollToOffset(bottom, { behavior: 'instant' });
+      } finally { finishProbe?.(); }
     });
   }
 
   const onVirtualizerChange = (_instance: unknown, sync: boolean) => {
+    if (!firstCommitMarked) {
+      firstCommitMarked = true;
+      perfMark('transcript-first-virtualizer-change');
+      perfMeasure('chat-switch.open-to-first-virtualizer-change', 'chat-open', 'transcript-first-virtualizer-change');
+    }
     // setOptions and initial measurement run during Svelte's own update. A
     // later ResizeObserver delivery is outside that update and must synchronously
     // commit its new range before core applies a scroll adjustment.
-    if (sync && !committingOptions && canFlushMeasurements) flushSync();
+    if (sync && !committingOptions && canFlushMeasurements) {
+      const finishProbe = perfGeometryStart('sync-flush');
+      try { flushSync(); } finally { finishProbe?.(); }
+    }
     followCommittedLayout();
   };
 
@@ -111,12 +125,15 @@
 
   function updateFooterHeight() {
     untrack(() => {
-      const next = Math.ceil(footerElement?.getBoundingClientRect().height ?? 0);
-      if (next === footerHeight) return;
-      footerHeight = next;
-      setVirtualizerOptions({ paddingEnd: next });
-      // Footer measurements use the same virtualizer-owned scroll write.
-      followCommittedLayout();
+      const finishProbe = perfGeometryStart('footer-measure');
+      try {
+        const next = Math.ceil(footerElement?.getBoundingClientRect().height ?? 0);
+        if (next === footerHeight) return;
+        footerHeight = next;
+        setVirtualizerOptions({ paddingEnd: next });
+        // Footer measurements use the same virtualizer-owned scroll write.
+        followCommittedLayout();
+      } finally { finishProbe?.(); }
     });
   }
 
@@ -125,8 +142,9 @@
     // Its immediate measurement must not force a nested flush.
     const previousCommitting = committingOptions;
     committingOptions = true;
+    const finishProbe = perfGeometryStart('row-measure');
     try { instance().measureElement(node); }
-    finally { committingOptions = previousCommitting; }
+    finally { committingOptions = previousCommitting; finishProbe?.(); }
   }
 
   $effect(() => {
@@ -171,8 +189,11 @@
     setVirtualizerOptions({ getScrollElement: () => scrollParent });
     const measureMargin = () => {
       if (!scrollParent) return;
-      scrollMargin = virtualRoot.getBoundingClientRect().top - scrollParent.getBoundingClientRect().top + scrollParent.scrollTop;
-      followCommittedLayout();
+      const finishProbe = perfGeometryStart('margin-measure');
+      try {
+        scrollMargin = virtualRoot.getBoundingClientRect().top - scrollParent.getBoundingClientRect().top + scrollParent.scrollTop;
+        followCommittedLayout();
+      } finally { finishProbe?.(); }
     };
     measureMargin();
     const observer = new ResizeObserver(measureMargin);

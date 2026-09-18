@@ -80,8 +80,11 @@ fixed that and the stronger cancellation check now passes.
 - `npm run install:mac -- --debug`: installed and launched `/Applications/Monitter.app`.
 - Installed app passes `codesign --verify --deep --strict`; its process is running.
 - The development server was stopped before installation/launch.
-- Native startup created a private mode-0600 state file at
-  `~/Library/Application Support/com.monitter.desktop/state.json`.
+- Native startup created the private profile directory at
+  `~/Library/Application Support/com.monitter.desktop/`, with durable state in
+  `state.sqlite3` (mode 0600) and `state.json` retained as the explicit SQLite
+  downgrade guard. Inspect the whole directory, including SQLite `-wal` and
+  `-shm` sidecars, when preserving or restoring a profile.
 - Latest DMG path is recorded in `artifacts/macos-debug.json`; package manifest: `artifacts/macos-debug.json`.
   `hdiutil verify` passed. Installed app: 34 MB; compressed DMG: 11 MB.
 - Documents File Provider adds FinderInfo that prevents bundle signing there. The build script

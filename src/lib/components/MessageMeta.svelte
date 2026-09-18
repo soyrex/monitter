@@ -8,7 +8,11 @@
     children?: Snippet;
   } = $props();
 
-  const timestamp = $derived(new Date(createdAt));
+  // Parent snapshots replace message objects while streaming. Stabilize the
+  // primitive before allocating a Date, otherwise unchanged timestamps rebuild
+  // their locale formatters on every snapshot through the parent prop getter.
+  const timestampValue = $derived(createdAt);
+  const timestamp = $derived(new Date(timestampValue));
   const validTimestamp = $derived(Number.isFinite(timestamp.getTime()));
   const time = $derived(validTimestamp
     ? timestamp.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })

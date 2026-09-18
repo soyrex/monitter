@@ -5,6 +5,7 @@
   import { DEFAULT_SURFACE_TINT, setSurfaceTint, surfaceTint } from '$lib/surface-tint';
   import { borderOpacity, DEFAULT_BORDER_OPACITY, setBorderOpacity } from '$lib/border-opacity';
   import { appTheme, appThemes, appThemePreset, applyThemeContrast, mixThemeColour, setAppTheme, setAppThemeAccent, setAppThemeContrast, type AppThemeId, type AppThemeSelection } from '$lib/app-theme';
+  import { appearanceKey, browserChromeKey } from '$lib/appearance-key';
   import { initMotion, motionPreference, motionView, setMotionPreference, type MotionPreference } from '$lib/motion';
   import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
@@ -140,6 +141,7 @@
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import TaskTranscript from '$lib/components/TaskTranscript.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
+  import { perfMark } from '$lib/perf-phases';
   import AppSurface from './AppSurface.svelte';
   import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
   import { balancePaneLayout, paneIds } from '$lib/panes';
@@ -270,7 +272,6 @@
   $effect(() => {
     if (!embedded) {
       document.documentElement.style.setProperty('--surface-tint', `${$surfaceTint}%`);
-      if (snapshot) syncBrowserChrome(snapshot.settings, $appTheme, $surfaceTint);
     }
   });
   $effect(() => {
@@ -297,7 +298,10 @@
     updateFullscreen();
     return () => { mounted = false; clearTimeout(timer); window.removeEventListener('resize', resized); };
   });
-  let snapshot = $state<Snapshot | null>(null),
+  // Bridge snapshots are immutable and replaced as a whole. Deep proxies make
+  // every history/index traversal pay per-field reactive bookkeeping, even
+  // though no UI code mutates these records. Keep form/composer state separate.
+  let snapshot = $state.raw<Snapshot | null>(null),
     selectedTaskId = $state<string | null>(null),
     selectedChannelId = $state<string | null>(null),
     pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "settings">(untrack(()=>embedded?"empty":"overview"));
@@ -518,9 +522,8 @@
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let snapshotIssued = 0,
     snapshotApplied = 0;
-  // Svelte deeply proxies `$state` objects, so `snapshot === bridgeCache` is
-  // not reliable. Retain the unproxied bridge object separately to recognize
-  // an unchanged revision without replacing local optimistic/synthetic state.
+  // Retain bridge identity separately from local optimistic/synthetic snapshots
+  // so an unchanged revision cannot overwrite those local replacements.
   let lastBridgeSnapshot: Snapshot | null = null;
   let appliedScale = 0;
   let openTaskIds = $state<string[]>([]);
@@ -1688,9 +1691,16 @@
       dark: mixThemeColour(dark.sidebar, selectedTheme.accent ?? dark.accent, tint / 100),
     };
   }
+  // Plain caches: writing them must not become an effect dependency. Only the
+  // root surface renders document-wide appearance; embedded panes inherit it.
+  let lastAppearanceKey: string | undefined;
+  let lastBrowserChromeKey: string | undefined;
   function syncBrowserChrome(settings: Snapshot['settings'], selectedTheme: AppThemeSelection, tint: number) {
+    const systemDark = settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const key = browserChromeKey(settings, selectedTheme, tint, systemDark);
+    if (key === lastBrowserChromeKey) return;
     const colours = browserThemeColours(selectedTheme, tint),
-      dark = settings.theme === 'dark' || (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches),
+      dark = settings.theme === 'dark' || systemDark,
       colour = dark ? colours.dark : colours.light,
       root = document.documentElement,
       meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
@@ -1701,8 +1711,12 @@
       window.localStorage.setItem('monitter.appearance.browser-colours.v1', JSON.stringify(colours));
       window.localStorage.setItem('monitter.appearance.mode.v1', settings.theme);
     } catch { /* Live colour still applies when client storage is unavailable. */ }
+    lastBrowserChromeKey = key;
   }
   function applyAppearance(settings: Snapshot["settings"], selectedTheme: AppThemeSelection = $appTheme, scale = activeInterfaceScale) {
+    const tint = $surfaceTint;
+    const key = appearanceKey(settings, selectedTheme, scale, tint, nativeRuntime);
+    if (key === lastAppearanceKey) return;
     const root = document.documentElement,
       light = applyThemeContrast(appThemePreset(selectedTheme.light).light, 'light', selectedTheme.contrast),
       dark = applyThemeContrast(appThemePreset(selectedTheme.dark).dark, 'dark', selectedTheme.contrast),
@@ -1716,7 +1730,7 @@
     root.dataset.windowSurface = ['opaque', 'translucent', 'glass'].includes(settings.windowSurface ?? '')
       ? settings.windowSurface!
       : 'opaque';
-    syncBrowserChrome(settings, selectedTheme, $surfaceTint);
+    syncBrowserChrome(settings, selectedTheme, tint);
     root.dataset.density = ['tight', 'normal', 'spacious'].includes(settings.interfaceDensity ?? '')
       ? settings.interfaceDensity!
       : 'normal';
@@ -1754,9 +1768,11 @@
       appliedScale = scale;
       void getCurrentWebview().setZoom(scale / 100).catch(reason => {
         appliedScale = 0;
+        lastAppearanceKey = undefined;
         error = `Could not apply interface scale: ${text(reason)}`;
       });
     }
+    lastAppearanceKey = key;
   }
   $effect(() => {
     const selectedTheme = $appTheme;
@@ -2198,6 +2214,7 @@
     pane = overviewOpen ? "overview" : "empty";
   }
   export function openTask(task: Task, allowDuplicate = false) {
+    perfMark('chat-open');
     if (!taskBelongsToWorkspace(task, activeWorkspaceKey)) { workspaceNavigation.task(task); return; }
     if (!allowDuplicate && focusExistingChat('task', task.id, paneId)) return;
     saveCurrentDraft();
@@ -2213,6 +2230,7 @@
     focusedProjectId = null;
     pane = "task";
     scrollRevision += 1;
+    perfMark('chat-state-applied');
   }
   function closeTaskTab(id: string, collapse = true) {
     openTaskIds = openTaskIds.filter(openId => openId !== id);
