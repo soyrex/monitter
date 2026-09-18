@@ -26,7 +26,19 @@
       image.setAttribute('aria-label', `View full-size ${image.alt || 'image'}`);
     }
   }
-  $effect(() => { html; container; void tick().then(makeImagesInteractive); });
+  function wrapTables() {
+    for (const table of container?.querySelectorAll<HTMLTableElement>('table') ?? []) {
+      if (table.parentElement?.classList.contains('markdown-table-scroll')) continue;
+      const scroll = document.createElement('div');
+      scroll.className = 'markdown-table-scroll';
+      scroll.setAttribute('role', 'region');
+      scroll.setAttribute('aria-label', 'Markdown table');
+      scroll.tabIndex = 0;
+      table.before(scroll);
+      scroll.append(table);
+    }
+  }
+  $effect(() => { html; container; void tick().then(() => { makeImagesInteractive(); wrapTables(); }); });
 
   onMount(() => {
     function openImage(target: EventTarget | null) {
@@ -117,6 +129,43 @@
     border-left: 2px solid var(--accent);
     color: var(--muted);
   }
+  .markdown :global(.markdown-table-scroll) {
+    max-width: 100%;
+    margin: 0.8em 0 1em;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    border: 1px solid rgba(128, 128, 128, 0.24);
+    border-radius: 8px;
+    background: rgba(128, 128, 128, 0.025);
+    scrollbar-width: thin;
+  }
+  .markdown :global(.markdown-table-scroll:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .markdown :global(.markdown-table-scroll table) {
+    width: max-content;
+    min-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.95em;
+    line-height: 1.45;
+  }
+  .markdown :global(.markdown-table-scroll th),
+  .markdown :global(.markdown-table-scroll td) {
+    max-width: 34ch;
+    padding: 7px 11px;
+    border-right: 1px solid rgba(128, 128, 128, 0.18);
+    border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  .markdown :global(.markdown-table-scroll th) {
+    background: rgba(var(--accent-rgb, 0, 168, 240), 0.09);
+    font-weight: 650;
+  }
+  .markdown :global(.markdown-table-scroll th:not([align])) { text-align: start; }
+  .markdown :global(.markdown-table-scroll tbody tr:nth-child(even)) { background: rgba(128, 128, 128, 0.065); }
+  .markdown :global(.markdown-table-scroll tr > :last-child) { border-right: 0; }
+  .markdown :global(.markdown-table-scroll tr:last-child > *) { border-bottom: 0; }
+  .markdown :global(.markdown-table-scroll p) { margin: 0; }
   .markdown :global(img) {
     display: block;
     max-width: min(300px, 100%);

@@ -5348,8 +5348,6 @@
   .document-body :global(.markdown h2) { font-size:1.5em; }
   .document-body :global(.markdown h3) { font-size:1.2em; }
   .document-body :global(.markdown pre) { overflow-x:auto;text-overflow:clip; }
-  .document-body :global(.markdown table) { display:block;max-width:100%;overflow-x:auto;border-collapse:collapse; }
-  .document-body :global(.markdown th),.document-body :global(.markdown td) { border:1px solid var(--line);padding:6px 10px; }
   .document-error { color:#b84c44; }
   .document-loading { color:var(--muted); }
   .pane-choices { display:flex;flex-wrap:wrap;justify-content:center;gap:16px; }
