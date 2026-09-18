@@ -41,6 +41,8 @@ try {
       'codex:native-review':[
         {id:'native-user',role:'user',text:'Inspect accessibility and report.',createdAt:now-800},
         {id:'native-reasoning',role:'reasoning',text:'Checking keyboard and focus behavior.',createdAt:now-500},
+        {id:'native-tool',role:'activity',text:'completed: npm run check\nAll checks passed.',createdAt:now-450},
+        {id:'native-message',role:'assistant',text:'The keyboard path is sound; I am checking the final focus state.',createdAt:now-420},
       ],
     };
     qa.setSnapshot(s);
@@ -61,14 +63,14 @@ try {
   await expect(pane.locator('.subagent-dock')).toHaveCount(1);
   const bounds=await pane.evaluate(node => {
     const box=selector => node.querySelector(selector).getBoundingClientRect();
-    const composer=box('.composer-area .composer'),visor=box('.subagent-visor'),chat=box('.conversation');
-    return {composer:{left:composer.left,right:composer.right,bottom:composer.bottom},visor:{left:visor.left,right:visor.right,top:visor.top},chat:{left:chat.left,right:chat.right}};
+    const composer=box('.composer-area .composer'),visor=box('.subagent-visor'),tabs=box('.visor-tabs-inner'),chat=box('.conversation');
+    return {composer:{left:composer.left,right:composer.right,bottom:composer.bottom},visor:{left:visor.left,right:visor.right,top:visor.top},tabs:{left:tabs.left,right:tabs.right},chat:{left:chat.left,right:chat.right}};
   });
-  expect(bounds.visor.left).toBeCloseTo(bounds.composer.left,0);
-  expect(bounds.visor.right).toBeCloseTo(bounds.composer.right,0);
+  expect(bounds.visor.left).toBeCloseTo(bounds.chat.left,0);
+  expect(bounds.visor.right).toBeCloseTo(bounds.chat.right,0);
+  expect(bounds.tabs.left).toBeCloseTo(bounds.composer.left,0);
+  expect(bounds.tabs.right).toBeCloseTo(bounds.composer.right,0);
   expect(bounds.visor.top).toBeGreaterThanOrEqual(bounds.composer.bottom);
-  expect(bounds.visor.left).toBeGreaterThanOrEqual(bounds.chat.left);
-  expect(bounds.visor.right).toBeLessThanOrEqual(bounds.chat.right);
   const closedTabsY=(await pane.getByRole('tablist',{name:'Subagent tasks'}).boundingBox()).y;
   await pane.getByRole('tablist',{name:'Subagent tasks'}).getByRole('tab',{name:/Inspect accessibility and report/}).click();
   const visor=pane.getByRole('region',{name:'Subagent activity'});
@@ -85,6 +87,13 @@ try {
   await expect(visor).toContainText('Inspect accessibility and report.');
   await expect(visor).toContainText('gpt-test · high');
   await expect(visor).toContainText('Checking keyboard and focus behavior.');
+  await expect(visor).toContainText('The keyboard path is sound; I am checking the final focus state.');
+  const toolCall=visor.locator('details.tool-call').filter({hasText:'completed: npm run check'});
+  await expect(toolCall).toBeVisible();
+  await expect(toolCall).not.toHaveAttribute('open', '');
+  await toolCall.locator('summary').click();
+  await expect(toolCall).toHaveAttribute('open', '');
+  await expect(toolCall).toContainText('All checks passed.');
   const showSidebar=pane.getByRole('button',{name:'Show right sidebar',exact:true});
   if(await showSidebar.count()) await showSidebar.click();
   await pane.getByRole('tab',{name:/Subagents 4/}).click();

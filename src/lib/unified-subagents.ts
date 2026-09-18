@@ -1,5 +1,5 @@
 import type { Agent, Collaboration, Message, RunEvent, Snapshot, SubagentSession, SubagentTranscriptEntry, Task, TaskStatus } from '$lib/types';
-import { subagentThreadLink, toolPresentation } from '$lib/activity-grouping';
+import { readableToolDetail, reasoningSummary, subagentThreadLink, toolPresentation } from '$lib/activity-grouping';
 
 /**
  * A presentation-only task view. Both native child tasks and Monitter
@@ -66,6 +66,35 @@ function humanName(path: string | null | undefined) {
 function concise(value: string | null | undefined, fallback: string) {
   const line = value?.trim().split(/\r?\n/, 1)[0]?.replace(/\s+/g, ' ') ?? '';
   return line ? (line.length > 74 ? `${line.slice(0, 71).trimEnd()}…` : line) : fallback;
+}
+
+function taskTranscript(task: Task, messages: Message[], events: RunEvent[]): SubagentTranscriptEntry[] {
+  const messageEntries: SubagentTranscriptEntry[] = messages
+    .filter(message => message.taskId === task.id && ['user', 'assistant'].includes(message.role))
+    .map(message => ({
+      id: message.id,
+      role: message.role as 'user' | 'assistant',
+      text: message.text,
+      createdAt: message.createdAt,
+    }));
+  const activityEntries = events.flatMap<SubagentTranscriptEntry>(event => {
+    if (event.taskId !== task.id) return [];
+    if (event.kind === 'reasoning') {
+      const text = reasoningSummary(event.detail) || event.detail.trim();
+      return text ? [{ id: event.id, role: 'reasoning' as const, text, createdAt: event.createdAt }] : [];
+    }
+    if (event.kind !== 'tool') return [];
+    const label = toolPresentation(event, task.status === 'running').label;
+    const detail = readableToolDetail(event).trim();
+    return [{
+      id: event.id,
+      role: 'activity' as const,
+      text: detail && detail !== label ? `${label}\n${detail}` : label,
+      createdAt: event.createdAt,
+    }];
+  });
+  return [...messageEntries, ...activityEntries]
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 }
 
 function sessionTree(
@@ -156,14 +185,7 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
       error,
       model: session.model ?? task?.model ?? null,
       reasoningEffort: session.reasoningEffort ?? task?.modelSettings?.reasoningEffort ?? null,
-      transcript: task ? messages
-        .filter(message => message.taskId === task.id && ['user', 'assistant'].includes(message.role))
-        .map(message => ({
-          id: message.id,
-          role: message.role as 'user' | 'assistant',
-          text: message.text,
-          createdAt: message.createdAt,
-        })) : [],
+      transcript: task ? taskTranscript(task, messages, events) : [],
       updatedAt: Math.max(session.updatedAt, task?.updatedAt ?? 0, collaboration?.updatedAt ?? 0, latestEvent?.createdAt ?? 0),
     };
   }).sort((a, b) => {

@@ -29,6 +29,10 @@ for (const label of ["queued: 'Starting'", "running: 'Working'", "completed: 'Do
 assert.ok(sidebar.includes('Active <span>{active.length}</span>') && sidebar.includes('Recent <span>{recent.length}</span>'), 'right sidebar has explicit Active and Recent sections');
 assert.ok(sidebar.includes('No active subagents.') && sidebar.includes('No recent subagent work.'), 'sidebar empty states stay explicit');
 assert.ok(visor.includes('selected.transcript') && visor.includes('aria-live="polite"') && visor.includes('Waiting for transcript activity'), 'visor exposes a live running transcript');
+assert.ok(visor.includes('width:100%;max-width:none') && visor.includes('width:min(var(--chat-content-max-width,900px)'), 'the visor chrome reaches pane edges while inner controls stay aligned to chat width');
+assert.ok(visor.includes('<details class="tool-call">') && visor.includes('No additional details.'), 'tool calls are expandable transcript blocks');
+assert.ok(visor.includes('font-size:calc(10px * var(--chat-font-ratio,1))'), 'subagent chat messages are two pixels smaller than the previous 12px transcript');
+assert.ok(adapter.includes('taskTranscript(task, messages, events)') && adapter.includes("event.kind !== 'tool'"), 'routed subagent transcripts merge agent messages with tool activity');
 assert.ok(surface.includes('bridge.getSubagentTranscript') && adapter.includes('transcript:'), 'native and routed transcript sources are normalized');
 assert.match(nativePermissions, /commands\.allow\s*=\s*\[[\s\S]*"get_subagent_transcript"[\s\S]*\]/, 'the packaged app grants its read-only transcript command');
 assert.match(nativeService, /"get_subagent_transcript"\s*=>\s*\{[\s\S]*read_subagent_transcript/, 'the owner LAN bridge exposes the same read-only transcript command');
