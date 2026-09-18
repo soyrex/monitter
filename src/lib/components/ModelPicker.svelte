@@ -17,9 +17,9 @@
   const effortIndex=$derived(Math.max(0,efforts.findIndex(level=>level.id===effort)));
   const visibleModels=$derived((catalog?.models??[]).filter(model=>`${model.name} ${model.id} ${model.description}`.toLowerCase().includes(query.toLowerCase())));
   $effect(()=>{const key=targetKey;JSON.stringify(settings);if(key!==observedTarget){observedTarget=key;open=false;query='';catalog=null;}void refresh(key);return()=>{revision+=1;};});
-  async function refresh(key=targetKey) {
+  async function refresh(key=targetKey, force=false) {
     const version=++revision;loading=true;error='';
-    try{const result=await bridge.getModelCatalog(JSON.parse(key));if(version===revision)catalog=result;}
+    try{const result=await bridge.getModelCatalog({...JSON.parse(key),refresh:force});if(version===revision)catalog=result;}
     catch(reason){if(version===revision)error=reason instanceof Error?reason.message:String(reason);}
     finally{if(version===revision)loading=false;}
   }
@@ -45,7 +45,7 @@
     {#if loading||saving}<LoaderCircle size={13} class="spin"/>{:else}<Brain size={14}/>{/if}{#if current.fastMode && selected?.supportsFast}<Zap class="fast-icon" size={11}/>{/if}<span>{label}</span>{#if effort}<small>{effort}</small>{/if}<ChevronDown size={12}/>
   </button>
   {#if open&&anchor}<div bind:this={panel} class="model-menu" role="dialog" aria-label="Model and reasoning" tabindex="-1" use:floating={{anchor,side:'above'}}>
-    <header><strong>Model</strong><button aria-label="Refresh models" disabled={loading||saving} onclick={()=>refresh()}><RefreshCw size={14}/></button><button aria-label="Close model picker" onclick={close}><X size={14}/></button></header>
+    <header><strong>Model</strong><button aria-label="Refresh models" disabled={loading||saving} onclick={()=>refresh(targetKey,true)}><RefreshCw size={14}/></button><button aria-label="Close model picker" onclick={close}><X size={14}/></button></header>
     {#if disabled}<p class="explanation">Available after this run finishes.</p>{:else if appliesNextTurn}<p class="explanation">Applies to the next turn.</p>{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if loading&&!catalog}<p class="explanation" role="status">Reading harness models…</p>{:else if catalog}

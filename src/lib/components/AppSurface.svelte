@@ -154,6 +154,7 @@
   import { findPaneTabOwner, paneTabMatches, type PaneSurfaceHandle } from '$lib/pane-controller';
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
   import ModelPicker from '$lib/components/ModelPicker.svelte';
+  import AgentModelPicker from '$lib/components/AgentModelPicker.svelte';
   import AccessPicker from '$lib/components/AccessPicker.svelte';
   import TerminalPane from '$lib/components/TerminalPane.svelte';
   import { terminalSessions, registerTerminal, closeTerminalSession, recentTerminalOutput } from '$lib/terminal-runtime';
@@ -4341,10 +4342,7 @@
             <option value="opencode">OpenCode (legacy)</option><option value="hermes">Hermes</option><option value="acp">ACP — browse agents / custom</option></select
           ></label
         ><label
-          >Model<input
-            bind:value={agentDraft.model}
-            placeholder={agentDraft.provider === "hermes" ? "Harness default, or provider/model" : "Harness default"}
-          /></label
+          >Model<AgentModelPicker draft={agentDraft} saved={settingsAgents.find(agent=>agent.id===agentDraft?.id)??null} disabled={busy} onchange={model=>{if(agentDraft)agentDraft.model=model;}} /></label
         ><label
           >Host<select bind:value={agentDraft.hostId} onchange={event => { const hostId = event.currentTarget.value; if (agentDraft && (snapshot?.hosts.find(host => host.id === hostId)?.kind !== 'local' || agentDraft.provider !== 'codex')) agentDraft.codexHome = null; }}
             >{#each snapshot?.hosts ?? [] as host}<option value={host.id}

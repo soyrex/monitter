@@ -402,13 +402,30 @@ const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
 /// terminates the resident transport on expiry.
 const ADMIN_TURN_TIMEOUT: Duration = Duration::from_secs(45);
 
-fn model_catalog_key(host: &Host, provider: &str, cwd: &str, codex_home: Option<&str>) -> String {
-    [
+fn model_catalog_key(
+    host: &Host,
+    provider: &str,
+    cwd: &str,
+    codex_home: Option<&str>,
+    acp_launch: Option<&AcpLaunch>,
+) -> String {
+    let mut parts = vec![
         provider.to_owned(), host.id.clone(), host.kind.clone(), host.address.clone(),
         host.user.clone(), host.port.to_string(), host.identity_file.clone(),
         host.codex_path.clone(), host.opencode_path.clone(), cwd.to_owned(),
         codex_home.unwrap_or_default().to_owned(),
-    ].join("\u{1f}")
+    ];
+    // Generic ACP launchers are user configuration, not a provider label.
+    // Include the exact argv descriptor so an edited command or argument list
+    // cannot inherit another harness's cached selector.
+    if provider == "acp" {
+        parts.push(
+            acp_launch
+                .and_then(|launch| serde_json::to_string(launch).ok())
+                .unwrap_or_default(),
+        );
+    }
+    parts.join("\u{1f}")
 }
 
 fn native_session_key(task: &Task, host: &Host, native: &str) -> String {
@@ -2338,12 +2355,15 @@ impl Service {
         provider: &str,
         cwd: &str,
         codex_home: Option<&str>,
+        refresh: bool,
     ) -> Result<ModelCatalog, String> {
-        let key = model_catalog_key(host, provider, cwd, codex_home);
-        if let Ok(cache) = self.model_catalogs.lock() {
-            if let Some((when, catalog)) = cache.get(&key) {
-                if when.elapsed() < MODEL_CATALOG_CACHE_TTL {
-                    return Ok(catalog.clone());
+        let key = model_catalog_key(host, provider, cwd, codex_home, None);
+        if !refresh {
+            if let Ok(cache) = self.model_catalogs.lock() {
+                if let Some((when, catalog)) = cache.get(&key) {
+                    if when.elapsed() < MODEL_CATALOG_CACHE_TTL {
+                        return Ok(catalog.clone());
+                    }
                 }
             }
         }
@@ -2370,7 +2390,7 @@ impl Service {
         Ok(catalog)
     }
 
-    fn acp_task_model_catalog(&self, task_id: &str) -> Result<ModelCatalog, String> {
+    fn acp_task_model_catalog(&self, task_id: &str) -> Result<Option<ModelCatalog>, String> {
         let control = self
             .runs
             .lock()
@@ -2379,9 +2399,34 @@ impl Service {
             .get(task_id)
             .cloned();
         match control {
-            Some(control) => control.acp_model_catalog(),
-            None => acp_session_config::model_catalog(&serde_json::Value::Null),
+            Some(control) => control.acp_model_catalog().map(Some),
+            None => Ok(None),
         }
+    }
+
+    fn acp_agent_model_catalog(
+        &self,
+        host: &Host,
+        launch: &AcpLaunch,
+        cwd: &str,
+        refresh: bool,
+    ) -> Result<ModelCatalog, String> {
+        let key = model_catalog_key(host, "acp", cwd, None, Some(launch));
+        if !refresh {
+            if let Ok(cache) = self.model_catalogs.lock() {
+                if let Some((when, catalog)) = cache.get(&key) {
+                    if when.elapsed() < MODEL_CATALOG_CACHE_TTL {
+                        return Ok(catalog.clone());
+                    }
+                }
+            }
+        }
+        let catalog = acp_probe::model_catalog(host, launch, cwd)?;
+        self.model_catalogs
+            .lock()
+            .map_err(|_| "Monitter model catalog lock failed.".to_string())?
+            .insert(key, (Instant::now(), catalog.clone()));
+        Ok(catalog)
     }
 
     fn set_task_model_settings(
@@ -2404,9 +2449,24 @@ impl Service {
         }
         if !reset {
             let catalog = if task.provider == "acp" {
-                self.acp_task_model_catalog(task_id)?
+                if let Some(catalog) = self.acp_task_model_catalog(task_id)? {
+                    catalog
+                } else {
+                    let launch = task
+                        .acp
+                        .as_ref()
+                        .filter(|launch| model::valid_acp_launch(launch))
+                        .ok_or("ACP task has no valid saved launch configuration.")?;
+                    self.acp_agent_model_catalog(&host, launch, &task.cwd, false)?
+                }
             } else {
-                self.model_catalog(&host, &task.provider, &task.cwd, task.codex_home.as_deref())?
+                self.model_catalog(
+                    &host,
+                    &task.provider,
+                    &task.cwd,
+                    task.codex_home.as_deref(),
+                    false,
+                )?
             };
             let model = catalog
                 .models
@@ -3753,7 +3813,7 @@ impl Service {
             if reset {
                 return self.mutate_data(None, |data| create_task_in_data(data, input));
             }
-            let (host, provider, cwd, codex_home) = {
+            let (host, provider, cwd, codex_home, acp_launch) = {
                 let data = self
                     .data
                     .lock()
@@ -3798,9 +3858,23 @@ impl Service {
                 if cwd.trim().is_empty() {
                     return Err("Agent or host must specify a task folder.".into());
                 }
-                (host, agent.provider.clone(), cwd, agent.codex_home.clone())
+                (
+                    host,
+                    agent.provider.clone(),
+                    cwd,
+                    agent.codex_home.clone(),
+                    agent.acp.clone(),
+                )
             };
-            let catalog = self.model_catalog(&host, &provider, &cwd, codex_home.as_deref())?;
+            let catalog = if provider == "acp" {
+                let launch = acp_launch
+                    .as_ref()
+                    .filter(|launch| model::valid_acp_launch(launch))
+                    .ok_or("ACP agent has no valid saved launch configuration.")?;
+                self.acp_agent_model_catalog(&host, launch, &cwd, false)?
+            } else {
+                self.model_catalog(&host, &provider, &cwd, codex_home.as_deref(), false)?
+            };
             let model = catalog
                 .models
                 .iter()
@@ -7427,7 +7501,7 @@ async fn get_model_catalog(
             .data
             .lock()
             .map_err(|_| "Monitter state lock failed.".to_string())?;
-        let (host, provider, cwd, selected, codex_home) = if let Some(task_id) = target.task_id.as_deref() {
+        let (host, provider, cwd, selected, codex_home, acp_launch) = if let Some(task_id) = target.task_id.as_deref() {
             let task = data
                 .snapshot
                 .tasks
@@ -7447,6 +7521,7 @@ async fn get_model_catalog(
                     fast_mode: None,
                 }),
                 task.codex_home.clone(),
+                task.acp.clone(),
             )
         } else if let Some(agent_id) = target.agent_id.as_deref() {
             let agent = data
@@ -7496,6 +7571,7 @@ async fn get_model_catalog(
                     fast_mode: None,
                 },
                 target.codex_home.clone().or_else(|| agent.codex_home.clone()),
+                agent.acp.clone(),
             )
         } else {
             return Err("Model catalog needs a task or agent target.".into());
@@ -7503,12 +7579,30 @@ async fn get_model_catalog(
         drop(data);
         let mut catalog = if provider == "acp" {
             if let Some(task_id) = target.task_id.as_deref() {
-                service.acp_task_model_catalog(task_id)?
+                if let Some(catalog) = service.acp_task_model_catalog(task_id)? {
+                    catalog
+                } else {
+                    let launch = acp_launch
+                        .as_ref()
+                        .filter(|launch| model::valid_acp_launch(launch))
+                        .ok_or("ACP task has no valid saved launch configuration.")?;
+                    service.acp_agent_model_catalog(&host, launch, &cwd, target.refresh)?
+                }
             } else {
-                acp_session_config::model_catalog(&serde_json::Value::Null)?
+                let launch = acp_launch
+                    .as_ref()
+                    .filter(|launch| model::valid_acp_launch(launch))
+                    .ok_or("ACP agent has no valid saved launch configuration.")?;
+                service.acp_agent_model_catalog(&host, launch, &cwd, target.refresh)?
             }
         } else {
-            service.model_catalog(&host, &provider, &cwd, codex_home.as_deref())?
+            service.model_catalog(
+                &host,
+                &provider,
+                &cwd,
+                codex_home.as_deref(),
+                target.refresh,
+            )?
         };
         if !selected.model.trim().is_empty() {
             catalog.current.model = selected.model;
@@ -8806,6 +8900,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             &task_snapshot.provider,
             &task_snapshot.cwd,
             task_snapshot.codex_home.as_deref(),
+            None,
         );
         service.model_catalogs.lock().unwrap().insert(
             key,
@@ -8997,6 +9092,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             &task_snapshot.provider,
             &task_snapshot.cwd,
             task_snapshot.codex_home.as_deref(),
+            None,
         );
         let catalog = ModelCatalog {
             models: vec![CatalogModel {

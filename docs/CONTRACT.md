@@ -101,7 +101,12 @@ No fake conversations, progress, token counts, host connections or model replies
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
 - `create_task { input: CreateTaskInput }` -> Task (rejects the internal Monitter Admin agent as a chat recipient)
-- `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null } }` -> ModelCatalog
+- `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null, codexHome?: string | null, refresh?: boolean } }` -> ModelCatalog.
+  Agent targets work before the first turn. ACP catalogs are obtained from the saved launcher by
+  initializing an isolated ACP connection and creating a model-free session; no user prompt or
+  model request is sent. The advertised opaque model IDs are used exactly as returned. A bounded
+  five-minute in-process cache distinguishes launcher, host and folder; `refresh` bypasses it. A harness that advertises
+  no catalog reports that limitation visibly. Task targets use the live ACP session when present.
 - `set_task_model_settings { taskId: string, settings: ModelSettings }` -> Snapshot
   Codex tasks may be running: the new model, reasoning effort, and Fast mode are written to the
   task snapshot and applied on the next `turn/start`. Other harnesses keep the existing
@@ -930,9 +935,10 @@ command, or take over an independently running Desktop/TUI process.
 
 ## Pane layouts and navigation
 
-The main workspace offers one pane, two columns or a 2 × 2 grid. Each pane owns its tabs, selected
+The Controls command palette offers one pane, two, three or four columns, and 2 × 2, 3 × 2 or
+4 × 2 grids. Each pane owns its tabs, selected
 chat/channel, drafts and right sidebar. Dividers resize with pointer dragging or arrow keys. Tabs move
-between panes; dropping toward a pane edge previews and creates a split, up to four panes. Collapsing
+between panes; dropping toward a pane edge previews and creates a split, up to eight panes. Collapsing
 the layout merges tabs and preserves drafts and uploaded references. Layout changes wait while a send
 acknowledgement or attachment upload is pending. Pane layout and unsent drafts are window-local.
 
@@ -1043,9 +1049,11 @@ width, while removable composer attachments remain compact previews.
 
 The composer shows its current model beside Send, with the attachment button at bottom left.
 Codex catalogs come from that task's saved host (local or SSH) through read-only app-server
-`config/read` and paginated `model/list`, cached by host/provider/working folder for 60 seconds. The menu exposes
-only advertised models, reasoning levels and Fast capability. Other harnesses currently report that
-catalog discovery is unavailable; they keep their configured models. Catalog failures remain visible.
+`config/read` and paginated `model/list`. OpenCode's legacy transport reads provider-qualified
+IDs from `opencode models`. ACP agents can advertise models during an isolated session setup
+before the first chat turn, including in Agent settings. The picker uses the exact advertised IDs
+and exposes only supported reasoning levels and Fast capability. Harnesses without model
+discovery retain their configured models and report the limitation. Catalog failures remain visible.
 
 `ModelSettings` contains `model`, nullable `reasoningEffort`, and nullable `fastMode`. New drafts keep
 these choices locally until their first send. Existing idle chats retain native session ID, host,
