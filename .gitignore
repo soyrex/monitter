@@ -11,6 +11,7 @@ vite.config.ts.timestamp-*
 
 # Local agent state and copied attachments
 /.monitter/
+/.slim/
 
 # Local validation artifacts and installed-build backups
 verification/
