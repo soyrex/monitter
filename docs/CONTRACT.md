@@ -615,7 +615,8 @@ errors.
 
 The resident Monitter Admin transport is a separate, single-occupant lane that the runtime owns for
 its own use (currently `autoname`): the bootstrap migration creates exactly one internal agent named
-"Monitter Admin" on `Service::open` and hides it from every user-facing surface. The internal task is
+"Monitter Admin" on `Service::open` and hides it from conversation surfaces while exposing its
+configuration in Settings → Agents. The internal task is
 created lazily on first use, never archived, and never projected into ordinary chat lists. Repeated
 `autoname` calls reuse its resident transport. It follows the same five-minute idle retirement
 policy, with an active broker request preventing collection; the next request restores its saved
@@ -701,11 +702,13 @@ command discovery/execution needs separate harness adapters and is not implied b
 
 `Agent.internal` is an optional boolean that defaults to `false`. The bootstrap migration creates
 exactly one internal agent on `Service::open`, named "Monitter Admin"; that record is created only by
-the bootstrap, is never offered to ordinary `save_agent` callers, and cannot be deleted. The internal
-agent and its single resident task are deliberately hidden from every user-facing surface:
+the bootstrap, is never offered for creation by ordinary `save_agent` callers, and cannot be deleted.
+The existing admin record is selectable in Settings → Agents so its provider, model, host, folder,
+and permissions can be changed. The internal agent and its single resident task are hidden from
+conversation surfaces:
 
 - Sidebars, the monitter menu, the Agent directory, and Cmd-K / Cmd-P palettes list user agents
-  only; the internal record is omitted from every projection, search result, and picker.
+  only; the internal record is omitted from those projections, search results, and pickers.
 - New chat, channel invite, channel membership, and channel recipient pickers exclude the internal
   agent. `create_task` rejects it as a chat recipient; `set_channel_membership` is a no-op for it.
 - Extensions MCP/skill eligible-agent sets, collaboration discovery, and the resident routing

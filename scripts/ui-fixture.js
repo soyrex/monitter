@@ -5,7 +5,7 @@
     hosts:[local],
     agents:[
       {id:'atlas',avatar:null,name:'Atlas',description:'Coding partner',instructions:'Work carefully and explain the result.',provider:'codex',model:'',hostId:'local',cwd:local.defaultCwd,color:'#397e61',sandbox:'read-only',expertise:[],responsibilities:[],skills:[],collaborationEnabled:true},
-      // Mirror the backend bootstrap: an internal agent must never reach any user-facing surface.
+      // Mirror the backend bootstrap: this agent is configurable in Settings but hidden from chats.
       {id:'monitter-admin',avatar:null,name:'Monitter Admin',description:'Housekeeping',instructions:'',provider:'codex',model:'',hostId:'local',cwd:local.defaultCwd,color:'#5b6f7d',sandbox:'read-only',expertise:[],responsibilities:[],skills:[],collaborationEnabled:false,internal:true},
     ],
     tasks:[],messages:[],events:[],channels:[],projects:[],collaborations:[],queuedMessages:[],approvalRequests:[],approvalRules:[],settings:{accent:'#3f9d6a',theme:'light',interfaceScale:125,showToolActivity:true,showReasoningSummaries:true,sendWithEnter:false,sidebarView:'standard'}

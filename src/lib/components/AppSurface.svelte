@@ -310,9 +310,11 @@
   // messages/events/approvals from the full snapshot independently.
   const localSnapshotIndexes = $derived.by(() => snapshot ? createSnapshotIndexes(snapshot) : null);
   const indexes = $derived(snapshotIndexes ?? localSnapshotIndexes);
-  // Internal agents and their tasks are deliberately excluded from every user-facing surface.
+  // Internal agents and their tasks are excluded from conversation surfaces.
   // The raw indexes (and snapshot) remain authoritative for backend-linked historical lookups.
   const visibleAgents = $derived(indexes?.visibleAgents ?? []);
+  // Settings can configure the resident agent; conversation surfaces use visibleAgents.
+  const settingsAgents = $derived(snapshot?.agents ?? []);
   const visibleTasks = $derived(indexes?.visibleTasks ?? []);
   const visibleActiveTasks = $derived(indexes?.visibleActiveTasks ?? []);
   const visibleActivityTasks = $derived(indexes?.visibleActivityTasks ?? []);
@@ -2634,7 +2636,7 @@
   let agentEdits=$state<Record<string,Agent>>({});
   function selectAgentEditor(id:string) {
     if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
-    agentDraft=JSON.parse(JSON.stringify(agentEdits[id]??visibleAgents.find(agent=>agent.id===id)??blankAgent()));
+    agentDraft=JSON.parse(JSON.stringify(agentEdits[id]??settingsAgents.find(agent=>agent.id===id)??blankAgent()));
   }
   export function openAgentSettings(draft:Agent) {
     if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
@@ -2649,8 +2651,8 @@
     activePaneId=owner;
     if(owner==='main')openAgentSettings(draft);else paneRefs[owner]?.openAgentSettings(draft);
   }
-  $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && visibleAgents.length)untrack(()=>selectAgentEditor(visibleAgents[0]?.id??''));});
-  function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(visibleAgents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
+  $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && settingsAgents.length)untrack(()=>selectAgentEditor(settingsAgents[0]?.id??''));});
+  function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
   function agentTaskCount(agentId: string): number {
     return (snapshot?.tasks ?? []).filter(task => task.agentId === agentId).length;
   }
@@ -2677,14 +2679,14 @@
       delete agentEdits[id];
       agentDraft = null;
       modal = null;
-      selectAgentEditor(visibleAgents[0]?.id ?? '');
+      selectAgentEditor(settingsAgents[0]?.id ?? '');
     }
   }
   async function saveAgent() {
     if(!agentDraft)return;
     const oldId=agentDraft.id;
     const submitted={...agentDraft,id:oldId||localUuid(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean)};
-    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(visibleAgents.find(agent=>agent.id===submitted.id)??submitted));}
+    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===submitted.id)??submitted));}
   }
   async function saveHost() {
     if (
@@ -4218,8 +4220,9 @@
 {#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each visibleAgents.filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small><ProviderIcon provider={agent.provider} size={12} />{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
 
 {#snippet agentEditor()}
-  <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each visibleAgents as agent}<option value={agent.id}>{agent.name}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
+  <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each settingsAgents as agent}<option value={agent.id}>{agent.name}{agent.internal ? ' (internal)' : ''}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
   <p class="hint">Choose an agent to edit its identity, harness, permissions and collaboration profile.</p>
+  {#if agentDraft?.internal}<p class="hint">Monitter Admin handles interface requests such as auto-naming. Choose its harness and model here; it stays hidden from chats and sidebars.</p>{/if}
 {#if agentDraft}<form
       class="form agent-settings-form"
       onsubmit={(event) => {
@@ -4230,6 +4233,7 @@
       <label
         >Name<input
           required
+          disabled={agentDraft.internal === true}
           bind:value={agentDraft.name}
           placeholder="e.g. Product work"
         /></label
@@ -4287,7 +4291,7 @@
         <button
           type="button"
           class="danger-text"
-          disabled={!agentDraft.id || busy}
+          disabled={!agentDraft.id || agentDraft.internal === true || busy}
           onclick={beginDeleteAgent}
           ><Trash2 size={15} /> Delete</button
         ><span></span><button

@@ -64,7 +64,7 @@ export interface Agent {
   color: string; sandbox: Sandbox;
   expertise: string[]; responsibilities: string[]; skills: string[];
   collaborationEnabled: boolean;
-  /** Internal agents and their tasks are deliberately hidden from every user-facing surface. */
+  /** Internal agents are configurable in Settings but hidden from conversation surfaces. */
   internal?: boolean;
 }
 export interface Task {
