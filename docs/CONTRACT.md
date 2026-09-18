@@ -930,9 +930,10 @@ command, or take over an independently running Desktop/TUI process.
 
 ## Pane layouts and navigation
 
-The main workspace offers one pane, two columns or a 2 × 2 grid. Each pane owns its tabs, selected
+The Controls command palette offers one pane, two, three or four columns, and 2 × 2, 3 × 2 or
+4 × 2 grids. Each pane owns its tabs, selected
 chat/channel, drafts and right sidebar. Dividers resize with pointer dragging or arrow keys. Tabs move
-between panes; dropping toward a pane edge previews and creates a split, up to four panes. Collapsing
+between panes; dropping toward a pane edge previews and creates a split, up to eight panes. Collapsing
 the layout merges tabs and preserves drafts and uploaded references. Layout changes wait while a send
 acknowledgement or attachment upload is pending. Pane layout and unsent drafts are window-local.
 

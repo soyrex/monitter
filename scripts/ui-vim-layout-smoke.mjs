@@ -23,6 +23,19 @@ try {
   await command('only'); await expect(panes()).toHaveCount(1); expect(await tabs()).toEqual(beforeTabs);
   const active=await page.locator('.tab-entry.active').getAttribute('data-tab-id'); await command('99tabclose'); await expect(page.getByRole('alert')).toContainText('does not exist'); expect(await page.locator('.tab-entry.active').getAttribute('data-tab-id')).toBe(active);
   await page.keyboard.press('Escape');await page.keyboard.press('Control+w');await page.keyboard.press('s'); await expect(panes()).toHaveCount(2);
+  for (let count = 3; count <= 8; count++) { await command('vsplit'); await expect(panes()).toHaveCount(count); }
+  await command('vsplit'); await expect(panes()).toHaveCount(8);
+  await expect(page.getByRole('alert')).toContainText('up to 8 panes');
+  await page.reload(); await expect(panes()).toHaveCount(8);
+  for (const [name, columns, rows] of [['3 columns',3,1],['4 columns',4,1],['3 × 2 grid',3,2],['4 × 2 grid',4,2]]) {
+    await page.keyboard.press(process.platform==='darwin'?'Meta+p':'Control+p');
+    await page.getByRole('dialog',{name:'Controls',exact:true}).getByText(name,{exact:true}).click();
+    await expect(panes()).toHaveCount(columns*rows);
+    await expect.poll(async()=>panes().evaluateAll(nodes=>{
+      const positions=nodes.map(node=>node.getBoundingClientRect());
+      return [new Set(positions.map(box=>Math.round(box.left/10))).size,new Set(positions.map(box=>Math.round(box.top/10))).size];
+    })).toEqual([columns,rows]);
+  }
   expect(errors).toEqual([]);
-  console.log('Vim layout commands preserve pane geometry, tabs, active chat, invalid targets, and Ctrl-W split.');
+  console.log('Vim commands and layout presets preserve pane geometry, tabs, and drafts through eight-pane reload.');
 } finally { await browser.close(); }

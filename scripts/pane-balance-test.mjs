@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { balancePaneLayout, leaf, split } from '../src/lib/panes.ts';
+import { balancePaneLayout, createPanePresetLayout, leaf, paneIds, panePresetDimensions, split } from '../src/lib/panes.ts';
 
 function leafAreas(layout, area=1, result={}) {
   if(!('axis' in layout)) { result[layout.id]=area; return result; }
@@ -21,6 +21,29 @@ assertEqualAreas(balancedThree,1/3);
 const four=split('root','horizontal',split('left','vertical',leaf('one'),leaf('two'),.2),split('right','vertical',leaf('three'),leaf('four'),.9),.7);
 assertEqualAreas(balancePaneLayout(four),.25);
 assert.equal(three.ratio,.8,'balancing must not mutate the saved source tree');
+
+for(const [mode,columns,rows] of [['single',1,1],['columns',2,1],['columns-3',3,1],['columns-4',4,1],['grid',2,2],['grid-3x2',3,2],['grid-4x2',4,2]]) {
+  const ids=Array.from({length:columns*rows},(_,index)=>`pane-${index}`);
+  let splitNumber=0;
+  const layout=createPanePresetLayout(mode,ids,()=>`split-${++splitNumber}`);
+  assert.deepEqual(panePresetDimensions(mode),[columns,rows]);
+  assert.deepEqual(paneIds(layout),ids);
+  assertEqualAreas(layout,1/ids.length);
+  const positions=[];
+  const visit=(node,x=0,y=0,width=1,height=1)=>{
+    if(!('axis' in node)){positions.push({x,y});return;}
+    if(node.axis==='horizontal'){
+      visit(node.first,x,y,width*node.ratio,height);
+      visit(node.second,x+width*node.ratio,y,width*(1-node.ratio),height);
+    }else{
+      visit(node.first,x,y,width,height*node.ratio);
+      visit(node.second,x,y+height*node.ratio,width,height*(1-node.ratio));
+    }
+  };
+  visit(layout);
+  assert.equal(new Set(positions.map(position=>position.x.toFixed(6))).size,columns);
+  assert.equal(new Set(positions.map(position=>position.y.toFixed(6))).size,rows);
+}
 
 const surface=readFileSync(new URL('../src/lib/components/AppSurface.svelte',import.meta.url),'utf8');
 assert.match(surface,/commandModifier && event\.altKey[^\n]+event\.code === 'Equal'/,'the direct balance shortcut must accept Cmd/Ctrl+Alt+=');

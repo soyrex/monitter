@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { loadWorkspaceSet, saveWorkspaceSet, remapTerminalIds, taskBelongsToWorkspace, workspaceForTask } from '../src/lib/workspace-persistence.ts';
+import { MAX_WORKSPACE_PANES } from '../src/lib/panes.ts';
 
 const data = new Map();
 globalThis.localStorage = {
@@ -43,6 +44,26 @@ assert.deepEqual(loadWorkspaceSet(), scoped);
 assert.equal(data.get(legacyKey), legacy, 'legacy recovery copy stays intact');
 scoped.workspaces['agent:atlas'].main.drafts['task:shared-chat'] = 'changed after saving';
 assert.equal(loadWorkspaceSet().workspaces['agent:atlas'].main.drafts['task:shared-chat'], pane.drafts['task:shared-chat']);
+
+const withPaneCount = count => {
+  const result = structuredClone(scoped);
+  const all = result.workspaces.all;
+  all.layout = { id: 'main' };
+  all.panes = {};
+  for (let index = 1; index < count; index++) {
+    const id = `pane-${index}`;
+    all.layout = { id: `split-${index}`, axis: 'horizontal', ratio: .5, first: all.layout, second: { id } };
+    all.panes[id] = structuredClone(pane);
+  }
+  all.activePaneId = `pane-${count - 1}`;
+  return result;
+};
+const eightPanes = withPaneCount(MAX_WORKSPACE_PANES);
+assert.equal(saveWorkspaceSet(eightPanes), null);
+assert.deepEqual(loadWorkspaceSet(), eightPanes, 'eight panes survive workspace reload');
+const eightPaneSave = data.get(setKey);
+assert.match(saveWorkspaceSet(withPaneCount(MAX_WORKSPACE_PANES + 1)), /invalid/);
+assert.equal(data.get(setKey), eightPaneSave, 'a ninth pane cannot replace the saved workspace');
 
 const valid = data.get(setKey);
 assert.match(saveWorkspaceSet({ ...scoped, activeWorkspaceKey: 'agent:missing' }), /invalid/);

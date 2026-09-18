@@ -145,8 +145,8 @@
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import { perfMark } from '$lib/perf-phases';
   import AppSurface from './AppSurface.svelte';
-  import type { PaneLayout, PaneTabTransfer } from '$lib/panes';
-  import { balancePaneLayout, paneIds } from '$lib/panes';
+  import type { PaneLayout, PaneLayoutPreset, PaneTabTransfer } from '$lib/panes';
+  import { balancePaneLayout, createPanePresetLayout, MAX_WORKSPACE_PANES, paneIds, panePresetDimensions } from '$lib/panes';
   import { paneRemovalDecision, paneTabCount, remapPromotedPaneId, remapQueuedPaneRemovals } from '$lib/pane-lifecycle';
   import { normalizeTabOrder, type TabKey } from '$lib/tab-order';
   import { createPaneLocalState } from '$lib/pane-local-state.svelte';
@@ -175,7 +175,7 @@
   let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, parentMobileSidebar = false, workspaceKey = 'all', onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
     { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; snapshotIndexes?: SnapshotIndexes | null; parentMobileSidebar?: boolean; workspaceKey?: WorkspaceKey;
       onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void;
-      parentExpandedPaneId?:string|null; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: 'single' | 'columns' | 'grid') => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
+      parentExpandedPaneId?:string|null; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: PaneLayoutPreset) => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
   type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
@@ -1146,7 +1146,7 @@
   const workspaceSave = createWorkspaceSaveScheduler(persistWorkspace);
   function isWorkspaceLayout(value: PaneLayout) {
     const ids = paneIds(value);
-    return ids.includes('main') && ids.length <= 4 && new Set(ids).size === ids.length;
+    return ids.includes('main') && ids.length <= MAX_WORKSPACE_PANES && new Set(ids).size === ids.length;
   }
   function sanitizePaneState(value: Record<string, unknown>, terminalIds: Record<string, string>, scope = activeWorkspaceKey): PaneState {
     const saved = remapTerminalIds(value, terminalIds) as unknown as Partial<PaneState>;
@@ -1378,20 +1378,19 @@
       if (channel) { drafts[`channel:${tab.id}`] = payload.text ?? ''; openChannel(channel); rememberTab(tab,before); }
     }
   }
-  async function setLayout(mode: 'single' | 'columns' | 'grid') {
+  async function setLayout(mode: PaneLayoutPreset) {
     if (embedded) { onLayout?.(mode); return; }
     if(layoutPending()) {notice='Wait for the message to be accepted before changing layout.';return;}
     const saved=captureChildren();
-    const existing = paneIds(layout), count = mode==='single'?1:mode==='columns'?2:4;
+    const [columns, rows] = panePresetDimensions(mode);
+    const existing = paneIds(layout), count = columns * rows;
     const ids = ['main',...existing.filter(id=>id!=='main')].slice(0,count);
     while(ids.length<count) ids.push(localUuid());
     for (const id of existing.filter(id=>!ids.includes(id))) {
       const source = paneRefs[id];
       for (const tab of source?.allTabs() ?? []) { const payload=source.takeTab(tab); if(payload) receiveTab(payload); }
     }
-    const pair = (first: PaneLayout, second: PaneLayout, axis: 'horizontal'|'vertical' = 'horizontal'): PaneLayout => ({id:localUuid(),axis,ratio:.5,first,second});
-    layout = count===1 ? {id:'main'} : count===2 ? pair({id:ids[0]},{id:ids[1]})
-      : pair(pair({id:ids[0]},{id:ids[1]}),pair({id:ids[2]},{id:ids[3]}),'vertical');
+    layout = createPanePresetLayout(mode,ids,localUuid);
     if(!ids.includes(activePaneId)) activePaneId='main';
     await tick();
     for(const id of ids) if(saved[id]) paneRefs[id]?.restoreState(saved[id]);
@@ -1400,7 +1399,7 @@
     if (embedded) { onVimSplit?.(paneId, axis); return; }
     if (workspaceTransition || layoutPending()) { notice = 'Wait for the current action before splitting a pane.'; return; }
     if (!paneIds(layout).includes(id)) return;
-    if (paneIds(layout).length >= 4) { error = 'Monitter supports up to four panes.'; return; }
+    if (paneIds(layout).length >= MAX_WORKSPACE_PANES) { error = `Monitter supports up to ${MAX_WORKSPACE_PANES} panes.`; return; }
     saveCurrentDraft();
     const saved = captureChildren();
     const fresh = localUuid();
@@ -1441,7 +1440,7 @@
       if(before && before.kind===tab.kind && before.id===tab.id) return;
       if(targetId==='main') reorderTab(tab,before); else paneRefs[targetId]?.reorderTab(tab,before); return;
     }
-    if (edge!=='center' && ids.length>=4) { notice='Up to four panes are available. Drop in the centre to move a tab.'; return; }
+    if (edge!=='center' && ids.length>=MAX_WORKSPACE_PANES) { notice=`Up to ${MAX_WORKSPACE_PANES} panes are available. Drop in the centre to move a tab.`; return; }
     if(edge!=='center' && layoutPending()) {notice='Wait for the message to be accepted before splitting a pane.';return;}
     const source=tab.sourcePaneId==='main'?{takeTab,hasPending}:paneRefs[tab.sourcePaneId];
     if(!source || source.hasPending())return;
@@ -3285,7 +3284,7 @@
     ...projects.map(project=>({id:`project:${project.id}`,label:project.name,group:'Projects',detail:project.description || `${activityTasks.filter(task=>task.projectId===project.id).length} chats`})),
   ]);
   const controlItems = $derived([
-    ...([{id:'single',label:'One pane'},{id:'columns',label:'Two columns'},{id:'grid',label:'2 × 2 grid'}] as const).map(item=>({id:`layout:${item.id}`,label:item.label,group:'Layout'})),
+    ...([{id:'single',label:'One pane'},{id:'columns',label:'Two columns'},{id:'columns-3',label:'3 columns'},{id:'columns-4',label:'4 columns'},{id:'grid',label:'2 × 2 grid'},{id:'grid-3x2',label:'3 × 2 grid'},{id:'grid-4x2',label:'4 × 2 grid'}] as const).map(item=>({id:`layout:${item.id}`,label:item.label,group:'Layout'})),
     {id:'balance-panes',label:'Balance panes',detail:macPlatform?'⌘⌥=':'Ctrl+Alt+=',keywords:'equalize resize panes',group:'Layout'},
     {id:"new-task",label:"New chat",group:"Create"},
     {id:"vim-command",label:"Vim command",detail:"Open : command mode for workspace controls",keywords:"vim ex command tabnew split terminal quit",group:"Workspace"},
@@ -3380,7 +3379,7 @@
     else if (id === "pane-appearance-settings") { palette=null; routeSettings('appearance'); }
     else if (id === "new-terminal") {palette=null;await newTerminal();}
     else if (id === "autoname") { palette=null; await autonameCurrentPane(); }
-    else if (id.startsWith('layout:')) {palette=null;setLayout(id.slice(7) as 'single'|'columns'|'grid');}
+    else if (id.startsWith('layout:')) {palette=null;setLayout(id.slice(7) as PaneLayoutPreset);}
     else if (id === 'balance-panes') { palette=null; balanceWorkspacePanes(); }
     else if (id === "tools") await run(()=>saveSettingsPatch({showToolActivity:!settings.showToolActivity}));
     else if (id === "reasoning") await run(()=>saveSettingsPatch({showReasoningSummaries:!settings.showReasoningSummaries}));

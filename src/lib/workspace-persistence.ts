@@ -1,3 +1,4 @@
+import { MAX_WORKSPACE_PANES } from './pane-constants.js';
 import type { PaneLayout } from '$lib/panes';
 import type { Task } from '$lib/types';
 
@@ -58,7 +59,7 @@ function paneIds(layout: PaneLayout): string[] { return 'axis' in layout ? [...p
 function isWorkspace(value: unknown): value is PersistedWorkspace {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const saved = value as Partial<PersistedWorkspace>;
-  if (saved.version !== 1 || !isLayout(saved.layout) || paneIds(saved.layout).length > 4
+  if (saved.version !== 1 || !isLayout(saved.layout) || paneIds(saved.layout).length > MAX_WORKSPACE_PANES
     || !paneIds(saved.layout).includes('main') || new Set(paneIds(saved.layout)).size !== paneIds(saved.layout).length
     || typeof saved.activePaneId !== 'string' || !saved.main || typeof saved.main !== 'object' || Array.isArray(saved.main)
     || !saved.panes || typeof saved.panes !== 'object' || Array.isArray(saved.panes) || !Array.isArray(saved.terminals)) return false;
