@@ -979,6 +979,18 @@ composer text and attachments are preserved. Invalid, archived and already-runni
 before transcript changes. Errors stay visible. Resume does not create another chat, copy a terminal
 command, or take over an independently running Desktop/TUI process.
 
+## Harness handoff
+
+`handoff_task { sourceTaskId, agentId, note? }` creates a new task on the selected, different
+agent and immediately sends it a bounded continuation brief. A handoff is available voluntarily
+and may be surfaced when a provider reports exhausted allowance. It is not a portable native-session
+transfer: the source native session, credentials, running transport, queued messages and pending or
+remembered approvals stay with the source task. The source must be non-running, non-archived and have
+no queued messages or pending approval. The brief contains only recent ordinary user/assistant text,
+the source provider, working folder and optional user note; it deliberately excludes raw provider state,
+attachments, approval data and secrets. The target receives fresh permissions and is linked to the
+source through `parentTaskId` for provenance.
+
 ## Pane layouts and navigation
 
 The Controls command palette offers one pane, two, three or four columns, and 2 × 2, 3 × 2 or

@@ -43,6 +43,7 @@
     Clock,
     Check,
     ArrowUp,
+    ArrowRightLeft,
     ArrowLeft,
     Search,
     ChevronDown,
@@ -484,6 +485,7 @@
       | "hosts"
       | "host"
       | "taskSettings"
+      | "handoff"
       | "channel"
       | "archived"
       | "project"
@@ -512,6 +514,7 @@
     taskNativeSessionId = $state(""),
     taskCwd = $state(""),
     renameTitle = $state("");
+  let handoffAgentId = $state(""), handoffNote = $state("");
   let palette = $state<"switch" | "controls" | null>(null);
   let tabPickerOpen = $state(false);
   let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
@@ -2619,6 +2622,27 @@
     return event.key === "Enter" && !event.isComposing && !event.shiftKey && !event.altKey &&
       (snapshot?.settings.sendWithEnter || event.metaKey || event.ctrlKey);
   }
+  function beginHandoff() {
+    if (!selectedTask || selectedTask.status === 'running') return;
+    handoffAgentId = visibleAgents.find(agent => agent.id !== selectedTask!.agentId)?.id ?? '';
+    handoffNote = '';
+    modal = 'handoff';
+  }
+  async function handoffSelectedTask() {
+    if (!selectedTask || !handoffAgentId || busy) return;
+    busy = true; error = '';
+    try {
+      const target = await bridge.handoffTask({ sourceTaskId: selectedTask.id, agentId: handoffAgentId, note: handoffNote.trim() || null });
+      const fresh = await bridge.getSnapshot();
+      applySnapshot(fresh, ++snapshotIssued);
+      modal = null;
+      const created = fresh.tasks.find(task => task.id === target.id) ?? target;
+      openTask(created);
+      notice = `Handed off to ${fresh.agents.find(agent => agent.id === handoffAgentId)?.name ?? 'the selected harness'}.`;
+    } catch (reason) {
+      error = `Could not hand off this chat: ${text(reason)}`;
+    } finally { busy = false; }
+  }
   async function send() {
     if (busy || handleSlashSubmit()) return;
     if (currentDraftId) { await createTask(); return; }
@@ -4218,6 +4242,7 @@
           onStop={() => { void run(() => bridge.cancelTask(selectedTask.id), "Stopping task…"); }}
           onEditTask={() => { renameTitle = selectedTask.title; taskProjectId = selectedTask.projectId ?? ''; modal = 'taskSettings'; }}
           onShare={shareSelectedChat}
+          onHandoff={beginHandoff}
         />{/key}
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
@@ -4792,6 +4817,19 @@
           ><Save size={15} /> Save title</button
         >
       </footer>
+</form>{/if}</Modal
+>
+<Modal
+  title="Hand off this chat"
+  open={modal === "handoff"}
+  onclose={() => (modal = null)}
+  >{#if selectedTask}<form class="form" onsubmit={(event) => { event.preventDefault(); void handoffSelectedTask(); }}>
+      <p class="hint">Monitter starts a fresh target session with a bounded recent transcript and this chat’s working folder. The original session, approvals and credentials stay where they are.</p>
+      <label>Continue with<select aria-label="Target harness" bind:value={handoffAgentId} disabled={busy}>
+        {#each visibleAgents.filter(agent => agent.id !== selectedTask.agentId) as agent}<option value={agent.id}>{agent.name} · {agent.provider}</option>{/each}
+      </select></label>
+      <label>Handoff note <span class="optional">Optional</span><textarea aria-label="Handoff note" bind:value={handoffNote} disabled={busy} placeholder="What should the next harness prioritise?"></textarea></label>
+      <footer><button type="button" class="secondary" disabled={busy} onclick={() => (modal = null)}>Cancel</button><button class="primary" disabled={busy || !handoffAgentId}><ArrowRightLeft size={15}/>Hand off and continue</button></footer>
     </form>{/if}</Modal
 >
 <Modal

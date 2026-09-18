@@ -1548,6 +1548,7 @@ impl Service {
                 self.delete_agent(&id, handling).and_then(snapshot_value)
             }
             "create_task" => value(self.create_task(arg(&args, "input")?)?),
+            "handoff_task" => value(self.handoff_task(arg(&args, "input")?)?),
             "autoname" => value(self.autoname(arg(&args, "target")?)?),
             "rename_task" => {
                 let id: String = arg(&args, "id")?;
@@ -4151,6 +4152,63 @@ impl Service {
         self.mutate_data(None, |data| create_task_in_data(data, input))
     }
 
+    /// A handoff starts a new task; provider-native state stays with its source.
+    fn handoff_task(self: &Arc<Self>, input: HandoffTaskInput) -> Result<Task, String> {
+        let (source, messages) = {
+            let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
+            let source = data.snapshot.tasks.iter().find(|task| task.id == input.source_task_id)
+                .cloned().ok_or("Source chat was not found.")?;
+            if source.archived { return Err("Restore this archived chat before handing it off.".into()); }
+            if source.status == "running" { return Err("Stop the current turn before handing this chat off.".into()); }
+            if data.snapshot.queued_messages.iter().any(|message| message.task_id == source.id) {
+                return Err("Send or remove queued messages before handing this chat off.".into());
+            }
+            if data.snapshot.approval_requests.iter().any(|request| request.task_id == source.id && request.status == "pending") {
+                return Err("Resolve pending approvals before handing this chat off.".into());
+            }
+            let messages = data.snapshot.messages.iter()
+                .filter(|message| message.task_id == source.id && (message.role == "user" || message.role == "assistant"))
+                .cloned().collect::<Vec<_>>();
+            (source, messages)
+        };
+        if source.agent_id == input.agent_id { return Err("Choose a different harness for this handoff.".into()); }
+        let target = self.create_task(CreateTaskInput {
+            agent_id: input.agent_id, title: source.title.clone(), native_session_id: None,
+            parent_task_id: Some(source.id.clone()), channel_id: None, project_id: source.project_id.clone(),
+            cwd: Some(source.cwd.clone()), model_settings: None, sandbox: None,
+        })?;
+        let brief = Self::handoff_brief(&source, &messages, input.note.as_deref());
+        self.mutate_data(Some(source.id.clone()), |data| {
+            data.snapshot.messages.push(Message {
+                id: id(), task_id: source.id.clone(), role: "system".into(),
+                text: format!("Handed off to a new {} chat.", target.provider), created_at: now(),
+                sender_agent_id: None, collaboration_id: None, stream_status: None, phase: None, attachments: vec![],
+            });
+            Ok(())
+        })?;
+        self.send(target.id.clone(), brief, vec![])?;
+        Ok(target)
+    }
+
+    fn handoff_brief(source: &Task, messages: &[Message], note: Option<&str>) -> String {
+        const MAX_MESSAGES: usize = 16;
+        const MAX_MESSAGE_CHARS: usize = 2_000;
+        let clipped = messages.iter().rev().take(MAX_MESSAGES).collect::<Vec<_>>();
+        let mut lines = vec![
+            "You are taking over an existing Monitter chat from a different harness. Continue the work using the visible context below. Do not claim access to the previous harness's hidden context, tools, approvals, credentials, or native session.".to_string(),
+            format!("Source harness: {}. Working folder: {}.", source.provider, source.cwd),
+        ];
+        if let Some(note) = note.map(str::trim).filter(|note| !note.is_empty()) { lines.push(format!("User handoff note: {note}")); }
+        lines.push("Recent conversation:".into());
+        for message in clipped.into_iter().rev() {
+            let role = if message.role == "user" { "User" } else { "Previous agent" };
+            let text = message.text.chars().take(MAX_MESSAGE_CHARS).collect::<String>();
+            lines.push(format!("{role}: {text}"));
+        }
+        lines.push("Acknowledge the handoff briefly, then continue the most recent user request.".into());
+        lines.join("\n\n")
+    }
+
     fn accept_send(
         self: &Arc<Self>,
         task_id: String,
@@ -6627,6 +6685,14 @@ async fn create_task(state: State<'_, AppState>, input: CreateTaskInput) -> Resu
         .map_err(|error| format!("Task creation worker failed: {error}"))?
 }
 
+#[tauri::command]
+async fn handoff_task(state: State<'_, AppState>, input: HandoffTaskInput) -> Result<Task, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.handoff_task(input))
+        .await
+        .map_err(|error| format!("Task handoff worker failed: {error}"))?
+}
+
 fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String> {
     if project.name.trim().is_empty() {
         return Err("Project name is required.".into());
@@ -8290,6 +8356,7 @@ pub fn run() {
             save_agent,
             delete_agent,
             create_task,
+            handoff_task,
             choose_local_folder,
             save_project,
             delete_project,

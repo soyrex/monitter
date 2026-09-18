@@ -9,6 +9,7 @@ import type {
   Goal,
   Channel,
   CreateTaskInput,
+  HandoffTaskInput,
   Host,
   ProbeResult,
   Project,
@@ -66,6 +67,7 @@ export interface MonitterBridge {
   saveAgent(agent: Agent): Promise<Snapshot>;
   deleteAgent(id: string, chatHandling?: 'archive' | 'delete'): Promise<Snapshot>;
   createTask(input: CreateTaskInput): Promise<Task>;
+  handoffTask(input: HandoffTaskInput): Promise<Task>;
   chooseLocalFolder(initial?: string): Promise<string | null>;
   renameTask(id: string, title: string): Promise<Snapshot>;
   autoname(target: AutonameTarget): Promise<Snapshot>;
@@ -249,6 +251,7 @@ const nativeBridge: MonitterBridge = {
   deleteAgent: (id, chatHandling: 'archive' | 'delete' = 'archive') =>
     invoke<Snapshot>("delete_agent", { id, chatHandling }),
   createTask: (input) => invoke<Task>("create_task", { input }),
+  handoffTask: (input) => invoke<Task>("handoff_task", { input }),
   chooseLocalFolder: (initial = '') => isLanBrowser() ? desktopOnly() : invoke<string | null>("choose_local_folder", { initial }),
   renameTask: (id, title) => invoke<Snapshot>("rename_task", { id, title }),
   autoname: target => invoke<Snapshot>("autoname", { target }),
@@ -352,6 +355,7 @@ const previewBridge: MonitterBridge = {
   saveAgent: () => desktopOnly(),
   deleteAgent: () => desktopOnly(),
   createTask: () => desktopOnly(),
+  handoffTask: () => desktopOnly(),
   chooseLocalFolder: () => desktopOnly(),
   renameTask: () => desktopOnly(),
   autoname: () => desktopOnly(),
@@ -433,6 +437,7 @@ export function getBridge(): MonitterBridge {
         test.invoke("delete_agent", { id, chatHandling }) as Promise<Snapshot>,
       createTask: (input) =>
         test.invoke("create_task", { input }) as Promise<Task>,
+      handoffTask: (input) => test.invoke("handoff_task", { input }) as Promise<Task>,
       chooseLocalFolder: (initial = '') => test.invoke("choose_local_folder", { initial }) as Promise<string | null>,
       renameTask: (id, title) =>
         test.invoke("rename_task", { id, title }) as Promise<Snapshot>,
