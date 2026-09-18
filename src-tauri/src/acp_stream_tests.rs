@@ -46,6 +46,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       update(undefined, {type:'text', text:'before tool'});
       console.log(JSON.stringify({jsonrpc:'2.0', method:'session/update', params:{sessionId:session, update:{sessionUpdate:'tool_call', toolCallId:'fixture-tool', title:'Read fixture', kind:'read', status:'completed'}}}));
       update(undefined, {type:'text', text:'after tool'});
+    } else if (process.argv[2] === 'many-tools') {
+      for (let index=0; index<32; index++) {
+        console.log(JSON.stringify({jsonrpc:'2.0', method:'session/update', params:{sessionId:session, update:{sessionUpdate:'tool_call', toolCallId:`fixture-tool-${index}`, title:`Read fixture ${index}`, kind:'read', status:'completed', rawOutput:{text:'x'.repeat(70*1024)}}}}));
+      }
+      update('done', {type:'text', text:'All tools finished.'});
     } else {
       update('a1', {type:'text', text:'a1'});
       update('b1', {type:'text', text:'b1'});
@@ -191,4 +196,47 @@ fn acp_anonymous_chunks_split_at_tool_activity() {
         .map(|message| message.text)
         .collect::<Vec<_>>();
     assert_eq!(messages, vec!["before tool", "after tool"]);
+}
+
+#[test]
+fn acp_tool_output_over_two_mib_completes_the_turn() {
+    let fixture = fixture(Some("many-tools"));
+    let agent = fixture.service.snapshot().unwrap().agents[0].clone();
+    let task = fixture
+        .service
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "ACP long tool turn".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let prompt = fixture
+        .service
+        .accept_send(task.id.clone(), "read many files".into(), vec![])
+        .unwrap()
+        .unwrap();
+    fixture
+        .service
+        .launch_accepted(task.id.clone(), Some(prompt));
+    wait_for(&fixture.service, &task.id);
+    let snapshot = fixture.service.snapshot().unwrap();
+    assert_eq!(
+        snapshot
+            .events
+            .iter()
+            .filter(|event| event.task_id == task.id && event.kind == "tool")
+            .count(),
+        32
+    );
+    assert!(snapshot.messages.iter().any(|message| {
+        message.task_id == task.id
+            && message.role == "assistant"
+            && message.text == "All tools finished."
+    }));
 }

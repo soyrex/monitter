@@ -37,6 +37,9 @@ const MAX_PERMISSION_HISTORY: usize = 4096;
 const MAX_PENDING_PERMISSIONS: usize = 16;
 const MAX_TOOL_ACTIVITY_ITEMS: usize = 1024;
 const MAX_TOOL_ACTIVITY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TOOL_EVENT_BYTES: usize = 512 * 1024;
+const MAX_TOOL_FIELD_BYTES: usize = 64 * 1024;
+const TOOL_DETAIL_TRUNCATED: &str = "[ACP tool detail truncated]";
 
 struct PermissionSlot(Arc<AtomicUsize>);
 impl Drop for PermissionSlot {
@@ -106,6 +109,88 @@ mod tests {
         assert_eq!(title, "ACP plan");
         assert_eq!(detail["update"]["sessionUpdate"], "plan");
         assert_eq!(detail["update"]["content"], "Check the manifest");
+    }
+
+    #[test]
+    fn many_tool_outputs_keep_the_turn_running() {
+        let mut updates = HashMap::new();
+        for index in 0..64 {
+            let params = json!({
+                "sessionId": "long-turn",
+                "update": {
+                    "toolCallId": format!("call-{index}"),
+                    "title": format!("Read file {index}"),
+                    "kind": "read",
+                    "status": "completed",
+                    "rawOutput": {"text": "x".repeat(64 * 1024)}
+                }
+            });
+            let (_, detail) = normalized_activity(&params, "tool_call", &mut updates)
+                .unwrap()
+                .expect("tool update");
+            let detail: Value = serde_json::from_str(&detail).unwrap();
+            assert_eq!(detail["update"]["status"], "completed");
+            assert_eq!(detail["update"]["title"], format!("Read file {index}"));
+        }
+        assert_eq!(updates.len(), 64);
+        assert!(retained_tool_activity_bytes(&updates) <= MAX_TOOL_ACTIVITY_BYTES);
+    }
+
+    #[test]
+    fn oversized_tool_output_is_truncated_without_hiding_failure() {
+        let mut updates = HashMap::new();
+        let params = json!({
+            "sessionId": "large-output",
+            "update": {
+                "toolCallId": "call-1",
+                "title": "Run command",
+                "status": "failed",
+                "rawOutput": {"stderr": "x".repeat(MAX_TOOL_EVENT_BYTES)}
+            }
+        });
+        let (title, detail) = normalized_activity(&params, "tool_call_update", &mut updates)
+            .unwrap()
+            .expect("tool update");
+        assert_eq!(title, "Run command");
+        assert!(detail.len() <= MAX_TOOL_EVENT_BYTES);
+        let detail: Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(detail["update"]["status"], "failed");
+        assert!(detail["update"]["rawOutput"]
+            .as_str()
+            .unwrap()
+            .contains(TOOL_DETAIL_TRUNCATED));
+    }
+
+    #[test]
+    fn parallel_tool_output_pressure_compacts_retained_state() {
+        let mut updates = HashMap::new();
+        for index in 0..64 {
+            let params = json!({
+                "sessionId": "parallel-turn",
+                "update": {
+                    "toolCallId": format!("call-{index}"),
+                    "title": format!("Search {index}"),
+                    "status": "in_progress",
+                    "content": "x".repeat(48 * 1024)
+                }
+            });
+            normalized_activity(&params, "tool_call", &mut updates)
+                .unwrap()
+                .expect("tool update");
+        }
+        assert!(retained_tool_activity_bytes(&updates) <= MAX_TOOL_ACTIVITY_BYTES);
+        assert_eq!(updates.len(), 64);
+        let final_update = json!({
+            "sessionId": "parallel-turn",
+            "update": {"toolCallId": "call-0", "status": "failed", "error": "permission denied"}
+        });
+        let (title, detail) = normalized_activity(&final_update, "tool_call_update", &mut updates)
+            .unwrap()
+            .expect("tool update");
+        assert_eq!(title, "Search 0");
+        let detail: Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(detail["update"]["status"], "failed");
+        assert_eq!(detail["update"]["error"], "permission denied");
     }
 }
 
@@ -318,6 +403,47 @@ fn activity_title(update: &Value, fallback: &str) -> String {
     .to_string()
 }
 
+fn activity_preview(value: &Value, max_bytes: usize) -> Value {
+    let text = value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string());
+    if text.len() <= max_bytes {
+        return value.clone();
+    }
+    let mut end = max_bytes.saturating_sub(TOOL_DETAIL_TRUNCATED.len() + 1);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Value::String(format!("{} {TOOL_DETAIL_TRUNCATED}", &text[..end]))
+}
+
+fn compact_tool_activity(update: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    for field in [
+        "sessionUpdate",
+        "toolCallId",
+        "title",
+        "toolName",
+        "kind",
+        "status",
+    ] {
+        if let Some(value) = update.get(field) {
+            let max_bytes = match field {
+                "toolCallId" => 512,
+                "title" | "toolName" => 256,
+                _ => 64,
+            };
+            compact.insert(field.into(), activity_preview(value, max_bytes));
+        }
+    }
+    Value::Object(compact)
+}
+
+fn retained_tool_activity_bytes(updates: &HashMap<(String, String), Value>) -> usize {
+    updates.values().map(|value| value.to_string().len()).sum()
+}
+
 fn normalized_activity(
     params: &Value,
     kind: &str,
@@ -356,7 +482,7 @@ fn normalized_activity(
     if !tool_updates.contains_key(&key) && tool_updates.len() >= MAX_TOOL_ACTIVITY_ITEMS {
         return Err("Too many ACP tool calls in one turn.".into());
     }
-    let (title, detail) = {
+    let (title, detail, terminal) = {
         let update = tool_updates.entry(key).or_insert_with(|| {
             json!({
                 "sessionUpdate": "tool_call",
@@ -369,16 +495,39 @@ fn normalized_activity(
         };
         object.insert("sessionUpdate".into(), Value::String("tool_call".into()));
         object.insert("toolCallId".into(), Value::String(tool_call_id));
+        let mut detail = json!({"sessionId": session, "update": update}).to_string();
+        if detail.len() > MAX_TOOL_EVENT_BYTES {
+            let mut bounded = compact_tool_activity(update);
+            for field in ["rawInput", "rawOutput", "content", "error"] {
+                if let Some(value) = update.get(field) {
+                    bounded[field] = activity_preview(value, MAX_TOOL_FIELD_BYTES);
+                }
+            }
+            bounded["detailTruncated"] = Value::Bool(true);
+            detail = json!({"sessionId": session, "update": bounded}).to_string();
+            if detail.len() > MAX_TOOL_EVENT_BYTES {
+                bounded = compact_tool_activity(update);
+                bounded["content"] = Value::String(TOOL_DETAIL_TRUNCATED.into());
+                detail = json!({"sessionId": session, "update": bounded}).to_string();
+            }
+            *update = bounded;
+        }
         let title = activity_title(update, "ACP tool action");
-        let detail = json!({"sessionId": session, "update": update}).to_string();
-        (title, detail)
+        let terminal = matches!(
+            update.get("status").and_then(Value::as_str),
+            Some("completed" | "failed" | "cancelled" | "canceled")
+        );
+        if terminal {
+            *update = compact_tool_activity(update);
+        }
+        (title, detail, terminal)
     };
-    let activity_bytes: usize = tool_updates
-        .values()
-        .map(|value| value.to_string().len())
-        .sum();
-    if activity_bytes > MAX_TOOL_ACTIVITY_BYTES {
-        return Err("ACP tool activity exceeds 2 MiB in one turn.".into());
+    if !terminal && retained_tool_activity_bytes(tool_updates) > MAX_TOOL_ACTIVITY_BYTES {
+        // Full updates have already been recorded as diagnostic events. Keep
+        // only mergeable identity/status metadata in memory for later patches.
+        for update in tool_updates.values_mut() {
+            *update = compact_tool_activity(update);
+        }
     }
     Ok(Some((title, detail)))
 }
