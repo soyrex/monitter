@@ -52,12 +52,13 @@ pub(crate) fn clear_goal(host: &Host, task: &Task) -> Result<(), String> {
 /// vocabulary used by Monitter-owned delegated tasks.
 pub(crate) fn read_subagent_transcript(
     host: &Host,
+    codex_home: Option<&str>,
     thread_id: &str,
 ) -> Result<Vec<crate::model::SubagentTranscriptEntry>, String> {
     if thread_id.trim().is_empty() {
         return Err("A Codex subagent thread ID is required.".into());
     }
-    let mut child = app_server_command(host, None)?.spawn().map_err(|error| {
+    let mut child = app_server_command(host, codex_home)?.spawn().map_err(|error| {
         format!("Could not start Codex app-server for subagent transcript lookup: {error}")
     })?;
     let result = read_subagent_transcript_from_child(&mut child, thread_id);

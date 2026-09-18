@@ -1,4 +1,4 @@
-//! Resident, local-only Codex app-server adapter.
+//! Resident Codex app-server adapter for local and SSH hosts.
 //!
 //! App-server is JSON-RPC over the owned child stdio pipes.  It deliberately
 //! never exposes a listener and never substitutes `exec resume` when a live
@@ -6,14 +6,13 @@
 
 use crate::{
     model::{InputOption, InputQuestion, InteractionInput, Task},
-    runner::{parse_codex_subagent_updates, resolve_local, RunControl},
+    runner::{parse_codex_subagent_updates, RunControl, SpawnedAppServer},
     ApprovalDecision, CreateApprovalRequest, Parsed, Service,
 };
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
@@ -115,9 +114,6 @@ struct OwnedRun {
 
 impl Drop for OwnedRun {
     fn drop(&mut self) {
-        if self.control.is_planned_retirement() {
-            return;
-        }
         self.control.terminate_owned();
         self.service
             .release_app_server_run(&self.task_id, &self.control);
@@ -134,17 +130,13 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         task_id: task_id.clone(),
         control: control.clone(),
     };
-    let (task, host) = match service.task_and_host(&task_id) {
+    let (mut task, host) = match service.task_and_host(&task_id) {
         Ok(value) => value,
         Err(error) => {
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
     };
-    if host.kind != "local" {
-        service.complete_app_server_turn(&task_id, &control, None, "error", Some("Codex app-server interactive sessions currently require a local desktop host. Monitter will not fall back to an uncertain exec resume turn on an SSH host.".into()));
-        return;
-    }
     let mut extensions = match service.runtime_extensions_for_agent(&task.agent_id) {
         Ok(extensions) => extensions,
         Err(error) => {
@@ -158,13 +150,6 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     }
     control.set_mcp_fingerprint(extensions.mcp_fingerprint());
     let prompt = extensions.prompt(&prompt);
-    let executable = match resolve_local(&host.codex_path) {
-        Ok(value) => value,
-        Err(error) => {
-            service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
-            return;
-        }
-    };
     let grant = match service.collaboration_grant(&task_id) {
         Ok(value) => value,
         Err(error) => {
@@ -172,38 +157,29 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             return;
         }
     };
-    let mut command = Command::new(executable);
-    command
-        .arg("app-server")
-        .current_dir(&task.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Err(error) =
-        crate::codex_accounts::configure_command(&mut command, task.codex_home.as_deref())
-    {
-        service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
-        return;
-    }
-    crate::runner::isolate_child(&mut command);
-    if let Some(grant) = &grant {
-        command
-            .env("MONITTER_ENDPOINT", &grant.endpoint)
-            .env("MONITTER_TOKEN", &grant.token);
-    }
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let SpawnedAppServer {
+        mut child,
+        collaboration_endpoint,
+        stderr,
+        cwd,
+        startup_diagnostics,
+    } = match crate::runner::spawn_codex_app_server(
+        &host,
+        &task,
+        grant
+            .as_ref()
+            .map(|grant| (grant.endpoint.as_str(), grant.token.as_str())),
+        &control,
+    ) {
+        Ok(transport) => transport,
         Err(error) => {
-            service.complete_app_server_turn(
-                &task_id,
-                &control,
-                None,
-                "error",
-                Some(format!("Could not start Codex app-server: {error}")),
-            );
+            service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
     };
+    // Use the remote process's expanded folder in protocol parameters only.
+    // Attachment ownership and the saved task snapshot keep their original cwd.
+    task.cwd = cwd;
     let Some(stdin) = child.stdin.take() else {
         crate::runner::terminate_bounded(&mut child);
         service.complete_app_server_turn(
@@ -226,7 +202,6 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         );
         return;
     };
-    let stderr = child.stderr.take();
     if let Err((mut child, _)) = control.install(child, Some(stdin)) {
         super::runner::terminate_bounded(&mut child);
         service.complete_app_server_turn(&task_id, &control, None, "interrupted", None);
@@ -236,17 +211,17 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     if let Some(stderr) = stderr {
         let service = service.clone();
         let task = task_id.clone();
-        let control = control.clone();
+        let token = grant.as_ref().map(|grant| grant.token.clone());
         thread::spawn(move || {
             let mut emitted = false;
-            let mut reader = BufReader::new(stderr);
-            while let Ok(Some(line)) = read_bounded_line(&mut reader, 64 * 1024) {
-                let Some(_event) = control.begin_event_processing() else {
-                    break;
-                };
+            let mut emit = |line: &str| {
                 if !emitted {
-                    if let Some(line) = crate::runner::provider_stderr_diagnostic(&line) {
+                    if let Some(line) = crate::runner::provider_stderr_diagnostic(line) {
                         emitted = true;
+                        let line = token
+                            .as_deref()
+                            .filter(|token| !token.is_empty())
+                            .map_or_else(|| line.clone(), |token| line.replace(token, "[redacted]"));
                         // The internal admin has no durable transcript or
                         // activity surface. Keep provider diagnostics inside
                         // its process-local caller path rather than leaking
@@ -256,6 +231,13 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                         }
                     }
                 }
+            };
+            for line in startup_diagnostics.lines() {
+                emit(line);
+            }
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_bounded_line(&mut reader, 64 * 1024) {
+                emit(&line);
             }
         });
     }
@@ -467,7 +449,10 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 }
                 if send(&control, json!({"method":"initialized"}))
                     .and_then(|_| {
-                        send(&control, thread_request(&task, grant.as_ref(), &extensions))
+                        send(
+                            &control,
+                            thread_request(&task, collaboration_endpoint.as_deref(), &extensions),
+                        )
                     })
                     .is_err()
                 {
@@ -1625,7 +1610,7 @@ fn turn_request(thread_id: &str, prompt: &str, task: &Task) -> Value {
 }
 fn thread_request(
     task: &Task,
-    grant: Option<&crate::collaboration_transport::SessionGrant>,
+    collaboration_endpoint: Option<&str>,
     extensions: &crate::extensions_runtime::RuntimeExtensions,
 ) -> Value {
     let sandbox = if task.sandbox == "yolo" {
@@ -1651,19 +1636,14 @@ fn thread_request(
         }
     }
     let mut config = extensions.codex_config();
-    if let Some(grant) = grant {
-        config.extend(
-            json!({
-                "mcp_servers.monitter.url": grant.endpoint,
-                "mcp_servers.monitter.bearer_token_env_var": "MONITTER_TOKEN",
-                "mcp_servers.monitter.required": true,
-                "mcp_servers.monitter.enabled_tools": crate::collaboration_mcp::tool_names(),
-                "mcp_servers.monitter.tools.install_shared_skill.approval_mode": "prompt"
-            })
-            .as_object()
-            .cloned()
-            .unwrap_or_default(),
-        );
+    if let Some(endpoint) = collaboration_endpoint {
+        config.extend(json!({
+            "mcp_servers.monitter.url": endpoint,
+            "mcp_servers.monitter.bearer_token_env_var":"MONITTER_TOKEN",
+            "mcp_servers.monitter.required":true,
+            "mcp_servers.monitter.enabled_tools": crate::collaboration_mcp::tool_names(),
+            "mcp_servers.monitter.tools.install_shared_skill.approval_mode":"prompt"
+        }).as_object().cloned().unwrap_or_default());
     }
     if !config.is_empty() {
         params["config"] = Value::Object(config);
@@ -1824,10 +1804,7 @@ mod tests {
         assert_eq!(request["params"]["excludeTurns"], Value::Bool(true));
         let with_mcp = thread_request(
             &task,
-            Some(&crate::collaboration_transport::SessionGrant {
-                endpoint: "http://127.0.0.1:4444/mcp".into(),
-                token: "test-token".into(),
-            }),
+            Some("http://127.0.0.1:4444/mcp"),
             &crate::extensions_runtime::RuntimeExtensions::default(),
         );
         let config = &with_mcp["params"]["config"];
