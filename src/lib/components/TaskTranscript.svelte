@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
-  import { ArrowRightLeft, Check, CircleStop, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
+  import { ArrowRightLeft, Check, CircleStop, Maximize2, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
   import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, Message, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
@@ -54,7 +54,7 @@
     avatarVisual,
     messageAvatar,
     deliveryStatus,
-    paneExpand,
+    maximised,
     rightSidebar,
     composer,
     subagentDock,
@@ -76,6 +76,7 @@
     onEditTask,
     onShare,
     onHandoff,
+    onMaximise,
   }: {
     active: boolean;
     task: Task;
@@ -100,7 +101,7 @@
     avatarVisual: Avatar;
     messageAvatar: Snippet<[Agent | null | undefined]>;
     deliveryStatus: Delivery;
-    paneExpand: EmptySnippet;
+    maximised: boolean;
     rightSidebar: EmptySnippet;
     composer: EmptySnippet;
     subagentDock: EmptySnippet;
@@ -122,6 +123,7 @@
     onEditTask: () => void;
     onShare: () => void;
     onHandoff: () => void;
+    onMaximise: () => void;
   } = $props();
 
   // The keyed transcript is recreated when the selected task changes.
@@ -184,15 +186,15 @@
     </div>
     <div class="task-actions">
       <ObserverIndicator names={observers}/>
+      {@render rightSidebar()}
       <div class="task-overflow">
         <button bind:this={taskMenuAnchor} class="icon" aria-label="Chat actions" aria-haspopup="menu" aria-expanded={menuOpen} onclick={()=>onMenuChange(!menuOpen)}><MoreHorizontal size={17}/></button>
         {#if menuOpen && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Chat actions">
           <button role="menuitem" disabled={busy || task.status === 'running'} title={task.status === 'running' ? 'Stop the current turn before handing off' : 'Continue this chat with another harness'} onclick={()=>{onMenuChange(false);onHandoff();}}><ArrowRightLeft size={15}/>Hand off…</button>
-          {#if canShare}<button role="menuitem" onclick={()=>{onMenuChange(false);onShare();}}><Share2 size={15}/>Share this chat</button>{/if}
+          {#if canShare}<button role="menuitem" onclick={()=>{onMenuChange(false);onShare();}}><Share2 size={15}/>Share</button>{/if}
+          <button role="menuitem" onclick={()=>{onMenuChange(false);onMaximise();}}><Maximize2 size={15}/>{maximised ? 'Restore layout' : 'Maximise'}</button>
         </div>{/if}
       </div>
-      {@render paneExpand()}
-      {@render rightSidebar()}
     </div>
   </div>
 {/if}

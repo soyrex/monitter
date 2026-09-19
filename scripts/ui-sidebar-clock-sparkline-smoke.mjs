@@ -35,24 +35,16 @@ try {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.getByRole('separator', { name: 'Resize main sidebar' }).press('Enter');
   await expect(page.locator('.app-shell')).toHaveClass(/sidebar-collapsed/);
-  const compact = page.locator('.sidebar-clock-widget.compact');
-  await expect(compact.locator('.compact-time span')).not.toBeEmpty();
-  await expect(compact.getByText('CPU', { exact: true })).toBeVisible();
-  await expect(compact.getByText('RAM', { exact: true })).toBeVisible();
-  await expect.poll(async () => compact.locator('.sparkline polyline').count(), { timeout: 6_000 }).toBe(2);
-  const compactBox = await compact.boundingBox();
-  const contentBoxes = await compact.locator('.clock-face, .metric-row').evaluateAll(nodes => nodes.map(node => {
-    const box = node.getBoundingClientRect(); return { left: box.left, right: box.right };
-  }));
-  if (!compactBox || contentBoxes.some(box => box.left < compactBox.x - .5 || box.right > compactBox.x + compactBox.width + .5)) {
-    throw new Error('Compact clock or metrics overflow the collapsed rail.');
-  }
-  // A transformed, device-scaled rail can round scrollWidth one CSS pixel above
-  // clientWidth even when the rendered text remains fully inside its box.
-  const clippedReadings = await compact.locator('.metric-row strong').evaluateAll(nodes => nodes.some(node => node.scrollWidth > node.clientWidth + 1));
-  if (clippedReadings) throw new Error('Compact metric readings are clipped.');
-  await page.screenshot({ path: 'output/sidebar-clock-compact.png' });
-  console.log('Sidebar clock: expanded and compact layouts, timezone, live sparklines, and green/yellow/orange/red levels passed.');
+  await expect(page.locator('.sidebar-clock-widget')).toHaveCount(0);
+  const compactUsage = page.getByRole('button', { name: 'Open provider usage', exact: true });
+  await expect(compactUsage).toBeVisible();
+  const footer = page.locator('.sidebar-footer');
+  await expect(footer.getByRole('button')).toHaveCount(1);
+  await expect(footer.getByRole('button', { name: 'Preferences', exact: true })).toBeVisible();
+  await compactUsage.click();
+  await expect(page.locator('.app-shell')).not.toHaveClass(/sidebar-collapsed/);
+  await expect(page.locator('.usage-rings')).toBeVisible();
+  console.log('Sidebar clock: expanded view retains clock and sparklines; compact rail uses Usage and Settings controls only.');
 } finally {
   await browser.close();
 }
