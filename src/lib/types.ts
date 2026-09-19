@@ -55,6 +55,21 @@ export interface AcpProbeResult {
   image: boolean; audio: boolean; embeddedContext: boolean;
 }
 export type Sandbox = 'read-only' | 'workspace-write' | 'harness-configured' | 'yolo';
+/** Per-harness opt-in. Jev recommends model settings only; it never grants authority. */
+export type JevRoutingMode = 'off' | 'recommend' | 'safe_auto';
+export interface JevModelTiers { fast: string; balanced: string; strong: string; frontier: string; }
+export interface JevRoutingDecision {
+  task_kind: 'answer' | 'investigate' | 'localized_edit' | 'bug_fix' | 'refactor' | 'architecture' | 'production_sensitive';
+  model_tier: 'fast' | 'balanced' | 'strong' | 'frontier';
+  reasoning_level: 'low' | 'medium' | 'high' | 'xhigh';
+  execution_mode: 'answer' | 'inspect' | 'edit';
+  permission_tier: 'read_only' | 'workspace_write' | 'shell_and_tests' | 'human_review_required';
+  confidence: number; rationale: string; escalation_conditions: string[];
+}
+export interface JevRoutePlan {
+  traceId: string; promptFingerprint: string; decision: JevRoutingDecision;
+  classifierEvidence: { provider: string; model: string; latencyMs: number; inputTokens: number | null; outputTokens: number | null; costUsd: number | null; };
+}
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
 export interface Project {
@@ -77,6 +92,8 @@ export interface Agent {
   color: string; sandbox: Sandbox;
   expertise: string[]; responsibilities: string[]; skills: string[];
   collaborationEnabled: boolean;
+  jevRouting?: JevRoutingMode;
+  jevModelTiers?: JevModelTiers;
   /** Internal agents are configurable in Settings but hidden from conversation surfaces. */
   internal?: boolean;
 }

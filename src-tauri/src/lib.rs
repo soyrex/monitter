@@ -59,6 +59,7 @@ mod lan_sync;
 mod markdown;
 mod menu;
 pub mod model;
+pub mod model_router;
 mod models;
 mod process_metrics;
 pub mod profile_init;
@@ -309,6 +310,9 @@ pub(crate) struct Service {
     extensions: extensions::ExtensionStore,
     extension_writes: Mutex<()>,
     environment_secrets: environment_secrets::EnvironmentSecretsStore,
+    // Initial Jev decisions are retained locally for audit. They contain a
+    // prompt fingerprint, never the prompt itself or the Jev credential.
+    router_trace_dir: PathBuf,
     // Serialize mutations independently from readers. Readers see the last
     // durable state while a new candidate is being encoded and synced.
     state_writes: Mutex<()>,
@@ -578,6 +582,8 @@ fn ensure_internal_admin(snapshot: &mut Snapshot) -> InternalAdminState {
             responsibilities: vec![],
             skills: vec![],
             collaboration_enabled: false,
+            jev_routing: model::JevRoutingMode::Off,
+            jev_model_tiers: model::JevModelTiers::default(),
             acp: None,
             internal: true,
             codex_home: None,
@@ -611,6 +617,7 @@ impl Service {
             extensions,
             extension_writes: Mutex::new(()),
             environment_secrets: environment_secrets::EnvironmentSecretsStore::new(),
+            router_trace_dir: dir.join("router-traces"),
             state_writes: Mutex::new(()),
             data: Mutex::new(Arc::new(ServiceData {
                 snapshot,
@@ -4058,6 +4065,37 @@ impl Service {
         }
     }
 
+    /// Classifies one fresh task for a harness that explicitly enabled Jev.
+    /// This deliberately performs no repository inspection, model execution,
+    /// permission change, or task creation. The renderer still owns whether it
+    /// applies a recommendation, and normal task/model validation follows.
+    fn plan_jev_route(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+    ) -> Result<model_router::JevRoutePlan, String> {
+        let agent = self
+            .committed_data()?
+            .snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .cloned()
+            .ok_or("Agent was not found.")?;
+        if agent.internal {
+            return Err("Jev routing is not available for the internal Monitter Admin agent.".into());
+        }
+        if agent.jev_routing == model::JevRoutingMode::Off {
+            return Err("Enable Jev routing for this harness before requesting a route.".into());
+        }
+        if prompt.trim().is_empty() {
+            return Err("Write a task before requesting a Jev route.".into());
+        }
+        let plan = model_router::live_jev_route_plan(prompt)?;
+        model_router::persist_jev_route_plan(&self.router_trace_dir, &plan)?;
+        Ok(plan)
+    }
+
     fn create_task(&self, input: CreateTaskInput) -> Result<Task, String> {
         if let Some(settings) = input.model_settings.as_ref() {
             let reset = settings.model.trim().is_empty()
@@ -6073,6 +6111,21 @@ async fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || service.snapshot())
         .await
         .map_err(|error| format!("Snapshot worker failed: {error}"))?
+}
+
+/// Native-owner only: route a fresh prompt through the locally stored Jev
+/// credential. The secret, raw prompt, and filesystem authority never cross
+/// this command boundary.
+#[tauri::command]
+async fn plan_jev_route(
+    state: State<'_, AppState>,
+    agent_id: String,
+    prompt: String,
+) -> Result<model_router::JevRoutePlan, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.plan_jev_route(&agent_id, &prompt))
+        .await
+        .map_err(|_| "Jev route worker failed.".to_string())?
 }
 
 #[tauri::command]
@@ -8328,6 +8381,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            plan_jev_route,
             get_process_metrics,
             get_extension_config,
             save_extension_config,

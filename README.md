@@ -93,6 +93,142 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
+## Experimental local model router
+
+Monitter includes a deliberately narrow native MVP for evaluating whether a
+Jev-guided route can use less expensive models without reducing coding-task
+success. It is a library module (`src-tauri/src/model_router.rs`), a local CLI,
+and an opt-in desktop feature attached to each saved harness. It cannot deploy,
+auto-merge, spend money, alter credentials, or grant permissions.
+
+In **Settings → Agents → Jev routing**, choose one mode per harness:
+
+- **Off** is the default and makes no Jev call.
+- **Recommend only** classifies a fresh task and records a compact local route
+  trace, but keeps the operator's model selection.
+- **Safe auto-route** may apply the operator's explicit tier-to-model mapping
+  and a recommended reasoning level only when confidence is at least 0.50.
+
+The composer marks enabled routing with a small Jev chip. An explicit composer
+model selection always wins. A route requiring human review is stopped before
+the harness is created; routing does not change the permission picker or
+approve an effect. The desktop command is owner-local and stores only a prompt
+fingerprint plus decision/evidence under Monitter app data `router-traces/`.
+
+Build and run the credential-free mock path from the repository root:
+
+```sh
+cargo run --manifest-path src-tauri/Cargo.toml --bin harness -- \
+  run "Find the failing test and fix the smallest underlying bug"
+
+cargo run --manifest-path src-tauri/Cargo.toml --bin harness -- eval
+```
+
+After `cargo build --manifest-path src-tauri/Cargo.toml --bin harness`, the
+same command is available as `src-tauri/target/debug/harness run "…"`. The
+bundled `mock` provider is intentional: it exercises classification, isolated
+worktree creation, evidence capture, reassessment, trace persistence, and the
+evaluation report without a model account, shell execution, or live changes.
+
+### Architecture
+
+```text
+prompt → Jev classifier → typed routing decision → isolated Git worktree
+      → provider adapter → evidence → reassessment → finish/escalate/review
+```
+
+`MockJevClassifier` is a deterministic local stand-in. Its output has the
+typed fields `task_kind`, `model_tier`, `reasoning_level`, `execution_mode`,
+`permission_tier`, `confidence`, `rationale`, and `escalation_conditions`.
+It follows the initial policy: low-cost answer/inspection first, balanced
+routes for contained edits and ordinary bugs, strong for refactors, and
+frontier inspection plus review for architecture or sensitive work.
+
+An adapter implements `AgentProvider` and receives this exact request:
+
+```rust
+AgentRunRequest {
+  prompt, workspace, model, reasoning_level, permission_tier, max_steps
+}
+```
+
+Adapters return normalized evidence: executed-command descriptions, test
+results, uncertainty, code/plan identification, steps used, and optional token
+and cost fields. This keeps provider/model selection independent from
+authority. A production adapter should bridge to Monitter's existing native
+provider/runtime and approval controls; it must never accept a router decision
+as a permission grant.
+
+The MVP bundles two adapters: `mock` (safe, deterministic, no model call) and
+`codex` (the installed, authenticated local Codex CLI). For Codex, model tier
+maps to `MONITTER_ROUTER_FAST_MODEL`, `MONITTER_ROUTER_BALANCED_MODEL`,
+`MONITTER_ROUTER_STRONG_MODEL`, and `MONITTER_ROUTER_FRONTIER_MODEL`; an
+explicit `--model` wins. If a tier variable is absent, Codex uses its configured
+default model and the trace says `codex-config-default`. The Codex adapter uses
+only its `read-only` or `workspace-write` sandbox in the router-created Git
+worktree, and does not pass `--approve-for-me` or either bypass flag.
+
+### Live Jev classifier POC
+
+The `run` command can use TypeSafe Jev for classification while retaining the
+side-effect-free mock coding-agent provider. This makes a real HTTPS request to
+Jev but does not call a coding model, execute shell commands, or make file
+changes. It reads the Keychain-backed Monitter `JEV_API_KEY` secret first, then
+falls back to `JEV_API_KEY` or `TYPESAFE_API_KEY` in the process environment.
+The value is never added to an argv, trace, error, or renderer state.
+
+```sh
+cargo run --manifest-path src-tauri/Cargo.toml --bin harness -- \
+  run "Find the failing test and fix the smallest underlying bug" --classifier jev
+```
+
+One `POST https://api.typesafe.ai/v1/systemone` call asks five parallel Choice
+questions: task kind, model tier, reasoning level, execution mode, and minimum
+permission tier. The router takes the lowest returned confidence as the
+decision confidence and records TypeSafe-reported model, usage, cost when
+available, and latency in the trace. A local sensitive-keyword preflight blocks
+production, credentials, billing, deployment, deletion, permission, and
+migration prompts before any request leaves Monitter.
+
+To run the full local POC, combine the live Jev classifier with Codex:
+
+```sh
+MONITTER_ROUTER_BALANCED_MODEL="your-codex-model" \
+  cargo run --manifest-path src-tauri/Cargo.toml --bin harness -- \
+  run "Find the failing test and fix the smallest underlying bug" \
+  --classifier jev --provider codex --max-steps 6
+```
+
+### Safety boundary
+
+- Edit-capable runs require a Git workspace and receive a fresh detached
+  worktree under the system temporary directory. The original workspace is not
+  given to the adapter.
+- Sensitive signals (production, deploy, credentials, billing, migrations,
+  deletion, access control, and similar) become `human_review_required` and
+  stop before the provider is called.
+- Explicit `--model`, `--tier`, and `--reasoning-level` preferences are kept,
+  but cannot remove a review gate or change the permission tier.
+- Reassessment recommends escalation when confidence is below 0.50, code or a
+  plan is missing, file/step budgets are crossed, tests fail, uncertainty is
+  reported, or more than one top-level subsystem changes. The MVP never
+  automatically retries on a stronger model.
+
+Each run writes a compact JSON trace under `.monitter/router-traces/` (local
+state, ignored by Git). The trace uses a SHA-256 prompt fingerprint rather than
+storing the raw prompt, and records both decisions, selected provider/model,
+permissions, evidence, files touched, test outcome, escalation, cost/tokens if
+provided, outcome, and an optional `--user-correction` note. The live POC
+records provider-reported tokens but does not invent a dollar cost when a
+provider omits one.
+
+`harness eval` compares the small representative fixture set against a fixed
+strong route and the mock Jev route, reporting success, escalation, mock cost,
+mock latency, and incorrect downgrades. These mock figures validate the
+evaluation plumbing only; they are not claims about live model quality, price,
+or latency. A later live evaluation should run the same tasks with explicitly
+approved providers and preserve the resulting traces for review.
+
 Platform build instructions:
 
 - macOS: `npm run build:mac`, then `npm run install:mac`. For a local debug package, use `npm run build:mac:local` and `npm run install:mac -- --debug`.

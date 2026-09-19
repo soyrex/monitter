@@ -145,6 +145,19 @@ impl EnvironmentSecretsStore {
     }
 }
 
+/// Internal-only access for a native service that must make an authenticated
+/// outbound request itself. This is deliberately allowlisted and returns no
+/// value across the Tauri boundary or into diagnostic output.
+pub(crate) fn jev_api_key_for_internal_service() -> Result<String, String> {
+    let vault = load_vault()?;
+    vault
+        .entries
+        .into_iter()
+        .find(|entry| entry.name == "JEV_API_KEY")
+        .map(|entry| entry.value)
+        .ok_or_else(|| "Monitter Environment & Secrets has no JEV_API_KEY entry.".to_string())
+}
+
 fn apply_pairs_to_command(command: &mut Command, pairs: Vec<(String, String)>) {
     for (name, value) in pairs {
         command.env(name, value);

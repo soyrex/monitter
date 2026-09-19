@@ -101,6 +101,11 @@ No fake conversations, progress, token counts, host connections or model replies
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
 - `create_task { input: CreateTaskInput }` -> Task (rejects the internal Monitter Admin agent as a chat recipient)
+- `plan_jev_route { agentId: string, prompt: string }` -> `JevRoutePlan` (native-owner only; requires an
+  explicit non-internal harness opt-in and the Keychain-backed `JEV_API_KEY`). It classifies a fresh prompt,
+  writes an app-local trace containing a prompt fingerprint and typed decision/evidence, and does not create a
+  task, invoke a provider, inspect a workspace, grant permissions, or expose the credential. LAN callers are
+  rejected. A `human_review_required` result must be stopped by the composer before task creation.
 - `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null, codexHome?: string | null, refresh?: boolean } }` -> ModelCatalog.
   Agent targets work before the first turn. ACP catalogs are obtained from the saved launcher by
   initializing an isolated ACP connection and creating a model-free session; no user prompt or
