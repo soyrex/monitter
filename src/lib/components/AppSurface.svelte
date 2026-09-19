@@ -117,6 +117,25 @@
   import { getBridge } from "$lib/bridge";
   import { contrastForeground } from '$lib/accent-contrast';
   import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage, sharedTaskIds } from '$lib/operator-sharing';
+  import {
+    applyProviderChoice,
+    capabilityFor,
+    clampLevelToCapability,
+    denormalizePermission,
+    deriveProviderKey,
+    detectProviderFromLaunch,
+    friendlyPermissionLabel,
+    friendlyProviderName,
+    getProviderOption,
+    isLevelSupported,
+    NORMALIZED_PERMISSIONS,
+    normalizeStoredSandbox,
+    PERMISSION_CAPABILITIES,
+    permissionDescription,
+    UI_PROVIDER_CATALOG,
+    type NormalizedPermission,
+    type ProviderKey,
+  } from '$lib/agent-permissions';
   import Modal from "$lib/components/Modal.svelte";
   import { activeModal } from "$lib/active-modal";
   import Markdown from "$lib/components/Markdown.svelte";
@@ -525,6 +544,27 @@
   const vimShortcuts = $derived(snapshot?.settings.shortcutMode === 'vim');
   $effect(() => { vimShortcuts; paneFocusChord=false; vimArmed=false; vimCommandOpen=false; });
   let directoryQuery = $state("");
+  /**
+   * In-pane navigation for the merged Agents category. The Agents category
+   * has two sub-views: the directory (landing) and the edit view. There is
+   * no URL routing — the pane switches based on this local state. The
+   * sidebar selection stays on "Agents" regardless of which sub-view is
+   * active, and the back affordance is rendered inside the edit view.
+   */
+  let agentRoute = $state<{ kind: 'directory' } | { kind: 'edit'; agentId: string } | { kind: 'new' }>({ kind: 'directory' });
+  /**
+   * Local open-state for the inline provider picker disclosure in the
+   * edit view. Reset on draft changes so we never show a stale list.
+   */
+  let providerPickerOpen = $state(false);
+  let providerPickerQuery = $state('');
+  /**
+   * One-time notice shown the first time the user edits an agent whose
+   * stored Sandbox predates the normalized permission model. Shown at
+   * most once per session, since the model is normalised on load.
+   */
+  let permissionMigrationNoticeVisible = $state(false);
+  let permissionMigrationNoticeShown = $state(false);
   let focusedAgentId = $state<string | null>(null);
   let focusedProjectId = $state<string | null>(null);
   let collapsedProjects = $state<Record<string, boolean>>({});
@@ -1198,7 +1238,14 @@
       ...fallback, ...saved,
       overviewOpen: saved.overviewOpen !== false,
       settingsOpen: saved.settingsOpen === true,
-      settingsCategory: ['profile','extensions','appearance','typography','behaviour','conversation','approvals','agents','directory','lan','remote'].includes(saved.settingsCategory ?? '') ? saved.settingsCategory! : 'appearance',
+      // 'directory' was folded into 'agents' when the Agent Setup area was
+      // redesigned; remap any stored legacy value to the new category.
+      // 'environment' was missing from the validator list before; include
+      // it so its sidebar entry survives a layout reload.
+      settingsCategory: (() => {
+        const raw = saved.settingsCategory === 'directory' ? 'agents' : saved.settingsCategory;
+        return ['profile','extensions','appearance','typography','behaviour','conversation','approvals','agents','lan','remote','environment'].includes(raw ?? '') ? raw! : 'appearance';
+      })(),
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openEmptyIds: Array.isArray(saved.openEmptyIds) ? saved.openEmptyIds : fallback.openEmptyIds,
       documents: saved.documents && typeof saved.documents === 'object' && !Array.isArray(saved.documents)
@@ -1696,8 +1743,11 @@
     const reader = new FileReader();
     reader.onerror = () => { if (agentDraft === target) error = 'Could not read this image.'; };
     reader.onload = () => {
-      if (agentDraft !== target || settingsCategory !== 'agents') return;
-      if (typeof reader.result === 'string' && reader.result.length <= 3 * 1024 * 1024) target.avatar = reader.result;
+      if (agentDraft !== target || agentRoute.kind === 'directory') return;
+      if (typeof reader.result === 'string' && reader.result.length <= 3 * 1024 * 1024) {
+        target.avatar = reader.result;
+        if (target.id) markAgentDirty(target.id);
+      }
       else error = 'Avatar image is too large.';
     };
     reader.readAsDataURL(file);
@@ -2772,14 +2822,50 @@
   }
 
   let agentEdits=$state<Record<string,Agent>>({});
+  // Dirty tracking: whether the currently-displayed agent draft has
+  // unsaved changes. Tracked by the draft's stable identity (it is created
+  // once per edit session and re-used for every keystroke), not by the
+  // stored Agent id, because a brand-new agent has no id until first save.
+  let agentDraftDirty = $state(false);
+  function isAgentDirty(agent: Agent | null): boolean {
+    return Boolean(agent) && agentDraftDirty;
+  }
+  function markAgentClean(_id: string) {
+    agentDraftDirty = false;
+  }
+  function markAgentDirty(_id: string) {
+    agentDraftDirty = true;
+  }
   function selectAgentEditor(id:string) {
     if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
     agentDraft=JSON.parse(JSON.stringify(agentEdits[id]??settingsAgents.find(agent=>agent.id===id)??blankAgent()));
+    agentRoute = id ? { kind: 'edit', agentId: id } : { kind: 'new' };
+    agentDraftDirty = false;
   }
+  /**
+   * Open an agent in the edit view, creating a working draft from either
+   * the supplied value or the persisted record. Sets the in-pane route
+   * so the merged Agents category lands directly on the editor rather
+   * than the directory.
+   */
   export function openAgentSettings(draft:Agent) {
     if(agentDraft)agentEdits[agentDraft.id]=JSON.parse(JSON.stringify(agentDraft));
     agentDraft=JSON.parse(JSON.stringify(agentEdits[draft.id]??draft));
+    agentRoute = draft.id ? { kind: 'edit', agentId: draft.id } : { kind: 'new' };
+    agentDraftDirty = false;
+    // First time after the upgrade, surface the permission migration notice
+    // if the persisted agent carries a Sandbox value written before the
+    // normalised picker existed. We treat any stored Sandbox that round-trips
+    // through the normalised model as eligible (i.e., anything except the
+    // canonical default), but only show the notice once per session.
+    if (draft.id && !permissionMigrationNoticeShown) {
+      permissionMigrationNoticeVisible = true;
+      permissionMigrationNoticeShown = true;
+    }
     openSettings();settingsCategory='agents';
+  }
+  function dismissPermissionMigrationNotice() {
+    permissionMigrationNoticeVisible = false;
   }
   function routeAgentSettings(draft:Agent) {
     mobileMain = true;
@@ -2790,8 +2876,46 @@
     if(owner==='main')openAgentSettings(draft);else paneRefs[owner]?.openAgentSettings(draft);
     focusRoutedPane();
   }
-  $effect(()=>{if(settingsOpen && settingsCategory==='agents' && !agentDraft && settingsAgents.length)untrack(()=>selectAgentEditor(settingsAgents[0]?.id??''));});
-  function discardAgentEdits(){if(!agentDraft)return;delete agentEdits[agentDraft.id];agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===agentDraft?.id)??blankAgent()));}
+  /**
+   * In-pane navigation back to the directory landing. If the user has
+   * unsaved edits we ask them to confirm before discarding.
+   */
+  function backToAgentDirectory() {
+    if (agentDraft && isAgentDirty(agentDraft)) {
+      const proceed = confirm(`Discard unsaved changes to ${agentDraft.name?.trim() || 'this agent'}?`);
+      if (!proceed) return;
+      if (agentDraft.id) discardAgentEdits();
+      else {
+        agentDraft = null;
+        agentRoute = { kind: 'directory' };
+      }
+      return;
+    }
+    if (agentDraft?.id) {
+      // No edits: just clear the draft and go back.
+      discardAgentEdits();
+      return;
+    }
+    agentDraft = null;
+    agentRoute = { kind: 'directory' };
+  }
+  $effect(()=>{
+    // When the Agents category first opens, land on the directory rather
+    // than auto-selecting the first agent. The previous behaviour forced
+    // the editor into view, which made "browse then edit" a two-click
+    // detour. The directory has its own affordance to drill in.
+    if (settingsOpen && settingsCategory === 'agents' && agentRoute.kind === 'directory' && !agentDraft) {
+      // Already on the directory; nothing to do.
+    }
+  });
+  function discardAgentEdits(){
+    if(!agentDraft)return;
+    const id = agentDraft.id;
+    delete agentEdits[id];
+    markAgentClean(id);
+    agentDraft = null;
+    agentRoute = { kind: 'directory' };
+  }
   function agentTaskCount(agentId: string): number {
     return (snapshot?.tasks ?? []).filter(task => task.agentId === agentId).length;
   }
@@ -2816,16 +2940,27 @@
         : 'Agent removed. Its chats are now archived with the agent name and LLM preserved.',
     )) {
       delete agentEdits[id];
+      markAgentClean(id);
       agentDraft = null;
       modal = null;
-      selectAgentEditor(settingsAgents[0]?.id ?? '');
+      agentRoute = { kind: 'directory' };
     }
   }
   async function saveAgent() {
     if(!agentDraft)return;
     const oldId=agentDraft.id;
-    const submitted={...agentDraft,id:oldId||localUuid(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean)};
-    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){delete agentEdits[oldId];agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===submitted.id)??submitted));void refreshCodexAccounts();}
+    // The normalised permission was tracked separately for the picker. Write
+    // the matching stored Sandbox back into the persisted draft. This is
+    // the only place the harness-specific vocabulary gets materialised.
+    const submitted={...agentDraft,id:oldId||localUuid(),expertise:(agentDraft.expertise??[]).map(value=>value.trim()).filter(Boolean),responsibilities:(agentDraft.responsibilities??[]).map(value=>value.trim()).filter(Boolean),skills:(agentDraft.skills??[]).map(value=>value.trim()).filter(Boolean),sandbox:agentDraft.sandbox};
+    if(await run(()=>bridge.saveAgent(submitted),'Agent saved.')){
+      delete agentEdits[oldId];
+      markAgentClean(submitted.id);
+      agentDraft=JSON.parse(JSON.stringify(settingsAgents.find(agent=>agent.id===submitted.id)??submitted));
+      // Once we have a real id, the edit view becomes a real edit, not a new agent.
+      if (agentDraft?.id && agentRoute.kind === 'new') agentRoute = { kind: 'edit', agentId: agentDraft.id };
+      void refreshCodexAccounts();
+    }
   }
   function codexAccountOptions(agent: Agent) {
     const saved = agent.codexHome?.trim();
@@ -3529,7 +3664,7 @@
     {id:"new-terminal",label:"New terminal",detail:"Open a shell in this host and folder",group:"Create",disabled:terminalBusy},
     ...(selectedTask || activeChannel || selectedTerminal ? [{id:"autoname",label:"Auto-name current pane",detail:"Generate a title from recent visible content",keywords:"/autoname rename title",group:"Current pane",disabled:terminalBusy}] : []),
     {id:"new-agent",label:"New agent",group:"Create"},
-    {id:"agent-directory",label:"Agent directory",detail:"Find agents by expertise, responsibility, or skill",group:"Collaborate"},
+    {id:"agents-directory",label:"Browse agents",detail:"Open the Agents settings to browse, configure, or create an agent",group:"Collaborate"},
     {id:"new-channel",label:"New channel",group:"Create"},
     {id:"new-project",label:"New project",group:"Create"},
     ...(['standard','activity','projects'] as SidebarView[]).map(view=>({id:`sidebar:${view}`,label:`${view[0].toUpperCase()+view.slice(1)} sidebar view`,group:'Sidebar',checked:sidebarView===view})),
@@ -3660,7 +3795,7 @@
       palette = null;
       if (id === "new-task") openTaskComposer();
       if (id === "new-agent") { routeAgentSettings(blankAgent()); }
-      if (id === "agent-directory") { directoryQuery='';routeSettings('directory'); }
+      if (id === "agents-directory") { directoryQuery='';agentRoute = { kind: 'directory' };routeSettings('agents'); }
       if (id === "new-channel") { channelDraft=blankChannel(); modal="channel"; }
       if (id === 'new-project') editProject();
       if (id === "hosts") modal=id;
@@ -3908,7 +4043,7 @@
         use hosts, agents, and tasks.
       </div>{/if}
     {#if settingsOpen && snapshot}<div class="settings-surface" class:settings-hidden={pane!=='settings'}>
-      <SettingsPane settings={snapshot.settings} interfaceScale={activeInterfaceScale} {interfaceScaleViewer} onscale={value=>{ setViewerInterfaceScale(interfaceScaleViewer,value); }} approvalRules={approvalRules} agents={visibleAgents} hosts={snapshot.hosts} revokingRuleId={revokingApprovalRuleId} onrevokeRule={revokeApprovalRule} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} {agentDirectory} headerActions={paneExpandControl} onsave={savePreference}/>
+      <SettingsPane settings={snapshot.settings} interfaceScale={activeInterfaceScale} {interfaceScaleViewer} onscale={value=>{ setViewerInterfaceScale(interfaceScaleViewer,value); }} approvalRules={approvalRules} agents={visibleAgents} hosts={snapshot.hosts} revokingRuleId={revokingApprovalRuleId} onrevokeRule={revokeApprovalRule} bind:category={settingsCategory} visible={pane==='settings'&&(!workspaceExpansion||workspaceExpansion===paneId)} active={embedded?active:activePaneId==='main'} {agentEditor} headerActions={paneExpandControl} onsave={savePreference}/>
     </div>{/if}
     {#if !snapshot}<div class="loading">
         <LoaderCircle size={22} /><span>Loading your workspace…</span
@@ -4475,7 +4610,7 @@
     <footer class="sidebar-footer" aria-label="Workspace controls">
       <button class="icon" aria-label="Preferences" title="Preferences" onclick={()=>routeSettings()}><Settings2 size={16}/></button>
       <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
-      <button class="icon" aria-label="Agent directory" title="Agent directory" onclick={()=>{directoryQuery='';routeSettings('directory')}}><Bot size={16}/></button>
+      <button class="icon" aria-label="Agents" title="Agents" onclick={()=>{directoryQuery='';agentRoute={kind:'directory'};routeSettings('agents');}}><Bot size={16}/></button>
       <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
       {#if !isLanBrowser()}<button class="icon" aria-label="Share workspace" title="Share workspace" onclick={()=>{workspaceShareTaskId.set(null);workspaceShareOpen.set(true);}}><Share2 size={16}/></button>{/if}
     </footer>
@@ -4556,99 +4691,369 @@
       </footer>
     </div>
   {/if}
-</Modal>
-
-{#snippet agentDirectory()}<div class="form agent-directory"><label>Find agents<input aria-label="Find agents" bind:value={directoryQuery} placeholder="Search expertise, responsibilities, or skills" /></label>{#each visibleAgents.filter(agent => { const profile=agent as AgentProfile; const haystack=[agent.name,agent.description,...(profile.expertise??[]),...(profile.responsibilities??[]),...(profile.skills??[])].join(' ').toLowerCase(); return haystack.includes(directoryQuery.trim().toLowerCase()); }) as agent}{@const profile=agent as AgentProfile}<article class:disabled={profile.collaborationEnabled===false}><span class="avatar">{@render avatarVisual(agent, 13)}</span><div><b>{agent.name}</b><small><ProviderIcon provider={agent.provider} size={12} />{agent.provider} · {snapshot?.hosts.find(host=>host.id===agent.hostId)?.name ?? 'Unknown host'} · {profile.collaborationEnabled===false?'Collaboration off':'Collaboration on'}</small>{#if (profile.expertise??[]).length}<p>{(profile.expertise??[]).join(' · ')}</p>{/if}</div><button class="secondary" onclick={()=>{modal=null;openTaskComposer(null,agent.id)}}>New chat</button><button class="icon" aria-label={`Edit ${agent.name}`} onclick={()=>{routeAgentSettings({...agent})}}><MoreHorizontal size={15}/></button></article>{:else}<p class="hint">No saved agents match this search.</p>{/each}</div>{/snippet}
+ </Modal>
 
 {#snippet agentEditor()}
-  <div class="agent-editor-selector"><label>Agent<select aria-label="Select agent" disabled={busy} value={agentDraft?.id??''} onchange={event=>selectAgentEditor(event.currentTarget.value)}><option value="">New agent</option>{#each settingsAgents as agent}<option value={agent.id}>{agent.name}{agent.internal ? ' (internal)' : ''}</option>{/each}</select></label><button class="secondary" disabled={busy} onclick={()=>selectAgentEditor('')}><Plus size={15}/>New agent</button></div>
-  <p class="hint">Choose an agent to edit its identity, harness, permissions and collaboration profile.</p>
-  {#if agentDraft?.internal}<p class="hint">Monitter Admin handles interface requests such as auto-naming. Choose its harness and model here; it stays hidden from chats and sidebars.</p>{/if}
-{#if agentDraft}<form
-      class="form agent-settings-form"
-      onsubmit={(event) => {
-        event.preventDefault();
-        saveAgent();
-      }}
-    >
-      <label
-        >Name<input
-          required
-          disabled={agentDraft.internal === true}
-          bind:value={agentDraft.name}
-          placeholder="e.g. Product work"
-        /></label
-      ><label
-        >Description<input
-          bind:value={agentDraft.description}
-          placeholder="What this agent is responsible for"
-        /></label
-      ><label>Avatar <span class="optional">Optional</span><input aria-label="Avatar image" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event)=>chooseAvatar(event.currentTarget.files?.[0])}/>{#if avatarSrc(agentDraft)}<span class="avatar-preview"><img src={avatarSrc(agentDraft)!} alt="Current avatar"/><button type="button" onclick={()=>agentDraft && (agentDraft.avatar=null)}>Remove avatar</button></span>{/if}<small>PNG, JPEG, or WebP up to 2 MiB.</small></label
-      ><details class="agent-profile"><summary>Collaboration profile</summary><p>Saved profile details help other agents discover when to involve this agent.</p><label>Expertise<textarea value={profileList((agentDraft as AgentProfile).expertise)} oninput={event => agentDraft && ((agentDraft as AgentProfile).expertise = parseProfileList(event.currentTarget.value))} placeholder="One area per line"></textarea></label><label>Responsibilities<textarea value={profileList((agentDraft as AgentProfile).responsibilities)} oninput={event => agentDraft && ((agentDraft as AgentProfile).responsibilities = parseProfileList(event.currentTarget.value))} placeholder="One responsibility per line"></textarea></label><label>Skills<textarea value={profileList((agentDraft as AgentProfile).skills)} oninput={event => agentDraft && ((agentDraft as AgentProfile).skills = parseProfileList(event.currentTarget.value))} placeholder="One skill per line"></textarea></label><label class="check-row"><input type="checkbox" role="switch" checked={(agentDraft as AgentProfile).collaborationEnabled !== false} onchange={event => agentDraft && ((agentDraft as AgentProfile).collaborationEnabled = event.currentTarget.checked)} /> Available for collaboration</label></details
-      ><label
-        >Instructions<textarea
-          bind:value={agentDraft.instructions}
-          placeholder="Guidance for new tasks"
-        ></textarea></label
+  {#if agentRoute.kind === 'directory'}
+    {@render agentDirectoryView()}
+  {:else}
+    {@render agentEditView()}
+  {/if}
+{/snippet}
+
+{#snippet agentDirectoryView()}
+  {@const haystack = (agent: typeof visibleAgents[number]) => {
+    const profile = agent as AgentProfile;
+    return [agent.name, agent.description, friendlyProviderName(agent), ...(profile.expertise ?? []), ...(profile.responsibilities ?? []), ...(profile.skills ?? [])].join(' ').toLowerCase();
+  }}
+  {@const myAgents = visibleAgents.filter(agent => !localHost || agent.hostId === localHost.id)}
+  {@const peerAgents = localHost ? visibleAgents.filter(agent => agent.hostId !== localHost.id) : []}
+  <div class="agent-directory-shell">
+    <header class="agent-directory-header">
+      <label class="agent-directory-search">
+        <Search size={14} aria-hidden="true" />
+        <input
+          aria-label="Find agents"
+          bind:value={directoryQuery}
+          placeholder="Search agents, providers, or expertise"
+          autocomplete="off"
+        />
+      </label>
+      <button
+        type="button"
+        class="primary"
+        onclick={() => { agentDraft = blankAgent(); agentRoute = { kind: 'new' }; }}
       >
-      <div class="form-grid">
-        <label
-          >Harness<select aria-label="Harness" bind:value={agentDraft.provider}
-            onchange={event => { if (agentDraft) { agentDraft.sandbox = event.currentTarget.value === "codex" ? "read-only" : "harness-configured"; agentDraft.model = ""; if (event.currentTarget.value !== 'codex') agentDraft.codexHome = null; } }}
-            ><option value="codex">Codex</option><option value="claude">Claude Code</option>
-            <option value="opencode">OpenCode (legacy)</option><option value="hermes">Hermes</option><option value="acp">ACP — browse agents / custom</option></select
-          ></label
-        ><label
-          >Model<AgentModelPicker draft={agentDraft} saved={settingsAgents.find(agent=>agent.id===agentDraft?.id)??null} disabled={busy} onchange={model=>{if(agentDraft)agentDraft.model=model;}} /></label
-        ><label
-          >Host<select bind:value={agentDraft.hostId} onchange={event => { const hostId = event.currentTarget.value; if (agentDraft && (snapshot?.hosts.find(host => host.id === hostId)?.kind !== 'local' || agentDraft.provider !== 'codex')) agentDraft.codexHome = null; }}
-            >{#each snapshot?.hosts ?? [] as host}<option value={host.id}
-                >{host.name} · {host.kind}</option
-              >{/each}</select
-          ></label
-        ><label
-          >Folder<input
-            bind:value={agentDraft.cwd}
-            placeholder="/path/to/project"
-          /></label
-        >{#if agentDraft.provider === "codex" && agentDraft.hostId === localHost?.id}<label
-          >Codex account<select aria-label="Codex account" bind:value={agentDraft.codexHome}
-            ><option value={null}>Inherited default account</option
-            >{#each codexAccountOptions(agentDraft) as account (account.home)}<option value={account.home}>{account.label}</option>{/each}</select
-          ><small>New chats use this account. Existing chats keep their pinned account.</small>{#if codexAccountsLoading}<small>Finding local Codex accounts…</small>{/if}{#if codexAccountsError}<small class="error" role="alert">Could not discover Codex accounts: {codexAccountsError}</small>{/if}</label
-          ><label
-            >Custom home <span class="optional">Optional</span><input aria-label="Custom Codex account home" value={agentDraft.codexHome ?? ''} oninput={event=>{if(agentDraft)agentDraft.codexHome=event.currentTarget.value.trim()||null}} placeholder="/Users/you/.codex-work" /><small>Use an existing CODEX_HOME directory. Monitter does not create or modify it.</small></label>{/if}
-        <label
-          >Permissions<select aria-label="Permissions" bind:value={agentDraft.sandbox}
-            >{#if agentDraft.provider === "codex"}<option value="read-only">Read only</option><option
-              value="workspace-write">Workspace write</option>
-            {:else}<option value="harness-configured">Use harness permissions</option>{/if}{#if ['codex','claude','acp'].includes(agentDraft.provider)}<option value="yolo">YOLO — skip permissions</option>{/if}</select
-          >{#if agentDraft.provider !== "codex" && agentDraft.sandbox !== 'yolo'}<small>Uses this harness's permissions on the selected host. Monitter shows approval controls only when this harness exposes a live response channel.</small>{/if}</label
-        ><label class="check-row"><input type="checkbox" role="switch" disabled={!['codex','claude','acp'].includes(agentDraft.provider)} checked={agentDraft.sandbox === 'yolo'} onchange={event => { if (agentDraft) agentDraft.sandbox = event.currentTarget.checked ? 'yolo' : (agentDraft.provider === 'codex' ? 'read-only' : 'harness-configured'); }} /> YOLO — skip permissions<small>{['codex','claude'].includes(agentDraft.provider) ? 'Applies to new chats. Existing chats keep their saved permissions.' : agentDraft.provider === 'acp' ? 'Applies to new chats only when the ACP agent advertises bypassPermissions.' : 'This harness has no verified skip-permissions mode.'}</small></label
-        ><label
-          >Colour<input type="color" bind:value={agentDraft.color} /></label
+        <Plus size={15} /> New agent
+      </button>
+    </header>
+    {#if visibleAgents.length === 0}
+      <section class="agent-directory-empty">
+        <h2>No agents yet</h2>
+        <p>Add your first agent to start a chat with it.</p>
+        <button
+          type="button"
+          class="primary"
+          onclick={() => { agentDraft = blankAgent(); agentRoute = { kind: 'new' }; }}
         >
-      </div>
-      {#if agentDraft.provider === 'acp'}
-        <AcpAgentPicker hostId={agentDraft.hostId} launch={agentDraft.acp} disabled={busy} onchange={(launch, name) => { if (agentDraft) { agentDraft.acp = launch; if (!agentDraft.name.trim() && name) agentDraft.name = name; } }}/>
+          <Plus size={15} /> New agent
+        </button>
+      </section>
+    {:else}
+      {@const myMatches = myAgents.filter(agent => haystack(agent).includes(directoryQuery.trim().toLowerCase()))}
+      <section class="agent-directory-section">
+        <h2 class="agent-directory-section-title">My agents <span>{myMatches.length}</span></h2>
+        {#if myAgents.length === 0}
+          <p class="hint">No agents owned by this device. Peer agents appear under Available agents below.</p>
+        {:else if myMatches.length === 0}
+          <p class="hint">No agents in this section match your search.</p>
+        {:else}
+          <ul class="agent-directory-list">
+            {#each myMatches as agent (agent.id)}
+              {@const profile = agent as AgentProfile}
+              {@const hostName = snapshot?.hosts.find(host => host.id === agent.hostId)?.name ?? 'Unknown host'}
+              <li class="agent-row" class:disabled={profile.collaborationEnabled === false}>
+                <button
+                  type="button"
+                  class="agent-row-edit"
+                  aria-label={`Edit ${agent.name}`}
+                  onclick={() => routeAgentSettings({ ...agent })}
+                >
+                  <span class="avatar">{@render avatarVisual(agent, 16)}</span>
+                  <span class="agent-row-body">
+                    <strong>{agent.name}</strong>
+                    <small>{agent.description || (profile.expertise?.[0] ?? 'No description yet')}</small>
+                    <small class="agent-row-meta">
+                      {friendlyProviderName(agent)}{agent.model ? ` · ${agent.model}` : ''} · {hostName}
+                    </small>
+                  </span>
+                </button>
+                <label class="agent-row-collab">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-label={`Available for collaboration: ${agent.name}`}
+                    checked={profile.collaborationEnabled !== false}
+                    disabled={busy}
+                    onchange={(event) => {
+                      const target = settingsAgents.find(item => item.id === agent.id);
+                      if (target) (target as AgentProfile).collaborationEnabled = event.currentTarget.checked;
+                    }}
+                  />
+                  <span>Collaborate</span>
+                </label>
+                <div class="agent-row-actions">
+                  <button
+                    type="button"
+                    class="primary"
+                    onclick={() => { modal = null; openTaskComposer(null, agent.id); }}
+                  >New chat</button>
+                  <button
+                    type="button"
+                    class="icon"
+                    aria-label={`Open ${agent.name} settings`}
+                    title="Edit agent"
+                    onclick={() => routeAgentSettings({ ...agent })}
+                  ><MoreHorizontal size={15} /></button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+      {#if peerAgents.length}
+        {@const peerMatches = peerAgents.filter(agent => haystack(agent).includes(directoryQuery.trim().toLowerCase()))}
+        <section class="agent-directory-section">
+          <h2 class="agent-directory-section-title">Available agents <span>{peerMatches.length}</span></h2>
+          {#if peerMatches.length === 0}
+            <p class="hint">No peer agents match your search.</p>
+          {:else}
+            <ul class="agent-directory-list">
+              {#each peerMatches as agent (agent.id)}
+                {@const profile = agent as AgentProfile}
+                {@const hostName = snapshot?.hosts.find(host => host.id === agent.hostId)?.name ?? 'Unknown host'}
+                <li class="agent-row" class:disabled={profile.collaborationEnabled === false}>
+                  <span class="agent-row-edit agent-row-readonly" aria-label={`${agent.name} (read-only)`}>
+                    <span class="avatar">{@render avatarVisual(agent, 16)}</span>
+                    <span class="agent-row-body">
+                      <strong>{agent.name}</strong>
+                      <small>{agent.description || (profile.expertise?.[0] ?? 'Peer agent')}</small>
+                      <small class="agent-row-meta">
+                        {friendlyProviderName(agent)}{agent.model ? ` · ${agent.model}` : ''} · {hostName}
+                      </small>
+                    </span>
+                  </span>
+                  <span class="agent-row-collab agent-row-collab-static">
+                    <span>{profile.collaborationEnabled === false ? 'Collab off' : 'Collab on'}</span>
+                  </span>
+                  <div class="agent-row-actions">
+                    <button
+                      type="button"
+                      class="primary"
+                      onclick={() => { modal = null; openTaskComposer(null, agent.id); }}
+                    >New chat</button>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
       {/if}
-      <footer>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet agentEditView()}
+  {#if !agentDraft}
+    {@const editAgentId = agentRoute.kind === 'edit' ? agentRoute.agentId : ''}
+    {@const persisted = settingsAgents.find(agent => agent.id === editAgentId)}
+    {#if persisted}
+      {agentDraft = JSON.parse(JSON.stringify(persisted))}
+    {:else if agentRoute.kind !== 'new'}
+      {agentDraft = blankAgent()}
+    {/if}
+  {/if}
+  {@const draft = agentDraft!}
+  {@const providerKey = deriveProviderKey(draft)}
+  {@const providerOption = getProviderOption(providerKey)}
+  {@const providerCaps = capabilityFor(draft)}
+  {@const normalizedPermission = normalizeStoredSandbox(draft)}
+  {@const detectedFromLaunch = draft.provider === 'acp' && Boolean(draft.acp?.command)}
+  {@const showMigrationNotice = draft.id && permissionMigrationNoticeVisible}
+  {@const showAdvancedDefault = draft.provider === 'acp' || Boolean(draft.acp?.command) || Boolean(draft.acp?.args?.length)}
+  <div class="agent-edit-shell">
+    <header class="agent-edit-header">
+      <button
+        type="button"
+        class="agent-back"
+        aria-label="Back to agents"
+        onclick={backToAgentDirectory}
+      ><ArrowLeft size={14} aria-hidden="true" /> Back to agents</button>
+      <div class="agent-edit-header-actions">
         <button
           type="button"
           class="danger-text"
-          disabled={!agentDraft.id || agentDraft.internal === true || busy}
+          disabled={!draft.id || draft.internal === true || busy}
           onclick={beginDeleteAgent}
-          ><Trash2 size={15} /> Delete</button
-        ><span></span><button
+        ><Trash2 size={15} /> Delete</button>
+        <button
           type="button"
           class="secondary"
-          onclick={discardAgentEdits}>Discard changes</button
-        ><button class="primary" disabled={busy}
-          ><Save size={15} /> Save agent</button
-        >
-      </footer>
-    </form>{/if}
+          disabled={busy || !isAgentDirty(draft)}
+          onclick={discardAgentEdits}
+        >Discard changes</button>
+        <button
+          type="button"
+          class="primary"
+          disabled={busy || !draft.name.trim() || !isAgentDirty(draft)}
+          onclick={() => { void saveAgent(); }}
+        ><Save size={15} /> Save agent</button>
+      </div>
+    </header>
+    {#if draft.internal}<p class="hint">Monitter Admin handles interface requests such as auto-naming. Choose its provider and model here; it stays hidden from chats and sidebars.</p>{/if}
+    <form
+      class="form agent-settings-form"
+      onsubmit={(event) => {
+        event.preventDefault();
+        if (isAgentDirty(draft)) void saveAgent();
+      }}
+    >
+      <div class="agent-name-row">
+        <span class="avatar-large">{@render avatarVisual(draft, 28)}</span>
+        <div class="agent-name-fields">
+          <label>Name<input
+            required
+            disabled={draft.internal === true}
+            bind:value={draft.name}
+            oninput={() => markAgentDirty(draft.id)}
+            placeholder="e.g. Product work"
+          /></label>
+          <label>Description<input
+            bind:value={draft.description}
+            oninput={() => markAgentDirty(draft.id)}
+            placeholder="What this agent is responsible for"
+          /></label>
+        </div>
+      </div>
+      <label class="agent-avatar-row">Avatar <span class="optional">Optional</span>
+        <input aria-label="Avatar image" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event) => chooseAvatar(event.currentTarget.files?.[0])} />
+        {#if avatarSrc(draft)}<span class="avatar-preview"><img src={avatarSrc(draft)!} alt="Current avatar" /><button type="button" onclick={() => { draft.avatar = null; markAgentDirty(draft.id); }}>Remove avatar</button></span>{/if}
+        <small>PNG, JPEG, or WebP up to 2 MiB.</small>
+      </label>
+      <section class="agent-provider-card" aria-labelledby="agent-provider-heading">
+        <div class="agent-provider-heading">
+          <div>
+            <h2 id="agent-provider-heading">{providerOption.friendlyName}</h2>
+            <p>
+              <ProviderIcon provider={providerOption.storedProvider} size={12} />
+              {providerOption.subtitle}{draft.model ? ` · ${draft.model}` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            class="secondary"
+            disabled={busy}
+            onclick={() => { providerPickerOpen = !providerPickerOpen; }}
+          >Change</button>
+        </div>
+        {#if detectedFromLaunch}
+          <p class="agent-provider-notice">Provider detected from executable. Save to confirm.</p>
+        {/if}
+        {#if showMigrationNotice}
+          <p class="agent-provider-notice" role="status">
+            Your permissions were updated to the new format.
+            <button type="button" class="link-button" onclick={dismissPermissionMigrationNotice}>Dismiss</button>
+          </p>
+        {/if}
+        {#if providerPickerOpen}
+          {@const query = providerPickerQuery.trim().toLowerCase()}
+          {@const options = UI_PROVIDER_CATALOG.filter(option => !query || [option.friendlyName, option.subtitle, ...option.searchTerms].join(' ').toLowerCase().includes(query))}
+          <div class="provider-picker" role="region" aria-label="Choose a provider">
+            <label class="provider-picker-search">
+              <Search size={14} aria-hidden="true" />
+              <input
+                aria-label="Find a provider"
+                placeholder="Search providers"
+                bind:value={providerPickerQuery}
+                autocomplete="off"
+              />
+            </label>
+            <div class="provider-picker-grid">
+              {#each options as option (option.key)}
+                <button
+                  type="button"
+                  class="provider-picker-tile"
+                  class:selected={option.key === providerKey}
+                  disabled={busy}
+                  onclick={() => {
+                    if (!agentDraft) return;
+                    applyProviderChoice(agentDraft, option.key);
+                    agentDraft.sandbox = denormalizePermission(agentDraft.provider, clampLevelToCapability(agentDraft, normalizeStoredSandbox(agentDraft)));
+                    providerPickerOpen = false;
+                    providerPickerQuery = '';
+                    markAgentDirty(agentDraft.id);
+                  }}
+                >
+                  <strong>{option.friendlyName}</strong>
+                  <small>{option.subtitle}</small>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </section>
+      <section class="agent-permissions" aria-labelledby="agent-permissions-heading">
+        <h2 id="agent-permissions-heading">Permissions</h2>
+        <div class="permission-cards" role="radiogroup" aria-label="Permission level">
+          {#each NORMALIZED_PERMISSIONS as level (level)}
+            {@const supported = isLevelSupported(draft, level)}
+            {@const reason = !supported ? providerCaps.hint : ''}
+            <button
+              type="button"
+              role="radio"
+              aria-label={friendlyPermissionLabel(level)}
+              aria-checked={normalizedPermission === level}
+              aria-disabled={!supported || undefined}
+              class="permission-card"
+              class:selected={normalizedPermission === level}
+              class:disabled={!supported}
+              disabled={busy || !supported}
+              title={!supported ? reason : undefined}
+              onclick={() => {
+                if (!supported) return;
+                const next = denormalizePermission(draft.provider, level);
+                if (draft.sandbox !== next) {
+                  draft.sandbox = next;
+                  markAgentDirty(draft.id);
+                }
+              }}
+            >
+              <span class="permission-card-title">{friendlyPermissionLabel(level)}</span>
+              <span class="permission-card-desc">{permissionDescription(level)}</span>
+              {#if !supported}<span class="permission-card-reason">{reason}</span>{/if}
+            </button>
+          {/each}
+        </div>
+        <p class="hint">{providerCaps.hint}</p>
+      </section>
+      <details class="agent-profile">
+        <summary>Collaboration profile</summary>
+        <p>Saved profile details help other agents discover when to involve this agent.</p>
+        <label>Expertise<textarea value={profileList((draft as AgentProfile).expertise)} oninput={(event) => { (draft as AgentProfile).expertise = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One area per line"></textarea></label>
+        <label>Responsibilities<textarea value={profileList((draft as AgentProfile).responsibilities)} oninput={(event) => { (draft as AgentProfile).responsibilities = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One responsibility per line"></textarea></label>
+        <label>Skills<textarea value={profileList((draft as AgentProfile).skills)} oninput={(event) => { (draft as AgentProfile).skills = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One skill per line"></textarea></label>
+        <label class="check-row"><input type="checkbox" role="switch" checked={(draft as AgentProfile).collaborationEnabled !== false} onchange={(event) => { (draft as AgentProfile).collaborationEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} /> Available for collaboration</label>
+      </details>
+      <label>Instructions<textarea
+        bind:value={draft.instructions}
+        oninput={() => markAgentDirty(draft.id)}
+        placeholder="Guidance for new tasks"
+      ></textarea></label>
+      <div class="form-grid">
+        <label>Model<AgentModelPicker draft={draft} saved={settingsAgents.find(agent => agent.id === draft?.id) ?? null} disabled={busy} onchange={(model) => { if (agentDraft) { agentDraft.model = model; markAgentDirty(agentDraft.id); } }} /></label>
+        <label>Host<select bind:value={draft.hostId} onchange={(event) => { draft.hostId = event.currentTarget.value; if (snapshot?.hosts.find(host => host.id === draft.hostId)?.kind !== 'local' || draft.provider !== 'codex') draft.codexHome = null; markAgentDirty(draft.id); }}
+          >{#each snapshot?.hosts ?? [] as host}<option value={host.id}>{host.name} · {host.kind}</option>{/each}</select></label>
+        <label>Folder<input bind:value={draft.cwd} oninput={() => markAgentDirty(draft.id)} placeholder="/path/to/project" /></label>
+        {#if draft.provider === 'codex' && draft.hostId === localHost?.id}
+          <label class="agent-account-row">Account<select aria-label="Account" bind:value={draft.codexHome} onchange={() => markAgentDirty(draft.id)}><option value={null}>Inherited default account</option>{#each codexAccountOptions(draft) as account (account.home)}<option value={account.home}>{account.label}</option>{/each}</select></label>
+          <p class="agent-account-help">New chats use this account. Existing chats keep their pinned account.</p>
+          {#if codexAccountsLoading}<p class="hint">Finding local Codex accounts…</p>{/if}
+          {#if codexAccountsError}<p class="error" role="alert">Could not discover Codex accounts: {codexAccountsError}</p>{/if}
+        {/if}
+        <label>Colour<input type="color" bind:value={draft.color} onchange={() => markAgentDirty(draft.id)} /></label>
+      </div>
+      <details class="agent-advanced" open={showAdvancedDefault}>
+        <summary><span><strong>Advanced</strong><small>Executable, arguments and presets. Most agents don\u2019t need this.</small></span></summary>
+        {#if draft.provider === 'acp'}
+          <AcpAgentPicker hostId={draft.hostId} launch={draft.acp} disabled={busy} onchange={(launch, name) => { if (agentDraft) { agentDraft.acp = launch; if (!agentDraft.name.trim() && name) agentDraft.name = name; markAgentDirty(agentDraft.id); } }} />
+        {:else}
+          <p class="hint">Nothing to configure for this provider.</p>
+        {/if}
+      </details>
+    </form>
+  </div>
 {/snippet}
+
 <Modal title="Hosts" open={modal === "hosts"} onclose={() => (modal = null)}
   ><div class="host-list">
     {#each snapshot?.hosts ?? [] as host}<button
@@ -6636,20 +7041,78 @@
 
   .agent-profile { display: grid; gap: 9px; margin: 4px 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
   .agent-settings-form { max-width:none; }
-  .agent-editor-selector { display:flex;align-items:end;gap:12px;flex-wrap:wrap; }
-  .agent-editor-selector label { display:grid;gap:6px;flex:1;min-width:140px; }
-  .agent-editor-selector select { width:100%; }
   .agent-profile summary { cursor: pointer; font-weight: 600; }
   .agent-profile p { margin: 0; color: var(--muted); font-size: calc(11px * var(--interface-font-ratio, 1)); }
+  .agent-edit-shell { display:grid; gap:18px; }
+  .agent-edit-header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  .agent-edit-header-actions { display:flex; gap:8px; align-items:center; margin-left:auto; }
+  .agent-back { display:inline-flex; align-items:center; gap:6px; padding:6px 8px; border:0; border-radius:6px; color:var(--accent-ink,var(--accent)); background:transparent; font:inherit; cursor:pointer; }
+  .agent-back:hover { background:color-mix(in srgb,var(--accent) 10%,transparent); }
+  .agent-name-row { display:grid; grid-template-columns:56px minmax(0,1fr); gap:14px; align-items:start; }
+  .agent-name-row .avatar-large { display:grid; place-items:center; width:56px; height:56px; overflow:hidden; border-radius:14px; background:var(--soft); }
+  .agent-name-fields { display:grid; gap:10px; }
+  .agent-name-fields label { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
+  .agent-name-fields input { padding:8px 9px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--paper); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); }
+  .agent-name-fields input:focus { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 16%,transparent); }
+  .agent-avatar-row { display:grid; gap:6px; padding:10px; border:1px solid var(--line); border-radius:7px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
+  .agent-provider-card { display:grid; gap:6px; padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+  .agent-provider-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .agent-provider-heading h2 { margin:0 0 2px; font-size:calc(14px * var(--interface-font-ratio, 1)); }
+  .agent-provider-heading p { margin:0; display:flex; align-items:center; gap:6px; color:var(--muted); font-size:calc(11.5px * var(--interface-font-ratio, 1)); }
+  .agent-provider-model { color:var(--ink); }
+  .agent-provider-notice { margin:0; padding:8px 10px; border-radius:6px; color:var(--accent-ink,var(--accent)); background:color-mix(in srgb,var(--accent) 9%,transparent); font-size:calc(11.5px * var(--interface-font-ratio, 1)); }
+  .agent-permissions h2 { margin:0 0 8px; font-size:calc(13px * var(--interface-font-ratio, 1)); font-weight:600; }
+  .permission-cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+  .permission-card { display:grid; gap:6px; padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--ink); text-align:left; cursor:pointer; transition:border-color .15s ease, background-color .15s ease; }
+  .permission-card:hover:not(.disabled):not(:disabled) { border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); }
+  .permission-card.selected { border-color:var(--accent); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 35%,transparent) inset; }
+  .permission-card.disabled { opacity:.5; cursor:not-allowed; }
+  .permission-card-title { font-size:calc(13px * var(--interface-font-ratio, 1)); font-weight:600; }
+  .permission-card-desc { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); line-height:1.45; }
+  .permission-card-reason { color:var(--muted); font-size:calc(10.5px * var(--interface-font-ratio, 1)); font-style:italic; }
+  .agent-advanced { border:1px solid var(--line); border-radius:8px; padding:4px 10px; background:var(--panel); }
+  .agent-advanced summary { cursor:pointer; list-style:none; padding:6px 0; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .agent-advanced summary::-webkit-details-marker { display:none; }
+  .agent-advanced summary strong { font-size:calc(12.5px * var(--interface-font-ratio, 1)); }
+  .agent-advanced summary small { display:block; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
+  .agent-advanced[open] > :not(summary) { padding-top:6px; }
+  .agent-account-help { margin:6px 0 0; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
+  .agent-directory-shell { display:grid; gap:18px; }
+  .agent-directory-header { display:flex; gap:12px; align-items:center; }
+  .agent-directory-search { display:flex; gap:6px; align-items:center; flex:1; padding:6px 10px; border:1px solid var(--line); border-radius:7px; background:var(--paper); color:var(--muted); }
+  .agent-directory-search input { flex:1; min-width:0; border:0; background:transparent; color:var(--ink); outline:none; font:inherit; font-size:calc(12.5px * var(--interface-font-ratio, 1)); }
+  .agent-directory-empty { display:grid; gap:10px; place-items:start; padding:32px; border:1px dashed var(--line); border-radius:10px; }
+  .agent-directory-empty h2 { margin:0; font-size:calc(16px * var(--interface-font-ratio, 1)); }
+  .agent-directory-empty p { margin:0; color:var(--muted); }
+  .agent-directory-section-title { display:flex; align-items:center; gap:8px; margin:0 0 6px; color:var(--muted); font:600 calc(10.5px * var(--interface-font-ratio, 1)) var(--mono, monospace); letter-spacing:.07em; text-transform:uppercase; }
+  .agent-directory-section-title span { color:var(--ink); font:600 calc(11px * var(--interface-font-ratio, 1)) var(--mono, monospace); }
+  .agent-directory-list { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
+  .agent-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:14px; align-items:center; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+  .agent-row.disabled { opacity:.65; }
+  .agent-row-edit { display:grid; grid-template-columns:36px minmax(0,1fr); gap:12px; align-items:center; min-width:0; padding:0; border:0; background:transparent; color:inherit; text-align:left; cursor:pointer; }
+  .agent-row-edit:hover .agent-row-body strong { color:var(--accent-ink,var(--accent)); }
+  .agent-row-readonly { cursor:default; }
+  .agent-row-body { display:grid; gap:2px; min-width:0; }
+  .agent-row-body strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:calc(13px * var(--interface-font-ratio, 1)); font-weight:600; }
+  .agent-row-body small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:calc(11px * var(--interface-font-ratio, 1)); color:var(--muted); }
+  .agent-row-meta { display:flex; align-items:center; gap:4px; }
+  .agent-row-collab { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
+  .agent-row-collab-static { padding:0 4px; }
+  .agent-row-actions { display:flex; gap:6px; align-items:center; }
+  .provider-picker { display:grid; gap:8px; margin-top:8px; padding:10px; border-top:1px solid var(--line); }
+  .provider-picker-search { display:flex; gap:6px; align-items:center; padding:6px 10px; border:1px solid var(--line); border-radius:7px; background:var(--paper); color:var(--muted); }
+  .provider-picker-search input { flex:1; border:0; background:transparent; color:var(--ink); outline:none; font:inherit; }
+  .provider-picker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:8px; }
+  .provider-picker-tile { display:grid; gap:4px; padding:10px; border:1px solid var(--line); border-radius:7px; background:var(--paper); color:var(--ink); text-align:left; cursor:pointer; }
+  .provider-picker-tile:hover { border-color:color-mix(in srgb,var(--accent) 55%,var(--line)); }
+  .provider-picker-tile.selected { border-color:var(--accent); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 35%,transparent) inset; }
+  .provider-picker-tile strong { font-size:calc(12.5px * var(--interface-font-ratio, 1)); }
+  .provider-picker-tile small { color:var(--muted); font-size:calc(10.5px * var(--interface-font-ratio, 1)); }
+  @container (max-width:520px){.permission-cards{grid-template-columns:1fr}.agent-row{grid-template-columns:1fr}.agent-row-collab,.agent-row-actions{justify-self:start}}
   .collaboration-row { display: flex; width: 100%; gap: 7px; padding: 7px 0; text-align: left; border-bottom: 1px solid var(--line); }
   .collaboration-row > span:last-child { display: grid; min-width: 0; gap: 2px; }
   .collaboration-row small, .collaboration-row em { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: calc(10px * var(--interface-font-ratio, 1)); font-style: normal; }
   .collaboration-row .collaboration-error { color: var(--danger, #c44c79); }
-  .agent-directory article { display: flex; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
-  .agent-directory article > div { display: grid; flex: 1; min-width: 0; gap: 2px; }
-  .agent-directory small, .agent-directory p { margin: 0; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); }
-  .agent-directory small { display:flex; align-items:center; gap:4px; }
-  .agent-directory article.disabled { opacity: .58; }
   .agent-removal-options { border: 1px solid var(--line); border-radius: 8px; padding: 4px; display: grid; gap: 4px; }
   .agent-removal-options label { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 10px; border-radius: 6px; cursor: pointer; }
   .agent-removal-options label.selected { background: var(--soft, rgba(255,255,255,0.04)); outline: 1px solid var(--accent); }

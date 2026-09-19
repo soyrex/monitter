@@ -67,14 +67,14 @@
   }
 </script>
 
-<section class="acp-setup" aria-label="ACP agent setup">
-  <div class="catalog-heading"><div><b>Plug in an ACP agent</b><p>Choose a preset or use any compatible executable.</p></div>
-    <button type="button" class="refresh" disabled={disabled || loading || !hostId} onclick={() => discover(hostId)} aria-label="Refresh installed ACP agents"><RefreshCw size={14}/>Refresh</button>
+<section class="acp-setup" aria-label="Launch behaviour">
+  <div class="catalog-heading"><div><b>Configure launch behaviour</b><p>Choose a preset or use any compatible executable.</p></div>
+    <button type="button" class="refresh" disabled={disabled || loading || !hostId} onclick={() => discover(hostId)} aria-label="Refresh installed presets"><RefreshCw size={14}/>Refresh</button>
   </div>
-  <label class="search"><Search size={15}/><input type="search" aria-label="Search ACP agents" placeholder="Search agents…" bind:value={query} disabled={disabled}/></label>
+  <label class="search"><Search size={15}/><input type="search" aria-label="Search presets" placeholder="Search presets…" bind:value={query} disabled={disabled}/></label>
   {#if loading}<p class="hint" role="status">Checking executable locations on this host…</p>{/if}
   {#if error}<p class="error" role="alert">{error} You can still enter a custom executable below.</p>{/if}
-  <div class="catalog" aria-label="ACP presets">
+  <div class="catalog" aria-label="Presets">
     {#if resultHost === hostId}
       {#each matches as candidate (candidate.id)}
         <button type="button" class="candidate" disabled={disabled} onclick={() => onchange({ command: candidate.launch.command, args: [...candidate.launch.args] }, candidate.name)}>
@@ -83,22 +83,22 @@
           <code class="launch-preview">{candidate.launch.command}{candidate.launch.args.length ? ` ${candidate.launch.args.join(' ')}` : ''}</code>
         </button>
       {:else}
-        {#if !loading}<p class="hint">No presets match. You can still use a custom ACP agent.</p>{/if}
+        {#if !loading}<p class="hint">No presets match. You can still use a custom executable.</p>{/if}
       {/each}
     {/if}
-    <button type="button" class="candidate custom" disabled={disabled} onclick={() => onchange({command:'',args:[]})}><Plug size={15}/><span><b>Custom ACP agent</b><span class="description">Any ACP-compatible executable or installed bridge</span></span></button>
+    <button type="button" class="candidate custom" disabled={disabled} onclick={() => onchange({command:'',args:[]})}><Plug size={15}/><span><b>Custom executable</b><span class="description">Any compatible launch or installed bridge</span></span></button>
   </div>
-  <p class="hint">Detection only locates executables. It does not start an agent, prove ACP compatibility, or check sign-in. Nothing is installed automatically.</p>
-  <label>Executable<input aria-label="ACP executable" value={launch?.command ?? ''} disabled={disabled} placeholder="/path/to/agent or executable-name" oninput={event => patch({command:event.currentTarget.value})}/></label>
+  <p class="hint">Detection only locates executables. It does not start an agent, prove compatibility, or check sign-in. Nothing is installed automatically.</p>
+  <label>Executable<input aria-label="Executable" value={launch?.command ?? ''} disabled={disabled} placeholder="/path/to/agent or executable-name" oninput={event => patch({command:event.currentTarget.value})}/></label>
   <div class="argument-heading"><b>Arguments</b><button type="button" disabled={disabled || (launch?.args.length ?? 0) >= 64} onclick={() => patch({args:[...(launch?.args ?? []),'']})}><Plus size={13}/>Add argument</button></div>
   {#each launch?.args ?? [] as argument, index}
-    <div class="argument"><input aria-label={`ACP argument ${index+1}`} value={argument} disabled={disabled} oninput={event => changeArgument(index,event.currentTarget.value)}/><button type="button" aria-label={`Remove ACP argument ${index+1}`} disabled={disabled} onclick={() => patch({args:launch!.args.filter((_,i)=>i!==index)})}><X size={14}/></button></div>
+    <div class="argument"><input aria-label={`Argument ${index+1}`} value={argument} disabled={disabled} oninput={event => changeArgument(index,event.currentTarget.value)}/><button type="button" aria-label={`Remove argument ${index+1}`} disabled={disabled} onclick={() => patch({args:launch!.args.filter((_,i)=>i!==index)})}><X size={14}/></button></div>
   {/each}
   <p class="hint">One argument per row, without shell quoting. Use the agent's existing sign-in or environment for credentials; do not put secrets in arguments.</p>
-  <button type="button" class="verify" disabled={disabled || verifying || !launch?.command.trim()} onclick={verify}><Plug size={14}/>{verifying ? 'Checking ACP…' : 'Verify ACP connection'}</button>
-  {#if verified}<p class="verified" role="status"><Check size={14}/>ACP v{verified.protocolVersion} verified{verified.agentName ? ` · ${verified.agentName}` : ''}{verified.agentVersion ? ` ${verified.agentVersion}` : ''}</p>{/if}
+  <button type="button" class="verify" disabled={disabled || verifying || !launch?.command.trim()} onclick={verify}><Plug size={14}/>{verifying ? 'Checking…' : 'Verify connection'}</button>
+  {#if verified}<p class="verified" role="status"><Check size={14}/>v{verified.protocolVersion} verified{verified.agentName ? ` · ${verified.agentName}` : ''}{verified.agentVersion ? ` ${verified.agentVersion}` : ''}</p>{/if}
   {#if verifyError}<p class="error" role="alert">{verifyError}</p>{/if}
-  <p class="hint">Verification launches this executable for a protocol handshake only. It does not sign in, create a chat, or send a model request.</p>
+  <p class="hint">Verification launches this executable for a handshake only. It does not sign in, create a chat, or send a model request.</p>
 </section>
 
 <style>
