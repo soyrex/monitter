@@ -86,6 +86,32 @@ pub fn valid_acp_launch(launch: &AcpLaunch) -> bool {
 /// centralized save path rejects renames of the resident admin.
 pub const INTERNAL_AGENT_NAME: &str = "Monitter Admin";
 
+/// Per-harness opt-in for Jev task classification. This controls only model
+/// selection advice; it never grants filesystem, shell, or approval authority.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum JevRoutingMode {
+    #[default]
+    Off,
+    Recommend,
+    SafeAuto,
+}
+
+/// Optional model IDs an operator has explicitly mapped to Jev's abstract
+/// tiers. Empty entries deliberately retain the harness's normal model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct JevModelTiers {
+    #[serde(default)]
+    pub fast: String,
+    #[serde(default)]
+    pub balanced: String,
+    #[serde(default)]
+    pub strong: String,
+    #[serde(default)]
+    pub frontier: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
@@ -113,6 +139,12 @@ pub struct Agent {
     pub skills: Vec<String>,
     #[serde(default = "default_collaboration_enabled")]
     pub collaboration_enabled: bool,
+    /// Explicitly opt-in per harness. Older saved agents remain off.
+    #[serde(default)]
+    pub jev_routing: JevRoutingMode,
+    /// Operator-owned tier mapping; Jev cannot invent provider model IDs.
+    #[serde(default)]
+    pub jev_model_tiers: JevModelTiers,
     /// ACP is intentionally an explicit launcher rather than a growing list
     /// of provider-specific executable fields. It is copied into new tasks.
     #[serde(default)]
@@ -1148,6 +1180,8 @@ pub fn default_snapshot() -> Snapshot {
             responsibilities: vec![],
             skills: vec![],
             collaboration_enabled: true,
+            jev_routing: JevRoutingMode::Off,
+            jev_model_tiers: JevModelTiers::default(),
             acp: None,
             internal: false,
         }],
@@ -1566,6 +1600,8 @@ mod task_migration_tests {
             "model":"", "sandbox":"read-only", "projectId":null
         })).unwrap();
         assert_eq!(agent.codex_home, None);
+        assert_eq!(agent.jev_routing, JevRoutingMode::Off);
+        assert_eq!(agent.jev_model_tiers, JevModelTiers::default());
         assert_eq!(task.codex_home, None);
     }
 

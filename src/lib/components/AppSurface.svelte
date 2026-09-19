@@ -1817,6 +1817,8 @@
     expertise: [], responsibilities: [], skills: [], collaborationEnabled: true,
     sandbox: "read-only",
     codexHome: null,
+    jevRouting: 'off',
+    jevModelTiers: { fast: '', balanced: '', strong: '', frontier: '' },
   });
   const blankChannel = (): Channel => ({
     id: "",
@@ -2794,7 +2796,39 @@
     if (!draftId || !draft || !canSend || !taskAgentId) { error = "Choose an agent and write a message."; return; }
     const textToSend = promptText(composer), attachmentIds=currentAttachments.map(item=>item.id);
     const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId, cwd: taskCwd };
-    const values = { modelSettings:draftModelSettings, sandbox:draftSandbox, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null, cwd: captured.projectId ? null : captured.cwd.trim() || null };
+    let modelSettings = draftModelSettings;
+    let routingNotice = '';
+    const routeAgent = taskFormAgent;
+    // An explicit model selection is a user preference and always wins. Jev
+    // never changes the sandbox or approval path; sensitive routes stop here
+    // because this screen has no consequential-action review gate.
+    if (routeAgent?.jevRouting && routeAgent.jevRouting !== 'off' && !modelSettings) {
+      busy = true; error = ''; notice = '';
+      try {
+        const plan = await bridge.planJevRoute(routeAgent.id, textToSend);
+        const decision = plan.decision;
+        if (decision.permission_tier === 'human_review_required') {
+          error = 'Jev marked this as consequential. It was not started; use a reviewed workflow before any effect.';
+          return;
+        }
+        const label = `${decision.model_tier.replace('_', ' ')} · ${decision.reasoning_level} reasoning`;
+        if (routeAgent.jevRouting === 'safe_auto' && decision.confidence >= 0.5) {
+          const mappedModel = routeAgent.jevModelTiers?.[decision.model_tier] || routeAgent.model;
+          if (mappedModel) {
+            modelSettings = { model: mappedModel, reasoningEffort: decision.reasoning_level, fastMode: null };
+            routingNotice = `Jev applied ${label} (${Math.round(decision.confidence * 100)}% confidence).`;
+          } else {
+            routingNotice = `Jev recommends ${label}; this harness has no mapped model for that tier.`;
+          }
+        } else {
+          routingNotice = `Jev recommends ${label} (${Math.round(decision.confidence * 100)}% confidence). Your model selection was kept.`;
+        }
+      } catch (reason) {
+        error = `Jev routing could not run: ${text(reason)}`;
+        return;
+      } finally { busy = false; }
+    }
+    const values = { modelSettings, sandbox:draftSandbox, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null, cwd: captured.projectId ? null : captured.cwd.trim() || null };
     taskDrafts[draftId] = { ...draft, ...captured, title: values.title };
     taskTitle = values.title;
     // The draft itself retains a recovery copy if task creation fails, while
@@ -2802,7 +2836,7 @@
     composer = '';
     const optimistic = beginOptimisticMessage({ kind: 'draft', targetId: draftId, text: textToSend, displayText: captured.text, attachments: [...currentAttachments], baselineIds: new Set(), baselineQueuedIds: new Set() });
     let taskId = draft.createdTaskId;
-    busy = true; error = ''; notice = '';
+    busy = true; error = ''; notice = routingNotice;
     setComposerPending(`draft:${draftId}`, true);
     try {
       if (!taskId) {
@@ -4302,7 +4336,7 @@
           <div class="composer draft-composer" use:fileDrop>
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             <textarea bind:value={composer} aria-label="Task message" placeholder="Describe what you want this agent to do…" oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
-      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
+      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right">{#if taskFormAgent?.jevRouting && taskFormAgent.jevRouting !== 'off'}<span class="router-chip" title={taskFormAgent.jevRouting === 'safe_auto' ? 'Jev will safely apply a confidence-qualified model and reasoning mapping. Permissions stay unchanged.' : 'Jev will record a recommendation; your model selection stays unchanged.'}>Jev · {taskFormAgent.jevRouting === 'safe_auto' ? 'auto' : 'recommend'}</span>{/if}<ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
           </div>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -5075,6 +5109,24 @@
         {/if}
         <label>Colour<input type="color" bind:value={draft.color} onchange={() => markAgentDirty(draft.id)} /></label>
       </div>
+      <details class="agent-profile">
+        <summary>Jev routing <span class="optional">Optional</span></summary>
+        <p>Classifies a new task before it starts. It can suggest a tier, or safely apply a model/reasoning mapping you choose. It never changes permissions, approvals, or the selected model when the user set one explicitly.</p>
+        <label>Mode<select value={draft.jevRouting ?? 'off'} onchange={(event) => { draft.jevRouting = event.currentTarget.value as Agent['jevRouting']; if (!draft.jevModelTiers) draft.jevModelTiers = { fast: '', balanced: '', strong: '', frontier: '' }; markAgentDirty(draft.id); }}>
+          <option value="off">Off</option>
+          <option value="recommend">Recommend only</option>
+          <option value="safe_auto">Safe auto-route</option>
+        </select></label>
+        {#if draft.jevRouting === 'safe_auto' && draft.jevModelTiers}
+          <p class="hint">Map only the models this harness can use. A blank tier keeps this harness’s normal model. Any selected model is still validated by the provider before the task starts.</p>
+          <div class="form-grid">
+            <label>Fast model<input bind:value={draft.jevModelTiers.fast} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
+            <label>Balanced model<input bind:value={draft.jevModelTiers.balanced} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
+            <label>Strong model<input bind:value={draft.jevModelTiers.strong} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
+            <label>Frontier model<input bind:value={draft.jevModelTiers.frontier} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
+          </div>
+        {/if}
+      </details>
       <details class="agent-advanced" open={showAdvancedDefault}>
         <summary><span><strong>Advanced</strong><small>Executable, arguments and presets. Most agents don\u2019t need this.</small></span></summary>
         {#if draft.provider === 'acp'}
@@ -7168,6 +7220,7 @@
   .compact-detail .run-detail { grid-column: 1 / -1; grid-row: 2 / 3; width: min(max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
+  .router-chip { flex:0 0 auto; padding:4px 7px; border:1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius:999px; color:var(--accent-ink); background:color-mix(in srgb, var(--accent) 10%, transparent); font-size:calc(10px * var(--interface-font-ratio, 1)); white-space:nowrap; }
   .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
