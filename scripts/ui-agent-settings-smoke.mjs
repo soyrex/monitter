@@ -9,6 +9,11 @@ try{
  await page.locator('.settings-pane').getByRole('button',{name:'Agents',exact:true}).click();
  const settings=page.locator('.settings-pane');
  await expect(settings).toBeVisible();
+ // Directory cards are scoped to Settings. Sidebar agents retain their compact
+ // list treatment, without directory-card borders or padding.
+ const sidebarAgent = page.locator('.sidebar .agent-row').first();
+ await expect(sidebarAgent).toHaveCSS('border-top-width', '0px');
+ await expect(sidebarAgent).toHaveCSS('padding-top', '4px');
  // Landing view: directory with the two existing agents.
  const atlasRow = settings.getByRole('button',{name:'Edit Atlas',exact:true});
  const betaRow = settings.getByRole('button',{name:'Edit Beta',exact:true});
