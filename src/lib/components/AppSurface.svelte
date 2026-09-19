@@ -42,6 +42,7 @@
     Activity,
     Clock,
     Check,
+    ChartPie,
     ArrowUp,
     ArrowRightLeft,
     ArrowLeft,
@@ -536,6 +537,7 @@
   let handoffAgentId = $state(""), handoffNote = $state("");
   let palette = $state<"switch" | "controls" | null>(null);
   let tabPickerOpen = $state(false);
+  let autoHiddenTabsRevealed = $state(false);
   let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
   let vimCommandInput = $state<HTMLInputElement>();
   let vimArmed = $state(false);
@@ -1595,6 +1597,28 @@
     event.preventDefault();event.stopPropagation();
     try { void dropTab(paneId,'center',JSON.parse(raw)); } catch { /* Ignore non-Monitter data. */ }
   }
+  function revealTabsFromPaneTop(event: PointerEvent) {
+    if (event.pointerType !== 'mouse' || mobileSidebar || snapshot?.settings.autoHideTabs !== true || globalOverview) {
+      autoHiddenTabsRevealed = false;
+      return;
+    }
+    const paneTop = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect().top : 0;
+    autoHiddenTabsRevealed = event.clientY >= paneTop && event.clientY <= paneTop + 40;
+  }
+  function clearAutoHiddenTabReveal() { autoHiddenTabsRevealed = false; }
+  function paneAutoHideTrigger(node: HTMLElement) {
+    node.addEventListener('pointermove', revealTabsFromPaneTop);
+    node.addEventListener('pointerleave', clearAutoHiddenTabReveal);
+    return {
+      destroy() {
+        node.removeEventListener('pointermove', revealTabsFromPaneTop);
+        node.removeEventListener('pointerleave', clearAutoHiddenTabReveal);
+      },
+    };
+  }
+  $effect(() => {
+    if (mobileSidebar || snapshot?.settings.autoHideTabs !== true || globalOverview) autoHiddenTabsRevealed = false;
+  });
   function attachmentTargets():{target:AttachmentTarget;scope:string}[] {
     if(pane==='task' && !currentDraftId && selectedTask) return [{target:{taskId:selectedTask.id},scope:`${selectedTask.hostId}:${selectedTask.cwd}`}];
     const agentIds=pane==='channel'?effectiveRecipients:currentDraftId?[taskAgentId]:[];
@@ -3985,8 +4009,8 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
-  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep}>
+  <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
+  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep}>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
@@ -4358,8 +4382,8 @@
           {avatarVisual}
           {messageAvatar}
           {deliveryStatus}
-          paneExpand={paneExpandControl}
           rightSidebar={rightSidebarControl}
+          maximised={focusStep > 0}
           composer={taskComposer}
           {subagentDock}
           {senderName}
@@ -4378,6 +4402,7 @@
           onEditTask={() => { renameTitle = selectedTask.title; taskProjectId = selectedTask.projectId ?? ''; modal = 'taskSettings'; }}
           onShare={shareSelectedChat}
           onHandoff={beginHandoff}
+          onMaximise={() => expandTab(true)}
         />{/key}
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
@@ -4605,14 +4630,22 @@
       <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>railProjectId === 'unassigned' ? !task.projectId : task.projectId === railProjectId),`project-chats:${railProjectId}`), true, railProjectId === 'unassigned' ? 'All chats are organised.' : 'No chats yet.')}</div>
       {#if railProject}<button class="rail-new-chat" aria-label={`New chat in ${railProject.name}`} onclick={()=>routeProjectDraft(railProject!.id)}><Plus size={14}/>New chat</button>{/if}
     </div>{/if}
-    <div class="sidebar-usage" class:compact={sidebarCompressed}><UsageRings usage={sidebarUsage} compact={sidebarCompressed} bind:expanded={usageExpanded}/></div>
-    <SidebarClock compact={sidebarCompressed} bind:expanded={clockExpanded}/>
+    {#if sidebarCompressed}
+      <div class="sidebar-usage compact">
+        <button class="icon compact-usage-control" aria-label="Open provider usage" title="Open provider usage" onclick={() => { sidebarCollapsed = false; usageExpanded = true; }}><ChartPie size={16}/></button>
+      </div>
+    {:else}
+      <div class="sidebar-usage"><UsageRings usage={sidebarUsage} bind:expanded={usageExpanded}/></div>
+      <SidebarClock bind:expanded={clockExpanded}/>
+    {/if}
     <footer class="sidebar-footer" aria-label="Workspace controls">
       <button class="icon" aria-label="Preferences" title="Preferences" onclick={()=>routeSettings()}><Settings2 size={16}/></button>
-      <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
-      <button class="icon" aria-label="Agents" title="Agents" onclick={()=>{directoryQuery='';agentRoute={kind:'directory'};routeSettings('agents');}}><Bot size={16}/></button>
-      <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
-      {#if !isLanBrowser()}<button class="icon" aria-label="Share workspace" title="Share workspace" onclick={()=>{workspaceShareTaskId.set(null);workspaceShareOpen.set(true);}}><Share2 size={16}/></button>{/if}
+      {#if !sidebarCompressed}
+        <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
+        <button class="icon" aria-label="Agents" title="Agents" onclick={()=>{directoryQuery='';agentRoute={kind:'directory'};routeSettings('agents');}}><Bot size={16}/></button>
+        <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
+        {#if !isLanBrowser()}<button class="icon" aria-label="Share workspace" title="Share workspace" onclick={()=>{workspaceShareTaskId.set(null);workspaceShareOpen.set(true);}}><Share2 size={16}/></button>{/if}
+      {/if}
     </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
@@ -5593,6 +5626,8 @@
   .sidebar.modern-tabs .sidebar-tabs-row { min-height:max(28px, calc(var(--density-detail-tabs-height) - 2px)); height:max(28px, calc(var(--density-detail-tabs-height) - 2px)); padding:0; gap:0; align-items:stretch; }
   .sidebar.modern-tabs .sidebar-tabs { gap:0; align-items:stretch; }
   .sidebar.modern-tabs .sidebar-tab-entry { align-self:stretch; margin-bottom:0; border:0; border-top:1px solid var(--line); border-right:1px solid var(--line); border-radius:0; }
+  .sidebar.modern-tabs .sidebar-tab-entry:first-child { border-left:0; }
+  .sidebar.modern-tabs .sidebar-tab-entry:last-child { border-right:0; }
   .sidebar.modern-tabs .sidebar-tab-entry.active { margin-bottom:-1px; }
   .sidebar.modern-tabs .sidebar-tab { border-radius:0; }
   @container sidebar (max-width: 270px) {
@@ -5910,9 +5945,9 @@
     background: linear-gradient(var(--line), var(--line)) left bottom / 100% 1px no-repeat, var(--sidebar);
     transition:transform .18s ease;
   }
-  .workspace.auto-hide-tabs > .topbar { margin-top:calc(-1 * var(--pane-tabbar-height)); transform:translateY(0); }
-  .workspace.auto-hide-tabs > .topbar:hover, .workspace.auto-hide-tabs > .topbar:focus-within { transform:translateY(var(--pane-tabbar-height)); }
-  .workspace.auto-hide-tabs > .topbar::before { content:""; position:absolute; left:0; right:0; bottom:0; height:30px; transform:translateY(30px); pointer-events:auto; }
+  .pane-surface[data-pane-autohide="true"] { overflow:visible; }
+  .workspace.auto-hide-tabs > .topbar { margin-top:calc(-1 * var(--pane-tabbar-height)); transform:translateY(0); position:relative; z-index:10; }
+  .workspace.auto-hide-tabs.tab-revealed > .topbar, .workspace.auto-hide-tabs > .topbar:hover, .workspace.auto-hide-tabs > .topbar:focus-within { transform:translateY(var(--pane-tabbar-height)); }
   @media (prefers-reduced-motion:reduce) { .topbar { transition:none; } }
   .workspace-context { display:grid; place-items:center; flex:none; width:var(--density-control-size); padding-bottom:var(--density-tabbar-inset); color:var(--muted); }
   .top-actions {
@@ -5926,12 +5961,12 @@
   .sidebar { --sidebar-clock-height:32px; --sidebar-usage-height:33px; }
   .sidebar.clock-expanded { --sidebar-clock-height:109px; }
   .sidebar.usage-expanded { --sidebar-usage-height:254px; }
-  .sidebar.sidebar-compressed { --sidebar-clock-height:138px; --sidebar-usage-height:216px; }
+  .sidebar.sidebar-compressed { --sidebar-clock-height:0px; --sidebar-usage-height:41px; }
   .sidebar .side-scroll { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-usage-height) + 12px); }
   .sidebar .agent-rail { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-usage-height) + 12px); }
   .mobile-navigation { --sidebar-footer-safe-area:env(safe-area-inset-bottom,0px); }
   .mobile-navigation .sidebar-footer > .icon { width:44px; height:44px; }
-  .sidebar-collapsed .sidebar-footer { flex-direction:column; height:180px; padding:4px; }
+  .sidebar-collapsed .sidebar-footer { height:var(--density-sidebar-footer-height); padding:4px; }
   .new-task,
   .primary {
     display: inline-flex;
