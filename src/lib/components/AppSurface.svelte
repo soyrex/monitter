@@ -165,6 +165,7 @@
   import RootSurfaceLifecycle from '$lib/components/RootSurfaceLifecycle.svelte';
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import TaskTranscript from '$lib/components/TaskTranscript.svelte';
+  import SparkleField from '$lib/components/SparkleField.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import { perfMark } from '$lib/perf-phases';
   import AppSurface from './AppSurface.svelte';
@@ -4067,6 +4068,7 @@
           {/if}
           {:else if tab.kind === 'task'}{@const task=snapshot?.tasks.find(item=>item.id===tab.id)}{#if task}
             <div class="tab-entry task-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
+              {#if task.status==='running'}<SparkleField active mirror contained />{/if}
               <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => selectTabPicker(() => openTask(task))} title={task.title}><span class="tab-kind-icon" aria-hidden="true"><MessageSquare size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
 
               <button class="edit-tab" aria-label={`Edit name for ${task.title}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openTask(task);renameTitle=task.title;taskProjectId=task.projectId??'';modal='taskSettings';}}><Pencil size={15}/></button>
@@ -6378,6 +6380,7 @@
   .modern-tabs:not(.compact-tabs) .tabs { gap:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry { border:0; border-right:1px solid var(--line); border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:first-child { border-left:0; }
+  .modern-tabs:not(.compact-tabs) > .topbar:has(> .workspace-context) .tab-entry:first-child { border-left:1px solid var(--line); }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { background:var(--soft); }
   .modern-tabs:not(.compact-tabs) .tab-entry > .tab:hover { background:transparent; }
