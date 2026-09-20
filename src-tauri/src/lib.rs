@@ -4304,6 +4304,13 @@ impl Service {
             return Err("Message cannot be empty.".into());
         }
         let user_text = if text.trim().is_empty() { String::new() } else { text };
+        // ACP startup makes the process available before the session is
+        // marked resident. The extension is learned during that handshake;
+        // use the still-live runtime here and let send_mcode_acp_steer make
+        // the stricter session/turn checks immediately before it writes.
+        let mcode_steering = self
+            .available_runtime(&task_id)?
+            .is_some_and(|control| control.supports_mcode_acp_steer());
         let (execution_prompt, pending_steer) = self.mutate_data(Some(task_id.clone()), |data| {
             let state = &mut data.snapshot;
             let ix = state
@@ -4332,8 +4339,13 @@ impl Service {
                 if slash_command.is_some() {
                     return Err("Provider commands are available after the current turn finishes.".into());
                 }
-                let steer = state.settings.busy_message_mode == "steer"
-                    && state.tasks[ix].provider == "codex";
+                let steer = (state.settings.busy_message_mode == "steer").then(|| {
+                    match state.tasks[ix].provider.as_str() {
+                        "codex" => Some("codex"),
+                        "acp" if mcode_steering => Some("mcode"),
+                        _ => None,
+                    }
+                }).flatten();
                 let queued_message_id = id();
                 state.queued_messages.push(QueuedMessage {
                     id: queued_message_id.clone(),
@@ -4345,15 +4357,15 @@ impl Service {
                     // This durable record remains visible while the native
                     // transport confirms `turn/steer`; only confirmation
                     // turns it into a transcript message.
-                    status: if steer { "sending" } else { "queued" }.into(),
+                    status: if steer.is_some() { "sending" } else { "queued" }.into(),
                     error: None,
                     sender_agent_id: None,
                     origin: None,
                 });
-                if steer {
+                if let Some(steer) = steer {
                     return Ok((
                         None,
-                        Some((append_attachment_paths(user_text, &attachments), queued_message_id)),
+                        Some((append_attachment_paths(user_text, &attachments), queued_message_id, steer)),
                     ));
                 }
                 return Ok((None, None));
@@ -4389,8 +4401,12 @@ impl Service {
             data.accepted_turns.insert(task_id.clone(), accepted.clone());
             Ok((Some(accepted), None))
         })?;
-        if let Some((prompt, queued_message_id)) = pending_steer {
-            self.steer_accepted(task_id, prompt, queued_message_id);
+        if let Some((prompt, queued_message_id, provider)) = pending_steer {
+            if provider == "mcode" {
+                self.mcode_steer_accepted(task_id, prompt, queued_message_id);
+            } else {
+                self.steer_accepted(task_id, prompt, queued_message_id);
+            }
         }
         Ok(execution_prompt)
     }
@@ -4767,6 +4783,69 @@ impl Service {
         };
         if let Err(error) = control.send_app_server_steer(&prompt, queued_message_id.clone()) {
             self.app_server_steer_rejected(&task_id, &control, &queued_message_id, &error);
+        }
+    }
+
+    fn restore_unsteered_mcode_message(
+        self: &Arc<Self>,
+        task_id: &str,
+        queued_message_id: &str,
+        detail: &str,
+    ) {
+        let ready_to_dispatch = self
+            .mutate(Some(task_id.into()), |snapshot| {
+                let Some(message) = snapshot.queued_messages.iter_mut().find(|message| {
+                    message.id == queued_message_id
+                        && message.task_id == task_id
+                        && message.status == "sending"
+                }) else {
+                    return Ok(false);
+                };
+                message.status = "queued".into();
+                message.error = None;
+                snapshot.events.push(Arc::new(RunEvent {
+                    id: id(),
+                    task_id: task_id.into(),
+                    kind: "status".into(),
+                    title: "Mcode could not steer; message queued".into(),
+                    detail: detail.into(),
+                    created_at: now(),
+                }));
+                Ok(snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .is_some_and(|task| task.status == "completed"))
+            })
+            .unwrap_or(false);
+        if ready_to_dispatch {
+            self.dispatch_queued(task_id);
+        }
+    }
+
+    fn mcode_steer_accepted(
+        self: &Arc<Self>,
+        task_id: String,
+        prompt: String,
+        queued_message_id: String,
+    ) {
+        let control = match self.available_runtime(&task_id) {
+            Ok(Some(control)) => control,
+            Ok(None) => {
+                self.restore_unsteered_mcode_message(
+                    &task_id,
+                    &queued_message_id,
+                    "The Mcode ACP transport ended before the follow-up could be steered.",
+                );
+                return;
+            }
+            Err(error) => {
+                self.restore_unsteered_mcode_message(&task_id, &queued_message_id, &error);
+                return;
+            }
+        };
+        if let Err(error) = control.send_mcode_acp_steer(&prompt, queued_message_id.clone()) {
+            self.mcode_acp_steer_rejected(&task_id, &control, &queued_message_id, &error);
         }
     }
 

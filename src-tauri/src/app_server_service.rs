@@ -543,6 +543,117 @@ impl Service {
         }
     }
 
+    /// Mcode confirms an ACP extension steer independently of the original
+    /// `session/prompt` completion. Persist it only after that acknowledgement;
+    /// otherwise the durable FIFO record remains available for fallback.
+    pub(crate) fn mcode_acp_steer_accepted(
+        self: &Arc<Self>,
+        task_id: &str,
+        control: &Arc<RunControl>,
+        turn_id: &str,
+        queued_message_id: &str,
+    ) {
+        let accepted = self.app_server_mutate(task_id, control, Some(turn_id), |data, _| {
+            let message_index = data
+                .snapshot
+                .queued_messages
+                .iter()
+                .position(|message| {
+                    message.id == queued_message_id
+                        && message.task_id == task_id
+                        && message.channel_id.is_none()
+                        && message.status == "sending"
+                })
+                .ok_or("The pending Mcode-steered message is no longer available.")?;
+            let queued = data.snapshot.queued_messages.remove(message_index);
+            let task = data
+                .snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .cloned()
+                .ok_or("Task not found")?;
+            let attachments = resolve_attachment_ids(
+                &data.attachments,
+                &task.host_id,
+                &task.cwd,
+                &queued.attachment_ids,
+            )?;
+            data.snapshot.messages.push(Message {
+                id: id(),
+                task_id: task_id.into(),
+                role: "user".into(),
+                text: queued.text,
+                created_at: queued.created_at,
+                sender_agent_id: None,
+                collaboration_id: None,
+                attachments,
+                phase: None,
+                stream_status: None,
+            });
+            data.snapshot.events.push(Arc::new(RunEvent {
+                id: id(),
+                task_id: task_id.into(),
+                kind: "status".into(),
+                title: "Follow-up steered into active Mcode turn".into(),
+                detail: String::new().into(),
+                created_at: now(),
+            }));
+            Ok(())
+        });
+        if let Err(error) = accepted {
+            self.mcode_acp_steer_rejected(task_id, control, queued_message_id, &error);
+        }
+    }
+
+    pub(crate) fn mcode_acp_steer_rejected(
+        self: &Arc<Self>,
+        task_id: &str,
+        control: &Arc<RunControl>,
+        queued_message_id: &str,
+        detail: &str,
+    ) {
+        let ready_to_dispatch = self
+            .mutate_data(Some(task_id.into()), |data| {
+                let runs = self.runs.lock().map_err(|_| "Run registry unavailable")?;
+                if control.is_cancelled()
+                    || !runs
+                        .tasks
+                        .get(task_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, control))
+                {
+                    return Ok(false);
+                }
+                let Some(message) = data.snapshot.queued_messages.iter_mut().find(|message| {
+                    message.id == queued_message_id
+                        && message.task_id == task_id
+                        && message.status == "sending"
+                }) else {
+                    return Ok(false);
+                };
+                message.status = "queued".into();
+                message.error = None;
+                data.snapshot.events.push(Arc::new(RunEvent {
+                    id: id(),
+                    task_id: task_id.into(),
+                    kind: "status".into(),
+                    title: "Mcode could not steer; message queued".into(),
+                    detail: detail.into(),
+                    created_at: now(),
+                }));
+                Ok(data
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .is_some_and(|task| task.status == "completed"))
+            })
+            .unwrap_or(false);
+        if ready_to_dispatch {
+            self.dispatch_queued(task_id);
+        }
+    }
+
     pub(crate) fn complete_app_server_turn(
         self: &Arc<Self>,
         task_id: &str,

@@ -1106,6 +1106,26 @@ fn run(
             phase_deadline = Instant::now() + INITIALIZE_TIMEOUT;
             continue;
         }
+        // Mcode's namespaced steering response is a non-terminal auxiliary
+        // request. A rejected steer must return its durable message to FIFO,
+        // not fail the active ACP turn.
+        if value.pointer("/error/message").is_some() {
+            if let Some(id) = value.get("id").and_then(Value::as_i64) {
+                if let Some(steer) = control.take_acp_steer_request(id) {
+                    let detail = value
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Mcode rejected the live steering request.");
+                    service.mcode_acp_steer_rejected(
+                        &task_id,
+                        &control,
+                        &steer.queued_message_id,
+                        detail,
+                    );
+                    continue;
+                }
+            }
+        }
         if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
             fail(
                 &service,
@@ -1135,6 +1155,7 @@ fn run(
                         return;
                     }
                 };
+                control.set_acp_extensions(value.get("result").unwrap_or(&Value::Null));
                 // A cold-resume promise is valid only when this exact ACP
                 // transport advertised a protocol recovery method. Persist
                 // that negotiation so the collector never guesses from the
@@ -1427,6 +1448,32 @@ fn run(
                 if let Err(error) = control.mark_app_server_turn_request(FIRST_PROMPT_ID).and_then(|_| send(&control, acp_protocol::request(json!(FIRST_PROMPT_ID), "session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":prompt}]})))) { fail(&service,&task_id,&control,error); return; }
                 phase = "prompt";
                 phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+                continue;
+            }
+            if let Some(steer) = control.take_acp_steer_request(id) {
+                let result = value.get("result").unwrap_or(&Value::Null);
+                let accepted = result.get("mode").and_then(Value::as_str) == Some("steered")
+                    && result
+                        .get("turnId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|turn_id| !turn_id.is_empty() && turn_id.len() <= 256)
+                    && control.current_app_server_turn().as_deref()
+                        == Some(steer.expected_turn_id.as_str());
+                if accepted {
+                    service.mcode_acp_steer_accepted(
+                        &task_id,
+                        &control,
+                        &steer.expected_turn_id,
+                        &steer.queued_message_id,
+                    );
+                } else {
+                    service.mcode_acp_steer_rejected(
+                        &task_id,
+                        &control,
+                        &steer.queued_message_id,
+                        "Mcode returned an invalid or stale live-steering acknowledgement.",
+                    );
+                }
                 continue;
             }
             let requested_turn = control.take_app_server_turn_request(id);

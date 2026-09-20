@@ -1664,6 +1664,10 @@ pub struct RunControl {
     // durable queue record and its expected native turn together so the
     // reader can either confirm the send or safely return it to the queue.
     app_server_steer_requests: Mutex<HashMap<i64, AppServerSteerRequest>>,
+    // Mcode exposes steering through an opt-in ACP extension, not the Codex
+    // app-server method. Keep its request correlation separate so a generic
+    // ACP response cannot be mistaken for a provider turn completion.
+    acp_steer_requests: Mutex<HashMap<i64, AcpSteerRequest>>,
     acp_config_requests: Mutex<HashSet<i64>>,
     // A later ACP turn is reserved before its optional model configuration is
     // sent. This makes the config acknowledgement a real ordering barrier and
@@ -1673,6 +1677,7 @@ pub struct RunControl {
     mcp_fingerprint: Mutex<Option<String>>,
     acp_session_result: Mutex<Option<Value>>,
     acp_slash_commands: Mutex<Vec<crate::model::SlashCommand>>,
+    mcode_acp_steer_available: AtomicBool,
     app_server_instance_id: String,
     acp_transport: AtomicBool,
     acp_control: Mutex<Option<mpsc::SyncSender<AcpControlFrame>>>,
@@ -1721,6 +1726,12 @@ impl Drop for RuntimeEventPermit {
 
 #[derive(Clone, Debug)]
 pub(crate) struct AppServerSteerRequest {
+    pub queued_message_id: String,
+    pub expected_turn_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AcpSteerRequest {
     pub queued_message_id: String,
     pub expected_turn_id: String,
 }
@@ -1790,12 +1801,14 @@ impl RunControl {
             app_server_pending_native_turn: Mutex::new(None),
             app_server_queries: Mutex::new(HashMap::new()),
             app_server_steer_requests: Mutex::new(HashMap::new()),
+            acp_steer_requests: Mutex::new(HashMap::new()),
             acp_config_requests: Mutex::new(HashSet::new()),
             acp_turn_reserved: Mutex::new(false),
             acp_prompt_after_config: Mutex::new(None),
             mcp_fingerprint: Mutex::new(None),
             acp_session_result: Mutex::new(None),
             acp_slash_commands: Mutex::new(Vec::new()),
+            mcode_acp_steer_available: AtomicBool::new(false),
             app_server_instance_id: crate::model::id(),
             acp_transport: AtomicBool::new(false),
             acp_control: Mutex::new(None),
@@ -2185,6 +2198,11 @@ impl RunControl {
                 .unwrap_or(true)
             || self
                 .app_server_steer_requests
+                .lock()
+                .map(|value| !value.is_empty())
+                .unwrap_or(true)
+            || self
+                .acp_steer_requests
                 .lock()
                 .map(|value| !value.is_empty())
                 .unwrap_or(true)
@@ -2583,6 +2601,55 @@ impl RunControl {
         Ok(())
     }
 
+    /// Mcode's opt-in ACP extension injects a follow-up into the admitted
+    /// active prompt turn. It is deliberately unavailable to generic ACP
+    /// agents, even if they happen to use a similarly named slash command.
+    pub(crate) fn send_mcode_acp_steer(
+        &self,
+        prompt: &str,
+        queued_message_id: String,
+    ) -> Result<(), String> {
+        if self.is_cancelled() {
+            return Err("Task was stopped before the follow-up could be steered.".into());
+        }
+        if !self.mcode_acp_steer_available.load(Ordering::SeqCst) {
+            return Err("This ACP session did not advertise Mcode live steering.".into());
+        }
+        let session_id = self
+            .current_app_server_thread()
+            .ok_or("Mcode is still starting; the follow-up cannot be steered yet.")?;
+        let expected_turn_id = self
+            .current_app_server_turn()
+            .filter(|turn| turn.starts_with("acp:"))
+            .ok_or("Mcode has no active ACP prompt to steer.")?;
+        let request_id = self.next_app_server_request_id()?;
+        self.acp_steer_requests
+            .lock()
+            .map_err(|_| "Mcode ACP steering lock failed.".to_string())?
+            .insert(
+                request_id,
+                AcpSteerRequest {
+                    queued_message_id,
+                    expected_turn_id,
+                },
+            );
+        let frame = crate::acp_protocol::request(
+            serde_json::json!(request_id),
+            "mcode/session/steer",
+            serde_json::json!({
+                "sessionId": session_id,
+                "text": prompt,
+                "clientRequestId": crate::model::id(),
+            }),
+        )
+        .to_string();
+        if let Err(error) = self.send_control(&frame) {
+            let _ = self.take_acp_steer_request(request_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn send_acp_turn_reserved(&self, prompt: &str, task: &Task) -> Result<(), String> {
         // Recovery owns the same resident slot while it reloads the saved
         // session. A newly accepted explicit user send waits through the
@@ -2688,6 +2755,31 @@ impl RunControl {
         if let Ok(mut slot) = self.acp_session_result.lock() {
             *slot = Some(value);
         }
+    }
+
+    /// Mcode publishes its optional methods in namespaced initialize metadata.
+    /// Treat malformed or unknown metadata as unsupported rather than widening
+    /// generic ACP behavior.
+    pub(crate) fn set_acp_extensions(&self, initialize_result: &Value) {
+        let extension = initialize_result
+            .get("_meta")
+            .and_then(|meta| meta.get("minimax-code/extensions"));
+        let supports_steer = extension
+            .filter(|extension| extension.get("version").and_then(Value::as_u64) == Some(1))
+            .and_then(|extension| extension.get("methods").and_then(Value::as_array))
+            .filter(|methods| methods.len() <= 64)
+            .is_some_and(|methods| {
+                methods.iter().any(|method| {
+                    method.as_str() == Some("mcode/session/steer")
+                        && method.as_str().is_some_and(|method| method.len() <= 128)
+                })
+            });
+        self.mcode_acp_steer_available
+            .store(supports_steer, Ordering::SeqCst);
+    }
+
+    pub(crate) fn supports_mcode_acp_steer(&self) -> bool {
+        self.mcode_acp_steer_available.load(Ordering::SeqCst)
     }
 
     pub(crate) fn replace_acp_slash_commands(&self, value: &Value) -> Result<(), String> {
@@ -2905,6 +2997,13 @@ impl RunControl {
             .and_then(|mut requests| requests.remove(&id))
     }
 
+    pub(crate) fn take_acp_steer_request(&self, id: i64) -> Option<AcpSteerRequest> {
+        self.acp_steer_requests
+            .lock()
+            .ok()
+            .and_then(|mut requests| requests.remove(&id))
+    }
+
     pub(crate) fn take_app_server_native_turn_request(
         &self,
         id: i64,
@@ -2973,6 +3072,7 @@ impl RunControl {
     /// a prompt.
     pub(crate) fn retire_acp_transport(&self) {
         self.resident.store(false, Ordering::SeqCst);
+        self.mcode_acp_steer_available.store(false, Ordering::SeqCst);
         if let Ok(mut commands) = self.acp_slash_commands.lock() {
             commands.clear();
         }
@@ -4730,6 +4830,44 @@ for line in sys.stdin.buffer:
             archived_agent_name: None,
             codex_home: None,
         }
+    }
+
+    #[test]
+    fn mcode_steer_is_advertised_active_turn_only_and_preserves_correlation() {
+        let control = RunControl::new(false);
+        control.set_app_server_thread("mcode-session".into());
+        control.set_app_server_turn("acp:41".into());
+        assert!(control
+            .send_mcode_acp_steer("change course", "queued-before-advertisement".into())
+            .is_err());
+
+        control.set_acp_extensions(&serde_json::json!({
+            "_meta": {"minimax-code/extensions": {
+                "version": 1,
+                "methods": ["mcode/session/steer"]
+            }}
+        }));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        control.mark_acp_transport();
+        control.set_acp_control(sender);
+        control
+            .send_mcode_acp_steer("change course", "queued-follow-up".into())
+            .unwrap();
+
+        let frame: Value = serde_json::from_str(
+            &receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .frame,
+        )
+        .unwrap();
+        assert_eq!(frame["method"], "mcode/session/steer");
+        assert_eq!(frame["params"]["sessionId"], "mcode-session");
+        assert_eq!(frame["params"]["text"], "change course");
+        let request_id = frame["id"].as_i64().unwrap();
+        let request = control.take_acp_steer_request(request_id).unwrap();
+        assert_eq!(request.queued_message_id, "queued-follow-up");
+        assert_eq!(request.expected_turn_id, "acp:41");
     }
 
     #[test]

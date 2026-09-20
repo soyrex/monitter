@@ -48,10 +48,11 @@ const commandUpdate=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'sessio
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
  if(frame.method==='initialize') { const recovery=process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}; const http=process.argv[2]==='managed-no-http'?{}:{mcpCapabilities:{http:true}}; reply(frame.id,{protocolVersion:1,agentCapabilities:{...recovery,...http}}); }
- else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); reply(frame.id,['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'}); if(process.argv[2]==='commands') commandUpdate(); }
+ else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; reply(frame.id,mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='mcode-steer'){ globalThis.activePromptId=frame.id; } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='mcode/session/steer'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`steer:${frame.params.text}\n`); reply(frame.id,{turnId:'fixture-mcode-turn',mode:'steered'}); update('mcode-steered'); reply(globalThis.activePromptId,{stopReason:'end_turn'}); }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
 });
@@ -222,6 +223,22 @@ fn resident_fixture_advertises_and_executes_a_raw_slash_command() {
         message.task_id == task.id && message.role == "user" && message.text == "/usage week"
     }));
     let _ = fs::remove_file(capture);
+}
+
+#[test]
+fn mcode_extension_metadata_is_opt_in_and_bounded() {
+    let control = crate::runner::RunControl::new(false);
+    control.set_acp_extensions(&serde_json::json!({
+        "_meta": {"minimax-code/extensions": {
+            "version": 1,
+            "methods": ["mcode/session/steer"]
+        }}
+    }));
+    assert!(control.supports_mcode_acp_steer());
+    control.set_acp_extensions(&serde_json::json!({
+        "_meta": {"minimax-code/extensions": {"version": 2, "methods": ["mcode/session/steer"]}}
+    }));
+    assert!(!control.supports_mcode_acp_steer());
 }
 
 #[test]

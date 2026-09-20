@@ -238,7 +238,14 @@ pub fn configured_permission_request(
     let options = parse_options(&session_result["configOptions"])?;
     let mode = options
         .iter()
-        .find(|option| option.category.as_deref() == Some("mode"))
+        // ACP categories are provider-owned presentation metadata. The only
+        // authority-bearing contract here is the exact advertised value.
+        .find(|option| {
+            option
+                .options
+                .iter()
+                .any(|option| option.value == "bypassPermissions")
+        })
         .ok_or(
             "This ACP agent did not advertise a permission mode selector; YOLO was not enabled.",
         )?;
@@ -345,5 +352,22 @@ mod tests {
         assert_eq!(params["configId"], "mode");
         assert_eq!(params["value"], "bypassPermissions");
         assert!(configured_permission_request(&json!({}), "s", "yolo").is_err());
+    }
+
+    #[test]
+    fn yolo_accepts_mcode_process_permission_selector() {
+        let result = json!({"configOptions":[{
+            "id":"permissionMode","name":"Permission mode","category":"_permission","type":"select",
+            "currentValue":"auto","options":[
+                {"value":"default","name":"Ask"},
+                {"value":"auto","name":"Auto"},
+                {"value":"bypassPermissions","name":"Full access"}
+            ]
+        }]});
+        let (_, params) = configured_permission_request(&result, "mcode-session", "yolo")
+            .unwrap()
+            .unwrap();
+        assert_eq!(params["configId"], "permissionMode");
+        assert_eq!(params["value"], "bypassPermissions");
     }
 }

@@ -345,10 +345,13 @@ behaviour for busy agents. `Snapshot.queuedMessages` persists FIFO records per t
 original text, attachment IDs, optional channel, status and error. A busy direct chat or selected busy
 channel recipient queues its follow-up; idle recipients still start immediately, and a channel user
 message is recorded once at submission rather than again when a recipient drains. With `steer`, a live
-local Codex app-server task sends `turn/steer` using its current thread and turn IDs. Monitter retains a
-visible `sending` record until Codex acknowledges the matching turn, then persists it as a user message;
-an unavailable, stale, or unsteerable turn returns the record to FIFO with a visible fallback event.
-Other CLI adapters safely queue. The next queued item starts only after its owned native run releases. A
+local Codex app-server task sends `turn/steer` using its current thread and turn IDs. An ACP task may
+also steer only after its initialize response explicitly advertises Mcode's
+`_meta["minimax-code/extensions"]` v1 `mcode/session/steer` method; Monitter sends that method with
+the live ACP session ID and only accepts a matching `mode: "steered"` reply while the same prompt turn
+is still active. Monitter retains a visible `sending` record until the harness acknowledges the matching
+turn, then persists it as a user message; an unavailable, stale, rejected, or unsteerable turn returns
+the record to FIFO with a visible fallback event. Other CLI adapters safely queue. The next queued item starts only after its owned native run releases. A
 restart changes an uncertain `sending` item to `error` and never replays it automatically. Cancelling, kicking,
 archiving or deleting prevents queued follow-ups from launching; task deletion removes their records.
 
@@ -535,8 +538,10 @@ an exact string-array `args`, never a shell command. Older records omit it.
 New ACP tasks copy the agent's launcher; editing the agent does not retarget an
 existing chat. Non-ACP tasks do not carry an ACP launcher. Session ownership
 distinguishes ACP launch configurations. ACP normally uses `harness-configured` permissions.
-An explicit `yolo` selection requests the live session's advertised `bypassPermissions` mode;
-if that exact option is absent the launch fails visibly. ACP remains a transport, not an OS sandbox.
+An explicit `yolo` selection requests the live session's advertised `bypassPermissions` mode (including
+Mcode's process-scoped `permissionMode` selector); if that exact option is absent the launch fails visibly.
+This changes only the agent process's own confirmation policy: ACP remains a transport, not an OS sandbox,
+and it does not widen Monitter's native, LAN, filesystem, or collaboration permissions.
 
 Agent settings offer searchable presets and a custom ACP launcher. The catalog
 is convenience metadata, not a restriction on which compatible executables can
@@ -677,7 +682,8 @@ Codex defaults to read-only with explicit workspace-write selection. `yolo` is a
 per-agent choice, captured in each newly created task's snapshot and off by default. Codex invokes
 `--dangerously-bypass-approvals-and-sandbox`; Claude invokes `--dangerously-skip-permissions`.
 OpenCode and Hermes reject `yolo`: OpenCode's `--auto` still respects explicit denials, and the
-Hermes bridge has no verified per-invocation bypass. Other providers require `harness-configured`;
+Hermes bridge has no verified per-invocation bypass. ACP accepts it only after the live session explicitly
+advertises `bypassPermissions`; other providers require `harness-configured`;
 do not describe their host permission rules as an OS sandbox.
 Approval requests are durable task records, not generic tool activity. A request contains the provider,
 provider run/request ID, proposed tool/action summary, provider detail, risk label, timestamp and an

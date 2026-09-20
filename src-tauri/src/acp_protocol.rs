@@ -132,7 +132,11 @@ pub fn initialize_params() -> Value {
         // Advertising `subagents` asks agents that support it (e.g. claude-agent-acp) to
         // announce Task/Agent-tool delegation as `subagent_spawned`/`subagent_state_update`
         // notifications instead of silently folding that activity into the root transcript.
-        "clientCapabilities":{"subagents":{}}})
+        "clientCapabilities":{"subagents":{},
+        // Mcode's namespaced extensions are opt-in. Other ACP agents ignore
+        // this opaque metadata, while Mcode uses it to expose its advertised
+        // active-turn steering method.
+        "_meta":{"minimax-code/extensions":{"version":1,"notifications":true}}}})
 }
 
 /// Only explicit capabilities enable optional methods. Null is not support.
