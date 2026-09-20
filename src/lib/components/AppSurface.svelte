@@ -537,6 +537,8 @@
     renameTitle = $state("");
   let handoffAgentId = $state(""), handoffNote = $state("");
   let palette = $state<"switch" | "controls" | null>(null);
+  let jevPalette = $state<{ query: string; loading: boolean; error?: string; suggestion?: { candidateId: string; label: string; detail: string } }>({ query: '', loading: false });
+  let jevPaletteRequest = 0;
   let tabPickerOpen = $state(false);
   let autoHiddenTabsRevealed = $state(false);
   let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
@@ -3784,6 +3786,53 @@
     ...(selectedTask ? [{id:"archive",label:"Archive current chat",group:"Current chat",disabled:selectedTask.status==="running"},
       ...(selectedTask.status==="running" ? [{id:"stop",label:"Stop current chat",group:"Current chat"}] : [])] : []),
   ].map(item=>({...item,disabled:(!item.id.startsWith('sidebar:') && busy) || ("disabled" in item && item.disabled)})));
+  function resetJevPalette(query = '') {
+    jevPaletteRequest += 1;
+    jevPalette = { query, loading: false };
+  }
+  function updateJevPaletteQuery(query: string) {
+    if (query !== jevPalette.query) resetJevPalette(query);
+  }
+  async function interpretPaletteCommand(query: string) {
+    const normalized = query.trim();
+    if (!normalized || palette !== 'controls' || jevPalette.loading) return;
+    const candidates = controlItems
+      .filter(item => !item.disabled)
+      .slice(0, 80)
+      .map(item => ({
+        id: item.id,
+        label: item.label,
+        description: [
+          'detail' in item ? item.detail : undefined,
+          'keywords' in item ? item.keywords : undefined,
+          item.group,
+        ].filter(Boolean).join(' · ') || null,
+      }));
+    const request = ++jevPaletteRequest;
+    jevPalette = { query: normalized, loading: true };
+    try {
+      const plan = await bridge.planJevCommand(normalized, candidates);
+      if (request !== jevPaletteRequest || palette !== 'controls' || jevPalette.query !== normalized) return;
+      const candidate = controlItems.find(item => item.id === plan.candidateId && !item.disabled);
+      if (!candidate) throw new Error('Jev returned a control that is no longer available.');
+      jevPalette = {
+        query: normalized,
+        loading: false,
+        suggestion: {
+          candidateId: candidate.id,
+          label: candidate.label,
+          detail: `Jev · ${Math.round(plan.confidence * 100)}% · ${plan.reason}`,
+        },
+      };
+    } catch (reason) {
+      if (request !== jevPaletteRequest || palette !== 'controls') return;
+      jevPalette = { query: normalized, loading: false, error: `Jev unavailable: ${text(reason)}` };
+    }
+  }
+  function closeCommandPalette() {
+    resetJevPalette();
+    palette = null;
+  }
   async function selectPalette(id: string) {
     if (palette === "switch") {
       palette = null;
@@ -3806,6 +3855,15 @@
         if (agent) { const scope=`agent:${agent.id}` as WorkspaceKey; if(scope===activeWorkspaceKey)openAgent(agent);else await switchWorkspace(scope); }
       }
       return;
+    }
+    if (id.startsWith('__jev-suggestion:')) {
+      const candidateId = id.slice('__jev-suggestion:'.length);
+      if (jevPalette.suggestion?.candidateId !== candidateId || !controlItems.some(item => item.id === candidateId && !item.disabled)) {
+        jevPalette = { query: jevPalette.query, loading: false, error: 'That Jev suggestion is no longer available.' };
+        return;
+      }
+      id = candidateId;
+      resetJevPalette(jevPalette.query);
     }
     if (id.startsWith('sidebar:')) { palette = null; setSidebarView(id.slice(8) as SidebarView); return; }
     const settings = snapshot?.settings;
@@ -4702,7 +4760,7 @@
 </main>
 
 
-<CommandPalette open={palette !== null} title={palette === "switch" ? "Switch to" : "Controls"} placeholder={palette === "switch" ? "Find a channel, chat or agent…" : "Find a control or setting…"} items={palette === "switch" ? switchItems : controlItems} onselect={selectPalette} onclose={()=>palette=null}/>
+<CommandPalette open={palette !== null} title={palette === "switch" ? "Switch to" : "Controls"} placeholder={palette === "switch" ? "Find a channel, chat or agent…" : "Find a control or setting…"} items={palette === "switch" ? switchItems : controlItems} jev={palette === 'controls' ? jevPalette : undefined} oninterpret={palette === 'controls' ? interpretPaletteCommand : undefined} onquerychange={palette === 'controls' ? updateJevPaletteQuery : undefined} onselect={selectPalette} onclose={closeCommandPalette}/>
 {#if snapshot}<ArchivedChats {snapshot} open={modal === 'archived'} onclose={()=>modal=null}
   onRestore={async taskId=>applySnapshot(await bridge.setTaskArchived(taskId,false),++snapshotIssued)}
   onDelete={deleteArchivedTask} previewDeletion={taskId=>bridge.previewTaskDeletion(taskId)}/>{/if}

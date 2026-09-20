@@ -11,4 +11,13 @@ const stale = granted.filter((command) => !registered.includes(command));
 if (missing.length || stale.length) {
   throw new Error(`Tauri command ACL drift. Missing: ${missing.join(', ') || 'none'}; stale: ${stale.join(', ') || 'none'}.`);
 }
+const lanStart = source.indexOf('pub(crate) fn lan_invoke');
+const lanEnd = source.indexOf('pub(crate) fn create_approval_request', lanStart);
+if (lanStart < 0 || lanEnd < 0) {
+  throw new Error('Could not locate the explicit LAN command allow-list.');
+}
+const lanDispatcher = source.slice(lanStart, lanEnd);
+if (lanDispatcher.includes('"plan_jev_command"')) {
+  throw new Error('plan_jev_command must remain native-owner only and absent from LAN dispatch.');
+}
 console.log(`Tauri command ACL covers all ${registered.length} registered commands.`);

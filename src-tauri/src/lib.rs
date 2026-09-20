@@ -4120,6 +4120,19 @@ impl Service {
         Ok(plan)
     }
 
+    /// Produces one advisory Cmd-P proposal through Jev. Unlike task routing,
+    /// this has no agent or task context: it can neither execute the selected
+    /// command nor modify permissions, state, or the supplied catalogue.
+    fn plan_jev_command(
+        &self,
+        query: &str,
+        candidates: &[model_router::JevCommandCandidate],
+    ) -> Result<model_router::JevCommandPlan, String> {
+        let result = model_router::live_jev_command_plan(query, candidates)?;
+        model_router::persist_jev_command_plan(&self.router_trace_dir, &result)?;
+        Ok(result.plan)
+    }
+
     fn create_task(&self, input: CreateTaskInput) -> Result<Task, String> {
         if let Some(settings) = input.model_settings.as_ref() {
             let reset = settings.model.trim().is_empty()
@@ -6150,6 +6163,22 @@ async fn plan_jev_route(
     tauri::async_runtime::spawn_blocking(move || service.plan_jev_route(&agent_id, &prompt))
         .await
         .map_err(|_| "Jev route worker failed.".to_string())?
+}
+
+/// Native-owner only: make one bounded, advisory Cmd-P selection with the
+/// locally stored Jev credential. This command is intentionally absent from
+/// `Service::lan_invoke`; LAN/controller and visitor clients cannot send a
+/// command catalogue or receive a proposal.
+#[tauri::command]
+async fn plan_jev_command(
+    state: State<'_, AppState>,
+    query: String,
+    candidates: Vec<model_router::JevCommandCandidate>,
+) -> Result<model_router::JevCommandPlan, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.plan_jev_command(&query, &candidates))
+        .await
+        .map_err(|_| "Jev command planning worker failed.".to_string())?
 }
 
 #[tauri::command]
@@ -8517,6 +8546,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             plan_jev_route,
+            plan_jev_command,
             get_process_metrics,
             get_extension_config,
             save_extension_config,

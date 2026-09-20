@@ -40,20 +40,31 @@
     checked?: boolean;
     disabled?: boolean;
   };
+  export type JevPaletteState = {
+    loading?: boolean;
+    error?: string;
+    suggestion?: { candidateId: string; label: string; detail: string };
+  };
 
   let {
     open = false,
     title,
     placeholder,
     items,
+    jev,
     onselect,
+    oninterpret,
+    onquerychange,
     onclose,
   }: {
     open?: boolean;
     title: string;
     placeholder: string;
     items: CommandPaletteItem[];
+    jev?: JevPaletteState;
     onselect: (id: string) => void;
+    oninterpret?: (query: string) => void;
+    onquerychange?: (query: string) => void;
     onclose: () => void;
   } = $props();
 
@@ -74,11 +85,27 @@
     const normalizedQuery = query.toLocaleLowerCase().trim();
     const terms = normalizedQuery.split(/\s+/).filter(Boolean);
 
-    return items
+    const matched = items
       .map((item, index) => ({ item, index, score: matchScore(item, normalizedQuery, terms) }))
       .filter((match) => match.score !== undefined)
       .sort((left, right) => left.score! - right.score! || left.index - right.index)
       .map((match) => match.item);
+    if (!normalizedQuery || !oninterpret) return matched;
+    if (jev?.suggestion) {
+      return [...matched, {
+        id: `__jev-suggestion:${jev.suggestion.candidateId}`,
+        label: jev.suggestion.label,
+        detail: jev.suggestion.detail,
+        group: 'Jev suggestion',
+      }];
+    }
+    return [...matched, {
+      id: '__jev-interpret',
+      label: jev?.loading ? 'Jev is interpreting…' : 'Interpret with Jev',
+      detail: jev?.error || 'Map this intent to one available Monitter control',
+      group: 'Jev',
+      disabled: jev?.loading,
+    }];
   });
 
   const groupedItems = $derived.by(() => {
@@ -96,6 +123,7 @@
   $effect(() => {
     query;
     items;
+    onquerychange?.(query);
     activeIndex = selectableItems.length ? 0 : -1;
   });
 
@@ -225,7 +253,9 @@
   }
 
   function select(item: CommandPaletteItem | undefined) {
-    if (item && !item.disabled) onselect(item.id);
+    if (!item || item.disabled) return;
+    if (item.id === '__jev-interpret') oninterpret?.(query.trim());
+    else onselect(item.id);
   }
 
   function moveActive(delta: number) {

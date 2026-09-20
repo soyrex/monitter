@@ -48,6 +48,8 @@ import type {
   SlashCommand,
   SlashCommandExecution,
   JevRoutePlan,
+  JevCommandCandidate,
+  JevCommandPlan,
   MailDetail,
   MailDetailRequestResult,
 } from "./types";
@@ -56,6 +58,7 @@ export interface MonitterBridge {
   available: boolean;
   getSnapshot(): Promise<Snapshot>;
   planJevRoute(agentId: string, prompt: string): Promise<JevRoutePlan>;
+  planJevCommand(query: string, candidates: JevCommandCandidate[]): Promise<JevCommandPlan>;
   getTaskEvents(taskId: string, before?: number, limit?: number): Promise<TaskEventsPage>;
   getUsageOverview(policy?: UsageRefreshPolicy): Promise<UsageOverview>;
   listCodexAccounts(): Promise<CodexAccount[]>;
@@ -242,6 +245,7 @@ const nativeBridge: MonitterBridge = {
     (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
   getSnapshot: () => getCachedSnapshot(),
   planJevRoute: (agentId, prompt) => isLanBrowser() ? desktopOnly() : invoke<JevRoutePlan>('plan_jev_route', { agentId, prompt }),
+  planJevCommand: (query, candidates) => isLanBrowser() ? desktopOnly() : invoke<JevCommandPlan>('plan_jev_command', { query, candidates }),
   getTaskEvents: (taskId, before, limit) => invoke<TaskEventsPage>('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
   getUsageOverview: (policy) => invoke<UsageOverview>('get_usage_overview', policy === undefined ? {} : { policy }),
   listCodexAccounts: () => invoke<CodexAccount[]>('list_codex_accounts'),
@@ -353,6 +357,7 @@ const previewBridge: MonitterBridge = {
   getTaskEvents: async () => ({ events: [], nextBefore: null }),
   getUsageOverview: async () => emptyUsageOverview(),
   planJevRoute: () => desktopOnly(),
+  planJevCommand: () => desktopOnly(),
   listCodexAccounts: () => desktopOnly(),
   getProcessMetrics: () => desktopOnly(),
   getTaskEventDetail: () => desktopOnly(),
@@ -432,6 +437,7 @@ export function getBridge(): MonitterBridge {
       getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,
       getUsageOverview: (policy) => test.invoke('get_usage_overview', policy === undefined ? {} : { policy }) as Promise<UsageOverview>,
       planJevRoute: (agentId, prompt) => test.invoke('plan_jev_route', { agentId, prompt }) as Promise<JevRoutePlan>,
+      planJevCommand: (query, candidates) => test.invoke('plan_jev_command', { query, candidates }) as Promise<JevCommandPlan>,
       listCodexAccounts: () => test.invoke('list_codex_accounts') as Promise<CodexAccount[]>,
       getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,

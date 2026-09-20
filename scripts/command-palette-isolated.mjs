@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 
 // Render the real component and icons, including its real keyboard handlers.
 const result = await build({ configFile: false, plugins: [svelte()],
+  resolve: { alias: { '$lib': new URL('../src/lib', import.meta.url).pathname } },
   build: { write: false, minify: false, rollupOptions: { input: 'scripts/fixtures/command-palette-entry.js' } },
 });
 const files = new Map(result.output.map(file => [`/${file.fileName}`, file.type === 'asset' ? file.source : file.code]));

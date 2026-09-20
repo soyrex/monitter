@@ -106,6 +106,12 @@ No fake conversations, progress, token counts, host connections or model replies
   writes an app-local trace containing a prompt fingerprint and typed decision/evidence, and does not create a
   task, invoke a provider, inspect a workspace, grant permissions, or expose the credential. LAN callers are
   rejected. A `human_review_required` result must be stopped by the composer before task creation.
+- `plan_jev_command { query: string, candidates: JevCommandCandidate[] }` -> `JevCommandPlan`
+  (native-owner only; requires the Keychain-backed `JEV_API_KEY`). The caller supplies a bounded catalogue of
+  currently enabled Cmd-P controls. Jev may select only one offered candidate ID and returns a typed confidence
+  and bounded reason. The command records a fingerprinted audit trace without raw query/catalogue text and never
+  executes a control. The UI must revalidate the candidate against its current enabled catalogue and require a
+  second explicit selection before dispatch. LAN, mobile, and shared callers cannot invoke this command.
 - `request_mail_detail { taskId: string, mailId: string }` -> `{ status: "ready" | "pending" }`.
   Native-owner only and deliberately absent from LAN/controller/visitor dispatch. The card must be a
   durable Gmail card in that exact task. A cache miss creates a five-minute, one-card grant and sends
@@ -1042,6 +1048,12 @@ chat/channel, drafts and right sidebar. Dividers resize with pointer dragging or
 between panes; dropping toward a pane edge previews and creates a split, up to eight panes. Collapsing
 the layout merges tabs and preserves drafts and uploaded references. Layout changes wait while a send
 acknowledgement or attachment upload is pending. Pane layout and unsent drafts are window-local.
+
+For a non-empty Cmd-P query, the native desktop may offer `Interpret with Jev`. Selecting it sends the
+query and only the currently enabled, bounded control catalogue to `plan_jev_command`. The returned item is
+shown as a proposal with confidence and reason; interpretation itself has no side effect. Selecting that
+proposal is a separate confirmation, after which the UI revalidates and uses the existing control dispatcher.
+Changing the query, closing the palette, or making the proposed control unavailable invalidates the proposal.
 
 ### Agent and project workspaces
 

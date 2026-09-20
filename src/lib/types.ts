@@ -70,6 +70,8 @@ export interface JevRoutePlan {
   traceId: string; promptFingerprint: string; decision: JevRoutingDecision;
   classifierEvidence: { provider: string; model: string; latencyMs: number; inputTokens: number | null; outputTokens: number | null; costUsd: number | null; };
 }
+export interface JevCommandCandidate { id: string; label: string; description?: string | null; }
+export interface JevCommandPlan { traceId: string; candidateId: string; confidence: number; reason: string; }
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
 export interface Project {
