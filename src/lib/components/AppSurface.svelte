@@ -1885,8 +1885,9 @@
       colour = dark ? colours.dark : colours.light,
       root = document.documentElement,
       meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-    root.style.backgroundColor = colour;
-    document.body.style.backgroundColor = colour;
+    const glass = settings.windowSurface === 'glass';
+    root.style.backgroundColor = glass ? 'transparent' : colour;
+    document.body.style.backgroundColor = glass ? 'transparent' : colour;
     meta?.setAttribute('content', colour);
     try {
       window.localStorage.setItem('monitter.appearance.browser-colours.v1', JSON.stringify(colours));
@@ -5560,7 +5561,7 @@
   :global(:root[data-window-surface="glass"]) .app-shell {
     --paper: color-mix(in srgb, var(--paper-base) calc(100% - var(--window-transparency)), transparent);
     --sidebar: color-mix(in srgb, var(--sidebar-base) calc(100% - var(--window-transparency)), transparent);
-    --panel: color-mix(in srgb, var(--panel-base) calc(100% - var(--window-transparency)), transparent);
+    --panel: var(--panel-base);
     backdrop-filter: blur(22px) saturate(125%);
     -webkit-backdrop-filter: blur(22px) saturate(125%);
   }
