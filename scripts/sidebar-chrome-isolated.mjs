@@ -11,7 +11,7 @@ const fixture = readFileSync(`${root}/scripts/fixtures/sidebar-chrome-isolated.h
 
 // Keep this fixture deliberately small, but lift the declarations verbatim from
 // AppSurface so this checks the shipped chrome rules rather than a second style.
-const ruleNames = ['.sidebar', '.brand', '.brand strong', '.brand-logo-button', '.icon', '.brand-actions', '.brand-action', '.sidebar-tabs-row', '.sidebar-tabs', '.sidebar-tab-entry', '.sidebar-tab', '.sidebar.modern-tabs .sidebar-tabs-row', '.sidebar.modern-tabs .sidebar-tabs', '.sidebar.modern-tabs .sidebar-tab-entry', '.sidebar.modern-tabs .sidebar-tab', '.mobile-navigation .brand', '.mobile-navigation .brand-action', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
+const ruleNames = ['.sidebar', '.brand', '.brand strong', '.brand-logo-button', '.icon', '.brand-actions', '.brand-action', '.sidebar-tabs-row', '.sidebar-tabs', '.sidebar-tab-entry', '.sidebar-tab', '.sidebar.modern-tabs .sidebar-tabs-row', '.sidebar.modern-tabs .sidebar-tabs', '.sidebar.modern-tabs .sidebar-tab-entry', '.sidebar.modern-tabs .sidebar-tab-entry:first-child', '.sidebar.modern-tabs .sidebar-tab-entry:last-child', '.sidebar.modern-tabs .sidebar-tab', '.mobile-navigation .brand', '.mobile-navigation .brand-action', '.workspace-context', '.workspace-context .avatar', '.top-actions', '.sidebar-footer', '.mobile-navigation .sidebar-footer > .icon'];
 const cssBlocks = ruleNames.flatMap(name => {
   const escaped = name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&');
   const re = new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{[^}]*\\}`, 'g');
@@ -62,8 +62,8 @@ try {
       const classicTabs = await page.locator('.sidebar-tabs-row').evaluate(node => ({ paddingTop:getComputedStyle(node).paddingTop, gap:getComputedStyle(node).gap, radius:getComputedStyle(node.querySelector('.sidebar-tab-entry')).borderRadius }));
       expect(classicTabs).toEqual({ paddingTop:'6px', gap:'3px', radius:'6px 6px 0px 0px' });
       await page.locator('.sidebar').evaluate(node => node.classList.add('modern-tabs'));
-      const modernTabs = await page.locator('.sidebar-tabs-row').evaluate(node => ({ paddingTop:getComputedStyle(node).paddingTop, gap:getComputedStyle(node).gap, radius:getComputedStyle(node.querySelector('.sidebar-tab-entry')).borderRadius, entryBorderRight:getComputedStyle(node.querySelector('.sidebar-tab-entry')).borderRightWidth }));
-      expect(modernTabs).toEqual({ paddingTop:'0px', gap:'0px', radius:'0px', entryBorderRight:'1px' });
+      const modernTabs = await page.locator('.sidebar-tabs-row').evaluate(node => ({ paddingTop:getComputedStyle(node).paddingTop, gap:getComputedStyle(node).gap, radius:getComputedStyle(node.querySelector('.sidebar-tab-entry')).borderRadius, firstEntryBorderLeft:getComputedStyle(node.querySelector('.sidebar-tab-entry:first-child')).borderLeftWidth, entryBorderRight:getComputedStyle(node.querySelector('.sidebar-tab-entry')).borderRightWidth, lastEntryBorderRight:getComputedStyle(node.querySelector('.sidebar-tab-entry:last-child')).borderRightWidth }));
+      expect(modernTabs).toEqual({ paddingTop:'0px', gap:'0px', radius:'0px', firstEntryBorderLeft:'0px', entryBorderRight:'1px', lastEntryBorderRight:'0px' });
       await page.locator('.sidebar').evaluate(node => { node.style.width = '220px'; });
       await expect.poll(() => page.locator('.sidebar-tab > span').evaluateAll(nodes => nodes.map(node => getComputedStyle(node).display))).toEqual(['none','none','none']);
       await expect(page.locator('.sidebar-tab')).toHaveCount(3);
