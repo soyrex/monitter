@@ -2688,14 +2688,7 @@ impl RunControl {
                 .get("name")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|name| {
-                    !name.is_empty()
-                        && name.len() <= 128
-                        && !name.starts_with('/')
-                        && name.chars().all(|ch| {
-                            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.')
-                        })
-                })
+                .filter(|name| crate::slash_commands::valid_name(name))
                 .ok_or("ACP advertised an invalid slash command name.")?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err("ACP advertised duplicate slash command names.".into());
@@ -2704,7 +2697,10 @@ impl RunControl {
                 .get("description")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|value| !value.is_empty() && value.len() <= 1024)
+                // ACP bridges expose provider-owned help text here. Keep it
+                // bounded for the palette, but accommodate current Claude
+                // skill descriptions (which can exceed 1 KiB).
+                .filter(|value| !value.is_empty() && value.chars().count() <= 2048)
                 .ok_or("ACP slash command description is missing or too long.")?;
             let input_hint = command
                 .pointer("/input/hint")
@@ -6034,6 +6030,24 @@ for line in sys.stdin.buffer:
             assert!(control.replace_acp_slash_commands(&commands).is_err());
         }
         assert!(control.acp_slash_commands().is_empty());
+    }
+
+    #[test]
+    fn acp_slash_catalog_accepts_bounded_hierarchical_names_and_descriptions() {
+        let control = RunControl::new(false);
+        let long_description = "x".repeat(1436);
+        control
+            .replace_acp_slash_commands(&serde_json::json!([
+                {"name":"memory show","description":long_description}
+            ]))
+            .unwrap();
+        assert_eq!(control.acp_slash_commands()[0].name, "memory show");
+
+        assert!(control
+            .replace_acp_slash_commands(&serde_json::json!([
+                {"name":"memory show","description":"x".repeat(2049)}
+            ]))
+            .is_err());
     }
 
     #[test]

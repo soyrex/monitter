@@ -3273,9 +3273,11 @@
       void selectSlash(slashItems.find(item => item.id === 'context-new'));
       return true;
     }
-    const command = composer.trim().split(/\s+/, 1)[0].toLowerCase();
-    const item = slashItems.find(item => item.label === command);
-    void selectSlash(item?.source === 'monitter' && composer.trim().toLowerCase() !== command ? undefined : item);
+    const typed = composer.trim().toLowerCase();
+    const item = slashItems
+      .filter(item => typed.startsWith(item.label.toLowerCase()) && (typed.length === item.label.length || /\s/.test(typed[item.label.length])))
+      .sort((left, right) => right.label.length - left.label.length)[0];
+    void selectSlash(item?.source === 'monitter' && typed !== item.label.toLowerCase() ? undefined : item);
     return true;
   }
   async function selectSlash(item?: SlashPaletteItem) {
@@ -3298,7 +3300,10 @@
     if (item.id.startsWith('provider:')) {
       if (!task) return;
       const typed = composer.trim();
-      const argumentSuffix = typed.match(/^\S+([\s\S]*)$/)?.[1] ?? '';
+      const label = item.label.toLowerCase();
+      const argumentSuffix = typed.toLowerCase().startsWith(label) && (typed.length === label.length || /\s/.test(typed[label.length]))
+        ? typed.slice(item.label.length)
+        : '';
       const sentCommand = `${item.label}${argumentSuffix}`.trimEnd();
       const previous = composer;
       composer = '';

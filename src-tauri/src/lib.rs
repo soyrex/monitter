@@ -2999,11 +2999,15 @@ impl Service {
         task_id: String,
         command: String,
     ) -> Result<SlashCommandExecution, String> {
-        let (name, arguments) = slash_commands::parse(&command)
-            .ok_or("Enter a valid slash command, such as /usage.")?;
-        let normalized = name.to_ascii_lowercase();
         let (task, host) = self.task_and_host(&task_id)?;
         let available = self.task_slash_commands(&task_id)?;
+        let (name, arguments) = if task.provider == "acp" {
+            slash_commands::parse_advertised(&command, available.iter().map(|item| item.name.as_str()))
+        } else {
+            slash_commands::parse(&command)
+        }
+        .ok_or("Enter an advertised slash command, such as /usage.")?;
+        let normalized = name.to_ascii_lowercase();
         if !available.iter().any(|item| item.name.eq_ignore_ascii_case(name)) {
             return Err(format!("/{name} is not advertised for this {} session.", task.provider));
         }
