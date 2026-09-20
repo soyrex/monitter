@@ -5416,8 +5416,8 @@
     --density-sidebar-scroll-y: 9px;
     --density-sidebar-row-y: 5px;
     --density-sidebar-task-y: 6px;
-    --density-sidebar-group-top: 4px;
-    --density-sidebar-group-bottom: 9px;
+    --density-sidebar-group-top: 2px;
+    --density-sidebar-group-bottom: 4px;
     --density-sidebar-footer-height: 44px;
     --density-pane-header-y: 8px;
     --density-header-avatar-size: 30px;
@@ -5441,8 +5441,8 @@
     --density-sidebar-scroll-y: 6px;
     --density-sidebar-row-y: 3px;
     --density-sidebar-task-y: 3px;
-    --density-sidebar-group-top: 2px;
-    --density-sidebar-group-bottom: 5px;
+    --density-sidebar-group-top: 1px;
+    --density-sidebar-group-bottom: 2px;
     --density-sidebar-footer-height: 40px;
     --density-pane-header-y: 5px;
     --density-header-avatar-size: 26px;
@@ -5461,8 +5461,8 @@
     --density-sidebar-scroll-y: 14px;
     --density-sidebar-row-y: 8px;
     --density-sidebar-task-y: 9px;
-    --density-sidebar-group-top: 7px;
-    --density-sidebar-group-bottom: 13px;
+    --density-sidebar-group-top: 4px;
+    --density-sidebar-group-bottom: 6px;
     --density-sidebar-footer-height: 52px;
     --density-pane-header-y: 11px;
     --density-header-avatar-size: 34px;
@@ -5828,7 +5828,7 @@
   }
   .task-tree { margin-left:10px; border-left:1px solid var(--line); padding-left:7px; }
   .agent-group > .task-tree { margin:0; border:0; padding:0; }
-  .agent-group.has-chats > .task-tree { padding-bottom: 1em; }
+  .agent-group.has-chats > .task-tree { padding-bottom: var(--density-sidebar-group-bottom); }
   .agent-group > .task-tree > .task-row { position: relative; padding-left: calc(var(--thread-axis) - 3px); }
   .agent-group > .task-tree > .task-row::before {
     content: ""; position: absolute; pointer-events: none;
