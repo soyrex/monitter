@@ -217,6 +217,8 @@
           {:else if item.type === 'tool-group'}
             {@const inlineSubagent=subagentForEvents(item.values)}
             {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} compressed={display.settings.compressToolCalls === true} running={displayTask.status === 'running'}/>{/if}
+          {:else if item.type === 'process-group'}
+            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} processTree running={displayTask.status === 'running'}/>
           {:else if item.type === 'approval'}
             {@const approvalText=approvalEventText(item.value)}
             <button class={`approval-inline ${item.value.status}`} onclick={()=>onOpenApproval(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{formatTime(item.value.resolvedAt ?? item.value.createdAt)}</time></button>

@@ -226,14 +226,43 @@ export type ConversationActivityItem =
   | { type: 'activity'; value: RunEvent }
   | { type: 'approval'; value: ApprovalRequest }
   | { type: 'reasoning-group'; values: RunEvent[] }
-  | { type: 'tool-group'; values: RunEvent[] };
+  | { type: 'tool-group'; values: RunEvent[] }
+  | { type: 'process-group'; values: RunEvent[] };
 
 /** One waiting indicator per conversation, never alongside a reply or approval. */
 export function showThinkingFallback(items: ConversationActivityItem[], working: boolean, awaitingApproval = false): boolean {
   if (!working || awaitingApproval) return false;
   const latest = items.at(-1);
   if (latest?.type === 'reasoning-group') return false;
+  if (latest?.type === 'process-group') return false;
   return !(latest?.type === 'message' && latest.value.role === 'assistant');
+}
+
+function combineProcessGroups(items: ConversationActivityItem[]): ConversationActivityItem[] {
+  const result: ConversationActivityItem[] = [];
+  let pending: Extract<ConversationActivityItem, { type: 'reasoning-group' | 'tool-group' }>[] = [];
+  const flush = () => {
+    if (!pending.length) return;
+    const values = pending.flatMap(item => item.values);
+    const hasReasoning = values.some(item => item.kind === 'reasoning' && !isBlankReasoning(item));
+    const hasTools = values.some(item => item.kind === 'tool' || item.kind === 'subagent');
+    if (hasReasoning && hasTools) result.push({ type: 'process-group', values });
+    else result.push(...pending);
+    pending = [];
+  };
+  for (const item of items) {
+    if (item.type !== 'reasoning-group' && item.type !== 'tool-group') {
+      flush();
+      result.push(item);
+      continue;
+    }
+    const taskId = item.values[0]?.taskId;
+    const previousTaskId = pending[0]?.values[0]?.taskId;
+    if (pending.length && taskId !== previousTaskId) flush();
+    pending.push(item);
+  }
+  flush();
+  return result;
 }
 
 function toolIdentity(event: RunEvent) {
@@ -746,7 +775,7 @@ export function groupConversationActivity(
   }
   const visible = grouped.filter(item => item.type !== 'reasoning-group' || item.values.some(value => !isBlankReasoning(value)) ||
     (latestReplacementAt.get(item.values[0].taskId) ?? -Infinity) < item.values.at(-1)!.createdAt);
-  if (!compressToolCalls) return visible;
+  if (!compressToolCalls) return combineProcessGroups(visible);
 
   // Compression is turn-scoped rather than adjacency-scoped. Transient thinking,
   // reasoning summaries and compaction rows may sit between calls without
@@ -777,5 +806,5 @@ export function groupConversationActivity(
     if (earlier >= 0) compacted.splice(earlier, 1);
     compacted.push(existing);
   }
-  return compacted;
+  return combineProcessGroups(compacted);
 }

@@ -10,11 +10,14 @@
   import ThinkingStatus from './ThinkingStatus.svelte';
   import ImageLightbox from './ImageLightbox.svelte';
   type DetailLoader = (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
-  let { event, events = [], compressed = false, running = false, active = true, avatar, onloaddetail }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; running?: boolean; active?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader } = $props();
+  let { event, events = [], compressed = false, processTree = false, running = false, active = true, avatar, onloaddetail }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; processTree?: boolean; running?: boolean; active?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
   const primary = $derived(items[0]);
   const latest = $derived(items.at(-1));
   const grouped = $derived(items.length > 1);
+  const hasReasoning = $derived(items.some(item => item.kind === 'reasoning'));
+  const toolItems = $derived(items.filter(item => item.kind === 'tool' || item.kind === 'subagent'));
+  const failedTools = $derived(toolItems.filter(item => toolPresentation(item, false).label === 'Tool failed').length);
   const reasoning = $derived(primary?.kind === 'reasoning');
   const summary = $derived(reasoning ? [...new Set(items.map(item=>reasoningSummary(item.detail)).filter(Boolean))].join('\n\n') : '');
   const summaryPreview = $derived(reasoning && summary ? summary.replace(/\s+/g, ' ').trim() : '');
@@ -138,6 +141,7 @@
     terminal: Terminal,
   } as const;
   const TriggerIcon = $derived(ICON_COMPONENT[primaryPresentation.icon]);
+  const processLabel = $derived(`Thought · Called ${toolItems.length} ${toolItems.length === 1 ? 'tool' : 'tools'}${failedTools ? ` · ${failedTools} failed` : ''}`);
 </script>
 {#snippet imagePreview(item: RunEvent)}
   {#if imagePreviews[item.id]}
@@ -154,6 +158,25 @@
   <ThinkingStatus {running} {active} {avatar} startedAt={primary.createdAt}/>
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning: {summaryPreview}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
+{:else if processTree && primary && hasReasoning}
+  <details class="activity process-tree" open={running || undefined}>
+    <summary aria-label={processLabel}><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>{processLabel}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary>
+    <div class="process-steps" aria-label="Process steps">
+      {#each items as item (item.id)}
+        {@const isThought=item.kind === 'reasoning'}
+        {@const presentation=isThought ? {icon:'book-open' as const,label:'Thought process'} : toolPresentation(item, running)}
+        {@const displayItem=expandedEvent(item)}
+        <details class="process-step">
+          <summary><ChevronRight size={12} class="call-chevron"/><span class:failed={presentation.label === 'Tool failed'}><svelte:component this={ICON_COMPONENT[presentation.icon]} size={14}/>{presentation.label}</span><time>{formatTime(item.createdAt)}</time></summary>
+          {#if isThought}<div class="process-thought"><Markdown text={reasoningSummary(displayItem.detail)}/></div>
+          {:else}<pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>{/if}
+          {@render imagePreview(displayItem)}
+          {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
+          {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
+        </details>
+      {/each}
+    </div>
+  </details>
 {:else if primary && latest}
   <div class="activity" class:grouped class:compressed={compressed && grouped} class:compaction>
     <button class="activity-trigger" bind:this={anchor} aria-haspopup={compressed && grouped ? undefined : 'dialog'} aria-expanded={open} aria-label={compaction ? compactionDescription : `Tool activity: ${description}, ${items.length} ${items.length===1?'entry':'entries'}`} onclick={toggle}>
@@ -211,6 +234,17 @@
   .activity[open] :global(.chevron),.activity-trigger[aria-expanded=true] :global(.chevron),.call[open] :global(.call-chevron){transform:rotate(90deg)}
   .reasoning summary :global(svg){color:var(--accent-ink)}small{flex-shrink:0;color:var(--muted);font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}
   .activity-body{padding:0 14px 12px;overflow:auto;max-height:280px}
+  .process-tree{margin-top:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  .process-tree > summary{padding:9px 10px;color:var(--ink);font-size:calc(11px * var(--interface-font-ratio,1))}
+  .process-steps{position:relative;display:grid;gap:2px;margin:0 10px 10px 24px;padding-left:12px;border-left:1px solid var(--line)}
+  .process-step{position:relative;min-width:0;border:0;border-radius:5px}
+  .process-step::before{content:"";position:absolute;left:-13px;top:16px;width:12px;border-top:1px solid var(--line)}
+  .process-step > summary{gap:6px;padding:6px 5px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1))}
+  .process-step > summary span{display:flex;align-items:center;gap:6px}.process-step > summary span.failed{color:var(--danger,#c44c79)}
+  .process-step > summary :global(svg){flex:none}.process-step > summary time{font-size:calc(9px * var(--interface-font-ratio,1))}
+  .process-step[open] > summary{color:var(--ink);background:color-mix(in srgb,var(--soft) 55%,transparent)}
+  .process-step .detail-summary,.process-thought{margin:0 5px 7px 23px;padding:7px 8px;border-left:1px solid var(--line);color:var(--muted);font-size:calc(10px * var(--interface-font-ratio,1));line-height:1.45}
+  .process-thought :global(.markdown){font-size:inherit}.process-thought :global(.markdown p:last-child){margin-bottom:0}
   .activity-popup{position:fixed;inset:auto;margin:0;box-sizing:border-box;padding:12px;width:520px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);box-shadow:0 12px 40px #0004;font-family:inherit;font-size:calc(12px * var(--interface-font-ratio, 1));overflow:auto;overscroll-behavior:contain}
   header{display:flex;align-items:center;gap:8px;margin-bottom:10px}header strong{flex:1;font-weight:500}header small{margin-left:6px}header button{display:grid;place-items:center;width:25px;height:25px;color:var(--muted);border-radius:5px}header button:hover{background:var(--soft)}
   .activity-expanded{margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}

@@ -4,7 +4,7 @@ import { CANCELLATION_EVENT_TITLE, CONTEXT_CLEARED_TITLE, contextCompactionPhase
 const event = (id, createdAt, title, detail) => ({ id, taskId: 'task', kind: 'tool', title, detail, createdAt });
 const message = (id, createdAt) => ({ id, taskId: 'task', role: 'assistant', text: 'reply', createdAt, attachments: [] });
 const approval = (id, createdAt, resolvedAt = null) => ({ id, taskId: 'task', provider: 'codex', runId: `run:${id}`, tool: 'computer', summary: 'Allow computer use', detail: '', risk: 'medium', status: 'approved', createdAt, resolvedAt, decision: 'approve_once' });
-const groups = (messages, events, compress = false) => groupConversationActivity(messages, events, compress).filter(item => item.type === 'tool-group');
+const groups = (messages, events, compress = false) => groupConversationActivity(messages, events, compress).filter(item => item.type === 'tool-group' || item.type === 'process-group');
 
 const nativeTransport = (id, createdAt, type) => event(id, createdAt, type, JSON.stringify({ type, id: `native-${id}` }));
 const transportTimeline = groupConversationActivity(
@@ -37,10 +37,13 @@ assert.equal(result.length, 1);
 // Messages are hard turn boundaries. Reasoning only separates tools when
 // compression is off; compressed summaries span thinking time.
 assert.equal(groups([message('reply', 2)], [event('before', 1, 'Web search', '{}'), event('after', 3, 'Web search', '{}')]).length, 2);
-assert.equal(groups([], [event('before', 1, 'Web search', '{}'), { ...event('reasoning', 2, 'Reasoning', 'thinking'), kind: 'reasoning' }, event('after', 3, 'Web search', '{}')]).length, 2);
+result = groups([], [event('before', 1, 'Web search', '{}'), { ...event('reasoning', 2, 'Reasoning', 'thinking'), kind: 'reasoning' }, event('after', 3, 'Web search', '{}')]);
+assert.equal(result.length, 1);
+assert.equal(result[0].type, 'process-group');
+assert.equal(result[0].values.filter(item => item.kind === 'tool').length, 2);
 result = groups([], [event('before', 1, 'Web search', '{}'), { ...event('reasoning', 2, 'Reasoning', 'thinking'), kind: 'reasoning' }, event('after', 3, 'Web search', '{}')], true);
 assert.equal(result.length, 1);
-assert.equal(result[0].values.length, 2);
+assert.equal(result[0].values.filter(item => item.kind === 'tool').length, 2);
 
 // Generic tool_result envelopes cannot collapse because their type/name is not a tool identity.
 assert.equal(groups([], [event('a', 1, 'Tool result', '{"type":"tool_result","name":"first"}'), event('b', 2, 'Tool result', '{"type":"tool_result","name":"second"}')]).length, 2);
