@@ -18,7 +18,7 @@ export function appearanceKey(settings: Settings, theme: AppThemeSelection, scal
 /** System colour-scheme changes affect browser chrome only in system mode. */
 export function browserChromeKey(settings: Settings, theme: AppThemeSelection, tint: number, systemDark: boolean): string {
   return JSON.stringify([
-    settings.theme, settings.theme === 'system' && systemDark,
+    settings.theme, settings.windowSurface, settings.theme === 'system' && systemDark,
     theme.light, theme.dark, theme.accent, theme.contrast, tint,
   ]);
 }
