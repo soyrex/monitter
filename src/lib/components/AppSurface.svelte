@@ -6377,7 +6377,7 @@
   .workspace.modern-tabs:not(.compact-tabs) > .topbar { height:max(30px, calc(var(--pane-tabbar-height) - 4px)); padding:0; gap:0; }
   .modern-tabs:not(.compact-tabs) .tabs { gap:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry { border:0; border-right:1px solid var(--line); border-radius:0; }
-  .modern-tabs:not(.compact-tabs) .tab-entry:first-child { border-left:1px solid var(--line); }
+  .modern-tabs:not(.compact-tabs) .tab-entry:first-child { border-left:0; }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { background:var(--soft); }
   .modern-tabs:not(.compact-tabs) .tab-entry > .tab:hover { background:transparent; }
