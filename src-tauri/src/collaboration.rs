@@ -71,6 +71,15 @@ impl Service {
                 &required_string(args, "url")?,
                 string_arg(args, "name")?,
             ),
+            "mail_triage_help" => Ok(json!({"instructions": crate::mail_triage::HELP})),
+            "present_mail_batch" => self.present_mail_batch_protocol(
+                caller_task,
+                Value::Object(args.clone()),
+            ),
+            "present_mail_detail" => self.present_mail_detail_protocol(
+                caller_task,
+                Value::Object(args.clone()),
+            ),
             "list_schedules" => self.list_schedules_protocol(caller_task),
             "save_schedule" => self.save_schedule_protocol(caller_task, args),
             "delete_schedule" => {
@@ -880,9 +889,11 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "send_message" => &["to_agent_id", "message", "request_id", "task_id"],
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
         "wait_for_task" => &["collaboration_id", "timeout_seconds"],
-        "list_messages" | "skills_help" | "list_shared_skills" => &[],
+        "list_messages" | "skills_help" | "list_shared_skills" | "mail_triage_help" => &[],
         "install_shared_skill" => &["url", "name"],
         "terminal_run" => &["command", "cwd"],
+        "present_mail_batch" => &["source", "account_label", "query_label", "messages"],
+        "present_mail_detail" => &["mail_id", "provider_message_id", "body_text"],
         _ => return Err("Unknown Monitter collaboration tool.".into()),
     };
     if args.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -1212,6 +1223,79 @@ mod tests {
                 json!({"collaboration_id":first["collaboration_id"],"timeout_seconds":"no"})
             )
             .is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mail_protocol_exposes_read_only_help_rejects_bodies_and_gates_to_codex() {
+        let (service, dir) = service("mail-protocol");
+        let caller = service.snapshot().unwrap().agents[0].clone();
+        let root = task(&service, &caller, "Mail", None, None);
+        running(&service, &root.id);
+
+        let help = service
+            .protocol(&root.id, "mail_triage_help", json!({}))
+            .unwrap()["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(help.contains("Gmail connector"));
+        assert!(help.contains("untrusted data"));
+        assert!(help.contains("one present_mail_batch call"));
+        assert!(help.contains("one HTTP request"));
+        assert!(help.contains("Never send, reply, archive, label, delete"));
+
+        let envelope = json!({
+            "source":"gmail",
+            "account_label":"Work Gmail",
+            "query_label":"Unread",
+            "messages":[{
+                "provider_message_id":"gmail-1",
+                "from":"Pat <pat@example.com>",
+                "to":["Alex <alex@example.com>"],
+                "cc":[],
+                "subject":"Please review",
+                "received_at":1_700_000_000_000_i64,
+                "snippet":"Could you review this?",
+                "body_text":"must never be accepted here"
+            }]
+        });
+        assert!(service
+            .protocol(&root.id, "present_mail_batch", envelope)
+            .unwrap_err()
+            .contains("schema"));
+
+        service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == root.id)
+                    .unwrap()
+                    .provider = "claude".into();
+                Ok(())
+            })
+            .unwrap();
+        let valid = json!({
+            "source":"gmail",
+            "account_label":"Work Gmail",
+            "query_label":"Unread",
+            "messages":[{
+                "provider_message_id":"gmail-1",
+                "from":"Pat <pat@example.com>",
+                "to":["Alex <alex@example.com>"],
+                "cc":[],
+                "subject":"Please review",
+                "received_at":1_700_000_000_000_i64,
+                "snippet":"Could you review this?"
+            }]
+        });
+        assert!(service
+            .protocol(&root.id, "present_mail_batch", valid)
+            .unwrap_err()
+            .contains("only to Codex"));
+        service.cleanup();
+        drop(service);
         let _ = fs::remove_dir_all(dir);
     }
 

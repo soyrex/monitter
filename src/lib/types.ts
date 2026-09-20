@@ -117,6 +117,32 @@ export interface Message {
   senderAgentId?: string | null; collaborationId?: string | null;
   attachments?: Attachment[];
 }
+export type MailImportance = 'critical' | 'high' | 'normal' | 'low';
+export type MailIntent = 'action_request' | 'decision_needed' | 'information' | 'scheduling' | 'transactional' | 'newsletter' | 'personal' | 'other';
+export type MailReplyState = 'yes' | 'no' | 'unclear';
+export type MailOwner = 'me' | 'sender' | 'named_recipient' | 'shared' | 'unclear';
+export type MailSuggestedAction = 'reply' | 'review' | 'schedule' | 'delegate' | 'track' | 'archive' | 'none';
+export interface MailClassifierTrace {
+  mode: 'pending' | 'jev' | 'mock' | 'fallback'; provider: string; model: string; latencyMs: number;
+  inputTokens: number | null; outputTokens: number | null; costMicrousd: number | null;
+  fallbackReason: string | null;
+}
+export interface MailCard {
+  id: string; providerMessageId: string; providerThreadId: string | null;
+  from: string; to: string[]; cc: string[]; subject: string; receivedAt: number; snippet: string;
+  importance: MailImportance; importanceScore: number; intent: MailIntent;
+  replyRequired: MailReplyState; suggestedOwner: MailOwner; suggestedAction: MailSuggestedAction;
+  confidence: number; rationale: string;
+}
+export interface MailBatch {
+  id: string; messageId: string; taskId: string; source: 'gmail'; accountLabel: string;
+  queryLabel: string; createdAt: number; classifier: MailClassifierTrace; items: MailCard[];
+}
+export interface MailDetail {
+  mailId: string; source: 'gmail'; accountLabel: string; from: string; to: string[]; cc: string[];
+  subject: string; receivedAt: number; bodyText: string;
+}
+export interface MailDetailRequestResult { status: 'ready' | 'pending'; }
 export interface Collaboration {
   id: string; kind: 'message' | 'delegation';
   fromAgentId: string; fromTaskId: string; toAgentId: string; toTaskId: string;
@@ -256,6 +282,8 @@ export interface EnvironmentSecretsConfig {
 }
 export interface Snapshot {
   hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
+  /** Body-free owner projection. Older runtimes and shared visitors omit it. */
+  mailBatches?: MailBatch[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
   collaborations: Collaboration[]; queuedMessages: QueuedMessage[];
   /** Omitted by older runtimes; current runtimes always provide this durable projection. */

@@ -1571,6 +1571,22 @@ fn finish_request(lifecycle: &Mutex<RequestLifecycle>, rpc_id: &str) -> bool {
 
 fn parse_item(item: &Value, started: bool) -> Parsed {
     let ty = item.get("type").and_then(Value::as_str).unwrap_or("");
+    if let Some(redacted) = crate::mail_triage::redacted_tool_event(item) {
+        return Parsed {
+            native_session_id: None,
+            assistant: None,
+            event: Some((
+                "tool".into(),
+                redacted
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Mail tool")
+                    .into(),
+                redacted.to_string(),
+            )),
+            failed: false,
+        };
+    }
     if !parse_codex_subagent_updates(item, "event").is_empty() {
         return Parsed {
             native_session_id: None,

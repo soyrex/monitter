@@ -106,6 +106,15 @@ No fake conversations, progress, token counts, host connections or model replies
   writes an app-local trace containing a prompt fingerprint and typed decision/evidence, and does not create a
   task, invoke a provider, inspect a workspace, grant permissions, or expose the credential. LAN callers are
   rejected. A `human_review_required` result must be stopped by the composer before task creation.
+- `request_mail_detail { taskId: string, mailId: string }` -> `{ status: "ready" | "pending" }`.
+  Native-owner only and deliberately absent from LAN/controller/visitor dispatch. The card must be a
+  durable Gmail card in that exact task. A cache miss creates a five-minute, one-card grant and sends
+  a visible, read-only follow-up to the same harness asking its Gmail connector to read that exact
+  provider message and return plain text through `present_mail_detail`. This never grants send,
+  reply, archive, label, delete, credential, or permission authority.
+- `get_mail_detail { taskId: string, mailId: string }` -> `MailDetail | null`. Native-owner only.
+  Returns a matching full message from the bounded 30-minute process-local cache. Full bodies are
+  never persisted in `Snapshot`, SQLite, compact UI projections, visitor sharing, or RunEvent detail.
 - `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null, codexHome?: string | null, refresh?: boolean } }` -> ModelCatalog.
   Agent targets work before the first turn. ACP catalogs are obtained from the saved launcher by
   initializing an isolated ACP connection and creating a model-free session; no user prompt or
@@ -912,6 +921,21 @@ The same Rust catalogue supplies the native harness tool allowlists:
 - `terminal_run`: open an interactive Monitter terminal tab and run a shell command in it.
   Requires `command` (bounded to 4096 bytes); optional `cwd` defaults to the caller task's
   saved folder. The shell stays interactive after the command finishes.
+- `mail_triage_help`: return the read-only Gmail workflow and its untrusted-content rules.
+- `present_mail_batch`: accept 1–20 normalized Gmail envelopes with bounded headers and snippets,
+  never bodies. The normalized aggregate state is capped at 64 KiB so every accepted batch remains
+  one Jev HTTP request. The authenticated MCP grant supplies the task identity, and this first milestone
+  accepts Codex callers only. Monitter immediately persists a body-free provisional card module,
+  then sends all envelopes to one background Jev System One request containing five typed Choice
+  questions per message (importance, intent, reply requirement, suggested owner, and suggested
+  action). The same cards are atomically enriched with provider/model/latency/token/cost evidence
+  when supplied. `MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` selects the deterministic local fixture;
+  missing or invalid live Jev results retain a visible 45% confidence fallback rather than
+  fabricating a live label.
+- `present_mail_detail`: accept at most 256 KiB of normalized plain text for one card only while its
+  fresh user-click grant exists and the provider message ID matches. The body is process-local,
+  expires after 30 minutes, is capped with the other cached details, and is redacted from normalized
+  provider tool events before Monitter persists them.
 
 Repeated writes with the same caller task and request ID return the same delivery; changing its
 recipient or message is rejected. A sender cannot address arbitrary existing chats or cancel another
@@ -947,6 +971,14 @@ interpolation for the Authorization header. ACP receives an HTTP server definiti
 session pipe and must advertise `agentCapabilities.mcpCapabilities.http`; otherwise startup fails
 visibly before a prompt is sent. Other Python-based adapters and SSH supervisors are unaffected.
 The broker rejects non-loopback browser origins, invalid/revoked grants, oversized input and unknown tools.
+
+Mail access itself is not part of the broker. The harness retains its own Gmail plugin authentication;
+Monitter receives normalized data only when the agent calls the fixed presentation tools. Email text
+is always data rather than instruction. Jev is advisory classification only and cannot widen mailbox,
+harness, filesystem, or approval authority. The first version exposes no compose/send/reply/forward,
+archive, label, delete, attachment download, OAuth, or background mailbox polling action. `MailBatch`
+is included in owner desktop/LAN snapshots so cards follow the transcript, but the explicit shared-
+visitor projection omits it; full message viewing remains native-owner only.
 
 ## Task Git viewer
 

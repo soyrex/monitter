@@ -193,6 +193,7 @@ impl Database {
             agents: read_vec(&connection, "agents")?,
             tasks: read_vec(&connection, "tasks")?,
             messages: read_vec(&connection, "messages")?,
+            mail_batches: read_vec(&connection, "mail_batches")?,
             events: read_vec::<RunEvent>(&connection, "events")?
                 .into_iter()
                 .map(Arc::new)
@@ -400,6 +401,12 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
     write_vec(transaction, "agents", &snapshot.agents, plain_id)?;
     write_vec(transaction, "tasks", &snapshot.tasks, plain_id)?;
     write_vec(transaction, "messages", &snapshot.messages, message_key)?;
+    write_vec(
+        transaction,
+        "mail_batches",
+        &snapshot.mail_batches,
+        mail_batch_key,
+    )?;
     write_vec(transaction, "events", &snapshot.events, event_key)?;
     write_vec(transaction, "channels", &snapshot.channels, plain_id)?;
     write_vec(transaction, "projects", &snapshot.projects, plain_id)?;
@@ -494,6 +501,13 @@ fn diff_state(
         &before_snapshot.messages,
         &after_snapshot.messages,
         message_key,
+    )?;
+    diff_vec(
+        transaction,
+        "mail_batches",
+        &before_snapshot.mail_batches,
+        &after_snapshot.mail_batches,
+        mail_batch_key,
     )?;
     diff_events(transaction, &before_snapshot.events, &after_snapshot.events)?;
     diff_vec(
@@ -614,6 +628,7 @@ has_id!(
     Agent,
     Task,
     Message,
+    MailBatch,
     RunEvent,
     Channel,
     Project,
@@ -625,6 +640,14 @@ has_id!(
     Schedule,
     ScheduleRun
 );
+
+fn mail_batch_key(value: &MailBatch) -> (&str, Option<&str>, Option<i64>) {
+    (
+        &value.id,
+        Some(value.task_id.as_str()),
+        Some(value.created_at),
+    )
+}
 
 fn message_key(value: &Message) -> (&str, Option<&str>, Option<i64>) {
     (

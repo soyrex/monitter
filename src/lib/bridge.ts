@@ -48,6 +48,8 @@ import type {
   SlashCommand,
   SlashCommandExecution,
   JevRoutePlan,
+  MailDetail,
+  MailDetailRequestResult,
 } from "./types";
 
 export interface MonitterBridge {
@@ -79,6 +81,8 @@ export interface MonitterBridge {
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | SendAccepted>;
+  requestMailDetail(taskId: string, mailId: string): Promise<MailDetailRequestResult>;
+  getMailDetail(taskId: string, mailId: string): Promise<MailDetail | null>;
   clearTaskContext(taskId: string): Promise<Snapshot>;
   cancelQueuedMessage(id: string): Promise<Snapshot>;
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
@@ -264,6 +268,8 @@ const nativeBridge: MonitterBridge = {
   deleteProject: id => invoke<Snapshot>("delete_project", {id}),
   setTaskProject: (taskId, projectId) => invoke<Snapshot>("set_task_project", {taskId, projectId}),
   sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
+  requestMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke<MailDetailRequestResult>('request_mail_detail', { taskId, mailId }),
+  getMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke<MailDetail | null>('get_mail_detail', { taskId, mailId }),
   clearTaskContext: (taskId) => invoke<Snapshot>('clear_task_context', { taskId }),
   cancelQueuedMessage: (id) => invoke<Snapshot>("cancel_queued_message", { id }),
   editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
@@ -322,6 +328,7 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   agents: [],
   tasks: [],
   messages: [],
+  mailBatches: [],
   events: [],
   channels: [],
   projects: [],
@@ -369,6 +376,8 @@ const previewBridge: MonitterBridge = {
   deleteProject: () => desktopOnly(),
   setTaskProject: () => desktopOnly(),
   sendMessage: () => desktopOnly(),
+  requestMailDetail: () => desktopOnly(),
+  getMailDetail: () => desktopOnly(),
   clearTaskContext: () => desktopOnly(),
   cancelQueuedMessage: () => desktopOnly(),
   editQueuedMessage: () => desktopOnly(),
@@ -455,6 +464,8 @@ export function getBridge(): MonitterBridge {
       setTaskProject: (taskId, projectId) => test.invoke("set_task_project", {taskId, projectId}) as Promise<Snapshot>,
       sendMessage: (taskId, text, attachmentIds = []) =>
         test.invoke("send_message", { taskId, text, attachmentIds }) as Promise<Snapshot>,
+      requestMailDetail: (taskId, mailId) => test.invoke('request_mail_detail', { taskId, mailId }) as Promise<MailDetailRequestResult>,
+      getMailDetail: (taskId, mailId) => test.invoke('get_mail_detail', { taskId, mailId }) as Promise<MailDetail | null>,
       clearTaskContext: (taskId) => test.invoke('clear_task_context', { taskId }) as Promise<Snapshot>,
       cancelQueuedMessage: (id) => test.invoke("cancel_queued_message", { id }) as Promise<Snapshot>,
       editQueuedMessage: (id, text) => test.invoke("edit_queued_message", { id, text }) as Promise<Snapshot>,

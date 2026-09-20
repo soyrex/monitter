@@ -15,7 +15,7 @@ commands.allow = [
   "probe_host", "list_codex_accounts", "discover_acp_agents", "verify_acp_agent", "save_agent", "delete_agent",
   "create_task", "handoff_task", "choose_local_folder", "save_project", "delete_project", "set_task_project",
   "rename_task", "autoname", "delete_task", "preview_task_deletion", "delete_archived_task",
-  "set_task_archived", "clear_task_context", "send_message", "send_message_fast", "resume_task",
+  "set_task_archived", "clear_task_context", "send_message", "send_message_fast", "request_mail_detail", "get_mail_detail", "resume_task",
   "cancel_task", "cancel_queued_message", "edit_queued_message", "set_channel_agent_conversation",
   "stop_channel_agent_conversation", "save_settings", "set_native_escape_shield", "load_dev_ui",
   "use_packaged_ui", "save_channel", "set_channel_membership", "send_channel_message",

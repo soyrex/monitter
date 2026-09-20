@@ -57,6 +57,7 @@ mod internal_agent_tests;
 mod lan;
 mod lan_sync;
 mod markdown;
+mod mail_triage;
 mod menu;
 pub mod model;
 pub mod model_router;
@@ -329,6 +330,10 @@ pub(crate) struct Service {
     // assistant message. It is never a path reader or a persisted capability.
     pending_codex_images: Mutex<HashMap<String, Vec<attachments::Attachment>>>,
     app_server_message_ids: Mutex<HashMap<(String, String, String), String>>,
+    // Full mail bodies and the click-to-fetch grants are deliberately
+    // process-local. Durable state contains only bounded envelope cards.
+    mail_details: Mutex<HashMap<(String, String), mail_triage::CachedMailDetail>>,
+    pending_mail_details: Mutex<HashMap<(String, String), mail_triage::PendingMailDetail>>,
     collaboration: Mutex<Option<collaboration_transport::Broker>>,
     collaboration_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     collaboration_started: std::sync::atomic::AtomicBool,
@@ -609,10 +614,14 @@ impl Service {
             &task_hosts,
             codex_accounts::effective_home(None).ok(),
         );
+        let recovered_mail_batches = mail_triage::recover_interrupted_batches(&mut snapshot);
         let internal_admin_state = ensure_internal_admin(&mut snapshot);
         // The bootstrap may have appended the resident Monitter Admin agent.
         // Persist that change so the next launch sees it as a normal agent.
-        if internal_admin_state == InternalAdminState::Created || pinned_legacy_codex_homes {
+        if internal_admin_state == InternalAdminState::Created
+            || pinned_legacy_codex_homes
+            || recovered_mail_batches
+        {
             store.save(&snapshot, &task_hosts, &attachments)?;
         }
         let shortcut_mode = native_shortcut_mode_code(&snapshot.settings.shortcut_mode);
@@ -636,6 +645,8 @@ impl Service {
             admin_dispatch: Mutex::new(()),
             pending_codex_images: Mutex::new(HashMap::new()),
             app_server_message_ids: Mutex::new(HashMap::new()),
+            mail_details: Mutex::new(HashMap::new()),
+            pending_mail_details: Mutex::new(HashMap::new()),
             collaboration: Mutex::new(None),
             collaboration_grants: Mutex::new(HashMap::new()),
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
@@ -1107,6 +1118,9 @@ impl Service {
                 data.snapshot
                     .messages
                     .retain(|m| !affected_set.contains(&m.task_id));
+                data.snapshot
+                    .mail_batches
+                    .retain(|batch| !affected_set.contains(&batch.task_id));
                 data.snapshot
                     .events
                     .retain(|e| !affected_set.contains(&e.task_id));
@@ -7006,6 +7020,9 @@ fn delete_task_blocking(service: &Service, id: String) -> Result<Snapshot, Strin
         data.snapshot
             .messages
             .retain(|message| message.task_id != id);
+        data.snapshot
+            .mail_batches
+            .retain(|batch| batch.task_id != id);
         data.snapshot.events.retain(|event| event.task_id != id);
         data.snapshot
             .subagent_sessions
@@ -7118,6 +7135,30 @@ async fn send_message_fast(
     .await
     .map_err(|error| format!("Send worker failed: {error}"))??;
     Ok(lan_sync::Accepted { accepted: true })
+}
+
+#[tauri::command]
+async fn request_mail_detail(
+    state: State<'_, AppState>,
+    task_id: String,
+    mail_id: String,
+) -> Result<mail_triage::MailDetailRequestResult, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.request_mail_detail(task_id, mail_id))
+        .await
+        .map_err(|error| format!("Mail detail request worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_mail_detail(
+    state: State<'_, AppState>,
+    task_id: String,
+    mail_id: String,
+) -> Result<Option<mail_triage::MailDetail>, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.get_mail_detail(&task_id, &mail_id))
+        .await
+        .map_err(|error| format!("Mail detail read worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -8518,6 +8559,8 @@ pub fn run() {
             clear_task_context,
             send_message,
             send_message_fast,
+            request_mail_detail,
+            get_mail_detail,
             resume_task,
             cancel_task,
             cancel_queued_message,

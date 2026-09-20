@@ -1401,6 +1401,22 @@ pub fn parse_codex_event(value: &Value) -> Parsed {
                 .map(str::to_owned)
         });
     let item = value.get("item").unwrap_or(value);
+    if let Some(redacted) = crate::mail_triage::redacted_tool_event(item) {
+        return Parsed {
+            native_session_id,
+            assistant: None,
+            event: Some((
+                "tool".into(),
+                redacted
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Mail tool")
+                    .into(),
+                redacted.to_string(),
+            )),
+            failed: false,
+        };
+    }
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
     let text = item
         .get("text")

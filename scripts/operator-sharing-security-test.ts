@@ -38,6 +38,15 @@ const source: Snapshot & { futureOwnerSecret: string } = {
     { id: 'profile', taskId: selectedId, role: 'system', text: 'secret system profile', createdAt: 1 },
     { id: 'hidden', taskId: hiddenId, role: 'user', text: 'hidden chat', createdAt: 1 },
   ],
+  mailBatches: [{ id: 'mail-batch', messageId: 'visible', taskId: selectedId, source: 'gmail',
+    accountLabel: 'private-mail-account', queryLabel: 'private-mail-query', createdAt: 1,
+    classifier: { mode: 'jev', provider: 'TypeSafe', model: 'jev', latencyMs: 1, inputTokens: 1,
+      outputTokens: 1, costMicrousd: 1, fallbackReason: null },
+    items: [{ id: 'mail-card', providerMessageId: 'private-provider-message', providerThreadId: null,
+      from: 'private-sender@example.com', to: ['private-recipient@example.com'], cc: [],
+      subject: 'private mail subject', receivedAt: 1, snippet: 'private mail snippet', importance: 'high',
+      importanceScore: 80, intent: 'action_request', replyRequired: 'yes', suggestedOwner: 'me',
+      suggestedAction: 'reply', confidence: 90, rationale: 'private mail rationale' }] }],
   events: [{ id: 'event', taskId: selectedId, kind: 'log', title: 'secret log', detail: '/private/log', createdAt: 1 }],
   channels: [{ id: 'channel-1', name: 'secret channel', description: '', agentIds: [], messages: [] }],
   projects: [], settings, collaborations: [],
@@ -77,7 +86,9 @@ assert.deepEqual(visitor.approvalRequests, []);
 assert.deepEqual(visitor.approvalRules, []);
 const serialized = JSON.stringify(visitor);
 for (const secret of ['/private', 'secret instructions', 'secret system profile', 'hidden chat',
-  'secret queued text', 'secret approval', 'future private value', 'native-', 'codexHome', '.codex-work']) assert.ok(!serialized.includes(secret), secret);
+  'secret queued text', 'secret approval', 'future private value', 'native-', 'codexHome', '.codex-work',
+  'private-mail-account', 'private-provider-message', 'private mail snippet']) assert.ok(!serialized.includes(secret), secret);
+assert.equal('mailBatches' in visitor, false, 'Mail cards are owner-only and must be absent from visitor projections.');
 assert.equal(source.tasks[0].cwd, '/private/workspace', 'Projection must not mutate owner state.');
 assert.equal(source.messages[0].attachments?.[0].path, '/private/secret.txt');
 

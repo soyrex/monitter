@@ -223,6 +223,111 @@ pub struct Message {
     pub attachments: Vec<crate::attachments::Attachment>,
 }
 
+/// Durable, body-free mail triage projection created only by Monitter's
+/// grant-scoped MCP tool. Full message content is kept in a process-local
+/// cache after an explicit user click and never enters `Snapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MailBatch {
+    pub id: String,
+    pub message_id: String,
+    pub task_id: String,
+    pub source: String,
+    pub account_label: String,
+    pub query_label: String,
+    pub created_at: i64,
+    pub classifier: MailClassifierTrace,
+    pub items: Vec<MailCard>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MailClassifierTrace {
+    pub mode: String,
+    pub provider: String,
+    pub model: String,
+    pub latency_ms: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cost_microusd: Option<u64>,
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MailImportance {
+    Critical,
+    High,
+    Normal,
+    Low,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MailIntent {
+    ActionRequest,
+    DecisionNeeded,
+    Information,
+    Scheduling,
+    Transactional,
+    Newsletter,
+    Personal,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MailReplyState {
+    Yes,
+    No,
+    Unclear,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MailOwner {
+    Me,
+    Sender,
+    NamedRecipient,
+    Shared,
+    Unclear,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MailSuggestedAction {
+    Reply,
+    Review,
+    Schedule,
+    Delegate,
+    Track,
+    Archive,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MailCard {
+    pub id: String,
+    pub provider_message_id: String,
+    pub provider_thread_id: Option<String>,
+    pub from: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub received_at: i64,
+    pub snippet: String,
+    pub importance: MailImportance,
+    pub importance_score: u8,
+    pub intent: MailIntent,
+    pub reply_required: MailReplyState,
+    pub suggested_owner: MailOwner,
+    pub suggested_action: MailSuggestedAction,
+    /// Lowest Jev answer confidence across this card's typed dimensions.
+    pub confidence: u8,
+    pub rationale: String,
+}
+
 /// A deliberately small, provider-neutral entry shown in the subagent visor.
 /// Native Codex thread items are normalized at the backend boundary so the UI
 /// never needs to understand the app-server protocol or expose raw rollouts.
@@ -950,6 +1055,10 @@ pub struct Snapshot {
     pub agents: Vec<Agent>,
     pub tasks: Vec<Task>,
     pub messages: Vec<Message>,
+    /// Body-free, owner-facing mail cards. Shared-visitor projection omits
+    /// this field explicitly; full bodies are never stored here.
+    #[serde(default)]
+    pub mail_batches: Vec<MailBatch>,
     /// Event records are immutable after insertion. Sharing their allocation
     /// keeps a candidate Snapshot clone from duplicating every historical
     /// event on an ordinary streaming update; serde retains the same JSON
@@ -1395,6 +1504,7 @@ pub fn default_snapshot() -> Snapshot {
         }],
         tasks: vec![],
         messages: vec![],
+        mail_batches: vec![],
         events: vec![],
         channels: vec![],
         projects: vec![],

@@ -479,7 +479,7 @@ impl JevClassifier for MockJevClassifier {
 }
 
 const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
-const MAX_JEV_PROMPT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_JEV_PROMPT_BYTES: usize = 64 * 1024;
 
 pub trait JevHttpClient: Send + Sync {
     fn post_system_one(
@@ -534,7 +534,18 @@ impl JevHttpClient for CurlJevHttpClient {
                 .map_err(|error| format!("Could not complete Jev HTTPS request: {error}"))?;
             let response = fs::read(&response_path)
                 .map_err(|error| format!("Could not read Jev response: {error}"))?;
-            let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let timing = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let mut timing_fields = timing.split_whitespace();
+            let status = timing_fields.next().unwrap_or_default().to_string();
+            if std::env::var_os("MONITTER_JEV_DIAGNOSTICS").is_some() {
+                let fields = timing_fields.collect::<Vec<_>>();
+                if fields.len() == 5 {
+                    eprintln!(
+                        "Jev HTTPS timing seconds: dns={} connect={} tls={} first_byte={} total={}",
+                        fields[0], fields[1], fields[2], fields[3], fields[4]
+                    );
+                }
+            }
             if !output.status.success() {
                 return Err(format!(
                     "Jev HTTPS request failed: {}",
@@ -580,7 +591,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 fn curl_config(api_key: &str, response_path: &Path) -> String {
     format!(
-        "url = {}\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\nheader = {}\noutput = {}\nwrite-out = \"%{{http_code}}\"\nsilent\nshow-error\nconnect-timeout = 5\nmax-time = 10\n",
+        "url = {}\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\nheader = {}\noutput = {}\nwrite-out = \"%{{http_code}} %{{time_namelookup}} %{{time_connect}} %{{time_appconnect}} %{{time_starttransfer}} %{{time_total}}\"\nsilent\nshow-error\nconnect-timeout = 5\nmax-time = 10\n",
         curl_config_value(JEV_ENDPOINT),
         curl_config_value(&format!("Authorization: Bearer {api_key}")),
         curl_config_value(&response_path.display().to_string()),
@@ -606,6 +617,81 @@ pub struct LiveJevClassifier {
     api_key: String,
     model: String,
     client: Box<dyn JevHttpClient>,
+}
+
+/// Raw typed-question response used by other narrow Jev classifiers inside
+/// Monitter. The caller owns its schema and must validate every answer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JevSystemOneResult {
+    pub body: serde_json::Value,
+    pub evidence: ClassifierEvidence,
+}
+
+pub(crate) fn live_jev_system_one(
+    state: &str,
+    questions: serde_json::Value,
+) -> Result<JevSystemOneResult, String> {
+    if state.len() > MAX_JEV_PROMPT_BYTES {
+        return Err(format!(
+            "Jev input exceeds the {} KiB MVP limit.",
+            MAX_JEV_PROMPT_BYTES / 1024
+        ));
+    }
+    let api_key = crate::environment_secrets::jev_api_key_for_internal_service()?;
+    let model = std::env::var("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|_| "jev-latest".into());
+    system_one_with_client(
+        &api_key,
+        &model,
+        state,
+        questions,
+        &CurlJevHttpClient,
+    )
+}
+
+pub(crate) fn system_one_with_client(
+    api_key: &str,
+    model: &str,
+    state: &str,
+    questions: serde_json::Value,
+    client: &dyn JevHttpClient,
+) -> Result<JevSystemOneResult, String> {
+    if !questions.is_object() {
+        return Err("Jev questions must be an object.".into());
+    }
+    let response = client.post_system_one(
+        api_key,
+        &serde_json::json!({"model":model,"state":state,"questions":questions}),
+    )?;
+    let usage = response
+        .body
+        .get("usage")
+        .unwrap_or(&serde_json::Value::Null);
+    let evidence = ClassifierEvidence {
+        provider: response
+            .body
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("TypeSafe")
+            .into(),
+        model: response
+            .body
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(model)
+            .into(),
+        latency_ms: response.latency_ms,
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64),
+        cost_usd: usage.get("cost").and_then(serde_json::Value::as_f64),
+    };
+    Ok(JevSystemOneResult {
+        body: response.body,
+        evidence,
+    })
 }
 
 impl LiveJevClassifier {

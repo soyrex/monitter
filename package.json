@@ -20,6 +20,7 @@
     "test:ui": "node scripts/ui-smoke.mjs",
     "test:hot-ui": "node scripts/hot-ui-test.mjs",
     "test:extensions:ui": "node scripts/extensions-settings-ui-test.mjs",
+    "test:mail-triage:ui": "node scripts/mail-triage-ui-test.mjs",
     "test:workspaces": "node scripts/workspace-persistence-test.mjs",
     "test:workspaces:ui": "node scripts/ui-scoped-workspaces-smoke.mjs",
     "test:overview:ui": "node scripts/ui-global-overview-workspace-smoke.mjs",

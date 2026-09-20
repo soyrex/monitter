@@ -22,6 +22,7 @@
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ExpandableUserRequest from '$lib/components/ExpandableUserRequest.svelte';
   import SparkleField from '$lib/components/SparkleField.svelte';
+  import MailTriageBatch from '$lib/components/MailTriageBatch.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import { perfMark, perfMeasure } from '$lib/perf-phases';
 
@@ -130,11 +131,12 @@
   setContext('monitter-markdown-task-id', task.id);
 
   let taskMenuAnchor = $state<HTMLButtonElement>();
-  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
-  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, optimisticMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
+  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
+  const taskMailBatches = $derived((snapshot.mailBatches ?? []).filter(batch => batch.taskId === task.id));
+  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, mailBatches: taskMailBatches, optimisticMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
   const transcriptBuffer = createTranscriptBuffer<TranscriptDisplay>(
     () => task.id,
-    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, conversationItems, optimisticMessages, confirmedDeliveryIds, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
+    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, mailBatches: taskMailBatches, conversationItems, optimisticMessages, confirmedDeliveryIds, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
     () => transcriptFingerprint,
   );
   const display = $derived(transcriptBuffer.value());
@@ -145,6 +147,7 @@
   const displayConfirmedDeliveryIds = $derived(display.confirmedDeliveryIds);
   const displayCollaborations = $derived(display.collaborations);
   const displaySubagents = $derived(display.subagents);
+  const displayMailBatches = $derived(display.mailBatches);
   const displayLatestUserRequest = $derived(displayItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
   const displayThinking = $derived.by(() => {
     if (displayTask.status !== 'running' || display.hasPendingApprovals) return false;
@@ -203,7 +206,7 @@
     <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       <TranscriptVirtualList
         items={displayItems}
-        getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
+        getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' || item.type === 'process-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
         stickyKey={displayLatestUserRequest?.id ?? null}
         {active}>
         {#snippet children(item, _index)}
@@ -224,7 +227,9 @@
             <button class={`approval-inline ${item.value.status}`} onclick={()=>onOpenApproval(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{formatTime(item.value.resolvedAt ?? item.value.createdAt)}</time></button>
           {:else}
             {@const message=item.value}
-            {#if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator" aria-label={`Context Cleared at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · Context Cleared</time><span aria-hidden="true"></span></div>
+            {@const mailBatch=displayMailBatches.find(batch => batch.messageId === message.id)}
+            {#if mailBatch}<MailTriageBatch batch={mailBatch} taskId={displayTask.id}/>
+            {:else if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator" aria-label={`Context Cleared at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · Context Cleared</time><span aria-hidden="true"></span></div>
             {:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
             {:else if !message.collaborationId || !displayCollaborations.find(value => value.id === message.collaborationId)}
               {@const optimistic=displayOptimisticMessages.find(item=>item.id===message.id)}

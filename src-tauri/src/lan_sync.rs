@@ -216,6 +216,7 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         agents: snapshot.agents.clone(),
         tasks: snapshot.tasks.clone(),
         messages: snapshot.messages.clone(),
+        mail_batches: snapshot.mail_batches.clone(),
         events: newest_first.into_iter().map(Arc::new).collect(),
         channels: snapshot.channels.clone(),
         projects: snapshot.projects.clone(),

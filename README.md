@@ -229,6 +229,50 @@ evaluation plumbing only; they are not claims about live model quality, price,
 or latency. A later live evaluation should run the same tasks with explicitly
 approved providers and preserve the resulting traces for review.
 
+## Experimental Gmail triage
+
+Monitter can turn Gmail results from a connected coding agent into native,
+clickable mail cards without putting Gmail OAuth inside Monitter. The harness
+keeps its own Gmail plugin access. When asked to list or triage mail, it reads
+messages through that connector and calls Monitter's built-in
+`present_mail_batch` MCP tool once with up to 20 normalized headers and bounded
+snippets. The whole group is classified in one Jev HTTP request, rather than
+paying the connection and TLS setup cost once per message.
+Provider message/thread IDs remain in Monitter for exact click-to-fetch routing
+but are omitted from the Jev request.
+
+Monitter renders provisional low-confidence cards immediately, then enriches
+the batch with Jev in the background so Jev network latency does not block the
+mail list. Five typed decisions are collected for each message: importance,
+intent, whether a reply appears necessary, likely next-action owner, and
+suggested action. Cards show the source account, score, confidence, and
+pending/Jev/fallback provenance. Set
+`MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` when developing without a live key;
+otherwise the Keychain-backed `JEV_API_KEY` is used and any failure is shown as
+a low-confidence local fallback. The allowlisted key is cached in process after
+its first Keychain read and refreshed when the Settings vault changes; it is
+never exposed to the UI or persisted outside Keychain.
+
+Clicking a card is an explicit detail request. Monitter sends a visible,
+read-only follow-up to the same agent, which reads that exact Gmail message and
+returns plain text through `present_mail_detail`. Full bodies are held in a
+bounded process-local cache for 30 minutes: they are not written to SQLite,
+Snapshot, visitor sharing, or Monitter's event trace. Mail tool payloads are
+redacted before normalized provider activity is persisted.
+
+This milestone is reading and classification only. It does not expose Gmail
+credentials or provide compose, send, reply, forward, archive, label, delete,
+attachment-download, background polling, or autonomous mailbox actions. Email
+content is always untrusted data and Jev never grants additional authority.
+For the strictest boundary, configure the harness's Gmail connector itself with
+read-only account scopes: Monitter cannot revoke independent mailbox powers
+already granted to a provider plugin, but its mail workflow never invokes or
+exposes mutation tools.
+
+See [the protocol and safety contract](docs/CONTRACT.md) for the MCP schemas,
+limits, cache rules, and owner/visitor boundaries. Run the focused UI fixture
+with `npm run test:mail-triage:ui`.
+
 Platform build instructions:
 
 - macOS: `npm run build:mac`, then `npm run install:mac`. For a local debug package, use `npm run build:mac:local` and `npm run install:mac -- --debug`.
@@ -248,6 +292,7 @@ When opening an issue, include your OS and version, Monitter commit, harness/ver
 ## More detail
 
 - [Architecture and command boundary](docs/CONTRACT.md)
+- [Read-only Gmail and Jev triage](docs/MAIL-TRIAGE.md)
 - [ACP adapter and compatibility](docs/ACP-ADAPTER.md)
 - [Idle runtime retirement](docs/IDLE-RUNTIME-RETIREMENT.md)
 - [Mobile controller](docs/MOBILE-CONTROLLER.md)

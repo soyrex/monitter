@@ -6,7 +6,11 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, process::Command, sync::Mutex};
+use std::{
+    collections::HashSet,
+    process::Command,
+    sync::{Mutex, OnceLock},
+};
 
 const MAX_ENTRIES: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
@@ -15,6 +19,7 @@ const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const KEYCHAIN_SERVICE: &str = "com.monitter.desktop.environment-secrets";
 const KEYCHAIN_ACCOUNT: &str = "default";
+static JEV_API_KEY_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 #[cfg(not(target_os = "macos"))]
 const UNSUPPORTED: &str = "Environment & Secrets is supported only on macOS.";
 
@@ -70,6 +75,7 @@ impl EnvironmentSecretsStore {
 
     pub(crate) fn list(&self) -> Result<EnvironmentSecretsConfig, String> {
         let vault = load_vault()?;
+        refresh_jev_api_key_cache(&vault);
         Ok(redacted_config(&vault))
     }
 
@@ -110,6 +116,7 @@ impl EnvironmentSecretsStore {
         normalize_vault(&mut vault)
             .map_err(|_| "Environment & Secrets data is invalid.".to_string())?;
         save_vault(&vault)?;
+        refresh_jev_api_key_cache(&vault);
         Ok(redacted_config(&vault))
     }
 
@@ -133,6 +140,7 @@ impl EnvironmentSecretsStore {
             return Err("Environment variable was not found. Refresh before deleting.".into());
         }
         save_vault(&vault)?;
+        refresh_jev_api_key_cache(&vault);
         Ok(redacted_config(&vault))
     }
 
@@ -140,7 +148,12 @@ impl EnvironmentSecretsStore {
     /// these pairs only through `Command::env`; this module never builds argv,
     /// shell text, or diagnostics from a secret value.
     pub(crate) fn apply_to_command(&self, command: &mut Command) -> Result<(), String> {
-        apply_pairs_to_command(command, environment_pairs(&load_vault()?));
+        let vault = load_vault()?;
+        // A harness launch already paid the Keychain cost. Reuse only the
+        // allowlisted Jev key for native classifier calls rather than opening
+        // the vault a second time moments later.
+        refresh_jev_api_key_cache(&vault);
+        apply_pairs_to_command(command, environment_pairs(&vault));
         Ok(())
     }
 }
@@ -149,13 +162,35 @@ impl EnvironmentSecretsStore {
 /// outbound request itself. This is deliberately allowlisted and returns no
 /// value across the Tauri boundary or into diagnostic output.
 pub(crate) fn jev_api_key_for_internal_service() -> Result<String, String> {
-    let vault = load_vault()?;
-    vault
+    let mut cached = JEV_API_KEY_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "Jev credential cache is temporarily unavailable.".to_string())?;
+    if let Some(value) = cached.as_ref() {
+        return Ok(value.clone());
+    }
+    let value = load_vault()?
         .entries
         .into_iter()
         .find(|entry| entry.name == "JEV_API_KEY")
         .map(|entry| entry.value)
-        .ok_or_else(|| "Monitter Environment & Secrets has no JEV_API_KEY entry.".to_string())
+        .ok_or_else(|| "Monitter Environment & Secrets has no JEV_API_KEY entry.".to_string())?;
+    *cached = Some(value.clone());
+    Ok(value)
+}
+
+fn refresh_jev_api_key_cache(vault: &Vault) {
+    let Ok(mut cached) = JEV_API_KEY_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    else {
+        return;
+    };
+    *cached = vault
+        .entries
+        .iter()
+        .find(|entry| entry.name == "JEV_API_KEY")
+        .map(|entry| entry.value.clone());
 }
 
 fn apply_pairs_to_command(command: &mut Command, pairs: Vec<(String, String)>) {
