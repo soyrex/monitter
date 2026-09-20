@@ -226,6 +226,9 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         queued_messages: snapshot.queued_messages.clone(),
         approval_requests: snapshot.approval_requests.clone(),
         approval_rules: snapshot.approval_rules.clone(),
+        schedules: snapshot.schedules.clone(),
+        schedule_runs: snapshot.schedule_runs.clone(),
+        pending_throwaway_task_ids: snapshot.pending_throwaway_task_ids.clone(),
     }
 }
 

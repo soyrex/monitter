@@ -71,6 +71,20 @@ impl Service {
                 &required_string(args, "url")?,
                 string_arg(args, "name")?,
             ),
+            "list_schedules" => self.list_schedules_protocol(caller_task),
+            "save_schedule" => self.save_schedule_protocol(caller_task, args),
+            "delete_schedule" => {
+                self.delete_schedule_protocol(caller_task, &required_string(args, "id")?)
+            }
+            "run_schedule_now" => {
+                self.run_schedule_now_protocol(caller_task, &required_string(args, "id")?)
+            }
+            "pause_schedule" => {
+                self.pause_schedule_protocol(caller_task, &required_string(args, "id")?)
+            }
+            "resume_schedule" => {
+                self.resume_schedule_protocol(caller_task, &required_string(args, "id")?)
+            }
             _ => Err("Unknown Monitter collaboration tool.".into()),
         }
     }

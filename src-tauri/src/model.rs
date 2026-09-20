@@ -977,6 +977,214 @@ pub struct Snapshot {
     pub approval_requests: Vec<ApprovalRequest>,
     #[serde(default)]
     pub approval_rules: Vec<ApprovalRule>,
+    /// In-process scheduled agent runs. See `CONTRACT.md` and
+    /// `scheduler.rs` for the full property set. Empty in older
+    /// state files; `#[serde(default)]` keeps the projection
+    /// forward-compatible.
+    #[serde(default)]
+    pub schedules: Vec<Schedule>,
+    #[serde(default)]
+    pub schedule_runs: Vec<ScheduleRun>,
+    /// Task IDs created by `throwaway` schedule fires. The scheduler
+    /// cleanup pass uses this list to find finished throwaway tasks,
+    /// write their Markdown report, and delete or archive them.
+    /// Persisted so cleanup survives restarts; an empty list means
+    /// no throwaway work is pending.
+    #[serde(default)]
+    pub pending_throwaway_task_ids: Vec<String>,
+}
+
+/// Three execution modes a schedule can pick. Each maps to a
+/// different relationship between the schedule and the task it
+/// produces.
+///
+/// - `PersistentThread` reuses one task per schedule; every fire
+///   appends a user message into the same task. Conversation history
+///   carries across fires.
+/// - `NewThreadPerFire` creates a brand-new task for every fire and
+///   leaves it as a standalone chat in the sidebar.
+/// - `Throwaway` creates a task per fire, captures a Markdown report
+///   under the task folder on success, then deletes the task. On
+///   failure the task is auto-archived so it remains inspectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleMode {
+    PersistentThread,
+    NewThreadPerFire,
+    Throwaway,
+}
+
+impl ScheduleMode {
+    pub fn stored(self) -> &'static str {
+        match self {
+            Self::PersistentThread => "persistent_thread",
+            Self::NewThreadPerFire => "new_thread_per_fire",
+            Self::Throwaway => "throwaway",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "persistent_thread" => Ok(Self::PersistentThread),
+            "new_thread_per_fire" => Ok(Self::NewThreadPerFire),
+            "throwaway" => Ok(Self::Throwaway),
+            other => Err(format!(
+                "Unknown schedule mode '{other}'. Use 'persistent_thread', 'new_thread_per_fire', or 'throwaway'."
+            )),
+        }
+    }
+}
+
+/// Behaviour when a tick arrives while the previous fire is still
+/// running. `persistent_thread` schedules default to `Queue`; the
+/// other two modes force `Skip` because queuing makes no sense for
+/// an ephemeral task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlapPolicy {
+    /// Drop the tick and record a `missed: true` event in the run
+    /// log.
+    Skip,
+    /// Queue a follow-up message in the existing task so the agent
+    /// picks it up the moment it finishes. Only valid for
+    /// `persistent_thread` schedules.
+    Queue,
+}
+
+impl OverlapPolicy {
+    pub fn stored(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Queue => "queue",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "skip" => Ok(Self::Skip),
+            "queue" => Ok(Self::Queue),
+            other => Err(format!(
+                "Unknown overlap policy '{other}'. Use 'skip' or 'queue'."
+            )),
+        }
+    }
+}
+
+/// A persisted schedule row. Empty `id` means create; non-empty
+/// means upsert. `next_fire_at_ms` is runtime-only and not persisted
+/// — the scheduler loop recomputes it from `frequency` + `tz` after
+/// every state recovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Schedule {
+    pub id: String,
+    pub title: String,
+    /// Agent ID the schedule dispatches to. Must reference a
+    /// non-internal agent from the same snapshot.
+    pub agent_id: String,
+    /// Prompt text sent to the agent on each fire. v1 has no token
+    /// interpolation; the agent itself does the substitution.
+    pub prompt: String,
+    /// 5-field standard cron expression, e.g. `*/15 * * * *`.
+    pub frequency: String,
+    /// Timezone: `host` means use the OS local zone (`chrono::Local`);
+    /// otherwise an IANA name like `Australia/Sydney`.
+    pub tz: String,
+    pub mode: ScheduleMode,
+    /// Overlap behaviour. Forced to `Skip` for non-persistent modes
+    /// at validation time.
+    #[serde(default = "default_overlap_policy")]
+    pub overlap_policy: OverlapPolicy,
+    /// `None` disables auto-pause. A number pauses the schedule
+    /// after that many consecutive failed runs. The counter resets
+    /// on the first successful fire.
+    #[serde(default)]
+    pub max_consecutive_failures: Option<u32>,
+    /// `enabled: false` is the user-visible "paused" state. The
+    /// scheduler loop skips disabled schedules entirely.
+    #[serde(default = "default_schedule_enabled")]
+    pub enabled: bool,
+    /// Bookkeeping surfaced in the run log. Not the next fire; the
+    /// scheduler recomputes that from `frequency` + `tz` after every
+    /// state recovery.
+    #[serde(default)]
+    pub last_fire_at_ms: Option<i64>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn default_overlap_policy() -> OverlapPolicy {
+    OverlapPolicy::Queue
+}
+
+fn default_schedule_enabled() -> bool {
+    true
+}
+
+/// A single fire of a schedule. Every fire produces exactly one row —
+/// success, failure, skipped, or missed. Surfaced in the schedule
+/// list and in the activity feed as `RunEvent.kind: "schedule"`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRun {
+    pub id: String,
+    pub schedule_id: String,
+    pub fired_at_ms: i64,
+    pub mode: ScheduleMode,
+    /// `None` if the dispatch was skipped (overlap) or missed (task
+    /// could not be created). Otherwise the produced task id.
+    pub task_id: Option<String>,
+    pub status: ScheduleRunStatus,
+    pub finished_at_ms: Option<i64>,
+    /// Short, human-readable summary suitable for an activity row.
+    pub summary: String,
+    /// Optional error detail when `status` is `error`.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// `true` when the loop decided to fire but the previous fire
+    /// was still running and the schedule's overlap policy is
+    /// `skip`.
+    #[serde(default)]
+    pub skipped_overlap: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleRunStatus {
+    /// Fire succeeded — message was sent, throwaway run wrote its
+    /// report.
+    Succeeded,
+    /// Fire failed at dispatch or harness level.
+    Error,
+    /// Tick arrived while previous fire was still running and
+    /// overlap policy is `skip`.
+    Skipped,
+    /// Schedule was disabled or deleted before the loop could pick
+    /// up the tick.
+    Missed,
+}
+
+impl ScheduleRunStatus {
+    pub fn stored(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Error => "error",
+            Self::Skipped => "skipped",
+            Self::Missed => "missed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "succeeded" => Ok(Self::Succeeded),
+            "error" => Ok(Self::Error),
+            "skipped" => Ok(Self::Skipped),
+            "missed" => Ok(Self::Missed),
+            other => Err(format!("Unknown schedule run status '{other}'.")),
+        }
+    }
 }
 
 /// Rebuild or refresh routed delegation entries while opening legacy state or
@@ -1196,6 +1404,9 @@ pub fn default_snapshot() -> Snapshot {
         queued_messages: vec![],
         approval_requests: vec![],
         approval_rules: vec![],
+        schedules: vec![],
+        schedule_runs: vec![],
+        pending_throwaway_task_ids: vec![],
         settings: Settings {
             user_name: String::new(),
             terminal_font_size: default_terminal_font_size(),

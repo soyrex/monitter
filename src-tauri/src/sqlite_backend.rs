@@ -206,6 +206,10 @@ impl Database {
             queued_messages: read_vec(&connection, "queued_messages")?,
             approval_requests: read_vec(&connection, "approval_requests")?,
             approval_rules: read_vec(&connection, "approval_rules")?,
+            schedules: read_vec(&connection, "schedules")?,
+            schedule_runs: read_vec(&connection, "schedule_runs")?,
+            pending_throwaway_task_ids: get_meta(&connection, "pending_throwaway_task_ids")?
+                .unwrap_or_default(),
         };
         let captured_since = get_meta::<Option<i64>>(&connection, "capture_since")?.flatten();
         Ok((
@@ -434,9 +438,26 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
         &snapshot.approval_rules,
         plain_id,
     )?;
+    write_vec(
+        transaction,
+        "schedules",
+        &snapshot.schedules,
+        plain_id,
+    )?;
+    write_vec(
+        transaction,
+        "schedule_runs",
+        &snapshot.schedule_runs,
+        plain_id,
+    )?;
     write_map(transaction, "task_hosts", task_hosts)?;
     write_map(transaction, "attachments", attachments)?;
-    set_meta(transaction, "settings", &snapshot.settings)
+    set_meta(transaction, "settings", &snapshot.settings)?;
+    set_meta(
+        transaction,
+        "pending_throwaway_task_ids",
+        &snapshot.pending_throwaway_task_ids,
+    )
 }
 
 fn diff_state(
@@ -530,6 +551,20 @@ fn diff_state(
         &after_snapshot.approval_rules,
         plain_id,
     )?;
+    diff_vec(
+        transaction,
+        "schedules",
+        &before_snapshot.schedules,
+        &after_snapshot.schedules,
+        plain_id,
+    )?;
+    diff_vec(
+        transaction,
+        "schedule_runs",
+        &before_snapshot.schedule_runs,
+        &after_snapshot.schedule_runs,
+        plain_id,
+    )?;
     diff_map(transaction, "task_hosts", before_hosts, after_hosts)?;
     diff_map(
         transaction,
@@ -539,6 +574,15 @@ fn diff_state(
     )?;
     if before_snapshot.settings != after_snapshot.settings {
         set_meta(transaction, "settings", &after_snapshot.settings)?;
+    }
+    if before_snapshot.pending_throwaway_task_ids
+        != after_snapshot.pending_throwaway_task_ids
+    {
+        set_meta(
+            transaction,
+            "pending_throwaway_task_ids",
+            &after_snapshot.pending_throwaway_task_ids,
+        )?;
     }
     Ok(())
 }
@@ -577,7 +621,9 @@ has_id!(
     SubagentSession,
     QueuedMessage,
     ApprovalRequest,
-    ApprovalRule
+    ApprovalRule,
+    Schedule,
+    ScheduleRun
 );
 
 fn message_key(value: &Message) -> (&str, Option<&str>, Option<i64>) {

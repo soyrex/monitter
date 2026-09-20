@@ -65,6 +65,10 @@ mod process_metrics;
 pub mod profile_init;
 mod runner;
 mod runtime_gc;
+mod scheduler;
+pub(crate) mod scheduler_impl;
+#[cfg(test)]
+mod scheduler_tests;
 #[cfg(test)]
 mod runtime_gc_tests;
 #[cfg(test)]
@@ -330,6 +334,7 @@ pub(crate) struct Service {
     collaboration_started: std::sync::atomic::AtomicBool,
     stopping: std::sync::atomic::AtomicBool,
     idle_collector_started: std::sync::atomic::AtomicBool,
+    scheduler_started: std::sync::atomic::AtomicBool,
     idle_collection: Mutex<()>,
     idle_retirement_failures: Mutex<HashSet<(String, usize)>>,
     native_escape_shield: std::sync::atomic::AtomicBool,
@@ -636,6 +641,7 @@ impl Service {
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
             stopping: std::sync::atomic::AtomicBool::new(false),
             idle_collector_started: std::sync::atomic::AtomicBool::new(false),
+            scheduler_started: std::sync::atomic::AtomicBool::new(false),
             idle_collection: Mutex::new(()),
             idle_retirement_failures: Mutex::new(HashSet::new()),
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
@@ -7249,6 +7255,89 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// Native desktop and LAN desktop surface. Returns the full
+/// snapshot; the frontend reads the `schedules` and `schedule_runs`
+/// fields. The chat-MCP surface calls the equivalent
+/// `mcp__monitter__list_schedules` tool.
+#[tauri::command]
+async fn list_schedules(state: State<'_, AppState>) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.list_schedules())
+        .await
+        .map_err(|error| format!("Schedule list worker failed: {error}"))?
+}
+
+/// Creates or updates a schedule. `id` empty creates; non-empty
+/// upserts. `preset` and `frequency` are mutually exclusive at the
+/// input layer; `preset` wins when both are present. Validation
+/// rejects unknown presets, invalid cron, missing or internal agents,
+/// and unknown timezones before any persistence happens.
+#[tauri::command]
+async fn save_schedule(
+    state: State<'_, AppState>,
+    input: scheduler::ScheduleInput,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_schedule(input))
+        .await
+        .map_err(|error| format!("Schedule save worker failed: {error}"))?
+}
+
+/// Removes the schedule row and any historical runs. Tasks created
+/// by past fires are not touched; they remain in the user's chat
+/// history under their original titles.
+#[tauri::command]
+async fn delete_schedule(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.delete_schedule(id))
+        .await
+        .map_err(|error| format!("Schedule delete worker failed: {error}"))?
+}
+
+/// Dispatches the schedule immediately, records a run, and returns
+/// the snapshot. The dispatch goes through the same overlap and
+/// mode-aware path as a normal timer fire, so user-driven runs and
+/// timer-driven runs share the activity log shape.
+#[tauri::command]
+async fn run_schedule_now(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.run_schedule_now(id))
+        .await
+        .map_err(|error| format!("Schedule run-now worker failed: {error}"))?
+}
+
+/// Flips `enabled: false`. A disabled schedule stays in the list and
+/// can be re-enabled; its run log and last-fire timestamp are
+/// preserved.
+#[tauri::command]
+async fn pause_schedule(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.set_schedule_enabled(id, false))
+        .await
+        .map_err(|error| format!("Schedule pause worker failed: {error}"))?
+}
+
+/// Flips `enabled: true` and resets the consecutive-failure counter.
+#[tauri::command]
+async fn resume_schedule(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.set_schedule_enabled(id, true))
+        .await
+        .map_err(|error| format!("Schedule resume worker failed: {error}"))?
+}
+
 #[tauri::command]
 async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Snapshot, String> {
     validate_settings(&settings)?;
@@ -8366,6 +8455,7 @@ pub fn run() {
             service.initialize_collaboration()?;
             service.dispatch_startup_queues();
             service.start_idle_collector();
+            service.start_scheduler();
             app.manage(dev_ui_state);
             app.manage(AppState(service));
             // The listener may immediately dispatch through app.state(), so it
@@ -8459,7 +8549,13 @@ pub fn run() {
             write_terminal,
             resize_terminal,
             read_terminal,
-            close_terminal
+            close_terminal,
+            list_schedules,
+            save_schedule,
+            delete_schedule,
+            run_schedule_now,
+            pause_schedule,
+            resume_schedule
         ])
         .build(tauri::generate_context!())
         .expect("error while running Monitter");

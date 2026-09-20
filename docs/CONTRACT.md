@@ -152,6 +152,12 @@ No fake conversations, progress, token counts, host connections or model replies
   diagnostics. Native snapshot, diagnostic-page and fast-send commands run off the UI thread.
 - `cancel_task { taskId: string }` -> Snapshot
 - `list_terminals {}` -> `TerminalSession[]`
+- `list_schedules {}` -> Snapshot (reads `schedules` and `scheduleRuns`)
+- `save_schedule { input: ScheduleInput }` -> Snapshot (empty `id` creates; `preset` and `frequency` mutually exclusive at the input layer, `preset` wins; rejects unknown presets, invalid cron, missing or internal agents, unknown timezones)
+- `delete_schedule { id: string }` -> Snapshot (removes schedule and its run log; tasks created by past fires remain in chat history)
+- `run_schedule_now { id: string }` -> Snapshot (dispatches via the same overlap and mode-aware path as a timer fire; records a run with the same shape)
+- `pause_schedule { id: string }` -> Snapshot (flips `enabled: false`; preserves run log and `lastFireAtMs`)
+- `resume_schedule { id: string }` -> Snapshot (flips `enabled: true`; resets `consecutiveFailures` to 0)
 - `finish_quit {}` completes a native quit only after `monitter-before-quit` lets the frontend save workspace state
 - `edit_queued_message { id: string, text: string }` -> Snapshot (queued/error only; preserves attachments, recipient, position and status; never retries automatically)
 - `cancel_queued_message { id: string }` -> Snapshot (removes only an unsent queued/error message)
@@ -1469,3 +1475,62 @@ filesystem capability. The shared chat snapshot includes the approved primary an
 visitor display identities, the owner's safe appearance projection, and the upload
 limits so the visitor can render the ordinary read-only chat surface without reading
 owner settings.
+
+## Scheduler
+
+Monitter ships an in-process scheduler that runs as a long-lived background thread
+inside the desktop app. It owns a list of `Schedule` rows persisted alongside the
+rest of the durable state, computes the next firing instant in the schedule's
+resolved timezone, and dispatches on the schedule's `mode`. The thread starts at
+app startup and stops when the desktop exits.
+
+### Property set
+
+- **Runs only while the desktop app is running.** If Monitter is closed, crashed,
+  or the host is sleeping without an auto-launch, schedules do not fire. There is
+  no separate OS-level scheduler, no launchd plist, no cron entry. This is a
+  deliberate product choice; users who need schedules to fire while the desktop
+  is closed must keep the desktop running.
+- **One catch-up fire on startup.** If a schedule was due while the app was off,
+  the loop dispatches at most one fire for that schedule on next launch. Multiple
+  missed ticks are never replayed; the next scheduled fire proceeds normally.
+- **Rust-side decision.** Fires are decided by the scheduler loop reading the
+  persisted `Schedule` row. The Tauri and chat-MCP command surfaces are
+  configuration only. There is no chat-driven code path that bypasses the loop to
+  "force fire now" without going through `run_schedule_now`, which records a run
+  and respects overlap and mode semantics.
+- **Three modes per schedule.** `persistent_thread` reuses one task per schedule
+  and appends the prompt to it on every fire. `new_thread_per_fire` creates a
+  fresh task for every fire and leaves it in the user's chat history.
+  `throwaway` creates a task, writes a Markdown report under the task folder on
+  success, then deletes the task; on failure the task is auto-archived.
+- **Overlap handling.** `persistent_thread` schedules can `queue` the next fire
+  into the existing task or `skip` it when the previous fire is still running.
+  `new_thread_per_fire` and `throwaway` always skip because queuing an ephemeral
+  task makes no sense.
+- **Auto-pause.** When `maxConsecutiveFailures` is set and the schedule crosses
+  that threshold of consecutive failed runs, the schedule is disabled and a
+  `missed` system event is appended. `null` disables auto-pause entirely.
+- **Frequency is a 5-field cron string.** `m h dom mon dow`, evaluated by
+  `croner` against the schedule's resolved timezone. The chat-MCP surface accepts
+  friendly preset names (`every_15_minutes`, `daily_9am`, `weekday_mornings`,
+  etc.) which the backend translates to cron at write time. Cron is the only
+  source of truth on disk. Timezones: `host` for the OS local zone, otherwise an
+  IANA name like `Australia/Sydney`.
+- **Run log.** Every fire produces one `ScheduleRun` row with `status` of
+  `succeeded`, `error`, `skipped`, or `missed`. The log is bounded to the most
+  recent 200 runs per schedule and 500 globally; older rows are evicted
+  deterministically. Each fire also produces a `RunEvent.kind: 'schedule'`
+  activity row visible in the task's diagnostic pane.
+- **No live harness requirement.** The scheduler thread does not require a
+  harness session to be running. If the harness is not authenticated at the
+  scheduled moment, the dispatch records a `ScheduleRun.status: 'error'` with a
+  visible message and applies the auto-pause rule.
+
+### Fields
+
+- `Schedule { id, title, agentId, prompt, frequency, tz, mode, overlapPolicy, maxConsecutiveFailures, enabled, lastFireAtMs, consecutiveFailures, createdAt, updatedAt }`
+- `ScheduleRun { id, scheduleId, firedAtMs, mode, taskId?, status, finishedAtMs?, summary, error?, skippedOverlap }`
+- `ScheduleMode = 'persistent_thread' | 'new_thread_per_fire' | 'throwaway'`
+- `OverlapPolicy = 'skip' | 'queue'`
+- `ScheduleRunStatus = 'succeeded' | 'error' | 'skipped' | 'missed'`

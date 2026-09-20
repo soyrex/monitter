@@ -149,7 +149,7 @@ export interface SubagentTranscriptEntry {
   createdAt: number;
 }
 export interface RunEvent {
-  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent';
+  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent' | 'schedule';
   title: string; detail: string; createdAt: number;
 }
 /** A revision-aware, compact UI projection. A null snapshot means unchanged. */
@@ -265,6 +265,71 @@ export interface Snapshot {
   approvalRequests: ApprovalRequest[];
   /** Omitted by older runtimes and deliberately absent from visitor projections. */
   approvalRules?: ApprovalRule[];
+  /** In-process scheduled agent runs. See CONTRACT.md. */
+  schedules?: Schedule[];
+  /** Per-fire records of schedule activity; bounded to 200 per schedule and 500 globally. */
+  scheduleRuns?: ScheduleRun[];
+  /**
+   * Task IDs created by `throwaway` schedule fires. The scheduler
+   * cleanup pass uses this list to find finished throwaway tasks,
+   * write their Markdown report, and delete or archive them. This
+   * field is intentionally runtime-only in spirit (it tracks work
+   * in flight) but is persisted because cleanup must survive
+   * restarts; an empty list means "no throwaway work pending".
+   */
+  pendingThrowawayTaskIds?: string[];
+}
+
+/**
+ * Three execution modes a schedule can pick. See CONTRACT.md for
+ * the full property set; in short:
+ * - `persistent_thread` reuses one task per schedule; every fire
+ *   appends a user message into the same task.
+ * - `new_thread_per_fire` creates a fresh task for every fire.
+ * - `throwaway` creates a task per fire, writes a Markdown report,
+ *   then deletes the task. On failure the task is auto-archived.
+ */
+export type ScheduleMode = 'persistent_thread' | 'new_thread_per_fire' | 'throwaway';
+/**
+ * Behaviour when a tick arrives while the previous fire is still
+ * running. `persistent_thread` defaults to `queue`; the other two
+ * modes force `skip` because queuing makes no sense for ephemeral
+ * tasks.
+ */
+export type OverlapPolicy = 'skip' | 'queue';
+export type ScheduleRunStatus = 'succeeded' | 'error' | 'skipped' | 'missed';
+export interface Schedule {
+  id: string;
+  title: string;
+  /** Agent ID the schedule dispatches to. Must reference a non-internal agent. */
+  agentId: string;
+  /** Prompt text sent to the agent on each fire. v1 has no token interpolation. */
+  prompt: string;
+  /** 5-field cron expression — see the SCHEDULER section of CONTRACT.md for the format. */
+  frequency: string;
+  /** Timezone — `host` for OS local zone, otherwise an IANA name like `Australia/Sydney`. */
+  tz: string;
+  mode: ScheduleMode;
+  overlapPolicy: OverlapPolicy;
+  /** null disables auto-pause; a number pauses after that many consecutive failures. */
+  maxConsecutiveFailures: number | null;
+  enabled: boolean;
+  lastFireAtMs: number | null;
+  consecutiveFailures: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface ScheduleRun {
+  id: string;
+  scheduleId: string;
+  firedAtMs: number;
+  mode: ScheduleMode;
+  taskId: string | null;
+  status: ScheduleRunStatus;
+  finishedAtMs: number | null;
+  summary: string;
+  error: string | null;
+  skippedOverlap: boolean;
 }
 export interface ProbeResult { ok: boolean; versions: Record<string, string>; message: string; }
 export interface CreateTaskInput {
