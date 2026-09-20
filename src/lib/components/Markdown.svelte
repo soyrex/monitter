@@ -120,6 +120,11 @@
     margin: 0.4em 0;
     padding-left: 1.25em;
   }
+  .markdown :global(ol) {
+    /* Markers sit outside the content box; leave room for multi-digit numbers
+       inside the clipped transcript column. */
+    padding-left: 2.25em;
+  }
   .markdown :global(a) {
     color: var(--accent-ink);
   }
