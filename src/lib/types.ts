@@ -132,12 +132,17 @@ export interface MailClassifierTrace {
   inputTokens: number | null; outputTokens: number | null; costMicrousd: number | null;
   fallbackReason: string | null;
 }
+export interface MailClassificationMetrics {
+  importanceConfidence: number; intentConfidence: number; replyConfidence: number;
+  ownerConfidence: number; actionConfidence: number;
+}
 export interface MailCard {
   id: string; providerMessageId: string; providerThreadId: string | null;
   from: string; to: string[]; cc: string[]; subject: string; receivedAt: number; snippet: string;
   importance: MailImportance; importanceScore: number; intent: MailIntent;
   replyRequired: MailReplyState; suggestedOwner: MailOwner; suggestedAction: MailSuggestedAction;
-  confidence: number; rationale: string; state: MailCardState; firstSeenAt: number; lastSeenAt: number;
+  confidence: number; classificationMetrics?: MailClassificationMetrics; rationale: string;
+  state: MailCardState; firstSeenAt: number; lastSeenAt: number;
   isNew: boolean;
 }
 export interface MailBatch {

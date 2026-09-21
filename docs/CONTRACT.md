@@ -951,7 +951,9 @@ The same Rust catalogue supplies the native harness tool allowlists:
   only. Monitter creates one body-free card module and updates it in place on later calls,
   then sends all envelopes to one background Jev System One request containing five typed Choice
   questions per message (importance, intent, reply requirement, suggested owner, and suggested
-  action). The same cards are atomically enriched with provider/model/latency/token/cost evidence
+  action). Each answer's 0–100 confidence is retained; the visible overall confidence is the
+  minimum of those five values. Older persisted cards without the per-dimension evidence expose
+  zeroes rather than inventing historical metrics. The same cards are atomically enriched with provider/model/latency/token/cost evidence
   when supplied; a stale response from an older sync is discarded. Empty snapshots do not call Jev.
   `MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` selects the deterministic local fixture;
   missing or invalid live Jev results retain a visible 45% confidence fallback rather than

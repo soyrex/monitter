@@ -327,6 +327,17 @@ pub enum MailCardState {
     History,
 }
 
+/// Jev's confidence for each typed mail classification dimension.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MailClassificationMetrics {
+    pub importance_confidence: u8,
+    pub intent_confidence: u8,
+    pub reply_confidence: u8,
+    pub owner_confidence: u8,
+    pub action_confidence: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MailCard {
@@ -347,6 +358,9 @@ pub struct MailCard {
     pub suggested_action: MailSuggestedAction,
     /// Lowest Jev answer confidence across this card's typed dimensions.
     pub confidence: u8,
+    /// Individual Jev confidences. Older persisted cards deserialize as zeroes.
+    #[serde(default)]
+    pub classification_metrics: MailClassificationMetrics,
     pub rationale: String,
     /// Local inbox lifecycle only; this never changes Gmail state.
     #[serde(default)]
