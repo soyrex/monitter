@@ -10,7 +10,8 @@
   import ThinkingStatus from './ThinkingStatus.svelte';
   import ImageLightbox from './ImageLightbox.svelte';
   type DetailLoader = (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
-  let { event, events = [], approvals = [], compressed = false, processTree = false, running = false, active = true, avatar, onloaddetail, onapproval }: { event?: RunEvent; events?: RunEvent[]; approvals?: ApprovalRequest[]; compressed?: boolean; processTree?: boolean; running?: boolean; active?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader; onapproval?: (request: ApprovalRequest) => void } = $props();
+  type ProcessGroup = { type: 'reasoning-group' | 'tool-group'; values: RunEvent[] };
+  let { event, events = [], approvals = [], processGroups = [], compressed = false, processTree = false, running = false, active = true, avatar, onloaddetail, onapproval }: { event?: RunEvent; events?: RunEvent[]; approvals?: ApprovalRequest[]; processGroups?: ProcessGroup[]; compressed?: boolean; processTree?: boolean; running?: boolean; active?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader; onapproval?: (request: ApprovalRequest) => void } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
   const primary = $derived(items[0]);
   const latest = $derived(items.at(-1));
@@ -141,8 +142,28 @@
     terminal: Terminal,
   } as const;
   const TriggerIcon = $derived(ICON_COMPONENT[primaryPresentation.icon]);
-  const processLabel = $derived(`${hasReasoning ? 'Thought' : 'Turn'} · ${toolItems.length} ${toolItems.length === 1 ? 'tool' : 'tools'}${approvals.length ? ` · ${approvals.length} approval${approvals.length === 1 ? '' : 's'}` : ''}${failedTools ? ` · ${failedTools} failed` : ''}`);
+  const processPreview = $derived.by(() => {
+    const current = toolItems.at(-1) ?? primary;
+    if (!current) return '';
+    const detail = readableToolDetail(current).replace(/\s+/g, ' ').trim().replace(/^Command\s+/i, '');
+    if (!detail) return '';
+    return detail.length > 100 ? `${detail.slice(0, 100).trimEnd()}…` : detail;
+  });
+  const processLabel = $derived(`${hasReasoning ? 'Thinking' : 'Turn'} · ${toolItems.length} ${toolItems.length === 1 ? 'tool' : 'tools'}${approvals.length ? ` · ${approvals.length} approval${approvals.length === 1 ? '' : 's'}` : ''}${failedTools ? ` · ${failedTools} failed` : ''}${processPreview ? `: ${processPreview}` : ''}`);
   const approvalLabel = (request: ApprovalRequest) => request.status === 'approved' && request.ruleId ? `Approved by saved rule: ${request.summary || request.tool}` : `${request.status === 'approved' ? 'Approved' : request.status[0].toUpperCase() + request.status.slice(1)}: ${request.summary || request.tool}`;
+  const treeGroups = $derived(processGroups.length ? processGroups : [{ type: 'tool-group' as const, values: items }]);
+  function processGroupLabel(group: ProcessGroup): string {
+    if (group.type === 'reasoning-group') return 'Thought process';
+    const values = group.values.filter(item => item.kind === 'tool' || item.kind === 'subagent');
+    const count = values.length;
+    if (!count) return 'Activity';
+    if (values.every(isShellActivity)) return `Ran ${count} ${count === 1 ? 'command' : 'commands'}`;
+    const label = toolPresentation(values[0], false).label;
+    if (count === 1) return label;
+    if (/\ba file\b/i.test(label)) return label.replace(/\ba file\b/i, `${count} files`);
+    if (/\ba command\b/i.test(label)) return label.replace(/\ba command\b/i, `${count} commands`);
+    return `${label} · ${count} tools`;
+  }
 </script>
 {#snippet imagePreview(item: RunEvent)}
   {#if imagePreviews[item.id]}
@@ -154,26 +175,34 @@
   {:else if imageErrors[item.id]}<p class="detail-state error">Image preview unavailable: {imageErrors[item.id]}</p>
   {/if}
 {/snippet}
+{#snippet processStep(item: RunEvent)}
+  {@const isThought=item.kind === 'reasoning'}
+  {@const presentation=isThought ? {icon:'book-open' as const,label:'Thought process'} : toolPresentation(item, running)}
+  {@const displayItem=expandedEvent(item)}
+  <details class="process-step">
+    <summary><ChevronRight size={12} class="call-chevron"/><span class:failed={presentation.label === 'Tool failed'}><svelte:component this={ICON_COMPONENT[presentation.icon]} size={14}/>{presentation.label}</span><time>{formatTime(item.createdAt)}</time></summary>
+    {#if isThought}<div class="process-thought"><Markdown text={reasoningSummary(displayItem.detail)}/></div>
+    {:else}<pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>{/if}
+    {@render imagePreview(displayItem)}
+    {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
+    {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
+  </details>
+{/snippet}
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 {#if primary && emptyReasoning}
   <ThinkingStatus {running} {active} {avatar} startedAt={primary.createdAt}/>
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning: {summaryPreview}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if processTree && primary && (hasReasoning || items.length > 1 || approvals.length)}
-  <details class="activity process-tree" open={running || undefined}>
+  <details class="activity process-tree">
     <summary aria-label={processLabel}><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>{processLabel}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary>
     <div class="process-steps" aria-label="Process steps">
-      {#each items as item (item.id)}
-        {@const isThought=item.kind === 'reasoning'}
-        {@const presentation=isThought ? {icon:'book-open' as const,label:'Thought process'} : toolPresentation(item, running)}
-        {@const displayItem=expandedEvent(item)}
-        <details class="process-step">
-          <summary><ChevronRight size={12} class="call-chevron"/><span class:failed={presentation.label === 'Tool failed'}><svelte:component this={ICON_COMPONENT[presentation.icon]} size={14}/>{presentation.label}</span><time>{formatTime(item.createdAt)}</time></summary>
-          {#if isThought}<div class="process-thought"><Markdown text={reasoningSummary(displayItem.detail)}/></div>
-          {:else}<pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>{/if}
-          {@render imagePreview(displayItem)}
-          {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
-          {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
+      {#each treeGroups as group, index (group.values[0]?.id ?? index)}
+        <details class="process-branch">
+          <summary><ChevronRight size={12} class="call-chevron"/><span>{processGroupLabel(group)}</span><time>{formatTime(group.values.at(-1)?.createdAt ?? primary.createdAt)}</time></summary>
+          <div class="process-branch-steps">
+            {#each group.values as item (item.id)}{@render processStep(item)}{/each}
+          </div>
         </details>
       {/each}
       {#each approvals as approval (approval.id)}
@@ -240,9 +269,11 @@
   .activity[open] :global(.chevron),.activity-trigger[aria-expanded=true] :global(.chevron),.call[open] :global(.call-chevron){transform:rotate(90deg)}
   .reasoning summary :global(svg){color:var(--accent-ink)}small{flex-shrink:0;color:var(--muted);font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}
   .activity-body{padding:0 14px 12px;overflow:auto;max-height:280px}
-  .process-tree{margin-top:6px}
+  .process-tree{margin:10px 0}
   .process-tree > summary{padding:9px 10px;color:var(--ink);font-size:calc(11px * var(--interface-font-ratio,1))}
   .process-steps{position:relative;display:grid;gap:2px;margin:0 10px 10px 24px;padding-left:12px;border-left:1px solid var(--line)}
+  .process-branch{position:relative;min-width:0}.process-branch > summary{gap:6px;padding:6px 5px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1))}.process-branch > summary span{display:flex;align-items:center;gap:6px}.process-branch > summary time{font-size:calc(9px * var(--interface-font-ratio,1))}.process-branch[open] > summary{color:var(--ink);background:color-mix(in srgb,var(--soft) 55%,transparent)}
+  .process-branch-steps{display:grid;gap:2px;margin:0 0 5px 17px;padding-left:12px;border-left:1px solid var(--line)}
   .process-step{position:relative;min-width:0;border:0;border-radius:5px}
   .process-step::before{content:"";position:absolute;left:-13px;top:16px;width:12px;border-top:1px solid var(--line)}
   .process-step > summary{gap:6px;padding:6px 5px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1))}

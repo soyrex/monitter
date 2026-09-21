@@ -1,4 +1,4 @@
-import type { Agent, Collaboration, Message, RunEvent, Snapshot, SubagentSession, SubagentTranscriptEntry, Task, TaskStatus } from '$lib/types';
+import type { Agent, Collaboration, Message, Project, RunEvent, Snapshot, SubagentSession, SubagentTranscriptEntry, Task, TaskStatus } from '$lib/types';
 import { readableToolDetail, reasoningSummary, subagentThreadLink, toolPresentation } from '$lib/activity-grouping';
 
 /**
@@ -23,6 +23,9 @@ export interface UnifiedSubagent {
   model: string | null;
   reasoningEffort: string | null;
   transcript: SubagentTranscriptEntry[];
+  transcriptEvents: RunEvent[];
+  projectName: string | null;
+  launchedAt: number;
   updatedAt: number;
 }
 
@@ -33,6 +36,7 @@ export interface UnifiedSubagentInput {
   messages?: Message[];
   events?: RunEvent[];
   subagentSessions?: SubagentSession[];
+  projects?: Project[];
   parentTaskId: string;
 }
 
@@ -135,9 +139,10 @@ function sessionTree(
  * collaboration records. A task is authoritative when it exists; a
  * collaboration-only record remains visible rather than becoming a fake task.
  */
-export function unifiedSubagentsForTask({ tasks, agents, collaborations, messages = [], events = [], subagentSessions = [], parentTaskId }: UnifiedSubagentInput): UnifiedSubagent[] {
+export function unifiedSubagentsForTask({ tasks, agents, collaborations, messages = [], events = [], subagentSessions = [], projects = [], parentTaskId }: UnifiedSubagentInput): UnifiedSubagent[] {
   const agentById = new Map(agents.map(agent => [agent.id, agent]));
   const taskById = new Map(tasks.map(task => [task.id, task]));
+  const projectById = new Map(projects.map(project => [project.id, project]));
   const delegationById = new Map(collaborations.filter(value => value.kind === 'delegation').map(value => [value.id, value]));
   const sessions = [...subagentSessions];
   const representedCollaborations = new Set(sessions.flatMap(value => value.collaborationId ? [value.collaborationId] : []));
@@ -168,6 +173,7 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
     const result = session.result ?? collaboration?.result ?? null;
     const error = session.error ?? collaboration?.error ?? null;
     const title = task?.title || concise(prompt, agentName);
+    const transcriptEvents = task ? events.filter(event => event.taskId === task.id && (event.kind === 'tool' || event.kind === 'reasoning')) : [];
 
     return {
       id: session.id,
@@ -186,6 +192,11 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
       model: session.model ?? task?.model ?? null,
       reasoningEffort: session.reasoningEffort ?? task?.modelSettings?.reasoningEffort ?? null,
       transcript: task ? taskTranscript(task, messages, events) : [],
+      transcriptEvents,
+      projectName: (task?.projectId ? projectById.get(task.projectId)?.name : undefined)
+        ?? (taskById.get(parentTaskId)?.projectId ? projectById.get(taskById.get(parentTaskId)!.projectId!)?.name : undefined)
+        ?? null,
+      launchedAt: session.createdAt || task?.createdAt || 0,
       updatedAt: Math.max(session.updatedAt, task?.updatedAt ?? 0, collaboration?.updatedAt ?? 0, latestEvent?.createdAt ?? 0),
     };
   }).sort((a, b) => {
@@ -195,6 +206,6 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
 }
 
 /** Convenience adapter for the regular desktop snapshot. */
-export function unifiedSubagentsFromSnapshot(snapshot: Pick<Snapshot, 'tasks' | 'agents' | 'collaborations' | 'messages' | 'events' | 'subagentSessions'>, parentTaskId: string) {
+export function unifiedSubagentsFromSnapshot(snapshot: Pick<Snapshot, 'tasks' | 'agents' | 'collaborations' | 'messages' | 'events' | 'subagentSessions' | 'projects'>, parentTaskId: string) {
   return unifiedSubagentsForTask({ ...snapshot, subagentSessions: snapshot.subagentSessions ?? [], parentTaskId });
 }

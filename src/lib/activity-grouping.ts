@@ -227,7 +227,7 @@ export type ConversationActivityItem =
   | { type: 'approval'; value: ApprovalRequest }
   | { type: 'reasoning-group'; values: RunEvent[] }
   | { type: 'tool-group'; values: RunEvent[] }
-  | { type: 'process-group'; values: RunEvent[]; approvals?: ApprovalRequest[] };
+  | { type: 'process-group'; values: RunEvent[]; approvals?: ApprovalRequest[]; groups?: Extract<ConversationActivityItem, { type: 'reasoning-group' | 'tool-group' }>[] };
 
 /** One waiting indicator per conversation, never alongside a reply or approval. */
 export function showThinkingFallback(items: ConversationActivityItem[], working: boolean, awaitingApproval = false): boolean {
@@ -247,7 +247,7 @@ function combineProcessGroups(items: ConversationActivityItem[]): ConversationAc
     const values = pending.flatMap(item => item.values);
     const hasReasoning = values.some(item => item.kind === 'reasoning' && !isBlankReasoning(item));
     const hasTools = values.some(item => item.kind === 'tool' || item.kind === 'subagent');
-    if (hasTools && (hasReasoning || pending.length > 1)) result.push({ type: 'process-group', values, approvals: pendingApprovals.length ? pendingApprovals : undefined });
+    if (hasTools && (hasReasoning || pending.length > 1)) result.push({ type: 'process-group', values, approvals: pendingApprovals.length ? pendingApprovals : undefined, groups: pending });
     else result.push(...pending);
     pending = [];
     pendingApprovals = [];
