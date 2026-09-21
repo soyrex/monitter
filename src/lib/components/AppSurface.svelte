@@ -5643,10 +5643,18 @@
     border-right: 1px solid var(--line);
     background: var(--sidebar);
   }
-  .sidebar.keyboard-active::after { content:""; position:absolute; inset:0; z-index:25; border:2px solid var(--accent); pointer-events:none; }
+  /* Sidebar focus is represented on the focused control, not as an active-pane
+     outline around the entire sidebar. Keep it consistent with usage rows. */
+  .sidebar.keyboard-active::after { content:none; }
   :global(.app-shell.native-mac:not(.native-fullscreen)) .sidebar.keyboard-active::after { border-radius:16px 0 0 16px; }
   :global(:root:has([data-active-modal])) .sidebar.keyboard-active::after { content:none; }
-  .sidebar.sidebar-selected :is(.sidebar-tabs, .side-scroll, .agent-rail, .project-rail, .activity-rail, .rail-chats, .rail-project-chats) button:focus { outline:2px solid var(--accent) !important; outline-offset:-2px; border-radius:5px; }
+  .sidebar.sidebar-selected :is(.sidebar-tabs, .side-scroll, .agent-rail, .project-rail, .activity-rail, .rail-chats, .rail-project-chats) button:focus {
+    outline:none !important;
+    outline-offset:0;
+    border-radius:5px;
+    background:color-mix(in srgb,var(--accent) 5%,transparent);
+    box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 12%,transparent);
+  }
   .brand {
     position: relative;
     height: 38px;
