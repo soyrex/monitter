@@ -289,7 +289,7 @@ onMount(() => {
 <svelte:window onkeydown={event => { if (event.key === 'Escape') { sidebarOpen = false; detailsOpen = false; } }} />
 <svelte:head>
 <title>Join Monitter</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
 </svelte:head>
 <div class="share-stage">
 <main class="share">
