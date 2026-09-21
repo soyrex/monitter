@@ -39,7 +39,17 @@ function removeSigningMetadata(path) {
   }
 }
 removeSigningMetadata(app);
-execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'inherit' });
+// Ad-hoc signing (`-`) hashes the bundle, so every build gets a new identity
+// and macOS Keychain re-prompts for Environment & Secrets access on install.
+// Prefer the stable local certificate used for dev builds (see
+// scripts/dev-codesign-runner.mjs); fall back to ad-hoc where it's absent.
+const devIdentity = process.env.MONITTER_DEV_SIGNING_IDENTITY
+  ?? 'Apple Development: soyrex@me.com (V53PM3GMXR)';
+const availableIdentities = execFileSync('/usr/bin/security', ['find-identity', '-v', '-p', 'codesigning'], {
+  encoding: 'utf8',
+});
+const signIdentity = availableIdentities.includes(devIdentity) ? devIdentity : '-';
+execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', signIdentity, app], { stdio: 'inherit' });
 execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], { stdio: 'inherit' });
 
 symlinkSync('/Applications', join(staging, 'Applications'));

@@ -1,0 +1,6 @@
+# Re-signs debug binaries with a stable local certificate before running them,
+# so the macOS Keychain ACL for Environment & Secrets survives rebuilds. See
+# scripts/dev-codesign-runner.mjs for why (ad-hoc signing hashes the binary,
+# so every `cargo build` looks like a new app to Keychain).
+[target.'cfg(target_os = "macos")']
+runner = ["node", "../scripts/dev-codesign-runner.mjs"]
