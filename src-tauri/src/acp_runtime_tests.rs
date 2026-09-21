@@ -43,7 +43,9 @@ fn fixture_with_args(name: &str, args: Vec<String>) -> Fixture {
 import readline from 'node:readline'; import fs from 'node:fs';
 let turns=0, session='fixture-session', configAcknowledged=true;
 const reply=(id,result)=>console.log(JSON.stringify({jsonrpc:'2.0',id,result}));
-const update=(text)=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text},id:`message-${turns}`}}}));
+const updateItem=(text,id)=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text},id}}}));
+const update=(text)=>updateItem(text,`message-${turns}`);
+const usageUpdate=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'usage_update',inputTokens:321,outputTokens:123}}}));
 const commandUpdate=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'available_commands_update',availableCommands:[{name:'usage',description:'Show fixture usage',input:{hint:'window'}}]}}}));
 const routerTrace=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'router_trace',trace:{traceId:'fixture-route',trigger:'initial_prompt',applied:false,requestedModel:'gpt-6-astra',requestedEffort:'max',newModel:'gpt-5.5',newEffort:'high',applicationError:'model unavailable',confidence:0.9,rationale:'fixture rollback'}}}}));
 readline.createInterface({input:process.stdin}).on('line', line=>{
@@ -52,7 +54,7 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
  else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; reply(frame.id,mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='mcode-steer'){ globalThis.activePromptId=frame.id; } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { if(process.argv[2]==='router-trace') routerTrace(); update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='mcode-steer'){ globalThis.activePromptId=frame.id; } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
  else if(frame.method==='mcode/session/steer'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`steer:${frame.params.text}\n`); reply(frame.id,{turnId:'fixture-mcode-turn',mode:'steered'}); update('mcode-steered'); reply(globalThis.activePromptId,{stopReason:'end_turn'}); }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
@@ -205,6 +207,61 @@ fn mona_router_trace_is_visible_as_a_truthful_status_event() {
     assert_eq!(detail["trace"]["requestedModel"], "gpt-6-astra");
     assert_eq!(detail["trace"]["newModel"], "gpt-5.5");
     assert_eq!(detail["trace"]["applicationError"], "model unavailable");
+}
+
+#[test]
+fn mona_prompt_result_persists_metadata_only_on_the_final_assistant_item() {
+    let fixture = fixture_with_args("mona-metadata", vec!["mona-metadata".into()]);
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "Mona result metadata fixture".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let accepted = fixture
+        .accept_send(task.id.clone(), "report your route".into(), vec![])
+        .unwrap()
+        .unwrap();
+    fixture.deliver_accepted(task.id.clone(), accepted);
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot.messages.iter().any(|message| {
+            message.task_id == task.id
+                && message.text == "final item"
+                && message.response_metadata.is_some()
+        })
+    });
+
+    let messages = fixture
+        .snapshot()
+        .unwrap()
+        .messages
+        .into_iter()
+        .filter(|message| message.task_id == task.id && message.role == "assistant")
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].text, "first item");
+    assert!(messages[0].response_metadata.is_none());
+    assert_eq!(messages[1].text, "final item");
+    let metadata = messages[1].response_metadata.as_ref().unwrap();
+    assert_eq!(metadata.model, "MiniMax-M2.7");
+    assert_eq!(metadata.input_tokens, 321);
+    assert_eq!(metadata.output_tokens, 123);
+    assert_eq!(metadata.jev_rationale.as_deref(), Some("fixture route rationale"));
+    assert_eq!(metadata.requested_model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(metadata.requested_effort.as_deref(), Some("xhigh"));
+    assert_eq!(metadata.confidence, Some(0.87));
+    assert_eq!(metadata.route_applied, Some(true));
+    assert!(!fixture.snapshot().unwrap().events.iter().any(|event| {
+        event.task_id == task.id && event.title == "Usage capture warning"
+    }));
 }
 
 #[test]

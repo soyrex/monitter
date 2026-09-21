@@ -116,6 +116,7 @@ impl Service {
         text: &str,
         phase: Option<&str>,
         complete: bool,
+        response_metadata: Option<AssistantResponseMetadata>,
     ) -> Result<(), String> {
         if text.len() > 2 * 1024 * 1024 || item_id.len() > 512 {
             return Err("Resident transport reply exceeds the supported size.".into());
@@ -187,6 +188,9 @@ impl Service {
                 if complete && !images.is_empty() {
                     message.attachments = images;
                 }
+                if complete && response_metadata.is_some() {
+                    message.response_metadata.clone_from(&response_metadata);
+                }
                 message.clone()
             } else {
                 let message = Message {
@@ -199,6 +203,7 @@ impl Service {
                     collaboration_id: None,
                     attachments: images,
                     phase,
+                    response_metadata: if complete { response_metadata } else { None },
                     stream_status: Some(if complete { "complete" } else { "streaming" }.into()),
                 };
                 data.snapshot.messages.push(message.clone());
@@ -473,6 +478,7 @@ impl Service {
                 collaboration_id: None,
                 attachments,
                 phase: None,
+                response_metadata: None,
                 stream_status: None,
             });
             data.snapshot.events.push(Arc::new(RunEvent {
@@ -589,6 +595,7 @@ impl Service {
                 collaboration_id: None,
                 attachments,
                 phase: None,
+                response_metadata: None,
                 stream_status: None,
             });
             data.snapshot.events.push(Arc::new(RunEvent {

@@ -25,6 +25,7 @@
     "test:workspaces:ui": "node scripts/ui-scoped-workspaces-smoke.mjs",
     "test:overview:ui": "node scripts/ui-global-overview-workspace-smoke.mjs",
     "test:usage-rings": "node scripts/usage-rings-time-test.mjs",
+    "test:response-metadata": "node scripts/response-metadata-unit-test.mjs",
     "test:codex-accounts:ui": "node scripts/codex-accounts-ui-test.mjs",
     "test:native": "node scripts/native-smoke.mjs",
     "test:permissions": "node scripts/permission-contract-test.mjs",

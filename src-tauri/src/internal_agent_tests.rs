@@ -759,6 +759,7 @@ fn delete_agent_with_delete_handling_drops_tasks_and_history() {
             snapshot.messages.push(crate::model::Message {
                 stream_status: None,
                 phase: None,
+                response_metadata: None,
                 id: "m-1".into(),
                 task_id: task.id.clone(),
                 role: "user".into(),

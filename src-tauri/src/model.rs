@@ -210,6 +210,11 @@ pub struct Message {
     /// Codex distinguishes interim commentary from the turn's final answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Authoritative, bounded completion data reported by an ACP harness.
+    /// This is added only after the final assistant item for a completed turn;
+    /// legacy snapshots deliberately deserialize without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_metadata: Option<AssistantResponseMetadata>,
     pub id: String,
     pub task_id: String,
     pub role: String,
@@ -222,6 +227,34 @@ pub struct Message {
     #[serde(default)]
     pub attachments: Vec<crate::attachments::Attachment>,
 }
+
+/// Durable, display-safe projection of an ACP prompt result. Provider result
+/// payloads can include much more data than belongs in a transcript, so the
+/// ACP runtime accepts only these explicitly bounded fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantResponseMetadata {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_applied: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_error: Option<String>,
+}
+
+// `confidence` is parsed only from finite values in the inclusive 0..=1
+// range before construction, and JSON snapshots cannot encode non-finite
+// numbers. That preserves the `Message: Eq` snapshot contract.
+impl Eq for AssistantResponseMetadata {}
 
 /// Durable, body-free mail triage projection created only by Monitter's
 /// grant-scoped MCP tool. Full message content is kept in a process-local
@@ -2016,6 +2049,30 @@ mod task_migration_tests {
         assert_eq!(value["tasks"][0]["projectId"], "project-1");
         let restored: Snapshot = serde_json::from_value(value).unwrap();
         assert_eq!(restored, snapshot);
+    }
+
+    #[test]
+    fn legacy_messages_omit_response_metadata_and_new_values_use_camel_case() {
+        let mut message: Message = serde_json::from_value(serde_json::json!({
+            "id":"message", "taskId":"task", "role":"assistant", "text":"reply",
+            "createdAt":1, "attachments":[]
+        }))
+        .unwrap();
+        assert_eq!(message.response_metadata, None);
+        message.response_metadata = Some(AssistantResponseMetadata {
+            model: "mona".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            jev_rationale: None,
+            requested_model: None,
+            requested_effort: None,
+            confidence: None,
+            route_applied: None,
+            application_error: None,
+        });
+        let value = serde_json::to_value(message).unwrap();
+        assert_eq!(value["responseMetadata"]["inputTokens"], 10);
+        assert_eq!(value["responseMetadata"]["outputTokens"], 5);
     }
 }
 

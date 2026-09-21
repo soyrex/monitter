@@ -377,6 +377,7 @@ fn add_throwaway_task(service: &Service, status: &str, cwd: &std::path::Path) ->
                 attachments: vec![],
                 stream_status: None,
                 phase: None,
+                response_metadata: None,
             });
             snap.pending_throwaway_task_ids.push(id.clone());
             Ok(id)
@@ -576,6 +577,7 @@ fn full_throwaway_cycle_produces_succeeded_run_and_report() {
                 attachments: vec![],
                 stream_status: None,
                 phase: None,
+                response_metadata: None,
             });
             snap.pending_throwaway_task_ids.push(id.clone());
             Ok(id)

@@ -120,6 +120,18 @@ export interface Message {
   text: string; createdAt: number;
   senderAgentId?: string | null; collaborationId?: string | null;
   attachments?: Attachment[];
+  responseMetadata?: AssistantResponseMetadata | null;
+}
+export interface AssistantResponseMetadata {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  jevRationale?: string | null;
+  requestedModel?: string | null;
+  requestedEffort?: string | null;
+  confidence?: number | null;
+  routeApplied?: boolean | null;
+  applicationError?: string | null;
 }
 export type MailImportance = 'critical' | 'high' | 'normal' | 'low';
 export type MailIntent = 'action_request' | 'decision_needed' | 'information' | 'scheduling' | 'transactional' | 'newsletter' | 'personal' | 'other';

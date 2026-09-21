@@ -18,6 +18,7 @@
   import UnifiedSubagentItem from '$lib/components/UnifiedSubagentItem.svelte';
   import ThinkingStatus from '$lib/components/ThinkingStatus.svelte';
   import MessageMeta from '$lib/components/MessageMeta.svelte';
+  import ResponseMetadata from '$lib/components/ResponseMetadata.svelte';
   import Markdown from '$lib/components/Markdown.svelte';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ExpandableUserRequest from '$lib/components/ExpandableUserRequest.svelte';
@@ -254,6 +255,7 @@
               {@const operator=message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}
               {@const humanName=operator?.name ?? (message.role==='user' ? senderName(message) : null)}
               <article class:user={message.role==='user'} class:tinted={message.role==='user' && (display.settings.tintUserMessages || !!humanName)} style:--participant-colour={humanName ? participantColour(humanName) : undefined} data-participant={humanName ?? undefined} class:sticky-user-request={message.role==='user' && message.id===displayLatestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={optimistic?.status} aria-label={message.role==='user' && message.id===displayLatestUserRequest?.id ? 'Latest user request' : undefined}>
+                <div class="message-bubble">
                 <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (displayAgent?.name ?? 'Agent') : 'System')} createdAt={message.createdAt}>
                   {#snippet avatar()}{#if humanName}<span class="avatar message-avatar human-avatar" title={humanName}>{humanName.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null)}{/if}{/snippet}
                   {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
@@ -261,6 +263,8 @@
                 {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>{:else}<Markdown text={message.role==='user' ? operatorMessageText(message.text) : message.text} preserveLineBreaks={message.role==='user'}/>{/if}
                 <AttachmentList attachments={message.attachments ?? []}/>
                 {#if message.streamStatus==='streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus==='interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
+                </div>
+                {#if message.role==='assistant' && message.responseMetadata}<ResponseMetadata metadata={message.responseMetadata}/>{/if}
               </article>
             {/if}
           {/if}
@@ -327,10 +331,12 @@
   .subagent-inline { margin:0 0 8px; }
   .subagent-inline :global(.subagent-item) { border-color:var(--line); background:color-mix(in srgb,var(--accent) 4%,var(--panel)); }
   .message[data-participant] .human-avatar { background:color-mix(in srgb,var(--participant-colour) 25%,var(--panel));color:var(--ink); }
-  .message.user.tinted { background:color-mix(in srgb,var(--participant-colour,var(--accent)) 16%,var(--panel)); }
-  .message.user { margin-left:auto; padding:12px 14px; border-radius:10px 10px 3px 10px; background:var(--soft); }
-  .message.final-answer { width:fit-content; padding:12px 14px; border:1px solid color-mix(in srgb,#4f9d69 18%,var(--line)); border-radius:10px 10px 10px 3px; background:color-mix(in srgb,#4f9d69 7%,var(--panel)); }
-  .message.system { padding-left:12px; border-left:2px solid var(--line); color:var(--muted); }
+  .message.user { width:fit-content; margin-left:auto; }
+  .message.user .message-bubble { padding:12px 14px; border-radius:10px 10px 3px 10px; background:var(--soft); }
+  .message.user.tinted .message-bubble { background:color-mix(in srgb,var(--participant-colour,var(--accent)) 16%,var(--panel)); }
+  .message.final-answer { width:fit-content; }
+  .message.final-answer .message-bubble { padding:12px 14px; border:1px solid color-mix(in srgb,#4f9d69 18%,var(--line)); border-radius:10px 10px 10px 3px; background:color-mix(in srgb,#4f9d69 7%,var(--panel)); }
+  .message.system .message-bubble { padding-left:12px; border-left:2px solid var(--line); color:var(--muted); }
   .cancellation-event { display:flex; align-items:center; gap:8px; min-height:30px; margin:2px 0 9px; padding:4px 2px; color:var(--muted); }
   .cancellation-event :global(.message-meta) { flex:1; min-width:0; margin:0; }
   .cancellation-event :global(.message-meta time) { margin-left:auto; }
@@ -338,7 +344,7 @@
   .context-cleared-event { display:flex; align-items:center; gap:10px; margin:5px 0 18px; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.045em; white-space:nowrap; }
   .context-cleared-event > span { height:1px; flex:1; background:var(--line); }
   .context-cleared-event time { flex:none; }
-  .optimistic-message { border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); }
+  .optimistic-message .message-bubble { border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); }
   .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
   :global(.delivery-status[data-delivery-status="sending"]) { color:var(--accent); }
   :global(.delivery-status[data-delivery-status="not-confirmed"]) { color:#bd655b; }

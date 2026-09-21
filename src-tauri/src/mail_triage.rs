@@ -186,6 +186,7 @@ impl crate::Service {
                 snapshot.messages.push(crate::model::Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: message_id.clone(),
                     task_id: caller_task.into(),
                     role: "system".into(),

@@ -92,6 +92,7 @@ fn large_history_mutation_and_ui_snapshot_latency() {
                 .map(|index| Message {
                     stream_status: Some("streaming".into()),
                     phase: None,
+                    response_metadata: None,
                     id: format!("fixture-message-{index}"),
                     task_id: "benchmark-task".into(),
                     role: "assistant".into(),

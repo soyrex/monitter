@@ -8,6 +8,7 @@
 
 use crate::{
     ApprovalDecision, CreateApprovalRequest, Service, acp_protocol,
+    model::AssistantResponseMetadata,
     runner::{self, Parsed, RunControl},
 };
 use serde_json::{Value, json};
@@ -40,6 +41,12 @@ const MAX_TOOL_ACTIVITY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOOL_EVENT_BYTES: usize = 512 * 1024;
 const MAX_TOOL_FIELD_BYTES: usize = 64 * 1024;
 const MAX_ROUTER_TRACE_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_METADATA_MODEL_BYTES: usize = 256;
+const MAX_RESPONSE_METADATA_RATIONALE_BYTES: usize = 4096;
+const MAX_RESPONSE_METADATA_REQUESTED_MODEL_BYTES: usize = 256;
+const MAX_RESPONSE_METADATA_REQUESTED_EFFORT_BYTES: usize = 64;
+const MAX_RESPONSE_METADATA_ERROR_BYTES: usize = 1024;
+const MAX_RESPONSE_METADATA_TOKENS: u64 = 1_000_000_000;
 const TOOL_DETAIL_TRUNCATED: &str = "[ACP tool detail truncated]";
 
 struct PermissionSlot(Arc<AtomicUsize>);
@@ -238,6 +245,51 @@ mod tests {
             "update": {"trace": {"applied": false, "rationale": "x".repeat(MAX_ROUTER_TRACE_BYTES)}}
         }))
         .is_err());
+    }
+
+    #[test]
+    fn mona_prompt_result_projects_only_bounded_completion_metadata() {
+        let metadata = normalized_mona_response_metadata(&json!({
+            "stopReason": "end_turn",
+            "model": "MiniMax-M2.7",
+            "usage": {"inputTokens": 120, "outputTokens": 45},
+            "routing": {
+                "rationale": "The task benefits from a longer reasoning budget.",
+                "requestedModel": "gpt-6-astra",
+                "requestedEffort": "xhigh",
+                "confidence": 0.92,
+                "applied": true,
+                "applicationError": null,
+                "rawPrompt": "must not be retained",
+                "providerCredential": "must not be retained"
+            }
+        }))
+        .unwrap()
+        .expect("Mona metadata");
+        assert_eq!(metadata.model, "MiniMax-M2.7");
+        assert_eq!(metadata.input_tokens, 120);
+        assert_eq!(metadata.output_tokens, 45);
+        assert_eq!(metadata.jev_rationale.as_deref(), Some("The task benefits from a longer reasoning budget."));
+        assert_eq!(metadata.requested_model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(metadata.confidence, Some(0.92));
+        assert_eq!(metadata.route_applied, Some(true));
+        let serialized = serde_json::to_value(metadata).unwrap();
+        assert!(serialized.get("rawPrompt").is_none());
+        assert!(serialized.get("providerCredential").is_none());
+    }
+
+    #[test]
+    fn mona_prompt_result_rejects_partial_or_oversized_metadata() {
+        assert!(normalized_mona_response_metadata(&json!({
+            "model": "mona", "usage": {"inputTokens": 1}
+        }))
+        .is_err());
+        assert!(normalized_mona_response_metadata(&json!({
+            "model": "mona", "usage": {"inputTokens": 1, "outputTokens": 1},
+            "routing": {"rationale": "x".repeat(MAX_RESPONSE_METADATA_RATIONALE_BYTES + 1)}
+        }))
+        .is_err());
+        assert_eq!(normalized_mona_response_metadata(&json!({"stopReason": "end_turn"})).unwrap(), None);
     }
 }
 
@@ -774,6 +826,104 @@ fn normalized_router_trace(params: &Value) -> Result<Option<(String, String)>, S
     Ok(Some((parts.join(" · "), detail)))
 }
 
+/// Project Mona's authoritative `session/prompt` result into the small,
+/// transcript-safe completion record. A result without Mona's fields is a
+/// normal generic ACP result; a partial or malformed Mona result is rejected
+/// rather than persisting ambiguous usage or unbounded provider data.
+fn normalized_mona_response_metadata(
+    result: &Value,
+) -> Result<Option<AssistantResponseMetadata>, String> {
+    let has_mona_fields = result.get("model").is_some()
+        || result.get("usage").is_some()
+        || result.get("routing").is_some();
+    if !has_mona_fields {
+        return Ok(None);
+    }
+    let bounded_required = |key: &str, max: usize| -> Result<String, String> {
+        let value = result
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("Mona prompt result omitted text {key}."))?;
+        if value.len() > max {
+            return Err(format!("Mona prompt result field {key} exceeded its safety limit."));
+        }
+        Ok(value.to_string())
+    };
+    let model = bounded_required("model", MAX_RESPONSE_METADATA_MODEL_BYTES)?;
+    let usage = result
+        .get("usage")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Mona prompt result omitted its usage object.".to_string())?;
+    let tokens = |key: &str| -> Result<u64, String> {
+        let value = usage
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= MAX_RESPONSE_METADATA_TOKENS)
+            .ok_or_else(|| format!("Mona prompt result usage.{key} was not a supported token count."))?;
+        Ok(value)
+    };
+    let input_tokens = tokens("inputTokens")?;
+    let output_tokens = tokens("outputTokens")?;
+
+    let routing = match result.get("routing") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(routing)) => Some(routing),
+        Some(_) => return Err("Mona prompt result routing was not an object.".into()),
+    };
+    let routing_text = |key: &str, max: usize| -> Result<Option<String>, String> {
+        let Some(routing) = routing else {
+            return Ok(None);
+        };
+        let Some(value) = routing.get(key) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("Mona prompt result routing.{key} was not text."))?
+            .trim();
+        if value.len() > max {
+            return Err(format!(
+                "Mona prompt result routing.{key} exceeded its safety limit."
+            ));
+        }
+        Ok((!value.is_empty()).then(|| value.to_string()))
+    };
+    let confidence = match routing.and_then(|routing| routing.get("confidence")) {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let confidence = value
+                .as_f64()
+                .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                .ok_or_else(|| {
+                    "Mona prompt result routing.confidence was outside 0..=1.".to_string()
+                })?;
+            Some(confidence)
+        }
+    };
+    let route_applied = match routing.and_then(|routing| routing.get("applied")) {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(applied)) => Some(*applied),
+        Some(_) => return Err("Mona prompt result routing.applied was not boolean.".into()),
+    };
+
+    Ok(Some(AssistantResponseMetadata {
+        model,
+        input_tokens,
+        output_tokens,
+        jev_rationale: routing_text("rationale", MAX_RESPONSE_METADATA_RATIONALE_BYTES)?,
+        requested_model: routing_text("requestedModel", MAX_RESPONSE_METADATA_REQUESTED_MODEL_BYTES)?,
+        requested_effort: routing_text("requestedEffort", MAX_RESPONSE_METADATA_REQUESTED_EFFORT_BYTES)?,
+        confidence,
+        route_applied,
+        application_error: routing_text("applicationError", MAX_RESPONSE_METADATA_ERROR_BYTES)?,
+    }))
+}
+
 fn flush_reasoning(
     service: &Arc<Service>,
     task_id: &str,
@@ -1075,7 +1225,7 @@ fn run(
             for (item, text) in &messages {
                 if dirty_messages.contains(item) {
                     if let Err(error) = service
-                        .app_server_message(&task_id, &control, &turn, item, text, None, false)
+                        .app_server_message(&task_id, &control, &turn, item, text, None, false, None)
                     {
                         fail(&service, &task_id, &control, error);
                         return;
@@ -1657,14 +1807,6 @@ fn run(
                 }
                 reasoning_bytes = 0;
                 turn_images = 0;
-                for (item, text) in &messages {
-                    if let Err(error) = service
-                        .app_server_message(&task_id, &control, &turn, item, text, None, true)
-                    {
-                        fail(&service, &task_id, &control, error);
-                        return;
-                    }
-                }
                 let stop_reason = value
                     .pointer("/result/stopReason")
                     .and_then(Value::as_str)
@@ -1682,6 +1824,45 @@ fn run(
                     ),
                     other => ("error", Some(format!("ACP prompt stopped with {other}."))),
                 };
+                let response_metadata = if status == "completed" {
+                    match normalized_mona_response_metadata(
+                        value.get("result").unwrap_or(&Value::Null),
+                    ) {
+                        Ok(metadata) => metadata,
+                        Err(error) => {
+                            service.record(
+                                &task_id,
+                                "error",
+                                "Mona response metadata ignored",
+                                error,
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let metadata_item = messages.last().map(|(item, _)| item.as_str());
+                for (item, text) in &messages {
+                    let metadata = (metadata_item == Some(item.as_str()))
+                        .then(|| response_metadata.clone())
+                        .flatten();
+                    if let Err(error) = service
+                        .app_server_message(
+                            &task_id,
+                            &control,
+                            &turn,
+                            item,
+                            text,
+                            None,
+                            true,
+                            metadata,
+                        )
+                    {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                }
                 // Release only the reservation owned by this completed
                 // response before publishing the durable completed state.
                 // `complete_app_server_turn` can wake queued work; clearing
@@ -1788,18 +1969,33 @@ fn run(
                 continue;
             }
             if kind == "usage_update" {
-                let usage = &params["update"];
-                let used = usage.get("used").and_then(Value::as_i64);
-                let size = usage.get("size").and_then(Value::as_i64);
-                if used.is_none() || size.is_none() {
+                // Mona's extension reports per-turn token counts, not the
+                // Codex-style context `used`/`size` pair. This notification
+                // is useful live telemetry only; the prompt result below is
+                // the authoritative completion record.
+                let update = &params["update"];
+                let usage = update.get("usage").unwrap_or(update);
+                let input = usage.get("inputTokens").and_then(Value::as_i64);
+                let output = usage.get("outputTokens").and_then(Value::as_i64);
+                if !input.is_some_and(|value| value >= 0)
+                    || !output.is_some_and(|value| value >= 0)
+                {
                     service.record(
                         &task_id,
                         "error",
                         "Usage capture warning",
-                        "ACP usage_update omitted numeric used or size; the run continued.".into(),
+                        "Mona usage_update omitted numeric inputTokens or outputTokens; the run continued."
+                            .into(),
                     );
                 } else {
-                    let detail = json!({"providerTurnId": turn, "used": used, "size": size, "cost": usage.get("cost")}).to_string();
+                    let detail = json!({
+                        "providerTurnId": turn,
+                        "classification": "delta",
+                        "input": input,
+                        "output": output,
+                        "cost": usage.get("cost")
+                    })
+                    .to_string();
                     if let Err(error) = service.app_server_event(
                         &task_id,
                         &control,
@@ -1992,7 +2188,7 @@ fn run(
                     if !turn.is_empty() {
                         if is_new || content_type == "image" {
                             if let Err(error) = service.app_server_message(
-                                &task_id, &control, &turn, &item, text, None, false,
+                                &task_id, &control, &turn, &item, text, None, false, None,
                             ) {
                                 fail(&service, &task_id, &control, error);
                                 return;

@@ -551,6 +551,16 @@ not claim the requested model ran. Malformed or oversized traces create a bounde
 without failing or replaying the model turn. Raw prompts and credentials are never accepted as part
 of this extension payload.
 
+When an ACP `session/prompt` result includes authoritative response attribution, Monitter may
+persist it on the completed assistant `Message.responseMetadata`. The bounded metadata contains
+the actual model, input/output token counts, and Jev's routing rationale and outcome; it is attached
+only at the matching prompt-completion boundary and never inferred from the task's configured
+model. Older messages and ACP agents that omit these result fields have no response metadata. The
+transcript shows only the actual model and an information control below the assistant bubble;
+token and routing details remain inside that disclosure. Shared and paired-mobile task transcripts
+receive the same safe projection. Prompt text, provider credentials, and unrecognized routing
+fields are never copied into the message.
+
 Agent settings offer searchable presets and a custom ACP launcher. The catalog
 is convenience metadata, not a restriction on which compatible executables can
 be used. Bridges (including Pi ACP) are labelled separately from native ACP.
