@@ -4062,7 +4062,7 @@
   {#if avatarSrc(agent)}
     <img src={avatarSrc(agent)!} alt="" />
   {:else}
-    <span class="model-avatar-mark"><ProviderIcon provider={agent?.provider ?? 'acp'} model={agent?.model} {size} /></span>
+    <span class="model-avatar-mark"><ProviderIcon provider={agent?.provider ?? 'acp'} model={agent?.model || agent?.acp?.command} {size} /></span>
   {/if}
 {/snippet}
 
@@ -6083,11 +6083,11 @@
     flex-shrink: 0;
     border-bottom: 0;
     background: linear-gradient(var(--line), var(--line)) left bottom / 100% 1px no-repeat, var(--sidebar);
-    transition:transform .18s ease;
+    transition:transform .18s ease, margin-top .18s ease;
   }
   .pane-surface[data-pane-autohide="true"] { overflow:visible; }
   .workspace.auto-hide-tabs > .topbar { margin-top:calc(-1 * var(--pane-tabbar-height)); transform:translateY(0); position:relative; z-index:10; }
-  .workspace.auto-hide-tabs.tab-revealed > .topbar, .workspace.auto-hide-tabs > .topbar:hover, .workspace.auto-hide-tabs > .topbar:focus-within { transform:translateY(var(--pane-tabbar-height)); }
+  .workspace.auto-hide-tabs.tab-revealed > .topbar, .workspace.auto-hide-tabs > .topbar:hover, .workspace.auto-hide-tabs > .topbar:focus-within { margin-top:0; transform:translateY(0); }
   @media (prefers-reduced-motion:reduce) { .topbar { transition:none; } }
   .workspace-context { display:grid; place-items:center; flex:none; width:var(--density-control-size); padding-bottom:var(--density-tabbar-inset); color:var(--muted); }
   .top-actions {
