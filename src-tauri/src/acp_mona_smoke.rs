@@ -18,7 +18,9 @@
 //!      chunk notification was observed during the turn
 
 use crate::{
+    acp_collaboration,
     acp_transport,
+    collaboration_transport,
     model::{AcpLaunch, Host},
     Service,
 };
@@ -124,6 +126,16 @@ fn mona_acp_synthetic_router_trace_smoke() {
     };
     assert!(std::path::Path::new(&bin).is_file(), "MONA_ACP_BIN does not exist: {bin}");
 
+    // Exercise the exact collaboration contract used by a real Monitter
+    // task. The server performs initialize + tools/list during session/new;
+    // no provider request or collaboration mutation is made by this smoke.
+    let collaboration = collaboration_transport::Broker::start(std::sync::Arc::new(
+        |_task_id, _tool, _arguments| Ok(json!({})),
+    ))
+    .expect("start synthetic collaboration broker");
+    let collaboration_grant = collaboration.session("mona-synthetic");
+    let mcp_servers = acp_collaboration::mcp_servers(Some(&collaboration_grant));
+
     let isolated_home = std::env::temp_dir().join(format!(
         "monitter-mona-synthetic-{}-{}",
         std::process::id(),
@@ -183,7 +195,7 @@ fn mona_acp_synthetic_router_trace_smoke() {
     }
     send(&mut stdin, json!({
         "jsonrpc":"2.0", "id":2, "method":"session/new",
-        "params":{"provider":"codex","cwd":"/tmp"}
+        "params":{"provider":"codex","cwd":"/tmp","mcpServers":mcp_servers}
     }));
     let deadline = Instant::now() + Duration::from_secs(10);
     let session_id = loop {
@@ -202,6 +214,11 @@ fn mona_acp_synthetic_router_trace_smoke() {
     let _ = reader.join();
     let frames = collected.lock().unwrap().clone();
     let init = frames.iter().find(|frame| frame["id"] == 1).expect("initialize response");
+    assert_eq!(
+        init["result"]["agentCapabilities"]["mcpCapabilities"]["http"],
+        true,
+        "mona-acp must advertise the HTTP MCP transport it actually attached"
+    );
     assert_eq!(init["result"]["agentCapabilities"]["extensions"]["monitter"]["jev_routing"], true);
     assert_eq!(init["result"]["agentCapabilities"]["extensions"]["monitter"]["auth_loader"], true);
     assert_eq!(init["result"]["agentCapabilities"]["extensions"]["monitter"]["reasoning_effort"], true);

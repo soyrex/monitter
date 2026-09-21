@@ -2,8 +2,9 @@
 
 Phase 2 is testable in Monitter without spending provider credits. The local
 smoke starts the real `mona-acp` executable through Monitter's ACP transport,
-uses an isolated empty `MONA_HOME`, and verifies initialize, session creation,
-routing trace delivery, and the expected unauthenticated prompt result.
+uses an isolated empty `MONA_HOME`, attaches a grant-scoped Streamable HTTP MCP
+collaboration broker, and verifies initialize, MCP tool discovery, session
+creation, routing trace delivery, and the expected unauthenticated prompt result.
 
 ## Build and install Mona ACP
 
