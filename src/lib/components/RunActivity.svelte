@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { AlarmClock, Archive, Bot, BookOpen, Brain, ChevronRight, Download, Eye, FilePen, FileSearch, FolderOpen, Globe, Image, ListChecks, MessageCircle, Monitor, Plug, Search, SquareTerminal, Terminal, Users, Wrench, X } from '@lucide/svelte';
-  import type { AttachmentFileData, RunEvent } from '$lib/types';
+  import { AlarmClock, Archive, Bot, BookOpen, Brain, ChevronRight, Download, Eye, FilePen, FileSearch, FolderOpen, Globe, Image, ListChecks, MessageCircle, Monitor, Plug, Search, ShieldCheck, SquareTerminal, Terminal, Users, Wrench, X } from '@lucide/svelte';
+  import type { ApprovalRequest, AttachmentFileData, RunEvent } from '$lib/types';
   import { getBridge } from '$lib/bridge';
   import { contextCompactionId, contextCompactionPhase, isContextCompaction, nativeSubagentActivity, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, type ToolPresentation } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
@@ -10,7 +10,7 @@
   import ThinkingStatus from './ThinkingStatus.svelte';
   import ImageLightbox from './ImageLightbox.svelte';
   type DetailLoader = (event: RunEvent, onChunk: (detail: string) => void) => Promise<string>;
-  let { event, events = [], compressed = false, processTree = false, running = false, active = true, avatar, onloaddetail }: { event?: RunEvent; events?: RunEvent[]; compressed?: boolean; processTree?: boolean; running?: boolean; active?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader } = $props();
+  let { event, events = [], approvals = [], compressed = false, processTree = false, running = false, active = true, avatar, onloaddetail, onapproval }: { event?: RunEvent; events?: RunEvent[]; approvals?: ApprovalRequest[]; compressed?: boolean; processTree?: boolean; running?: boolean; active?: boolean; avatar?: Snippet; onloaddetail?: DetailLoader; onapproval?: (request: ApprovalRequest) => void } = $props();
   const items = $derived(events.length ? events : event ? [event] : []);
   const primary = $derived(items[0]);
   const latest = $derived(items.at(-1));
@@ -141,7 +141,8 @@
     terminal: Terminal,
   } as const;
   const TriggerIcon = $derived(ICON_COMPONENT[primaryPresentation.icon]);
-  const processLabel = $derived(`Thought · Called ${toolItems.length} ${toolItems.length === 1 ? 'tool' : 'tools'}${failedTools ? ` · ${failedTools} failed` : ''}`);
+  const processLabel = $derived(`${hasReasoning ? 'Thought' : 'Turn'} · ${toolItems.length} ${toolItems.length === 1 ? 'tool' : 'tools'}${approvals.length ? ` · ${approvals.length} approval${approvals.length === 1 ? '' : 's'}` : ''}${failedTools ? ` · ${failedTools} failed` : ''}`);
+  const approvalLabel = (request: ApprovalRequest) => request.status === 'approved' && request.ruleId ? `Approved by saved rule: ${request.summary || request.tool}` : `${request.status === 'approved' ? 'Approved' : request.status[0].toUpperCase() + request.status.slice(1)}: ${request.summary || request.tool}`;
 </script>
 {#snippet imagePreview(item: RunEvent)}
   {#if imagePreviews[item.id]}
@@ -158,7 +159,7 @@
   <ThinkingStatus {running} {active} {avatar} startedAt={primary.createdAt}/>
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning: {summaryPreview}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
-{:else if processTree && primary && hasReasoning}
+{:else if processTree && primary && (hasReasoning || items.length > 1 || approvals.length)}
   <details class="activity process-tree" open={running || undefined}>
     <summary aria-label={processLabel}><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>{processLabel}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary>
     <div class="process-steps" aria-label="Process steps">
@@ -174,6 +175,11 @@
           {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
           {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
         </details>
+      {/each}
+      {#each approvals as approval (approval.id)}
+        <button class="process-approval" type="button" onclick={() => onapproval?.(approval)} title="Open approval history">
+          <ShieldCheck size={14}/><span>{approvalLabel(approval)}</span><time>{formatTime(approval.resolvedAt ?? approval.createdAt)}</time>
+        </button>
       {/each}
     </div>
   </details>
@@ -234,7 +240,7 @@
   .activity[open] :global(.chevron),.activity-trigger[aria-expanded=true] :global(.chevron),.call[open] :global(.call-chevron){transform:rotate(90deg)}
   .reasoning summary :global(svg){color:var(--accent-ink)}small{flex-shrink:0;color:var(--muted);font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}
   .activity-body{padding:0 14px 12px;overflow:auto;max-height:280px}
-  .process-tree{margin-top:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  .process-tree{margin-top:6px}
   .process-tree > summary{padding:9px 10px;color:var(--ink);font-size:calc(11px * var(--interface-font-ratio,1))}
   .process-steps{position:relative;display:grid;gap:2px;margin:0 10px 10px 24px;padding-left:12px;border-left:1px solid var(--line)}
   .process-step{position:relative;min-width:0;border:0;border-radius:5px}
@@ -244,6 +250,7 @@
   .process-step > summary :global(svg){flex:none}.process-step > summary time{font-size:calc(9px * var(--interface-font-ratio,1))}
   .process-step[open] > summary{color:var(--ink);background:color-mix(in srgb,var(--soft) 55%,transparent)}
   .process-step .detail-summary,.process-thought{margin:0 5px 7px 23px;padding:7px 8px;border-left:1px solid var(--line);color:var(--muted);font-size:calc(10px * var(--interface-font-ratio,1));line-height:1.45}
+  .process-approval{display:flex;align-items:center;gap:6px;width:100%;padding:6px 5px;color:var(--muted);border:0;border-radius:5px;background:transparent;text-align:left;font:inherit;font-size:calc(11px * var(--interface-font-ratio,1));cursor:pointer}.process-approval:hover,.process-approval:focus-visible{color:var(--ink);background:color-mix(in srgb,var(--soft) 55%,transparent)}.process-approval > span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.process-approval :global(svg){flex:none;color:var(--accent-ink)}.process-approval time{font-size:calc(9px * var(--interface-font-ratio,1))}
   .process-thought :global(.markdown){font-size:inherit}.process-thought :global(.markdown p:last-child){margin-bottom:0}
   .activity-popup{position:fixed;inset:auto;margin:0;box-sizing:border-box;padding:12px;width:520px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);box-shadow:0 12px 40px #0004;font-family:inherit;font-size:calc(12px * var(--interface-font-ratio, 1));overflow:auto;overscroll-behavior:contain}
   header{display:flex;align-items:center;gap:8px;margin-bottom:10px}header strong{flex:1;font-weight:500}header small{margin-left:6px}header button{display:grid;place-items:center;width:25px;height:25px;color:var(--muted);border-radius:5px}header button:hover{background:var(--soft)}

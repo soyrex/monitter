@@ -227,7 +227,7 @@ export type ConversationActivityItem =
   | { type: 'approval'; value: ApprovalRequest }
   | { type: 'reasoning-group'; values: RunEvent[] }
   | { type: 'tool-group'; values: RunEvent[] }
-  | { type: 'process-group'; values: RunEvent[] };
+  | { type: 'process-group'; values: RunEvent[]; approvals?: ApprovalRequest[] };
 
 /** One waiting indicator per conversation, never alongside a reply or approval. */
 export function showThinkingFallback(items: ConversationActivityItem[], working: boolean, awaitingApproval = false): boolean {
@@ -241,16 +241,28 @@ export function showThinkingFallback(items: ConversationActivityItem[], working:
 function combineProcessGroups(items: ConversationActivityItem[]): ConversationActivityItem[] {
   const result: ConversationActivityItem[] = [];
   let pending: Extract<ConversationActivityItem, { type: 'reasoning-group' | 'tool-group' }>[] = [];
+  let pendingApprovals: ApprovalRequest[] = [];
   const flush = () => {
     if (!pending.length) return;
     const values = pending.flatMap(item => item.values);
     const hasReasoning = values.some(item => item.kind === 'reasoning' && !isBlankReasoning(item));
     const hasTools = values.some(item => item.kind === 'tool' || item.kind === 'subagent');
-    if (hasReasoning && hasTools) result.push({ type: 'process-group', values });
+    if (hasTools && (hasReasoning || pending.length > 1)) result.push({ type: 'process-group', values, approvals: pendingApprovals.length ? pendingApprovals : undefined });
     else result.push(...pending);
     pending = [];
+    pendingApprovals = [];
   };
   for (const item of items) {
+    if (item.type === 'approval') {
+      const taskId = pending[0]?.values[0]?.taskId;
+      if (pending.length && taskId === item.value.taskId) {
+        pendingApprovals.push(item.value);
+      } else {
+        flush();
+        result.push(item);
+      }
+      continue;
+    }
     if (item.type !== 'reasoning-group' && item.type !== 'tool-group') {
       flush();
       result.push(item);
