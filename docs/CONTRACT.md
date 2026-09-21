@@ -934,14 +934,18 @@ The same Rust catalogue supplies the native harness tool allowlists:
   Requires `command` (bounded to 4096 bytes); optional `cwd` defaults to the caller task's
   saved folder. The shell stays interactive after the command finishes.
 - `mail_triage_help`: return the read-only Gmail workflow and its untrusted-content rules.
-- `present_mail_batch`: accept 1–20 normalized Gmail envelopes with bounded headers and snippets,
-  never bodies. The normalized aggregate state is capped at 64 KiB so every accepted batch remains
-  one Jev HTTP request. The authenticated MCP grant supplies the task identity, and this first milestone
-  accepts Codex callers only. Monitter immediately persists a body-free provisional card module,
+- `present_mail_batch`: accept 0–20 normalized Gmail envelopes with bounded headers and snippets,
+  never bodies. `sync_mode: snapshot` (the default) declares a complete current bounded result;
+  Monitter upserts one task/account inbox by provider message ID and moves absent cards into local
+  history. `incremental` only adds or refreshes and never infers removal. The normalized aggregate
+  state is capped at 64 KiB so every non-empty accepted batch remains one Jev HTTP request. The
+  authenticated MCP grant supplies the task identity, and this first milestone accepts Codex callers
+  only. Monitter creates one body-free card module and updates it in place on later calls,
   then sends all envelopes to one background Jev System One request containing five typed Choice
   questions per message (importance, intent, reply requirement, suggested owner, and suggested
   action). The same cards are atomically enriched with provider/model/latency/token/cost evidence
-  when supplied. `MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` selects the deterministic local fixture;
+  when supplied; a stale response from an older sync is discarded. Empty snapshots do not call Jev.
+  `MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` selects the deterministic local fixture;
   missing or invalid live Jev results retain a visible 45% confidence fallback rather than
   fabricating a live label.
 - `present_mail_detail`: accept at most 256 KiB of normalized plain text for one card only while its

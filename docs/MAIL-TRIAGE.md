@@ -12,9 +12,10 @@ credentials and exposes no mailbox mutation tools.
    Existing resident sessions must be restarted to discover newly added MCP
    tools.
 3. Ask, for example: `Show my important unread email since yesterday.`
-4. The agent should call `mail_triage_help`, query Gmail, then put all selected
-   messages (up to 20) into one `present_mail_batch` call. Monitter sends that
-   entire batch to Jev in one HTTP request; the chat renders Jev-ranked cards.
+4. The agent should call `mail_triage_help`, query Gmail, then put the complete
+   current result (up to 20 messages, including an empty result) into one
+   `present_mail_batch` call with `sync_mode: "snapshot"`. Monitter upserts the
+   chat's live inbox and sends a non-empty batch to Jev in one HTTP request.
 5. Click a card to request its full content. The click produces a visible
    read-only follow-up; the same agent reads that exact Gmail message and calls
    `present_mail_detail`. The panel displays plain text only.
@@ -32,7 +33,9 @@ User mail question
   → Codex Gmail connector searches/reads bounded results
   → present_mail_batch (grant supplies task identity)
   → strict envelope validation; bodies rejected
-  → body-free provisional MailBatch and native cards immediately
+  → upsert one body-free MailBatch per task/account by provider message ID
+  → messages absent from a later snapshot move to collapsed local history
+  → native cards update at the transcript foot immediately
   → one background Jev System One HTTP request for the entire batch,
     with five indexed Choice questions per email
   → same cards updated atomically with classifier evidence
@@ -45,6 +48,14 @@ Card click
   → bounded process-local cache (30 minutes, at most 40 messages)
   → native detail panel
 ```
+
+The first call creates one transcript anchor. Later calls update that same
+projection and do not append another mail module. `snapshot` is the scheduled
+inbox default: its result must be the complete current bounded search window.
+`incremental` is available when a connector query supplies only newly found
+messages; it never infers that an omitted message disappeared. A zero-message
+snapshot is a successful check and moves prior active cards to local history.
+All lifecycle state is local to Monitter and never mutates Gmail.
 
 The background path prevents observed Jev network latency from delaying first
 paint. While it runs, cards show deterministic 45%-confidence provisional
@@ -70,9 +81,9 @@ are retained when supplied. Missing cost is not invented.
 
 - Email headers, snippets, and bodies are untrusted data, never agent
   instructions. The tool help and generated detail prompt repeat this rule.
-- `present_mail_batch` accepts Gmail only, 1–20 messages, bounded headers and a
+- `present_mail_batch` accepts Gmail only, 0–20 messages, bounded headers and a
   maximum 1,500-byte snippet. The normalized aggregate state must fit the
-  64 KiB Jev state budget so every accepted batch remains one request. Unknown
+  64 KiB Jev state budget so every non-empty batch remains one request. Unknown
   fields—including a body—are rejected.
 - Jev receives only bounded sender/recipient fields, subject, timestamp, and
   snippet. Gmail message/thread IDs and full bodies are omitted. It is advisory
@@ -99,10 +110,11 @@ granted independently to the harness plugin.
 ## Observability
 
 Each persisted `MailBatch` includes source/account attribution, the user-facing
-query label, a classifier trace, and the typed card outputs. A compact `mail`
-RunEvent records batch ID, count, source, labels, and classifier evidence, but no
-message snippets or bodies. Fallback mode and its bounded error reason remain
-visible on the card module.
+query label, a classifier trace, typed card outputs, first/last seen times,
+active/history state, a monotonic sync counter, and the latest added/refreshed/
+history counts. A compact `mail` RunEvent records batch ID, sync mode, counts,
+source, labels, and classifier evidence, but no message snippets or bodies.
+Fallback mode and its bounded error reason remain visible on the card module.
 
 ## Verification
 

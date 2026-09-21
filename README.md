@@ -236,8 +236,10 @@ clickable mail cards without putting Gmail OAuth inside Monitter. The harness
 keeps its own Gmail plugin access. When asked to list or triage mail, it reads
 messages through that connector and calls Monitter's built-in
 `present_mail_batch` MCP tool once with up to 20 normalized headers and bounded
-snippets. The whole group is classified in one Jev HTTP request, rather than
-paying the connection and TLS setup cost once per message.
+snippets. Repeated snapshot calls upsert one persistent task/account inbox by
+Gmail message ID; absent messages move to local history rather than producing
+another mail block. Each non-empty group is classified in one Jev HTTP request,
+rather than paying connection and TLS setup cost once per message.
 Provider message/thread IDs remain in Monitter for exact click-to-fetch routing
 but are omitted from the Jev request.
 

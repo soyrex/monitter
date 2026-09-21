@@ -126,8 +126,9 @@ export type MailIntent = 'action_request' | 'decision_needed' | 'information' | 
 export type MailReplyState = 'yes' | 'no' | 'unclear';
 export type MailOwner = 'me' | 'sender' | 'named_recipient' | 'shared' | 'unclear';
 export type MailSuggestedAction = 'reply' | 'review' | 'schedule' | 'delegate' | 'track' | 'archive' | 'none';
+export type MailCardState = 'active' | 'history';
 export interface MailClassifierTrace {
-  mode: 'pending' | 'jev' | 'mock' | 'fallback'; provider: string; model: string; latencyMs: number;
+  mode: 'pending' | 'jev' | 'mock' | 'fallback' | 'not_needed'; provider: string; model: string; latencyMs: number;
   inputTokens: number | null; outputTokens: number | null; costMicrousd: number | null;
   fallbackReason: string | null;
 }
@@ -136,11 +137,13 @@ export interface MailCard {
   from: string; to: string[]; cc: string[]; subject: string; receivedAt: number; snippet: string;
   importance: MailImportance; importanceScore: number; intent: MailIntent;
   replyRequired: MailReplyState; suggestedOwner: MailOwner; suggestedAction: MailSuggestedAction;
-  confidence: number; rationale: string;
+  confidence: number; rationale: string; state: MailCardState; firstSeenAt: number; lastSeenAt: number;
+  isNew: boolean;
 }
 export interface MailBatch {
   id: string; messageId: string; taskId: string; source: 'gmail'; accountLabel: string;
-  queryLabel: string; createdAt: number; classifier: MailClassifierTrace; items: MailCard[];
+  queryLabel: string; createdAt: number; updatedAt: number; syncCount: number; lastAdded: number;
+  lastUpdated: number; lastMovedToHistory: number; classifier: MailClassifierTrace; items: MailCard[];
 }
 export interface MailDetail {
   mailId: string; source: 'gmail'; accountLabel: string; from: string; to: string[]; cc: string[];

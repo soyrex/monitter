@@ -892,7 +892,7 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "list_messages" | "skills_help" | "list_shared_skills" | "mail_triage_help" => &[],
         "install_shared_skill" => &["url", "name"],
         "terminal_run" => &["command", "cwd"],
-        "present_mail_batch" => &["source", "account_label", "query_label", "messages"],
+        "present_mail_batch" => &["source", "account_label", "query_label", "sync_mode", "messages"],
         "present_mail_detail" => &["mail_id", "provider_message_id", "body_text"],
         "list_schedules" => &[],
         "save_schedule" => &[

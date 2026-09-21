@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
   import { ArrowRightLeft, Check, CircleStop, Maximize2, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
-  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, Message, RunEvent, Snapshot, Task } from '$lib/types';
+  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
@@ -148,6 +148,15 @@
   const displayCollaborations = $derived(display.collaborations);
   const displaySubagents = $derived(display.subagents);
   const displayMailBatches = $derived(display.mailBatches);
+  const displayMailInboxes = $derived.by(() => {
+    const latest = new Map<string, MailBatch>();
+    for (const batch of displayMailBatches) {
+      const key = `${batch.source}\u0000${batch.accountLabel}`;
+      const current = latest.get(key);
+      if (!current || (batch.updatedAt || batch.createdAt) > (current.updatedAt || current.createdAt)) latest.set(key, batch);
+    }
+    return [...latest.values()].sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+  });
   const displayLatestUserRequest = $derived(displayItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
   const displayThinking = $derived.by(() => {
     if (displayTask.status !== 'running' || display.hasPendingApprovals) return false;
@@ -229,7 +238,7 @@
           {:else}
             {@const message=item.value}
             {@const mailBatch=displayMailBatches.find(batch => batch.messageId === message.id)}
-            {#if mailBatch}<MailTriageBatch batch={mailBatch} taskId={displayTask.id}/>
+            {#if mailBatch}<!-- The durable live inbox is rendered at the transcript foot. -->
             {:else if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator" aria-label={`Context Cleared at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · Context Cleared</time><span aria-hidden="true"></span></div>
             {:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
             {:else if !message.collaborationId || !displayCollaborations.find(value => value.id === message.collaborationId)}
@@ -250,6 +259,7 @@
           {/if}
         {/snippet}
         {#snippet footer()}
+          {#each displayMailInboxes as inbox (inbox.id)}<MailTriageBatch batch={inbox} taskId={displayTask.id}/>{/each}
           {#if !displayItems.length && !display.hasPendingApprovals}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
           {#if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}
             <ThinkingStatus active={active && !transcriptBuffer.held()} starting={displayTask.status!=='running'} running={displayTask.status==='running'} startedAt={displayLatestUserRequest?.createdAt}>{#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}</ThinkingStatus>

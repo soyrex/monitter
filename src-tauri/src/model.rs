@@ -236,6 +236,20 @@ pub struct MailBatch {
     pub account_label: String,
     pub query_label: String,
     pub created_at: i64,
+    /// Last successful projection update. Older snapshots deserialize this as
+    /// zero and the UI falls back to `created_at`.
+    #[serde(default)]
+    pub updated_at: i64,
+    /// Monotonically increasing within this task/account inbox. It also
+    /// prevents a slower Jev response from overwriting a newer scheduled run.
+    #[serde(default)]
+    pub sync_count: u64,
+    #[serde(default)]
+    pub last_added: u32,
+    #[serde(default)]
+    pub last_updated: u32,
+    #[serde(default)]
+    pub last_moved_to_history: u32,
     pub classifier: MailClassifierTrace,
     pub items: Vec<MailCard>,
 }
@@ -305,6 +319,14 @@ pub enum MailSuggestedAction {
     None,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MailCardState {
+    #[default]
+    Active,
+    History,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MailCard {
@@ -326,6 +348,15 @@ pub struct MailCard {
     /// Lowest Jev answer confidence across this card's typed dimensions.
     pub confidence: u8,
     pub rationale: String,
+    /// Local inbox lifecycle only; this never changes Gmail state.
+    #[serde(default)]
+    pub state: MailCardState,
+    #[serde(default)]
+    pub first_seen_at: i64,
+    #[serde(default)]
+    pub last_seen_at: i64,
+    #[serde(default)]
+    pub is_new: bool,
 }
 
 /// A deliberately small, provider-neutral entry shown in the subagent visor.

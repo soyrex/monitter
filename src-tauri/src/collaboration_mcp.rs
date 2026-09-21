@@ -50,11 +50,12 @@ fn tools() -> Vec<Value> {
         json!({"name":"list_shared_skills","description":"List shared skill metadata only; never returns private MCP configuration or skill contents.","inputSchema":schema(json!({}),&[]),"annotations":{"readOnlyHint":true}}),
         json!({"name":"install_shared_skill","description":"Download a public HTTPS GitHub or Markdown skill URL and install its portable instructions for all current and future user agents. Only when requested by the user. Does not execute scripts, install dependencies, or replace an existing skill. Existing sessions need a new harness launch.","inputSchema":schema(json!({"url":{"type":"string"},"name":{"type":"string"}}),&["url"]),"annotations":{"readOnlyHint":false}}),
         json!({"name":"mail_triage_help","description":"Read the exact read-only Gmail-to-Monitter mail triage workflow and safety contract before presenting mail.","inputSchema":schema(json!({}),&[]),"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
-        json!({"name":"present_mail_batch","description":"Present 1-20 normalized Gmail envelopes to Monitter in one batch. Put all selected messages in this single call rather than calling once per message. Monitter sends the whole batch to Jev in one HTTP request for typed importance, intent, reply, owner, action and confidence classifications, then renders body-free cards. Full bodies are rejected.","inputSchema":schema(json!({
+        json!({"name":"present_mail_batch","description":"Upsert a persistent, body-free Gmail inbox for this chat. Send the complete current result (0-20 envelopes) once with sync_mode snapshot; messages absent from a later snapshot move to local history. Use incremental only for a delta result. Non-empty calls use one Jev request. Full bodies are rejected.","inputSchema":schema(json!({
             "source":{"type":"string","enum":["gmail"]},
             "account_label":{"type":"string","maxLength":160},
             "query_label":{"type":"string","maxLength":240},
-            "messages":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","additionalProperties":false,"required":["provider_message_id","from","subject","received_at","snippet"],"properties":{
+            "sync_mode":{"type":"string","enum":["snapshot","incremental"],"default":"snapshot"},
+            "messages":{"type":"array","minItems":0,"maxItems":20,"items":{"type":"object","additionalProperties":false,"required":["provider_message_id","from","subject","received_at","snippet"],"properties":{
                 "provider_message_id":{"type":"string","maxLength":512},"provider_thread_id":{"type":"string","maxLength":512},
                 "from":{"type":"string","maxLength":320},"to":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":320}},"cc":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":320}},
                 "subject":{"type":"string","maxLength":1000},"received_at":{"type":"integer","minimum":0},"snippet":{"type":"string","maxLength":1500}
@@ -92,7 +93,7 @@ fn valid(name: &str, args: &Value) -> bool {
         "terminal_run" => (&["command", "cwd"], &["command"]),
         "install_shared_skill" => (&["url", "name"], &["url"]),
         "present_mail_batch" => (
-            &["source", "account_label", "query_label", "messages"],
+            &["source", "account_label", "query_label", "sync_mode", "messages"],
             &["source", "account_label", "query_label", "messages"],
         ),
         "present_mail_detail" => (
@@ -431,10 +432,15 @@ mod tests {
         assert_eq!(help["annotations"]["readOnlyHint"], true);
         let batch = listed.iter().find(|tool| tool["name"] == "present_mail_batch").unwrap();
         assert_eq!(batch["inputSchema"]["properties"]["messages"]["maxItems"], 20);
+        assert_eq!(batch["inputSchema"]["properties"]["messages"]["minItems"], 0);
+        assert_eq!(batch["inputSchema"]["properties"]["sync_mode"]["default"], "snapshot");
         assert_eq!(batch["inputSchema"]["properties"]["messages"]["items"]["additionalProperties"], false);
         assert!(valid("present_mail_batch", &json!({
-            "source":"gmail","account_label":"Work","query_label":"Unread",
+            "source":"gmail","account_label":"Work","query_label":"Unread","sync_mode":"snapshot",
             "messages":[{"provider_message_id":"m1","from":"Pat","subject":"Hello","received_at":1,"snippet":"Hi"}]
+        })));
+        assert!(valid("present_mail_batch", &json!({
+            "source":"gmail","account_label":"Work","query_label":"Unread","messages":[]
         })));
         assert!(!valid("present_mail_batch", &json!({
             "source":"gmail","account_label":"Work","query_label":"Unread",
