@@ -49,6 +49,23 @@ const MAX_RESPONSE_METADATA_ERROR_BYTES: usize = 1024;
 const MAX_RESPONSE_METADATA_TOKENS: u64 = 1_000_000_000;
 const TOOL_DETAIL_TRUNCATED: &str = "[ACP tool detail truncated]";
 
+fn normalized_stop_outcome(stop_reason: &str) -> (&'static str, Option<String>) {
+    match stop_reason {
+        // `stop` is the successful finish reason used by OpenAI-compatible
+        // providers. ACP agents should translate it to `end_turn`, but accept
+        // it here as a compatibility boundary so a completed reply is not
+        // persisted as a transport failure.
+        "end_turn" | "completed" | "stop" => ("completed", None),
+        "cancelled" => ("interrupted", None),
+        "refusal" => ("error", Some("ACP agent refused this prompt.".into())),
+        "max_tokens" => (
+            "error",
+            Some("ACP agent reached its token limit before completing this prompt.".into()),
+        ),
+        other => ("error", Some(format!("ACP prompt stopped with {other}."))),
+    }
+}
+
 struct PermissionSlot(Arc<AtomicUsize>);
 impl Drop for PermissionSlot {
     fn drop(&mut self) {
@@ -290,6 +307,20 @@ mod tests {
         }))
         .is_err());
         assert_eq!(normalized_mona_response_metadata(&json!({"stopReason": "end_turn"})).unwrap(), None);
+    }
+
+    #[test]
+    fn provider_native_stop_is_a_successful_acp_completion() {
+        assert_eq!(normalized_stop_outcome("stop"), ("completed", None));
+        assert_eq!(normalized_stop_outcome("end_turn"), ("completed", None));
+        assert_eq!(normalized_stop_outcome("cancelled"), ("interrupted", None));
+        assert_eq!(
+            normalized_stop_outcome("tool_use"),
+            (
+                "error",
+                Some("ACP prompt stopped with tool_use.".to_string())
+            )
+        );
     }
 }
 
@@ -1811,19 +1842,7 @@ fn run(
                     .pointer("/result/stopReason")
                     .and_then(Value::as_str)
                     .unwrap_or("end_turn");
-                let (status, error) = match stop_reason {
-                    "end_turn" | "completed" => ("completed", None),
-                    "cancelled" => ("interrupted", None),
-                    "refusal" => ("error", Some("ACP agent refused this prompt.".into())),
-                    "max_tokens" => (
-                        "error",
-                        Some(
-                            "ACP agent reached its token limit before completing this prompt."
-                                .into(),
-                        ),
-                    ),
-                    other => ("error", Some(format!("ACP prompt stopped with {other}."))),
-                };
+                let (status, error) = normalized_stop_outcome(stop_reason);
                 let response_metadata = if status == "completed" {
                     match normalized_mona_response_metadata(
                         value.get("result").unwrap_or(&Value::Null),
