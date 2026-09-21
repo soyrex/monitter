@@ -1093,7 +1093,11 @@ fn no_classification_trace() -> MailClassifierTrace {
 
 fn safe_jev_error(error: &str) -> String {
     let lower = error.to_lowercase();
-    if lower.contains("not configured") || lower.contains("api key") {
+    if lower.contains("no typesafe_api_key or jev_api_key") {
+        "Add TYPESAFE_API_KEY in Settings > Environment & Secrets.".into()
+    } else if lower.contains("keychain") || lower.contains("credential cache") {
+        "Monitter could not read the Jev credential from macOS Keychain.".into()
+    } else if lower.contains("not configured") || lower.contains("api key") {
         "Jev API access is not configured.".into()
     } else if lower.contains("timed out") || lower.contains("timeout") {
         "Jev classification timed out.".into()
@@ -1803,6 +1807,20 @@ mod tests {
         assert!(require_codex_task(&task).is_err());
         task.provider = "codex".into();
         assert!(require_codex_task(&task).is_ok());
+    }
+
+    #[test]
+    fn safe_jev_errors_distinguish_missing_secret_and_keychain_access() {
+        assert_eq!(
+            safe_jev_error(
+                "Monitter Environment & Secrets has no TYPESAFE_API_KEY or JEV_API_KEY entry."
+            ),
+            "Add TYPESAFE_API_KEY in Settings > Environment & Secrets."
+        );
+        assert_eq!(
+            safe_jev_error("Cannot access the macOS Keychain for Environment & Secrets."),
+            "Monitter could not read the Jev credential from macOS Keychain."
+        );
     }
 
     #[test]

@@ -173,8 +173,9 @@ worktree, and does not pass `--approve-for-me` or either bypass flag.
 The `run` command can use TypeSafe Jev for classification while retaining the
 side-effect-free mock coding-agent provider. This makes a real HTTPS request to
 Jev but does not call a coding model, execute shell commands, or make file
-changes. It reads the Keychain-backed Monitter `JEV_API_KEY` secret first, then
-falls back to `JEV_API_KEY` or `TYPESAFE_API_KEY` in the process environment.
+changes. It reads the Keychain-backed Monitter `TYPESAFE_API_KEY` secret first
+(`JEV_API_KEY` remains a legacy alias), then uses the same preference in the
+process environment.
 The value is never added to an argv, trace, error, or renderer state.
 
 ```sh
@@ -250,7 +251,7 @@ intent, whether a reply appears necessary, likely next-action owner, and
 suggested action. Cards show the source account, score, confidence, and
 pending/Jev/fallback provenance. Set
 `MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` when developing without a live key;
-otherwise the Keychain-backed `JEV_API_KEY` is used and any failure is shown as
+otherwise the Keychain-backed `TYPESAFE_API_KEY` is used and any failure is shown as
 a low-confidence local fallback. The allowlisted key is cached in process after
 its first Keychain read and refreshed when the Settings vault changes; it is
 never exposed to the UI or persisted outside Keychain.

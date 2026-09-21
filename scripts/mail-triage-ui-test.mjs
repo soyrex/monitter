@@ -24,7 +24,8 @@ const batch={id:'batch',messageId:'message',taskId:'task',source:'gmail',account
 {id:'mail-low',providerMessageId:'provider-low',providerThreadId:null,from:'Digest <digest@example.com>',to:['Alex'],cc:[],subject:'Weekly digest',receivedAt:1699990000000,snippet:'Your weekly newsletter.',importance:'low',importanceScore:20,intent:'newsletter',replyRequired:'no',suggestedOwner:'unclear',suggestedAction:'archive',confidence:93,rationale:'low importance',state:'history',firstSeenAt:1699990000000,lastSeenAt:1699990000000,isNew:false},
 {id:'mail-high',providerMessageId:'provider-high',providerThreadId:'thread',from:'Pat <pat@example.com>',to:['Alex'],cc:[],subject:'Decision needed by Friday',receivedAt:1700000000000,snippet:'Please approve the proposal.',importance:'high',importanceScore:80,intent:'decision_needed',replyRequired:'yes',suggestedOwner:'me',suggestedAction:'review',confidence:86,rationale:'high importance',state:'active',firstSeenAt:1700000300000,lastSeenAt:1700000300000,isNew:true}]};
 const pending={...batch,id:'pending-batch',accountLabel:'Pending Gmail',queryLabel:'Latest mail',classifier:{mode:'pending',provider:'TypeSafe',model:'',latencyMs:0,inputTokens:null,outputTokens:null,costMicrousd:null,fallbackReason:null},items:batch.items.map(item=>({...item,confidence:45}))};
-</script><main><MailTriageBatch {batch} taskId="task"/><MailTriageBatch batch={pending} taskId="task"/></main><style>:global(:root){--accent:#3f9d6a;--line:#d9d3c7;--panel:#fff;--paper:#f8f5ef;--soft:#eeeae2;--ink:#27231e;--muted:#776f63;--mono:monospace;--interface-font-ratio:1;--interface-font:system-ui}:global(body){margin:30px;background:var(--paper);font-family:system-ui}main{max-width:850px;margin:auto}</style>`);
+const fullBatch={...batch,id:'full-batch',items:Array.from({length:12},(_,index)=>({...batch.items[1],id:'full-'+index,providerMessageId:'provider-full-'+index,subject:'Actionable message '+(index+1),receivedAt:1700000000000-index*60000,isNew:index<3}))};
+</script><main><MailTriageBatch {batch} taskId="task"/><MailTriageBatch batch={pending} taskId="task"/><div class="screen"><MailTriageBatch batch={fullBatch} taskId="task" fullHeight/></div></main><style>:global(:root){--accent:#3f9d6a;--line:#d9d3c7;--panel:#fff;--paper:#f8f5ef;--soft:#eeeae2;--ink:#27231e;--muted:#776f63;--mono:monospace;--interface-font-ratio:1;--interface-font:system-ui}:global(body){margin:30px;background:var(--paper);font-family:system-ui}main{max-width:850px;margin:auto}.screen{height:520px;margin-top:30px}</style>`);
 writeFileSync(join(harness, 'main.js'), `import { mount } from 'svelte';import App from './App.svelte';mount(App,{target:document.querySelector('#app')});`);
 writeFileSync(join(harness, 'vite.config.mjs'), `import { svelte } from '@sveltejs/vite-plugin-svelte';export default{resolve:{alias:[{find:'$lib/bridge',replacement:${JSON.stringify(join(harness, 'bridge.js'))}},{find:'$lib',replacement:${JSON.stringify(lib)}}]},plugins:[svelte()]};`);
 
@@ -55,9 +56,15 @@ try {
   await expect(page.locator('.mail-batch').first()).toContainText('1 added · 1 refreshed');
   await expect(page.locator('.mail-batch').first()).toContainText('1 moved to history');
   await expect(cards.first()).toContainText('New');
-  await expect(page.getByText('Jev', { exact: true })).toBeVisible();
+  await expect(page.getByText('Jev', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Jev pending', { exact: true })).toBeVisible();
   await expect(page.getByText('Showing immediate provisional labels while Jev classifies this batch in the background.')).toBeVisible();
+  const fullInbox = page.locator('.mail-batch.full-height');
+  await expect(fullInbox).toHaveCount(1);
+  const fullHeight = await fullInbox.evaluate(element => element.getBoundingClientRect().height);
+  expect(Math.round(fullHeight)).toBe(520);
+  const scrollOwnsOverflow = await fullInbox.locator('.mail-scroll').evaluate(element => element.scrollHeight > element.clientHeight && getComputedStyle(element).overflowY === 'auto');
+  expect(scrollOwnsOverflow).toBe(true);
   await page.screenshot({ path: join(root, 'verification', 'mail-triage-list.png'), fullPage: true });
   await cards.first().click();
   const dialog = page.getByRole('dialog', { name: 'Email: Decision needed by Friday' });
