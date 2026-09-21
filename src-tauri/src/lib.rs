@@ -14,6 +14,8 @@ mod acp_recovery_tests;
 mod acp_resume_failure_tests;
 mod acp_runtime;
 #[cfg(test)]
+mod acp_mona_smoke;
+#[cfg(test)]
 mod acp_runtime_tests;
 mod acp_session_config;
 #[cfg(test)]
