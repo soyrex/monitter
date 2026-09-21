@@ -29,8 +29,15 @@ struct RecoveryFixture {
 impl Drop for RecoveryFixture {
     fn drop(&mut self) {
         self.service.cleanup();
-        let _ = fs::remove_file(&self.script);
-        let _ = fs::remove_dir_all(&self.root);
+        // KEEP_FIXTURE_DIR=1 lets a developer preserve the temp fixture
+        // directory across a failing test run to inspect
+        // frames.log / starts / the fake-acp.mjs script.
+        if std::env::var_os("KEEP_FIXTURE_DIR").is_some() {
+            eprintln!("[recovery-fixture] preserved at {}", self.root.display());
+        } else {
+            let _ = fs::remove_file(&self.script);
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 }
 

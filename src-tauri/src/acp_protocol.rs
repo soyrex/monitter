@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(caps.recovery_method().unwrap(), "session/resume");
         assert_eq!(
             initialize_params()["clientCapabilities"],
-            json!({"subagents":{}})
+            json!({"subagents":{},"_meta":{"minimax-code/extensions":{"version":1,"notifications":true}}})
         );
     }
 
