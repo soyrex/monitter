@@ -31,6 +31,15 @@ pub fn catalog() -> Vec<AcpCandidate> {
     // In particular the Qwen npm package is qwen-code, but its binary is qwen.
     [
         (
+            "mona-acp",
+            "mona-acp (Monitter harness)",
+            "First-party Monitter harness with per-turn Jev routing across codex, claude, and minimax",
+            "https://github.com/soyrex/mona",
+            "native",
+            "mona-acp",
+            vec![],
+        ),
+        (
             "gemini",
             "Gemini CLI",
             "Google's native ACP integration",

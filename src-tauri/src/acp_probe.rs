@@ -26,6 +26,15 @@ pub struct ProbeResult {
     pub image: bool,
     pub audio: bool,
     pub embedded_context: bool,
+    /// Per-harness extension flags. mona-acp sets `monitter.auth_loader`,
+    /// `monitter.jev_routing`, and `monitter.reasoning_effort` to true.
+    /// Other harnesses leave these false or omit them.
+    #[serde(default)]
+    pub jev_routing: bool,
+    #[serde(default)]
+    pub auth_loader: bool,
+    #[serde(default)]
+    pub reasoning_effort: bool,
 }
 
 #[cfg(test)]
@@ -228,6 +237,11 @@ pub fn verify(host: &Host, launch: &AcpLaunch) -> Result<ProbeResult, String> {
         }
         let result = &frame["result"];
         let caps = acp_protocol::Capabilities::from_initialize(result)?;
+        // mona-acp (and any harness that opts in to Monitter extensions)
+        // returns `agentCapabilities.extensions.monitter = { auth_loader,
+        // jev_routing, reasoning_effort }`. Other harnesses leave the
+        // block out entirely; we default to false.
+        let ext = &result["agentCapabilities"]["extensions"]["monitter"];
         return Ok(ProbeResult {
             protocol_version: acp_protocol::PROTOCOL_VERSION,
             agent_name: label(&result["agentInfo"]["name"]),
@@ -237,6 +251,9 @@ pub fn verify(host: &Host, launch: &AcpLaunch) -> Result<ProbeResult, String> {
             image: caps.image,
             audio: caps.audio,
             embedded_context: caps.embedded_context,
+            jev_routing: ext["jev_routing"].as_bool().unwrap_or(false),
+            auth_loader: ext["auth_loader"].as_bool().unwrap_or(false),
+            reasoning_effort: ext["reasoning_effort"].as_bool().unwrap_or(false),
         });
     }
     Err("Agent sent too many messages before ACP initialization finished.".into())

@@ -97,6 +97,13 @@
   <p class="hint">One argument per row, without shell quoting. Use the agent's existing sign-in or environment for credentials; do not put secrets in arguments.</p>
   <button type="button" class="verify" disabled={disabled || verifying || !launch?.command.trim()} onclick={verify}><Plug size={14}/>{verifying ? 'Checking…' : 'Verify connection'}</button>
   {#if verified}<p class="verified" role="status"><Check size={14}/>v{verified.protocolVersion} verified{verified.agentName ? ` · ${verified.agentName}` : ''}{verified.agentVersion ? ` ${verified.agentVersion}` : ''}</p>{/if}
+  {#if verified && (verified.jevRouting || verified.authLoader || verified.reasoningEffort)}
+    <p class="extensions" role="status">
+      {#if verified.jevRouting}<span class="ext-badge jev">Per-turn Jev routing</span>{/if}
+      {#if verified.authLoader}<span class="ext-badge">Auth loader</span>{/if}
+      {#if verified.reasoningEffort}<span class="ext-badge">Reasoning effort</span>{/if}
+    </p>
+  {/if}
   {#if verifyError}<p class="error" role="alert">{verifyError}</p>{/if}
   <p class="hint">Verification launches this executable for a handshake only. It does not sign in, create a chat, or send a model request.</p>
 </section>
@@ -116,7 +123,7 @@
   input{min-width:0;background:var(--bg);border:1px solid var(--line);border-radius:5px;color:inherit;padding:8px;font:inherit}
   .argument input{flex:1}.argument-heading b{font-size:12px}
   .refresh,.argument-heading button,.argument button{display:inline-flex;align-items:center;justify-content:center;gap:5px;flex-shrink:0;color:inherit;background:transparent;border:1px solid var(--line);border-radius:5px;padding:6px;font-size:11px}
-  .verify{display:inline-flex;align-items:center;justify-content:center;gap:7px;align-self:flex-start;padding:9px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:inherit;font:inherit;font-size:12px;min-height:40px}.verified{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--accent-ink,var(--accent));margin:0;overflow-wrap:anywhere}
+  .verify{display:inline-flex;align-items:center;justify-content:center;gap:7px;align-self:flex-start;padding:9px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:inherit;font:inherit;font-size:12px;min-height:40px}.verified{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--accent-ink,var(--accent));margin:0;overflow-wrap:anywhere}.extensions{display:flex;flex-wrap:wrap;gap:6px;margin:0}.ext-badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:99px;font-size:11px;background:var(--accent-soft,rgba(120,170,255,.18));color:var(--accent-ink,var(--accent));border:1px solid var(--line)}.ext-badge.jev{font-weight:600}
   button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.error{color:var(--danger,#d96060);font-size:12px;margin:0}
   @media(hover:hover) and (pointer:fine){.candidate:hover{border-color:var(--accent)}}
   @media(max-width:760px),(pointer:coarse){input{font-size:16px}.candidate{min-height:48px}.refresh,.argument-heading button,.argument button{min-height:40px}}

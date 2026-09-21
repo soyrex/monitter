@@ -53,6 +53,8 @@ export interface AcpProbeResult {
   protocolVersion: number; agentName: string | null; agentVersion: string | null;
   loadSession: boolean; resumeSession: boolean;
   image: boolean; audio: boolean; embeddedContext: boolean;
+  // Per-harness Monitter extensions, surfaced as picker badges.
+  jevRouting?: boolean; authLoader?: boolean; reasoningEffort?: boolean;
 }
 export type Sandbox = 'read-only' | 'workspace-write' | 'harness-configured' | 'yolo';
 /** Per-harness opt-in. Jev recommends model settings only; it never grants authority. */
