@@ -12,7 +12,7 @@
   {#if channel.description}<p class="topic">{channel.description}</p>{/if}
   {#each members as agent (agent.id)}
     <div class="member">
-      <span class="member-avatar">{#if agent.avatar && /^data:image\/(png|jpeg|webp);base64,/i.test(agent.avatar)}<img src={agent.avatar} alt=""/>{:else}<span class="model-avatar-mark"><ProviderIcon provider={agent.provider} model={agent.model} size={16} /></span>{/if}</span>
+      <span class="member-avatar">{#if agent.avatar && /^data:image\/(png|jpeg|webp);base64,/i.test(agent.avatar)}<img src={agent.avatar} alt=""/>{:else}<span class="model-avatar-mark"><ProviderIcon provider={agent.provider} model={agent.model || agent.acp?.command} size={16} /></span>{/if}</span>
       <div class="member-copy"><b>{agent.name}</b><small>{tasks.some(task=>task.channelId===channel.id&&task.agentId===agent.id&&task.status==='running')?'Working · ':''}{hosts.find(host=>host.id===agent.hostId)?.name??'Unknown host'}</small></div>
       <button disabled={busy} aria-label={`Remove ${agent.name} from channel`} title={`Remove ${agent.name}`} onclick={()=>onmembership(agent.id,false)}><UserMinus size={15}/></button>
     </div>
