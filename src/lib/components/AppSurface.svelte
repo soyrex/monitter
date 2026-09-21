@@ -224,6 +224,8 @@
     focusStep=workspace?2:1;
     if(workspace)setPaneExpansion(paneId);
   }
+  export function maximizePane(){focusTarget=contentKey;focusStep=2;setPaneExpansion(paneId);}
+  export function restorePaneLayout(){resetTabExpansion();}
   $effect(()=>{if(focusStep && (contentKey!==focusTarget || (focusStep===2 && workspaceExpansion!==paneId)))untrack(resetTabExpansion);});
   $effect(()=>{if(!embedded && expandedPaneId && (activePaneId!==expandedPaneId || !paneIds(layout).includes(expandedPaneId)))expandedPaneId=null;});
 
@@ -3604,6 +3606,13 @@
     if (activePaneId === 'main') toggleDetail();
     else paneRefs[activePaneId]?.toggleDetail();
   }
+  function maximizeFocusedPane() {
+    if (sidebarSelected) { notice='Select a content pane first.'; return; }
+    if (activePaneId === 'main') maximizePane(); else paneRefs[activePaneId]?.maximizePane();
+  }
+  function restoreFocusedPaneLayout() {
+    if (activePaneId === 'main') restorePaneLayout(); else paneRefs[activePaneId]?.restorePaneLayout();
+  }
   function balanceWorkspacePanes() {
     if (embedded || paneIds(layout).length < 2) return;
     layout = balancePaneLayout(layout);
@@ -3629,6 +3638,11 @@
       event.preventDefault();
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') selectAdjacentTab(event.key === 'ArrowLeft' ? -1 : 1);
       else focusAdjacentPane(event.key === 'ArrowUp' ? 'up' : 'down');
+      return;
+    }
+    if (!embedded && commandModifier && !event.altKey && !event.shiftKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId && !railProjectId && !document.querySelector('[role="dialog"]') && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+      event.preventDefault();
+      if (event.key === 'ArrowUp') maximizeFocusedPane(); else restoreFocusedPaneLayout();
       return;
     }
     if (!embedded && commandModifier && event.shiftKey && !event.altKey && !event.isComposing && !modal && !palette && !taskMenu && !railAgentId && !railProjectId && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
