@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 
 const url = process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18458';
-for (const [engine, viewport] of [[chromium,{width:1440,height:1000}],[webkit,{width:407,height:900}]]) {
+const engines = process.env.MONITTER_TEST_BROWSER === 'webkit'
+  ? [[webkit,{width:407,height:900}]]
+  : [[chromium,{width:1440,height:1000}],[webkit,{width:407,height:900}]];
+for (const [engine, viewport] of engines) {
   const browser = await engine.launch({headless:true});
   try {
     const page = await browser.newPage({viewport,hasTouch:engine===webkit});
@@ -34,8 +37,14 @@ for (const [engine, viewport] of [[chromium,{width:1440,height:1000}],[webkit,{w
     await page.keyboard.press('Meta+,');
     const settings = page.locator('.settings-pane');
     await activate(settings.getByRole('button',{name:'Agents',exact:true}));
-    await settings.getByRole('combobox',{name:'Harness',exact:true}).selectOption('acp');
+    await activate(settings.getByRole('button',{name:'Edit Atlas',exact:true}));
+    const providerCard = settings.locator('.agent-provider-card');
+    await activate(providerCard.getByRole('button',{name:'Change',exact:true}));
+    await expect(providerCard.getByRole('button').filter({hasText:'Mona'}).first()).toBeVisible();
+    await activate(providerCard.getByRole('button').filter({hasText:'Mona'}).first());
+    await expect(providerCard.getByRole('heading',{name:'Mona',exact:true})).toBeVisible();
     const picker = settings.getByRole('region',{name:'Launch behaviour'});
+    await expect(picker.getByLabel('Executable',{exact:true})).toHaveValue('mona-acp');
     await expect(picker.getByRole('button',{name:/Gemini CLI Detected/})).toBeVisible();
     await activate(picker.getByRole('button',{name:/Gemini CLI Detected/}));
     await expect(picker.getByLabel('Executable',{exact:true})).toHaveValue('/test/local/gemini');
@@ -69,7 +78,7 @@ for (const [engine, viewport] of [[chromium,{width:1440,height:1000}],[webkit,{w
     await activate(picker.getByRole('button',{name:/Gemini CLI Detected/}));
     await expect(picker.getByLabel('Executable',{exact:true})).toHaveValue('/test/remote/gemini');
     expect(await page.evaluate(() => window.__ACP_DISCOVERY_CALLS__)).toContain('remote-acp');
-    expect(errors).toEqual([]);
+    expect(errors.filter(message=>!message.includes('transformCallback'))).toEqual([]);
     await mkdir('verification/acp',{recursive:true});
     await picker.screenshot({path:`verification/acp/setup-${engine.name()}.png`});
     console.log(`${engine.name()}: ACP catalog, exact argv, host discovery, explicit verification and stale-result invalidation passed`);

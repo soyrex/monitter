@@ -16,8 +16,10 @@ install -m 0755 target/release/mona-acp "$HOME/.local/bin/mona-acp"
 ```
 
 Monitter's reviewed ACP catalog looks for `mona-acp` on `PATH` and in
-`~/.local/bin`. In the desktop app, open the agent settings, choose ACP, refresh
-discovery, select **mona-acp (Monitter harness)**, and use **Verify connection**.
+`~/.local/bin`. In the desktop app, open **Preferences → Agents**, create or
+edit an agent, choose **Change → Mona**, expand **Advanced**, and use
+**Verify connection**. The Mona choice seeds the reviewed `mona-acp`
+executable; Refresh can resolve its installed absolute path.
 Verification proves protocol compatibility and reports negotiated Jev routing,
 auth-loader, and reasoning-effort capabilities. It does not prove provider
 authentication or make a model request.
