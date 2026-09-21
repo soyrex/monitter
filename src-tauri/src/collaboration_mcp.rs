@@ -138,7 +138,11 @@ fn valid(name: &str, args: &Value) -> bool {
                 if v.as_f64().is_none_or(|n| !(1.0..=20.0).contains(&n)) {
                     return false;
                 }
-            } else if *k == "active_only" {
+            } else if *k == "max_consecutive_failures" {
+                if v.as_f64().is_none_or(|n| n < 1.0) {
+                    return false;
+                }
+            } else if *k == "active_only" || *k == "enabled" {
                 if !v.is_boolean() {
                     return false;
                 }
@@ -397,6 +401,21 @@ mod tests {
         assert!(valid(
             "save_schedule",
             &json!({"title": "t", "agent_id": "a", "prompt": "p"})
+        ));
+        // Valid with enabled and max_consecutive_failures.
+        assert!(valid(
+            "save_schedule",
+            &json!({"title": "t", "agent_id": "a", "prompt": "p", "enabled": true, "max_consecutive_failures": 5})
+        ));
+        // Invalid enabled value type.
+        assert!(!valid(
+            "save_schedule",
+            &json!({"title": "t", "agent_id": "a", "prompt": "p", "enabled": "not-a-bool"})
+        ));
+        // Invalid max_consecutive_failures value type or bound.
+        assert!(!valid(
+            "save_schedule",
+            &json!({"title": "t", "agent_id": "a", "prompt": "p", "max_consecutive_failures": 0})
         ));
         // schedule id required.
         assert!(!valid("delete_schedule", &json!({})));

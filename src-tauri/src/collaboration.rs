@@ -894,6 +894,21 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "terminal_run" => &["command", "cwd"],
         "present_mail_batch" => &["source", "account_label", "query_label", "messages"],
         "present_mail_detail" => &["mail_id", "provider_message_id", "body_text"],
+        "list_schedules" => &[],
+        "save_schedule" => &[
+            "id",
+            "title",
+            "agent_id",
+            "prompt",
+            "preset",
+            "frequency",
+            "tz",
+            "mode",
+            "overlap_policy",
+            "max_consecutive_failures",
+            "enabled",
+        ],
+        "delete_schedule" | "run_schedule_now" | "pause_schedule" | "resume_schedule" => &["id"],
         _ => return Err("Unknown Monitter collaboration tool.".into()),
     };
     if args.keys().any(|key| !allowed.contains(&key.as_str())) {

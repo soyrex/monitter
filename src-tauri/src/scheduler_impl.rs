@@ -498,8 +498,26 @@ impl Service {
         caller_task: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
+        // The MCP tool schema is snake_case (matching `validate_tool_args`),
+        // but `ScheduleInput` is `rename_all = "camelCase"` for the Tauri
+        // frontend's IPC calls. Translate the snake_case keys that differ,
+        // and default a missing `id` to "" (create) per the tool's
+        // documented behaviour.
+        let mut mapped = args.clone();
+        for (from, to) in [
+            ("agent_id", "agentId"),
+            ("overlap_policy", "overlapPolicy"),
+            ("max_consecutive_failures", "maxConsecutiveFailures"),
+        ] {
+            if let Some(value) = mapped.remove(from) {
+                mapped.insert(to.to_string(), value);
+            }
+        }
+        mapped
+            .entry("id")
+            .or_insert_with(|| serde_json::Value::String(String::new()));
         let input = serde_json::from_value::<crate::scheduler::ScheduleInput>(
-            serde_json::Value::Object(args.clone()),
+            serde_json::Value::Object(mapped),
         )
         .map_err(|e| format!("Invalid schedule input: {e}"))?;
         let snap = self.save_schedule(input)?;
