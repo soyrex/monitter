@@ -1,5 +1,5 @@
 <script lang="ts">
-  let { active = false, mirror = false, contained = false }: { active?: boolean; mirror?: boolean; contained?: boolean } = $props();
+  let { active = false, mirror = false, contained = false, pane = false }: { active?: boolean; mirror?: boolean; contained?: boolean; pane?: boolean } = $props();
   const sparkles = [
     { x: 6, y: 40, size: '11px', delay: 0 },
     { x: 92, y: 90, size: '9px', delay: .5 },
@@ -25,7 +25,7 @@
   ];
 </script>
 
-{#if active}<div class="sparkle-field" class:mirror class:contained aria-hidden="true">
+{#if active}<div class="sparkle-field" class:mirror class:contained class:pane aria-hidden="true">
   <div class="sparkle-glow"></div>
   {#each sparkles as sparkle}<span class="sparkle" style:left={`${sparkle.x}%`} style:bottom={`${sparkle.y}px`} style:font-size={sparkle.size} style:animation-delay={`${sparkle.delay}s`}>✦</span>{/each}
 </div>{/if}
@@ -33,6 +33,7 @@
 <style>
   .sparkle-field { position:absolute; left:0; right:0; top:-80px; bottom:0; overflow:hidden; pointer-events:none; z-index:0; }
   .sparkle-field.contained { inset:0; }
+  .sparkle-field.pane { top:auto; height:40%; }
   .sparkle-field.mirror { transform:scaleY(-1); transform-origin:center; }
   .sparkle-field { opacity:.5; }
   :global([data-theme="dark"]) .sparkle-field { opacity:1; }

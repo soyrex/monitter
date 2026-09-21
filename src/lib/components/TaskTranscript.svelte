@@ -202,6 +202,7 @@
   </div>
 {/if}
 <section class="conversation">
+    <SparkleField active={task.status === 'running'} pane />
     <TaskActivity goal={null} onclear={onClearGoal} tools={computerTools} onstop={onStop} disabled={busy} />
     <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       <TranscriptVirtualList
@@ -259,7 +260,6 @@
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
     <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />
   <div class="composer-area">
-    <SparkleField active={task.status === 'running'}/>
     {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
     {@render composer()}
     {@render subagentDock()}
@@ -275,7 +275,7 @@
   .floating-panel { position:fixed; inset:auto; z-index:50; margin:0; box-sizing:border-box; overflow:auto; overscroll-behavior:contain; padding:5px; border:1px solid var(--line); border-radius:9px; color:var(--ink); background:var(--panel); box-shadow:0 12px 30px #0003; }
   .pane-task-header { grid-column: 1 / -1; grid-row: 1; }
   .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
-  .conversation { --chat-content-max-width:900px; display:flex; min-width:0; min-height:0; flex:1; flex-direction:column; grid-column:1; grid-row:2; }
+  .conversation { --chat-content-max-width:900px; position:relative; display:flex; min-width:0; min-height:0; flex:1; flex-direction:column; grid-column:1; grid-row:2; }
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .composer-area { position:relative; flex-shrink:0; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }
