@@ -2819,8 +2819,21 @@
         if (routeAgent.jevRouting === 'safe_auto' && decision.confidence >= 0.5) {
           const mappedModel = routeAgent.jevModelTiers?.[decision.model_tier] || routeAgent.model;
           if (mappedModel) {
-            modelSettings = { model: mappedModel, reasoningEffort: decision.reasoning_level, fastMode: null };
-            routingNotice = `Jev applied ${label} (${Math.round(decision.confidence * 100)}% confidence).`;
+            const catalog = await bridge.getModelCatalog({agentId:routeAgent.id,projectId:captured.projectId||null,codexHome:routeAgent.provider==='codex'?routeAgent.codexHome??null:null});
+            const wanted = mappedModel.trim().toLowerCase();
+            const exact = catalog.models.find(model => model.id === mappedModel);
+            const aliases = catalog.models.filter(model => {
+              const unqualified = model.id.includes('/') ? model.id.slice(model.id.indexOf('/') + 1) : model.id;
+              return model.id.toLowerCase() === wanted || model.name.toLowerCase() === wanted || unqualified.toLowerCase() === wanted;
+            });
+            const selected = exact ?? (aliases.length === 1 ? aliases[0] : null);
+            if (selected) {
+              const effort = routeAgent.provider === 'acp' || !selected.reasoningEfforts.some(option => option.id === decision.reasoning_level) ? null : decision.reasoning_level;
+              modelSettings = { model: selected.id, reasoningEffort: effort, fastMode: null };
+              routingNotice = `Jev applied ${label} with ${selected.name} (${Math.round(decision.confidence * 100)}% confidence).`;
+            } else {
+              routingNotice = `Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default was kept.`;
+            }
           } else {
             routingNotice = `Jev recommends ${label}; this harness has no mapped model for that tier.`;
           }
