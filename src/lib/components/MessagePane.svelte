@@ -196,7 +196,9 @@
   .message-header { position: sticky; top: 0; z-index: 2; max-height: 40%; overflow: auto; scrollbar-width: thin; }
   /* Paint behind the translucent header so content fades before its top edge. */
   .message-header::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(to bottom, var(--paper) 0%, var(--paper) 20%, transparent 100%); }
-  .message-content { display: flow-root; min-width:0; width: min(var(--chat-content-max-width, 900px), calc(100% - 2 * var(--chat-side-padding, clamp(25px, 4vw, 50px)))); margin-inline: auto; padding: 25px 0 calc(var(--scroll-fade) + 8px); overflow-x:clip; }
+  /* Keep the viewport as the horizontal guard, but let entry shadows paint
+     past this centered width instead of clipping at its own edges. */
+  .message-content { display: flow-root; min-width:0; width: min(var(--chat-content-max-width, 900px), calc(100% - 2 * var(--chat-side-padding, clamp(25px, 4vw, 50px)))); margin-inline: auto; padding: 25px 0 calc(var(--scroll-fade) + 8px); overflow-x:visible; }
   .jump-latest { position:absolute; left:50%; bottom:14px; z-index:2; display:grid; place-items:center; width:36px; height:36px; border:1px solid var(--line); border-radius:50%; color:var(--ink); background:var(--panel); box-shadow:0 0 30px black; opacity:0; transform:translate(-50%,8px); visibility:hidden; pointer-events:none; cursor:pointer; transition:opacity .18s ease,transform .18s ease,visibility .18s step-end; }
   .jump-latest.visible { opacity:1; transform:translate(-50%,0); visibility:visible; pointer-events:auto; transition:opacity .18s ease,transform .18s ease; }
   .jump-latest.thinking.visible { color:var(--accent-ink); border-color:var(--accent); box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 20%,transparent),0 0 14px color-mix(in srgb,var(--accent) 28%,transparent),0 3px 12px #0002; animation:jump-attention-glow 1.6s ease-in-out infinite; }
