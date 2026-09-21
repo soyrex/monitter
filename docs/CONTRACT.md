@@ -543,6 +543,14 @@ Mcode's process-scoped `permissionMode` selector); if that exact option is absen
 This changes only the agent process's own confirmation policy: ACP remains a transport, not an OS sandbox,
 and it does not widen Monitter's native, LAN, filesystem, or collaboration permissions.
 
+An ACP harness that negotiates Monitter's `jev_routing` extension may emit a bounded
+`session/update` with `sessionUpdate: "router_trace"`. Monitter validates a structured trace no
+larger than 64 KiB and stores one visible status event containing both the requested and actual
+model/effort plus the application outcome. A failed application is labelled as a rollback and does
+not claim the requested model ran. Malformed or oversized traces create a bounded diagnostic error
+without failing or replaying the model turn. Raw prompts and credentials are never accepted as part
+of this extension payload.
+
 Agent settings offer searchable presets and a custom ACP launcher. The catalog
 is convenience metadata, not a restriction on which compatible executables can
 be used. Bridges (including Pi ACP) are labelled separately from native ACP.

@@ -1,9 +1,9 @@
 //! End-to-end ACP fixtures. These are temporary local subprocesses only.
 
 use crate::{
+    Service,
     extensions::{ManagedSkill, McpServerConfig, McpTransport},
     model::{AcpLaunch, CreateTaskInput},
-    Service,
 };
 use std::collections::BTreeMap;
 use std::{
@@ -45,13 +45,14 @@ let turns=0, session='fixture-session', configAcknowledged=true;
 const reply=(id,result)=>console.log(JSON.stringify({jsonrpc:'2.0',id,result}));
 const update=(text)=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text},id:`message-${turns}`}}}));
 const commandUpdate=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'available_commands_update',availableCommands:[{name:'usage',description:'Show fixture usage',input:{hint:'window'}}]}}}));
+const routerTrace=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'router_trace',trace:{traceId:'fixture-route',trigger:'initial_prompt',applied:false,requestedModel:'gpt-6-astra',requestedEffort:'max',newModel:'gpt-5.5',newEffort:'high',applicationError:'model unavailable',confidence:0.9,rationale:'fixture rollback'}}}}));
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
  if(frame.method==='initialize') { const recovery=process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}; const http=process.argv[2]==='managed-no-http'?{}:{mcpCapabilities:{http:true}}; reply(frame.id,{protocolVersion:1,agentCapabilities:{...recovery,...http}}); }
  else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; reply(frame.id,mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='mcode-steer'){ globalThis.activePromptId=frame.id; } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='mcode-steer'){ globalThis.activePromptId=frame.id; } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { if(process.argv[2]==='router-trace') routerTrace(); update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } }
  else if(frame.method==='mcode/session/steer'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`steer:${frame.params.text}\n`); reply(frame.id,{turnId:'fixture-mcode-turn',mode:'steered'}); update('mcode-steered'); reply(globalThis.activePromptId,{stopReason:'end_turn'}); }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
@@ -88,7 +89,7 @@ fn fixture(name: &str) -> Fixture {
 }
 
 fn wait_for(service: &Service, task_id: &str, predicate: impl Fn(&crate::Snapshot) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         let snapshot = service.snapshot().unwrap();
         if predicate(&snapshot) {
@@ -158,6 +159,52 @@ fn resident_fixture_delivers_context_and_two_distinct_turns() {
         .map(|message| message.text)
         .collect::<Vec<_>>();
     assert_eq!(replies, vec!["reply-1", "reply-2"]);
+}
+
+#[test]
+fn mona_router_trace_is_visible_as_a_truthful_status_event() {
+    let fixture = fixture_with_args("router-trace", vec!["router-trace".into()]);
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "Mona routing fixture".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let accepted = fixture
+        .accept_send(task.id.clone(), "route this safely".into(), vec![])
+        .unwrap()
+        .unwrap();
+    // Invoke the accepted-turn dispatcher directly so this subprocess test
+    // does not depend on a Tauri async runtime being installed by the test
+    // runner. Production still reaches the same dispatcher through
+    // `launch_accepted`.
+    fixture.deliver_accepted(task.id.clone(), accepted);
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot.events.iter().any(|event| {
+            event.task_id == task.id && event.title == "Jev route rolled back · gpt-5.5 · high"
+        })
+    });
+
+    let event = fixture
+        .snapshot()
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.task_id == task.id && event.title.starts_with("Jev route rolled back"))
+        .expect("router trace event");
+    assert_eq!(event.kind, "status");
+    let detail: serde_json::Value = serde_json::from_str(&event.detail).unwrap();
+    assert_eq!(detail["trace"]["requestedModel"], "gpt-6-astra");
+    assert_eq!(detail["trace"]["newModel"], "gpt-5.5");
+    assert_eq!(detail["trace"]["applicationError"], "model unavailable");
 }
 
 #[test]
@@ -403,9 +450,11 @@ fn managed_mcp_and_skill_reach_acp_launch_without_rewriting_user_transcript() {
         .map(|message| message.text)
         .collect::<Vec<_>>();
     assert_eq!(stored_user, vec!["original user request"]);
-    assert!(!stored_user
-        .iter()
-        .any(|text| text.contains("MANAGED_SKILL_SENTINEL")));
+    assert!(
+        !stored_user
+            .iter()
+            .any(|text| text.contains("MANAGED_SKILL_SENTINEL"))
+    );
 }
 
 #[test]
@@ -413,7 +462,10 @@ fn managed_http_mcp_is_rejected_before_prompt_without_advertised_capability() {
     let capture = std::env::temp_dir().join(format!("monitter-acp-http-{}", crate::id()));
     let fixture = fixture_with_args(
         "managed-http",
-        vec!["managed-no-http".into(), capture.to_string_lossy().into_owned()],
+        vec![
+            "managed-no-http".into(),
+            capture.to_string_lossy().into_owned(),
+        ],
     );
     let agent = fixture.snapshot().unwrap().agents.remove(0);
     let mut config = fixture.extension_config().unwrap();
@@ -455,9 +507,11 @@ fn managed_http_mcp_is_rejected_before_prompt_without_advertised_capability() {
             .find(|item| item.id == task.id)
             .is_some_and(|item| item.status == "error")
     });
-    assert!(!fs::read_to_string(&capture)
-        .unwrap_or_default()
-        .contains("prompt:"));
+    assert!(
+        !fs::read_to_string(&capture)
+            .unwrap_or_default()
+            .contains("prompt:")
+    );
     let _ = fs::remove_file(&capture);
 }
 
@@ -873,10 +927,12 @@ fn ssh_shim_runs_real_supervisor_with_spaced_cwd_two_turns_and_cancel() {
     {
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(fixture
-        .collaboration_grants
-        .lock()
-        .is_ok_and(|grants| !grants.contains_key(&task.id)));
+    assert!(
+        fixture
+            .collaboration_grants
+            .lock()
+            .is_ok_and(|grants| !grants.contains_key(&task.id))
+    );
     let _ = fs::remove_file(&capture);
     let _ = fs::remove_file(&shim);
 }

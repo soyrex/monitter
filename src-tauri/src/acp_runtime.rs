@@ -7,17 +7,17 @@
 //! receive a JSON-RPC error instead of being mistaken for an approval.
 
 use crate::{
-    acp_protocol,
+    ApprovalDecision, CreateApprovalRequest, Service, acp_protocol,
     runner::{self, Parsed, RunControl},
-    ApprovalDecision, CreateApprovalRequest, Service,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     io::{BufReader, Write},
     sync::{
+        Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -39,6 +39,7 @@ const MAX_TOOL_ACTIVITY_ITEMS: usize = 1024;
 const MAX_TOOL_ACTIVITY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOOL_EVENT_BYTES: usize = 512 * 1024;
 const MAX_TOOL_FIELD_BYTES: usize = 64 * 1024;
+const MAX_ROUTER_TRACE_BYTES: usize = 64 * 1024;
 const TOOL_DETAIL_TRUNCATED: &str = "[ACP tool detail truncated]";
 
 struct PermissionSlot(Arc<AtomicUsize>);
@@ -155,10 +156,12 @@ mod tests {
         assert!(detail.len() <= MAX_TOOL_EVENT_BYTES);
         let detail: Value = serde_json::from_str(&detail).unwrap();
         assert_eq!(detail["update"]["status"], "failed");
-        assert!(detail["update"]["rawOutput"]
-            .as_str()
-            .unwrap()
-            .contains(TOOL_DETAIL_TRUNCATED));
+        assert!(
+            detail["update"]["rawOutput"]
+                .as_str()
+                .unwrap()
+                .contains(TOOL_DETAIL_TRUNCATED)
+        );
     }
 
     #[test]
@@ -191,6 +194,50 @@ mod tests {
         let detail: Value = serde_json::from_str(&detail).unwrap();
         assert_eq!(detail["update"]["status"], "failed");
         assert_eq!(detail["update"]["error"], "permission denied");
+    }
+
+    #[test]
+    fn router_trace_reports_requested_and_actual_route() {
+        let params = json!({
+            "sessionId": "mona-session",
+            "update": {
+                "sessionUpdate": "router_trace",
+                "trace": {
+                    "traceId": "trace-1",
+                    "applied": true,
+                    "requestedModel": "gpt-6-astra",
+                    "requestedEffort": "max",
+                    "newModel": "gpt-6-astra",
+                    "newEffort": "xhigh",
+                    "rationale": "frontier task",
+                    "prompt": "must not be persisted",
+                    "apiKey": "must not be persisted"
+                }
+            }
+        });
+        let (title, detail) = normalized_router_trace(&params).unwrap().unwrap();
+        assert_eq!(title, "Jev route applied · gpt-6-astra · xhigh");
+        let detail: Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(detail["trace"]["requestedEffort"], "max");
+        assert_eq!(detail["trace"]["newEffort"], "xhigh");
+        assert!(detail["trace"].get("prompt").is_none());
+        assert!(detail["trace"].get("apiKey").is_none());
+    }
+
+    #[test]
+    fn router_trace_rejects_oversized_or_unstructured_payloads() {
+        assert!(
+            normalized_router_trace(&json!({
+                "sessionId": "mona-session",
+                "update": {"trace": "not-an-object"}
+            }))
+            .is_err()
+        );
+        assert!(normalized_router_trace(&json!({
+            "sessionId": "mona-session",
+            "update": {"trace": {"applied": false, "rationale": "x".repeat(MAX_ROUTER_TRACE_BYTES)}}
+        }))
+        .is_err());
     }
 }
 
@@ -639,6 +686,94 @@ fn notification_kind(value: &Value) -> &str {
         .unwrap_or_default()
 }
 
+/// Validate and normalize Mona's negotiated `router_trace` extension into one
+/// bounded diagnostic event. The event keeps both the requested and actual
+/// configuration, but never contains a raw prompt or provider credential.
+fn normalized_router_trace(params: &Value) -> Result<Option<(String, String)>, String> {
+    let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let trace = params.pointer("/update/trace").unwrap_or(&Value::Null);
+    let Some(trace_object) = trace.as_object() else {
+        return Err("ACP router_trace omitted its trace object.".into());
+    };
+
+    let applied = trace_object
+        .get("applied")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "ACP router_trace omitted its applied flag.".to_string())?;
+    let bounded_string = |key: &str, max: usize| -> Result<Option<String>, String> {
+        let Some(value) = trace_object.get(key) else {
+            return Ok(None);
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("ACP router_trace field {key} was not text."))?
+            .trim();
+        if value.len() > max {
+            return Err(format!(
+                "ACP router_trace field {key} exceeded its safety limit."
+            ));
+        }
+        Ok((!value.is_empty()).then(|| value.to_string()))
+    };
+    let actual_model = bounded_string("newModel", 256)?;
+    let actual_effort = bounded_string("newEffort", 64)?;
+    let application_error = bounded_string("applicationError", 1024)?;
+
+    // Store only the documented routing fields. Unknown provider data is not
+    // copied into Monitter, so a malformed extension cannot smuggle a prompt,
+    // token, or credential into the durable event log.
+    let mut projected = serde_json::Map::new();
+    projected.insert("applied".into(), Value::Bool(applied));
+    for (key, max) in [
+        ("traceId", 128),
+        ("trigger", 64),
+        ("rationale", 4096),
+        ("oldModel", 256),
+        ("newModel", 256),
+        ("oldEffort", 64),
+        ("newEffort", 64),
+        ("promptFingerprint", 256),
+        ("proposedTier", 64),
+        ("proposedEffort", 64),
+        ("requestedModel", 256),
+        ("requestedEffort", 64),
+        ("applicationError", 1024),
+    ] {
+        if let Some(value) = bounded_string(key, max)? {
+            projected.insert(key.into(), Value::String(value));
+        }
+    }
+    for key in ["confidence", "occurredAt"] {
+        if let Some(value) = trace_object.get(key) {
+            if !value.is_number() {
+                return Err(format!("ACP router_trace field {key} was not numeric."));
+            }
+            projected.insert(key.into(), value.clone());
+        }
+    }
+    let detail = json!({"sessionId": session_id, "trace": projected}).to_string();
+    if detail.len() > MAX_ROUTER_TRACE_BYTES {
+        return Err("ACP router_trace exceeded 64 KiB and was ignored.".into());
+    }
+
+    let mut parts = vec![if applied {
+        "Jev route applied".to_string()
+    } else if application_error.is_some() {
+        "Jev route rolled back".to_string()
+    } else {
+        "Jev route kept current runtime".to_string()
+    }];
+    if let Some(model) = actual_model {
+        parts.push(model);
+    }
+    if let Some(effort) = actual_effort {
+        parts.push(effort);
+    }
+    Ok(Some((parts.join(" · "), detail)))
+}
+
 fn flush_reasoning(
     service: &Arc<Service>,
     task_id: &str,
@@ -760,11 +895,9 @@ fn run(
             return;
         }
     };
-    if let Err(error) = service.apply_environment_secrets_to_local_user_command(
-        &task_id,
-        &host,
-        &mut command,
-    ) {
+    if let Err(error) =
+        service.apply_environment_secrets_to_local_user_command(&task_id, &host, &mut command)
+    {
         if let Some(remote) = remote_collaboration.take() {
             runner::abort_remote_collaboration(remote);
         }
@@ -1026,8 +1159,12 @@ fn run(
                     turn = active_turn;
                 }
                 if seen_permission_ids.len() >= MAX_PERMISSION_HISTORY {
-                    fail(&service, &task_id, &control,
-                        "ACP permission request history exceeded its safety limit; reconnect this chat.");
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP permission request history exceeded its safety limit; reconnect this chat.",
+                    );
                     return;
                 }
                 if !session_ok
@@ -1168,7 +1305,12 @@ fn run(
                         .and_then(Value::as_bool)
                         != Some(true)
                 {
-                    fail(&service, &task_id, &control, "This ACP agent does not advertise HTTP MCP support; Monitter could not attach its collaboration server and did not silently ignore it.");
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "This ACP agent does not advertise HTTP MCP support; Monitter could not attach its collaboration server and did not silently ignore it.",
+                    );
                     return;
                 }
                 let (method, params) = if let Some(native) = task.native_session_id.as_deref() {
@@ -1264,7 +1406,12 @@ fn run(
                         settings.fast_mode.is_some() || settings.reasoning_effort.is_some()
                     })
                 {
-                    fail(&service, &task_id, &control, "ACP has not advertised support for saved fast mode or reasoning effort settings.");
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP has not advertised support for saved fast mode or reasoning effort settings.",
+                    );
                     return;
                 }
                 let permission = match crate::acp_session_config::configured_permission_request(
@@ -1599,9 +1746,9 @@ fn run(
             if control.matches_app_server_thread(notification_session)
                 && notification_kind(&value) == "available_commands_update"
             {
-                if let Err(error) = control.replace_acp_slash_commands(
-                    &params["update"]["availableCommands"],
-                ) {
+                if let Err(error) =
+                    control.replace_acp_slash_commands(&params["update"]["availableCommands"])
+                {
                     fail(&service, &task_id, &control, error);
                     return;
                 }
@@ -1615,6 +1762,31 @@ fn run(
                 continue;
             }
             let kind = notification_kind(&value);
+            if kind == "router_trace" {
+                match normalized_router_trace(params) {
+                    Ok(Some((title, detail))) => {
+                        if let Err(error) = service.app_server_event(
+                            &task_id,
+                            &control,
+                            (!turn.is_empty()).then_some(turn.as_str()),
+                            Parsed {
+                                native_session_id: None,
+                                assistant: None,
+                                event: Some(("status".into(), title, detail)),
+                                failed: false,
+                            },
+                        ) {
+                            fail(&service, &task_id, &control, error);
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        service.record(&task_id, "error", "Mona routing update ignored", error)
+                    }
+                }
+                continue;
+            }
             if kind == "usage_update" {
                 let usage = &params["update"];
                 let used = usage.get("used").and_then(Value::as_i64);
@@ -1675,8 +1847,7 @@ fn run(
                     return;
                 }
                 if kind == "subagent_spawned" {
-                    if let Some(child_id) =
-                        update.get("subagentSessionId").and_then(Value::as_str)
+                    if let Some(child_id) = update.get("subagentSessionId").and_then(Value::as_str)
                     {
                         if let Some(task_text) = update.get("task").and_then(Value::as_str) {
                             let result = service.append_subagent_transcript_entry(
@@ -1768,7 +1939,9 @@ fn run(
                 let placeholder = match content_type {
                     "image" => "",
                     "audio" => "\n[The ACP agent returned audio; playback is not supported yet.]\n",
-                    "resource_link" => "\n[The ACP agent returned a resource link; automatic fetching is disabled.]\n",
+                    "resource_link" => {
+                        "\n[The ACP agent returned a resource link; automatic fetching is disabled.]\n"
+                    }
                     "resource" => "\n[The ACP agent returned embedded resource content.]\n",
                     _ => "\n[The ACP agent returned unsupported content.]\n",
                 };
