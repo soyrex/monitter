@@ -142,9 +142,17 @@ fn mona_acp_synthetic_router_trace_smoke() {
     command
         .env("MONA_HOME", &isolated_home)
         .env("MONA_ACP_JEV_ROUTE_POLICY", "safe_auto")
+        .env_remove("MONA_ACP_LIVE_JEV")
+        .env_remove("MONA_ACP_JEV_PROVIDER")
+        .env_remove("MONA_MEMORY_JEV_PROVIDER")
+        .env_remove("MONA_BROWSER_JEV_PROVIDER")
         .env_remove("OPENAI_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("MINIMAX_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("TYPESAFE_API_KEY")
+        .env_remove("AIMLAPI_API_KEY")
+        .env_remove("MONA_API_KEY")
         .stderr(Stdio::null());
 
     let mut child = command.spawn().expect("spawn mona-acp");

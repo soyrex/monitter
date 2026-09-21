@@ -10,7 +10,7 @@ routing trace delivery, and the expected unauthenticated prompt result.
 From the Mona checkout:
 
 ```sh
-cargo build --release --bin mona-acp
+cargo build --release -p mona-acp --bin mona-acp
 install -d "$HOME/.local/bin"
 install -m 0755 target/release/mona-acp "$HOME/.local/bin/mona-acp"
 ```
@@ -28,13 +28,13 @@ authentication or make a model request.
 cd /Users/alex/code/mona-acp-milestone-a
 cargo test -p mona-acp --lib
 cargo test -p mona-acp --test end_to_end
-cargo build --bin mona-acp
+cargo build -p mona-acp --bin mona-acp
 
 cd /Users/alex/code/monitter-mona-phase2-closeout
 npm run check
 node scripts/run-activity-mona-router-trace-isolated.mjs
 RUN_MONITTER_MONA_SYNTHETIC_SMOKE=1 \
-  MONA_ACP_BIN=/Users/alex/code/mona-acp-milestone-a/target/debug/mona-acp \
+  MONA_ACP_BIN=/Users/alex/.local/bin/mona-acp \
   cargo test --manifest-path src-tauri/Cargo.toml \
   acp_mona_smoke::mona_acp_synthetic_router_trace_smoke --lib -- --nocapture
 ```
