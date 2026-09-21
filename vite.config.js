@@ -36,7 +36,7 @@ export default defineConfig(({ command, mode }) => {
     port: appUi ? 18420 : webDev ? 18450 : 18420,
     strictPort: true,
     host: appUi ? '127.0.0.1' : webDev ? '0.0.0.0' : host || "127.0.0.1",
-    ...(webDev ? { cors: false, proxy: webDevProxy() } : {}),
+    ...(webDev ? { allowedHosts: ['.ts.net'], cors: false, proxy: webDevProxy() } : {}),
     hmr: !webDev && host
       ? {
           protocol: "ws",

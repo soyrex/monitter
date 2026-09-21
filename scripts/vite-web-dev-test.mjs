@@ -16,6 +16,8 @@ assert.equal(request({ from: 'https://attacker.invalid' }), 403);
 assert.equal(request({ from: 'null' }), 403);
 assert.equal(request({ from: null }), 403);
 assert.equal(request({ host: 'attacker.invalid:18450' }), 421);
+assert.equal(request({ host: 'hillarys-laptop.tail38b849.ts.net:18450', from: 'http://hillarys-laptop.tail38b849.ts.net:18450', peer: '100.109.8.3' }), 200);
+assert.equal(request({ host: 'hillarys-laptop.tail38b849.ts.net:9999', from: 'http://hillarys-laptop.tail38b849.ts.net:9999', peer: '100.109.8.3' }), 421);
 assert.equal(request({ site: 'cross-site' }), 403);
 assert.equal(request({ url: '/api/other' }), 404);
 assert.equal(request({ url: '/api/access', method: 'GET', from: null }), 200);

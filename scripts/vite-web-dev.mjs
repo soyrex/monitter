@@ -19,6 +19,7 @@ export function trustedDevAddress(address = '') {
 export function webDevGuard(origins) {
   const allowed = new Set(typeof origins === 'string' ? [origins] : origins);
   const hosts = new Set([...allowed].map(origin => new URL(origin).host));
+  const ports = new Set([...allowed].map(origin => new URL(origin).port));
   return (/** @type {import('node:http').IncomingMessage} */ req, /** @type {import('node:http').ServerResponse} */ res, /** @type {() => void} */ next) => {
     const reject = (/** @type {number} */ code, /** @type {string} */ error) => {
       res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -28,7 +29,10 @@ export function webDevGuard(origins) {
     // cross-site requests before rewriting anything for the backend connection.
     if (!trustedDevAddress(req.socket?.remoteAddress)) return reject(403, 'LAN and Tailscale clients only.');
     const host = req.headers.host;
-    if (!host || !hosts.has(host)) return reject(421, 'Use a listed dev-server IP address.');
+    const magicDns = typeof host === 'string'
+      && /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]+\.ts\.net:(\d+)$/i.test(host)
+      && ports.has(host.slice(host.lastIndexOf(':') + 1));
+    if (!host || (!hosts.has(host) && !magicDns)) return reject(421, 'Use a listed dev-server address.');
     const origin = `http://${host}`;
     if (req.headers.origin && req.headers.origin !== origin) return reject(403, 'Invalid dev-server origin.');
     if (req.url?.startsWith('/api/')) {
