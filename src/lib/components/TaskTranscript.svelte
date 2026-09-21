@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
-  import { ArrowRightLeft, Check, CircleStop, Maximize2, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
+  import { ArrowRightLeft, Check, CircleStop, Inbox, Maximize2, MessageSquare, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
   import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
@@ -131,6 +131,7 @@
   setContext('monitter-markdown-task-id', task.id);
 
   let taskMenuAnchor = $state<HTMLButtonElement>();
+  let inboxView = $state(true);
   type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
   const taskMailBatches = $derived((snapshot.mailBatches ?? []).filter(batch => batch.taskId === task.id));
   const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, mailBatches: taskMailBatches, optimisticMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
@@ -197,6 +198,7 @@
       <h1 class="task-title"><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={onEditTask}><Pencil size={14}/></button></h1>
     </div>
     <div class="task-actions">
+      {#if displayMailInboxes.length}<button class="mail-view-toggle" type="button" aria-label={inboxView ? 'Show chat' : 'Show inbox'} title={inboxView ? 'Show chat' : 'Show inbox'} onclick={() => { inboxView = !inboxView; if (inboxView) transcriptBuffer.setFollowing(true); }}>{#if inboxView}<MessageSquare size={14}/>Chat{:else}<Inbox size={14}/>Inbox{/if}</button>{/if}
       <ObserverIndicator names={observers}/>
       {@render rightSidebar()}
       <div class="task-overflow">
@@ -213,7 +215,12 @@
 <section class="conversation">
     <SparkleField active={task.status === 'running'} pane />
     <TaskActivity goal={null} onclear={onClearGoal} tools={computerTools} onstop={onStop} disabled={busy} />
-    <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
+    {#if inboxView && displayMailInboxes.length}
+      <div class="mail-inbox-surface" aria-label="Mail inbox">
+        {#each displayMailInboxes as inbox (inbox.id)}<MailTriageBatch batch={inbox} taskId={displayTask.id} fullHeight={displayMailInboxes.length === 1}/>{/each}
+      </div>
+    {:else}
+      <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       <TranscriptVirtualList
         items={displayItems}
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' || item.type === 'process-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
@@ -259,19 +266,21 @@
           {/if}
         {/snippet}
         {#snippet footer()}
-          {#each displayMailInboxes as inbox (inbox.id)}<MailTriageBatch batch={inbox} taskId={displayTask.id}/>{/each}
           {#if !displayItems.length && !display.hasPendingApprovals}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
           {#if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}
             <ThinkingStatus active={active && !transcriptBuffer.held()} starting={displayTask.status!=='running'} running={displayTask.status==='running'} startedAt={displayLatestUserRequest?.createdAt}>{#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}</ThinkingStatus>
           {/if}
         {/snippet}
       </TranscriptVirtualList>
-    </MessagePane>
+      </MessagePane>
+    {/if}
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
     <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />
   <div class="composer-area">
-    {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
-    {@render composer()}
+    {#if !inboxView || !displayMailInboxes.length}
+      {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
+      {@render composer()}
+    {/if}
     {@render subagentDock()}
   </div>
 </section>
@@ -286,6 +295,10 @@
   .pane-task-header { grid-column: 1 / -1; grid-row: 1; }
   .task-heading-identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
   .conversation { --chat-content-max-width:900px; position:relative; display:flex; min-width:0; min-height:0; flex:1; flex-direction:column; grid-column:1; grid-row:2; }
+  .mail-inbox-surface { display:flex; min-width:0; min-height:0; flex:1; flex-direction:column; gap:12px; overflow:auto; padding:12px var(--chat-side-padding,clamp(18px,3vw,36px)); }
+  .mail-inbox-surface > :global(.mail-batch) { width:100%; }
+  .mail-view-toggle { display:inline-flex; align-items:center; gap:6px; min-height:29px; padding:0 9px; border:1px solid var(--line); border-radius:7px; color:var(--muted); background:var(--panel); font:500 calc(10px * var(--interface-font-ratio,1)) var(--mono); }
+  .mail-view-toggle:hover { color:var(--ink); background:var(--soft); }
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .composer-area { position:relative; flex-shrink:0; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }

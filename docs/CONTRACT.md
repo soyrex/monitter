@@ -102,12 +102,12 @@ No fake conversations, progress, token counts, host connections or model replies
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
 - `create_task { input: CreateTaskInput }` -> Task (rejects the internal Monitter Admin agent as a chat recipient)
 - `plan_jev_route { agentId: string, prompt: string }` -> `JevRoutePlan` (native-owner only; requires an
-  explicit non-internal harness opt-in and the Keychain-backed `JEV_API_KEY`). It classifies a fresh prompt,
+  explicit non-internal harness opt-in and the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). It classifies a fresh prompt,
   writes an app-local trace containing a prompt fingerprint and typed decision/evidence, and does not create a
   task, invoke a provider, inspect a workspace, grant permissions, or expose the credential. LAN callers are
   rejected. A `human_review_required` result must be stopped by the composer before task creation.
 - `plan_jev_command { query: string, candidates: JevCommandCandidate[] }` -> `JevCommandPlan`
-  (native-owner only; requires the Keychain-backed `JEV_API_KEY`). The caller supplies a bounded catalogue of
+  (native-owner only; requires the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). The caller supplies a bounded catalogue of
   currently enabled Cmd-P controls. Jev may select only one offered candidate ID and returns a typed confidence
   and bounded reason. The command records a fingerprinted audit trace without raw query/catalogue text and never
   executes a control. The UI must revalidate the candidate against its current enabled catalogue and require a

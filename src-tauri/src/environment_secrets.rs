@@ -19,6 +19,7 @@ const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const KEYCHAIN_SERVICE: &str = "com.monitter.desktop.environment-secrets";
 const KEYCHAIN_ACCOUNT: &str = "default";
+const JEV_API_KEY_NAMES: [&str; 2] = ["TYPESAFE_API_KEY", "JEV_API_KEY"];
 static JEV_API_KEY_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 #[cfg(not(target_os = "macos"))]
 const UNSUPPORTED: &str = "Environment & Secrets is supported only on macOS.";
@@ -169,12 +170,11 @@ pub(crate) fn jev_api_key_for_internal_service() -> Result<String, String> {
     if let Some(value) = cached.as_ref() {
         return Ok(value.clone());
     }
-    let value = load_vault()?
-        .entries
-        .into_iter()
-        .find(|entry| entry.name == "JEV_API_KEY")
-        .map(|entry| entry.value)
-        .ok_or_else(|| "Monitter Environment & Secrets has no JEV_API_KEY entry.".to_string())?;
+    let vault = load_vault()?;
+    let value = jev_api_key_from_vault(&vault).ok_or_else(|| {
+        "Monitter Environment & Secrets has no TYPESAFE_API_KEY or JEV_API_KEY entry."
+            .to_string()
+    })?;
     *cached = Some(value.clone());
     Ok(value)
 }
@@ -186,11 +186,17 @@ fn refresh_jev_api_key_cache(vault: &Vault) {
     else {
         return;
     };
-    *cached = vault
-        .entries
-        .iter()
-        .find(|entry| entry.name == "JEV_API_KEY")
-        .map(|entry| entry.value.clone());
+    *cached = jev_api_key_from_vault(vault);
+}
+
+fn jev_api_key_from_vault(vault: &Vault) -> Option<String> {
+    JEV_API_KEY_NAMES.iter().find_map(|name| {
+        vault
+            .entries
+            .iter()
+            .find(|entry| entry.name == *name)
+            .map(|entry| entry.value.clone())
+    })
 }
 
 fn apply_pairs_to_command(command: &mut Command, pairs: Vec<(String, String)>) {
@@ -390,6 +396,38 @@ mod tests {
         assert!(should_inject_into_local_user_command("local", false));
         assert!(!should_inject_into_local_user_command("ssh", false));
         assert!(!should_inject_into_local_user_command("local", true));
+    }
+
+    #[test]
+    fn jev_credential_prefers_typesafe_name_and_accepts_legacy_alias() {
+        let mut vault = Vault {
+            entries: vec![
+                VaultEntry {
+                    name: "TYPESAFE_API_KEY".into(),
+                    value: "typesafe-value".into(),
+                    description: String::new(),
+                    updated_at: 1,
+                },
+                VaultEntry {
+                    name: "JEV_API_KEY".into(),
+                    value: "jev-value".into(),
+                    description: String::new(),
+                    updated_at: 1,
+                },
+            ],
+        };
+        normalize_vault(&mut vault).unwrap();
+        assert_eq!(
+            jev_api_key_from_vault(&vault).as_deref(),
+            Some("typesafe-value")
+        );
+        vault
+            .entries
+            .retain(|entry| entry.name != "TYPESAFE_API_KEY");
+        assert_eq!(
+            jev_api_key_from_vault(&vault).as_deref(),
+            Some("jev-value")
+        );
     }
 
     #[test]

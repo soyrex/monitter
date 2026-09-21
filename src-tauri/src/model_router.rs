@@ -950,10 +950,10 @@ impl LiveJevClassifier {
     }
 
     pub fn from_env() -> Result<Self, String> {
-        let api_key = std::env::var("JEV_API_KEY")
-            .or_else(|_| std::env::var("TYPESAFE_API_KEY"))
+        let api_key = std::env::var("TYPESAFE_API_KEY")
+            .or_else(|_| std::env::var("JEV_API_KEY"))
             .map_err(|_| {
-                "Set JEV_API_KEY (or TYPESAFE_API_KEY) before selecting --classifier jev."
+                "Set TYPESAFE_API_KEY (or legacy JEV_API_KEY) before selecting --classifier jev."
                     .to_string()
             })?;
         let model = std::env::var("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|_| "jev-latest".into());

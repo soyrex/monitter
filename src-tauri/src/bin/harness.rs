@@ -5,7 +5,7 @@ use monitter_lib::model_router::{
 use std::{env, path::PathBuf, process};
 
 fn usage() -> &'static str {
-    "Usage:\n  harness run <prompt> [--workspace <path>] [--provider mock|codex] [--classifier mock|jev] [--model <id>] [--reasoning-level low|medium|high|xhigh] [--tier fast|balanced|strong|frontier] [--max-steps <n>] [--user-correction <note>]\n  harness eval\n\n--classifier jev reads Monitter's Keychain-backed JEV_API_KEY first, then JEV_API_KEY or TYPESAFE_API_KEY from the environment. The codex provider uses the local authenticated Codex CLI in an isolated worktree and never bypasses sandbox or approvals."
+    "Usage:\n  harness run <prompt> [--workspace <path>] [--provider mock|codex] [--classifier mock|jev] [--model <id>] [--reasoning-level low|medium|high|xhigh] [--tier fast|balanced|strong|frontier] [--max-steps <n>] [--user-correction <note>]\n  harness eval\n\n--classifier jev reads Monitter's Keychain-backed TYPESAFE_API_KEY first (with JEV_API_KEY as a legacy alias), then TYPESAFE_API_KEY or JEV_API_KEY from the environment. The codex provider uses the local authenticated Codex CLI in an isolated worktree and never bypasses sandbox or approvals."
 }
 
 fn main() {

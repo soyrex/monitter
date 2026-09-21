@@ -7,7 +7,8 @@ credentials and exposes no mailbox mutation tools.
 
 ## Try it
 
-1. Add `JEV_API_KEY` in **Settings → Environment & Secrets**.
+1. Add `TYPESAFE_API_KEY` in **Settings → Environment & Secrets**. TypeSafe is
+   the API provider; Jev is the model. `JEV_API_KEY` remains a legacy alias.
 2. Start a new Codex chat whose harness has the Gmail connector available.
    Existing resident sessions must be restarted to discover newly added MCP
    tools.
@@ -35,7 +36,7 @@ User mail question
   → strict envelope validation; bodies rejected
   → upsert one body-free MailBatch per task/account by provider message ID
   → messages absent from a later snapshot move to collapsed local history
-  → native cards update at the transcript foot immediately
+  → native inbox view updates immediately
   → one background Jev System One HTTP request for the entire batch,
     with five indexed Choice questions per email
   → same cards updated atomically with classifier evidence
@@ -50,7 +51,10 @@ Card click
 ```
 
 The first call creates one transcript anchor. Later calls update that same
-projection and do not append another mail module. `snapshot` is the scheduled
+projection and do not append another mail module. A chat with a maintained mail
+batch opens in a full-height inbox view with an independently scrolling message
+list and no composer; the header's **Chat** switch restores the transcript and
+composer. `snapshot` is the scheduled
 inbox default: its result must be the complete current bounded search window.
 `incremental` is available when a connector query supplies only newly found
 messages; it never infers that an omitted message disappeared. A zero-message
@@ -64,8 +68,8 @@ fallback when the request finishes. If Monitter exits while enrichment is
 pending, startup converts the durable provisional batch to an explicit
 interrupted fallback instead of leaving a false perpetual-pending state.
 
-The first Jev use in a Monitter process loads `JEV_API_KEY` from the macOS
-Keychain. Monitter then keeps only that allowlisted value in a process-local
+The first Jev use in a Monitter process loads `TYPESAFE_API_KEY` (or the legacy
+`JEV_API_KEY` alias) from the macOS Keychain. Monitter then keeps only that allowlisted value in a process-local
 cache, avoiding repeated multi-second Keychain opens; saving or deleting the
 vault through Settings refreshes or clears the cache. The value is never
 serialized, returned over Tauri IPC, placed in argv, or logged. Optional
@@ -127,7 +131,7 @@ cargo test --manifest-path src-tauri/Cargo.toml collaboration_mcp
 ```
 
 The ignored `live_jev_mail_smoke_uses_synthetic_envelope` test can be run
-explicitly when `JEV_API_KEY` is configured. It performs one live-account
+explicitly when `TYPESAFE_API_KEY` is configured. It performs one live-account
 request with synthetic data and is therefore excluded from ordinary tests.
 
 The Rust fixtures verify typed Jev answer mapping, schema rejection, body-free
