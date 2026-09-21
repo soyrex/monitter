@@ -47,6 +47,10 @@
 
 <style>
   .task-activity { flex: none; min-height: 0; max-height: 25%; overflow: auto; overscroll-behavior: contain; margin: 10px 20px 0; font-size: calc(12px * var(--interface-font-ratio, 1)); }
+  /* Once a goal is opened, keep the HUD shell stationary and make only its
+     long description the scrolling region. This keeps the card border visible
+     instead of scrolling the whole card out of view. */
+  .task-activity:has(details[open]) { max-height: none; overflow: visible; }
   /* Keep the goal dock aligned to the composer, with an exact 10px inset. */
   .task-activity.docked { position:relative; z-index:0; width:min(calc(var(--chat-content-max-width,900px) - 10px),calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 10px)); box-sizing:border-box; margin:0 auto -10px; }
   .docked .goal-card { border-bottom-left-radius:0; border-bottom-right-radius:0; }
@@ -71,6 +75,7 @@
   details { margin-top: 7px; }
   summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   p { line-height: 1.5; overflow-wrap: anywhere; }
+  details[open] p { max-height: min(50vh, 360px); overflow: auto; overscroll-behavior: contain; padding-right: 4px; }
   .goal-usage { display: flex; align-items: center; gap: 12px; margin-top: 7px; color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
   progress { width: 90px; height: 5px; accent-color: var(--accent); }
   .computer-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
