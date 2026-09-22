@@ -19,6 +19,7 @@ pub struct ProcessMetricsProcess {
     pub pid: libc::pid_t,
     pub parent_pid: libc::pid_t,
     pub name: String,
+    pub command_line: String,
     pub started_at: i64,
     pub cpu_time_ms: u64,
     pub resident_memory_bytes: u64,
@@ -219,10 +220,12 @@ pub fn sample() -> Result<ProcessMetricsSample, String> {
                 if pid == root { "Monitter" } else { "Process" }.into(),
                 0,
             ));
+            let command_line = process_command_line(pid).unwrap_or_else(|| name.clone());
             processes.push(ProcessMetricsProcess {
                 pid,
                 parent_pid,
                 name,
+                command_line,
                 started_at,
                 cpu_time_ms: own_cpu / 1_000_000,
                 resident_memory_bytes: memory,
@@ -239,6 +242,49 @@ pub fn sample() -> Result<ProcessMetricsSample, String> {
         root_pid: root,
         processes,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn process_command_line(pid: libc::pid_t) -> Option<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = 0usize;
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size <= std::mem::size_of::<libc::c_int>() { return None; }
+    let mut bytes = vec![0u8; size];
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size <= std::mem::size_of::<libc::c_int>() { return None; }
+    bytes.truncate(size);
+    let argc = i32::from_ne_bytes(bytes[..4].try_into().ok()?).max(0) as usize;
+    let mut offset = 4;
+    while offset < bytes.len() && bytes[offset] != 0 { offset += 1; }
+    while offset < bytes.len() && bytes[offset] == 0 { offset += 1; }
+    let mut args = Vec::new();
+    for _ in 0..argc {
+        if offset >= bytes.len() { break; }
+        let end = bytes[offset..].iter().position(|byte| *byte == 0).map(|index| offset + index).unwrap_or(bytes.len());
+        let value = String::from_utf8_lossy(&bytes[offset..end]).trim().to_string();
+        if !value.is_empty() { args.push(value); }
+        offset = end.saturating_add(1);
+    }
+    (!args.is_empty()).then(|| args.join(" "))
 }
 
 #[cfg(not(target_os = "macos"))]

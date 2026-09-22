@@ -1765,6 +1765,11 @@
     const value = agent?.avatar;
     return value && /^data:image\/(png|jpeg|webp);base64,/i.test(value) ? value : null;
   };
+  const isMonaAgent = (agent: Agent | null | undefined) => {
+    const provider = String(agent?.provider ?? '').toLowerCase();
+    const command = agent?.acp?.command?.toLowerCase() ?? '';
+    return provider === 'mona' || agent?.model?.toLowerCase() === 'mona' || command.includes('mona-acp');
+  };
   async function chooseAvatar(file?: File) {
     if (!agentDraft || !file) return;
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 2 * 1024 * 1024) { error = 'Choose a PNG, JPEG, or WebP image up to 2 MiB.'; return; }
@@ -4057,7 +4062,9 @@
 {/snippet}
 
 {#snippet avatarVisual(agent: Agent | null | undefined, size = 13)}
-  {#if avatarSrc(agent)}
+  {#if isMonaAgent(agent)}
+    <span class="mona-avatar-mark" aria-hidden="true">M</span>
+  {:else if avatarSrc(agent)}
     <img src={avatarSrc(agent)!} alt="" />
   {:else}
     <span class="model-avatar-mark"><ProviderIcon provider={agent?.provider ?? 'acp'} model={agent?.model || agent?.acp?.command} {size} /></span>
@@ -5845,6 +5852,7 @@
     background: var(--accent);
     font: calc(11px * var(--interface-font-ratio, 1)) var(--mono);
   }
+  .mona-avatar-mark { display:grid; place-items:center; width:100%; height:100%; color:var(--on-accent); background:linear-gradient(145deg, color-mix(in srgb, var(--accent) 88%, white), var(--accent)); font:700 calc(14px * var(--interface-font-ratio, 1)) var(--mono); letter-spacing:-.08em; }
   .model-avatar-mark { display:grid; place-items:center; width:100%; height:100%; background:var(--soft); color:var(--ink); }
   .agent-avatar-toggle { position:relative; padding:0; border:0; overflow:hidden; cursor:pointer; }
   .avatar-toggle-overlay { position:absolute; inset:0; display:grid; place-items:center; background:rgba(0,0,0,.75); color:#fff; opacity:0; pointer-events:none; border-radius:inherit; }
