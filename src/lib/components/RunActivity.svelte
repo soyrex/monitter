@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { AlarmClock, Archive, Bot, BookOpen, Brain, ChevronRight, Download, Eye, FilePen, FileSearch, FolderOpen, Globe, Image, ListChecks, MessageCircle, Monitor, Plug, Search, ShieldCheck, SquareTerminal, Terminal, Users, Wrench, X } from '@lucide/svelte';
+  import { AlarmClock, Archive, Bot, BookOpen, Brain, ChevronRight, Download, Eye, FilePen, FileSearch, FolderOpen, GitBranch, Globe, Image, ListChecks, MessageCircle, Monitor, Plug, Search, ShieldCheck, SquareTerminal, Terminal, Users, Wrench, X } from '@lucide/svelte';
   import type { ApprovalRequest, AttachmentFileData, RunEvent } from '$lib/types';
   import { getBridge } from '$lib/bridge';
   import { contextCompactionId, contextCompactionPhase, isContextCompaction, nativeSubagentActivity, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, type ToolPresentation } from '$lib/activity-grouping';
@@ -40,6 +40,22 @@
   const compactionActive = $derived(
     compaction && compactionId !== null && running && items.length === 1 && compactionPhases[0] === 'started',
   );
+  type RouterTraceView = { requested: string; actual: string; rationale: string; error: string };
+  function routerTraceView(item: RunEvent): RouterTraceView | null {
+    if (item.kind !== 'status' || !item.title.startsWith('Jev route ')) return null;
+    try {
+      const detail = JSON.parse(item.detail) as { trace?: Record<string, unknown> };
+      const trace = detail.trace;
+      if (!trace || typeof trace !== 'object') return null;
+      const text = (key: string) => typeof trace[key] === 'string' ? String(trace[key]).trim() : '';
+      const requested = [text('requestedModel'), text('requestedEffort')].filter(Boolean).join(' · ') || 'Current runtime';
+      const actual = [text('newModel'), text('newEffort')].filter(Boolean).join(' · ') || 'Current runtime';
+      return { requested, actual, rationale: text('rationale'), error: text('applicationError') };
+    } catch {
+      return null;
+    }
+  }
+  const route = $derived(primary ? routerTraceView(primary) : null);
   const labels = $derived([...new Set(items.map(item => toolPresentation(item, running).label))]);
   const primaryPresentation: ToolPresentation = $derived(
     primary ? toolPresentation(primary, running) : { icon: 'terminal', label: 'Tool activity' },
@@ -189,7 +205,16 @@
   </details>
 {/snippet}
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
-{#if primary && emptyReasoning}
+{#if primary && route}
+  <details class="activity routing" data-router-trace>
+    <summary aria-label={primary.title}><ChevronRight size={13} class="chevron"/><GitBranch size={14}/><span>{primary.title}</span><time>{formatTime(primary.createdAt)}</time></summary>
+    <div class="routing-body">
+      <dl><div><dt>Requested</dt><dd>{route.requested}</dd></div><div><dt>Actual</dt><dd>{route.actual}</dd></div></dl>
+      {#if route.error}<p class="routing-error">{route.error}</p>{/if}
+      {#if route.rationale}<p>{route.rationale}</p>{/if}
+    </div>
+  </details>
+{:else if primary && emptyReasoning}
   <ThinkingStatus {running} {active} {avatar} startedAt={primary.createdAt}/>
 {:else if primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning: {summaryPreview}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
@@ -258,6 +283,8 @@
 {/if}
 <style>
   .activity{margin:4px 0 10px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{margin-bottom:1em;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  .activity.routing{margin-bottom:1em;border:1px solid color-mix(in srgb,var(--accent) 34%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--accent) 5%,var(--panel))}
+  .routing-body{display:grid;gap:8px;padding:10px 12px;border-top:1px solid var(--line)}.routing-body dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0}.routing-body dl div{min-width:0}.routing-body dt{color:var(--muted);font:calc(9px * var(--interface-font-ratio,1)) var(--mono);text-transform:uppercase}.routing-body dd{margin:3px 0 0;overflow-wrap:anywhere;font:calc(11px * var(--interface-font-ratio,1)) var(--mono)}.routing-body p{margin:0;color:var(--muted);line-height:1.45}.routing-body .routing-error{color:#bd655b}
   summary,.activity-trigger{display:flex;align-items:center;gap:8px;padding:11px 12px;color:var(--muted);cursor:pointer;list-style:none;text-align:left}
   .activity-trigger{box-sizing:border-box;width:100%;font:inherit;padding:8px 4px 8px 0;background:transparent}.activity-trigger:hover{color:var(--ink)}
   summary::-webkit-details-marker{display:none}

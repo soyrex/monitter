@@ -7,8 +7,8 @@
 
 use crate::{
     model::{
-        id, MailBatch, MailCard, MailCardState, MailClassifierTrace, MailImportance, MailIntent,
-        MailOwner, MailReplyState, MailSuggestedAction,
+        id, MailBatch, MailCard, MailCardState, MailClassificationMetrics, MailClassifierTrace,
+        MailImportance, MailIntent, MailOwner, MailReplyState, MailSuggestedAction,
     },
     model_router::{self, ClassifierEvidence},
 };
@@ -186,6 +186,7 @@ impl crate::Service {
                 snapshot.messages.push(crate::model::Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: message_id.clone(),
                     task_id: caller_task.into(),
                     role: "system".into(),
@@ -792,6 +793,7 @@ struct MailClassification {
     suggested_owner: MailOwner,
     suggested_action: MailSuggestedAction,
     confidence: u8,
+    metrics: MailClassificationMetrics,
 }
 
 fn classifications_from_jev(body: &Value, count: usize) -> Result<Vec<MailClassification>, String> {
@@ -809,6 +811,13 @@ fn classifications_from_jev(body: &Value, count: usize) -> Result<Vec<MailClassi
                 suggested_owner,
                 suggested_action,
                 confidence: [a, b, c, d, e].into_iter().min().unwrap_or(0),
+                metrics: MailClassificationMetrics {
+                    importance_confidence: a,
+                    intent_confidence: b,
+                    reply_confidence: c,
+                    owner_confidence: d,
+                    action_confidence: e,
+                },
             })
         })
         .collect()
@@ -883,6 +892,13 @@ fn mock_classification(message: &MailEnvelopeInput) -> MailClassification {
             MailSuggestedAction::Review
         },
         confidence: 45,
+        metrics: MailClassificationMetrics {
+            importance_confidence: 45,
+            intent_confidence: 45,
+            reply_confidence: 45,
+            owner_confidence: 45,
+            action_confidence: 45,
+        },
     }
 }
 
@@ -918,6 +934,7 @@ fn build_batch(
                 suggested_owner: classification.suggested_owner,
                 suggested_action: classification.suggested_action,
                 confidence: classification.confidence,
+                classification_metrics: classification.metrics,
                 rationale,
                 state: MailCardState::Active,
                 first_seen_at: created_at,
@@ -967,6 +984,7 @@ fn apply_classifications(
         item.suggested_owner = classification.suggested_owner;
         item.suggested_action = classification.suggested_action;
         item.confidence = classification.confidence;
+        item.classification_metrics = classification.metrics;
         item.rationale = classification_rationale(&classification);
     }
     Ok(())
@@ -1253,9 +1271,24 @@ mod tests {
         );
         assert_eq!(batch.items[0].importance, MailImportance::High);
         assert_eq!(batch.items[0].confidence, 86);
+        assert_eq!(
+            batch.items[0].classification_metrics.importance_confidence,
+            92
+        );
+        assert_eq!(batch.items[0].classification_metrics.action_confidence, 86);
         assert_eq!(batch.classifier.cost_microusd, Some(200));
         let serialized = serde_json::to_string(&batch).unwrap();
         assert!(!serialized.contains("body_text"));
+        let mut legacy = serde_json::to_value(&batch).unwrap();
+        legacy["items"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("classificationMetrics");
+        let restored: MailBatch = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            restored.items[0].classification_metrics,
+            MailClassificationMetrics::default()
+        );
     }
 
     #[test]
@@ -1508,6 +1541,13 @@ mod tests {
                         suggested_owner: MailOwner::Me,
                         suggested_action: MailSuggestedAction::Review,
                         confidence: 88,
+                        metrics: MailClassificationMetrics {
+                            importance_confidence: 94,
+                            intent_confidence: 91,
+                            reply_confidence: 90,
+                            owner_confidence: 89,
+                            action_confidence: 88,
+                        },
                     }],
                     ClassifierEvidence {
                         provider: "TypeSafe".into(),
@@ -1541,6 +1581,16 @@ mod tests {
         assert_eq!(success.classifier.latency_ms, 900);
         assert_eq!(success.items[0].importance, MailImportance::Critical);
         assert_eq!(success.items[0].confidence, 88);
+        assert_eq!(
+            success.items[0]
+                .classification_metrics
+                .importance_confidence,
+            94
+        );
+        assert_eq!(
+            success.items[0].classification_metrics.action_confidence,
+            88
+        );
         let failure = snapshot
             .mail_batches
             .iter()

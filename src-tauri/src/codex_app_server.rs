@@ -1338,6 +1338,7 @@ fn handle_notification(
                         &buffered.text,
                         phase.as_deref(),
                         false,
+                        None,
                     ) {
                         service.complete_app_server_turn(
                             task_id,
@@ -1376,6 +1377,7 @@ fn handle_notification(
                             text,
                             item.get("phase").and_then(Value::as_str),
                             true,
+                            None,
                         ) {
                             service.complete_app_server_turn(
                                 task_id,

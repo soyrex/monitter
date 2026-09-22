@@ -13,7 +13,7 @@ try{
  // list treatment, without directory-card borders or padding.
  const sidebarAgent = page.locator('.sidebar .agent-row').first();
  await expect(sidebarAgent).toHaveCSS('border-top-width', '0px');
- await expect(sidebarAgent).toHaveCSS('padding-top', '4px');
+ await expect(sidebarAgent).toHaveCSS('padding-top', '5px');
  // Landing view: directory with the two existing agents.
  const atlasRow = settings.getByRole('button',{name:'Edit Atlas',exact:true});
  const betaRow = settings.getByRole('button',{name:'Edit Beta',exact:true});
@@ -76,6 +76,20 @@ try{
  await expect(settings.getByRole('heading',{name:'Claude Code',exact:true})).toBeVisible();
  await settings.getByRole('button',{name:'Save agent',exact:true}).click();
  await expect.poll(()=>page.evaluate(()=>window.__MONITTER_QA__.snapshot().agents.find(agent=>agent.name==='New colleague')?.provider)).toBe('claude');
+ // Mona is a first-class choice even though its durable backend transport is
+ // generic ACP. Selecting it must expose the advanced launch picker and seed
+ // the reviewed executable without requiring an unreachable ACP-only state.
+ await providerCard.getByRole('button',{name:'Change',exact:true}).click();
+ await providerCard.getByRole('button').filter({hasText: 'Mona'}).first().click();
+ await expect(settings.getByRole('heading',{name:'Mona',exact:true})).toBeVisible();
+ const launchBehaviour = settings.getByRole('region',{name:'Launch behaviour'});
+ await expect(launchBehaviour).toBeVisible();
+ await expect(launchBehaviour.getByLabel('Executable',{exact:true})).toHaveValue('mona-acp');
+ await settings.getByRole('button',{name:'Save agent',exact:true}).click();
+ await expect.poll(()=>page.evaluate(()=>{
+   const agent=window.__MONITTER_QA__.snapshot().agents.find(agent=>agent.name==='New colleague');
+   return {provider:agent?.provider,command:agent?.acp?.command};
+ })).toEqual({provider:'acp',command:'mona-acp'});
  // Switch back to Codex. The model picker opens a popup rather than a
  // textbox, so verify the provider switch through the persisted snapshot
  // alone; the model picker popup itself is covered by AgentModelPicker.

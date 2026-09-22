@@ -1185,6 +1185,7 @@ impl Service {
             state.messages.push(Message {
                 stream_status: None,
                 phase: None,
+                response_metadata: None,
                 id: id(),
                 task_id: task_id.into(),
                 role: "system".into(),
@@ -3339,6 +3340,7 @@ impl Service {
             snapshot.messages.push(Message {
                 stream_status: None,
                 phase: None,
+                response_metadata: None,
                 id: id(),
                 task_id: task_id.into(),
                 role: "system".into(),
@@ -3654,6 +3656,7 @@ impl Service {
                 state.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     sender_agent_id: None,
                     collaboration_id: None,
                     id: id(),
@@ -3721,11 +3724,15 @@ impl Service {
             let control = runs.tasks.get(task_id).cloned();
             (task, control)
         };
-        let classification = if task.provider == "opencode" {
-            "delta"
-        } else {
-            "cumulative"
-        };
+        let classification = value
+            .get("classification")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| matches!(*value, "delta" | "cumulative"))
+            .unwrap_or(if task.provider == "opencode" {
+                "delta"
+            } else {
+                "cumulative"
+            });
         let provider_turn_id = value
             .get("providerTurnId")
             .and_then(serde_json::Value::as_str)
@@ -4259,7 +4266,7 @@ impl Service {
             data.snapshot.messages.push(Message {
                 id: id(), task_id: source.id.clone(), role: "system".into(),
                 text: format!("Handed off to a new {} chat.", target.provider), created_at: now(),
-                sender_agent_id: None, collaboration_id: None, stream_status: None, phase: None, attachments: vec![],
+                sender_agent_id: None, collaboration_id: None, stream_status: None, phase: None, response_metadata: None, attachments: vec![],
             });
             Ok(())
         })?;
@@ -4372,7 +4379,7 @@ impl Service {
                 }
                 return Ok((None, None));
             }
-            state.messages.push(Message { stream_status: None, phase: None,
+            state.messages.push(Message { stream_status: None, phase: None, response_metadata: None,
                 sender_agent_id: None,
                 collaboration_id: None,
                 id: id(),
@@ -5059,6 +5066,7 @@ impl Service {
             snapshot.messages.push(Message {
                 stream_status: None,
                 phase: None,
+                response_metadata: None,
                 sender_agent_id: queued.sender_agent_id.clone(),
                 collaboration_id: None,
                 id: id(),
@@ -5198,6 +5206,7 @@ impl Service {
                 state.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: task_id.into(),
                     role: "system".into(),
@@ -6086,6 +6095,7 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
         state.messages.push(Message {
             stream_status: None,
             phase: None,
+            response_metadata: None,
             sender_agent_id: None,
             collaboration_id: None,
             id: id(),
@@ -7717,7 +7727,7 @@ fn send_channel_message_accepted(
                 task.status = "running".into();
                 let instructions = agent_instructions(&agent, &state.settings.user_name);
                 if !instructions.trim().is_empty() {
-                    state.messages.push(Message { stream_status: None, phase: None,
+                    state.messages.push(Message { stream_status: None, phase: None, response_metadata: None,
                         sender_agent_id: None,
                         collaboration_id: None,
                         id: id(),
@@ -7742,7 +7752,7 @@ fn send_channel_message_accepted(
                 matching_attachments(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             matched_attachment_ids.extend(matched);
             let instructions = initial_task_instructions(state, &task_id);
-            state.messages.push(Message { stream_status: None, phase: None,
+            state.messages.push(Message { stream_status: None, phase: None, response_metadata: None,
                 sender_agent_id: None,
                 collaboration_id: None,
                 id: id(),
@@ -8789,6 +8799,7 @@ mod tests {
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: a.id.clone(),
                     role: "user".into(),
@@ -8801,6 +8812,7 @@ mod tests {
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: a.id.clone(),
                     role: "assistant".into(),
@@ -8834,6 +8846,7 @@ mod tests {
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: b.id.clone(),
                     role: "user".into(),
@@ -8846,6 +8859,7 @@ mod tests {
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: b.id.clone(),
                     role: "assistant".into(),
@@ -9202,6 +9216,7 @@ name@rafa.test",
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: task.id.clone(),
                     role: "user".into(),
@@ -9214,6 +9229,7 @@ name@rafa.test",
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: task.id.clone(),
                     role: "assistant".into(),
@@ -9248,6 +9264,7 @@ name@rafa.test",
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     id: id(),
                     task_id: task.id.clone(),
                     role: "user".into(),
@@ -11055,6 +11072,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 snapshot.messages.push(Message {
                     stream_status: None,
                     phase: None,
+                    response_metadata: None,
                     sender_agent_id: None,
                     collaboration_id: None,
                     id: id(),

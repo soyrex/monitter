@@ -9,11 +9,11 @@
  *
  * Design contract (locked):
  *   - No "ACP" / "native" / "YOLO" string leaks into user-facing copy.
- *   - The user picks one of five providers: Claude Code, Codex, MiniMax,
- *     Gemini, OpenCode. The picker is data-driven and extensible.
+ *   - The user picks a friendly provider/harness entry. The picker is
+ *     data-driven and extensible, including Monitter's own Mona harness.
  *   - The normalised permission levels are exactly three: read-only,
  *     auto-approve-edits, full-access.
- *   - MiniMax and Gemini are stored as `provider: 'acp'` with the
+ *   - Mona, MiniMax and Gemini are stored as `provider: 'acp'` with the
  *     matching executable configured, because the stored `Provider` enum
  *     does not yet have first-class values for them.
  */
@@ -32,10 +32,10 @@ export const NORMALIZED_PERMISSIONS: readonly NormalizedPermission[] = [
 /**
  * The logical provider the user sees in the picker and the directory. This
  * is the key the capability table is keyed on. It is intentionally separate
- * from the stored `Provider` enum because MiniMax and Gemini are stored as
+ * from the stored `Provider` enum because Mona, MiniMax and Gemini are stored as
  * `provider: 'acp'` and disambiguated by the configured executable name.
  */
-export type ProviderKey = 'claude-code' | 'codex' | 'opencode' | 'minimax' | 'gemini';
+export type ProviderKey = 'claude-code' | 'codex' | 'opencode' | 'mona' | 'minimax' | 'gemini';
 
 export interface UiProviderOption {
   /** Logical UI key. Drives the capability table and friendly name lookup. */
@@ -47,7 +47,7 @@ export interface UiProviderOption {
   /**
    * Stored provider value to write when this tile is selected. For first-
    * class keys (`claude-code`, `codex`, `opencode`) this equals the key's
-   * underlying `Provider` enum value. For MiniMax and Gemini we write
+   * underlying `Provider` enum value. For Mona, MiniMax and Gemini we write
    * `acp` together with the executable hint below.
    */
   storedProvider: Provider;
@@ -61,7 +61,7 @@ export interface UiProviderOption {
 }
 
 /**
- * The five initial providers exposed in the picker. Additional providers
+ * The initial providers exposed in the picker. Additional providers
  * are added by appending entries here; the rest of the module reads from
  * this list rather than hard-coding tile shapes.
  */
@@ -89,6 +89,14 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     storedProvider: 'opencode',
     acpCommand: null,
     searchTerms: ['opencode', 'oss'],
+  },
+  {
+    key: 'mona',
+    friendlyName: 'Mona',
+    subtitle: 'Monitter harness',
+    storedProvider: 'acp',
+    acpCommand: 'mona-acp',
+    searchTerms: ['mona', 'mona-acp', 'monitter', 'acp'],
   },
   {
     key: 'minimax',
@@ -135,6 +143,7 @@ export function deriveProviderKey(agent: Pick<Agent, 'provider' | 'acp'>): Provi
 export function detectProviderFromLaunch(launch: AcpLaunch | null | undefined): ProviderKey {
   const command = (launch?.command ?? '').toLowerCase();
   if (!command) return 'opencode';
+  if (/(?:^|[\W_])mona-acp(?:$|[\W_])/.test(command)) return 'mona';
   if (/(?:^|[\W_])(?:mcode|minimax)(?:$|[\W_])/.test(command)) return 'minimax';
   if (/(?:^|[\W_])gemini(?:$|[\W_])/.test(command)) return 'gemini';
   if (/(?:^|[\W_])claude(?:$|[\W_])/.test(command)) return 'claude-code';
@@ -190,6 +199,13 @@ export const PERMISSION_CAPABILITIES: Record<ProviderKey, PermissionCapability> 
     fullAccess: true,
     defaultLevel: 'auto-approve-edits',
     hint: 'OpenCode supports all three levels.',
+  },
+  mona: {
+    readOnly: true,
+    autoApproveEdits: true,
+    fullAccess: true,
+    defaultLevel: 'auto-approve-edits',
+    hint: 'Mona supports all three levels.',
   },
   minimax: {
     readOnly: true,

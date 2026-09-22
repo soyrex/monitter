@@ -322,11 +322,11 @@ mod tests {
         stale.set_app_server_thread("thread-1".into());
         stale.set_app_server_turn("turn-1".into());
         assert!(service
-            .app_server_message(&task.id, &stale, "turn-1", "item-1", "live", None, false)
+            .app_server_message(&task.id, &stale, "turn-1", "item-1", "live", None, false, None)
             .is_ok());
         stale.cancel();
         assert!(service
-            .app_server_message(&task.id, &stale, "turn-1", "item-1", "stale", None, true)
+            .app_server_message(&task.id, &stale, "turn-1", "item-1", "stale", None, true, None)
             .is_err());
         let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
     }
@@ -520,6 +520,7 @@ mod tests {
                 "one",
                 Some("final_answer"),
                 false,
+                None,
             )
             .unwrap();
         service
@@ -531,6 +532,7 @@ mod tests {
                 "one two",
                 Some("final_answer"),
                 false,
+                None,
             )
             .unwrap();
         service
@@ -542,6 +544,7 @@ mod tests {
                 "one two",
                 Some("final_answer"),
                 true,
+                None,
             )
             .unwrap();
         let messages = service
@@ -650,6 +653,7 @@ mod tests {
                 "image reply",
                 None,
                 true,
+                None,
             )
             .unwrap();
         let message = service

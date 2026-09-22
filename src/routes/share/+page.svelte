@@ -6,6 +6,7 @@ import type { ComposerContextUsage } from '$lib/context-usage-data';
 import ImageLightbox from '$lib/components/ImageLightbox.svelte';
 import Markdown from '$lib/components/Markdown.svelte';
 import MessageMeta from '$lib/components/MessageMeta.svelte';
+import ResponseMetadata from '$lib/components/ResponseMetadata.svelte';
 import ProviderIcon from '$lib/components/ProviderIcon.svelte';
 import type { Attachment, AttachmentFileData, Message, Snapshot, Task } from '$lib/types';
 import { splitOperatorMessage } from '$lib/operator-sharing';
@@ -24,6 +25,7 @@ type DisplayMessage = {
     role: Message['role'];
     streamStatus?: Message['streamStatus'];
     phase?: Message['phase'];
+    responseMetadata?: Message['responseMetadata'];
     delivery?: 'sending' | 'sent' | 'uncertain';
 };
 type LocalOutgoing = DisplayMessage & {
@@ -66,7 +68,7 @@ const looseTasks = $derived(snapshot?.tasks.filter(x => !x.projectId) ?? []);
 const visibleMessages = $derived([...messages.map(display), ...localOutgoing.filter(x => x.taskId === selectedId)].sort((a, b) => a.timestamp - b.timestamp));
 const initials = (value: string) => (value.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('') || '?').toUpperCase();
 function isSnapshot(x: unknown): x is SharedChatSnapshot { return !!x && typeof x === 'object' && Array.isArray((x as Snapshot).tasks) && Array.isArray((x as Snapshot).agents); }
-function display(message: Message): DisplayMessage { const tagged = message.role === 'user' ? splitOperatorMessage(message.text) : { name: null, text: message.text }; const agent = message.senderAgentId ? snapshot?.agents.find(x => x.id === message.senderAgentId) : task?.agentId ? snapshot?.agents.find(x => x.id === task.agentId) : null; return { id: message.id, name: tagged.name || (message.role === 'assistant' ? agent?.name || 'Agent' : message.role === 'system' ? 'Monitter' : snapshot?.sharing?.primary.name || 'Shared participant'), text: tagged.text, timestamp: message.createdAt, attachments: message.attachments ?? [], role: message.role, streamStatus: message.streamStatus, phase: message.phase }; }
+function display(message: Message): DisplayMessage { const tagged = message.role === 'user' ? splitOperatorMessage(message.text) : { name: null, text: message.text }; const agent = message.senderAgentId ? snapshot?.agents.find(x => x.id === message.senderAgentId) : task?.agentId ? snapshot?.agents.find(x => x.id === task.agentId) : null; return { id: message.id, name: tagged.name || (message.role === 'assistant' ? agent?.name || 'Agent' : message.role === 'system' ? 'Monitter' : snapshot?.sharing?.primary.name || 'Shared participant'), text: tagged.text, timestamp: message.createdAt, attachments: message.attachments ?? [], role: message.role, streamStatus: message.streamStatus, phase: message.phase, responseMetadata: message.responseMetadata }; }
 function isHuman(item: DisplayMessage) { return item.role === 'user'; }
 function scrollLatest() { if (messagesPane)
     messagesPane.scrollTop = messagesPane.scrollHeight; }
@@ -369,6 +371,7 @@ onMount(() => {
 <small>{Math.max(1,Math.round(attachment.size/1024))} KB</small>{#if attachment.previewDataUrl}<button class="preview-button" aria-label={`Preview ${attachment.name}`} onclick={()=>lightbox={src:attachment.previewDataUrl!,alt:attachment.name,title:attachment.name}}>
 <img src={attachment.previewDataUrl} alt={`Preview of ${attachment.name}`}/>
 </button>{/if}</div>{/each}</div>{/if}</div>
+{#if item.role==='assistant' && item.responseMetadata}<ResponseMetadata metadata={item.responseMetadata}/>{/if}
 </article>{:else}<p class="empty">No messages are shared in this chat.</p>{/each}</div>{#if task.status==='running'}<p class="agent-status" role="status">
 <LoaderCircle class="spin" size={13}/>Agent is working…</p>{/if}<form onsubmit={e=>{e.preventDefault();void send()}}>
 <div class="composer">

@@ -120,6 +120,18 @@ export interface Message {
   text: string; createdAt: number;
   senderAgentId?: string | null; collaborationId?: string | null;
   attachments?: Attachment[];
+  responseMetadata?: AssistantResponseMetadata | null;
+}
+export interface AssistantResponseMetadata {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  jevRationale?: string | null;
+  requestedModel?: string | null;
+  requestedEffort?: string | null;
+  confidence?: number | null;
+  routeApplied?: boolean | null;
+  applicationError?: string | null;
 }
 export type MailImportance = 'critical' | 'high' | 'normal' | 'low';
 export type MailIntent = 'action_request' | 'decision_needed' | 'information' | 'scheduling' | 'transactional' | 'newsletter' | 'personal' | 'other';
@@ -132,12 +144,17 @@ export interface MailClassifierTrace {
   inputTokens: number | null; outputTokens: number | null; costMicrousd: number | null;
   fallbackReason: string | null;
 }
+export interface MailClassificationMetrics {
+  importanceConfidence: number; intentConfidence: number; replyConfidence: number;
+  ownerConfidence: number; actionConfidence: number;
+}
 export interface MailCard {
   id: string; providerMessageId: string; providerThreadId: string | null;
   from: string; to: string[]; cc: string[]; subject: string; receivedAt: number; snippet: string;
   importance: MailImportance; importanceScore: number; intent: MailIntent;
   replyRequired: MailReplyState; suggestedOwner: MailOwner; suggestedAction: MailSuggestedAction;
-  confidence: number; rationale: string; state: MailCardState; firstSeenAt: number; lastSeenAt: number;
+  confidence: number; classificationMetrics?: MailClassificationMetrics; rationale: string;
+  state: MailCardState; firstSeenAt: number; lastSeenAt: number;
   isNew: boolean;
 }
 export interface MailBatch {

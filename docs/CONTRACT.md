@@ -543,6 +543,24 @@ Mcode's process-scoped `permissionMode` selector); if that exact option is absen
 This changes only the agent process's own confirmation policy: ACP remains a transport, not an OS sandbox,
 and it does not widen Monitter's native, LAN, filesystem, or collaboration permissions.
 
+An ACP harness that negotiates Monitter's `jev_routing` extension may emit a bounded
+`session/update` with `sessionUpdate: "router_trace"`. Monitter validates a structured trace no
+larger than 64 KiB and stores one visible status event containing both the requested and actual
+model/effort plus the application outcome. A failed application is labelled as a rollback and does
+not claim the requested model ran. Malformed or oversized traces create a bounded diagnostic error
+without failing or replaying the model turn. Raw prompts and credentials are never accepted as part
+of this extension payload.
+
+When an ACP `session/prompt` result includes authoritative response attribution, Monitter may
+persist it on the completed assistant `Message.responseMetadata`. The bounded metadata contains
+the actual model, input/output token counts, and Jev's routing rationale and outcome; it is attached
+only at the matching prompt-completion boundary and never inferred from the task's configured
+model. Older messages and ACP agents that omit these result fields have no response metadata. The
+transcript shows only the actual model and an information control below the assistant bubble;
+token and routing details remain inside that disclosure. Shared and paired-mobile task transcripts
+receive the same safe projection. Prompt text, provider credentials, and unrecognized routing
+fields are never copied into the message.
+
 Agent settings offer searchable presets and a custom ACP launcher. The catalog
 is convenience metadata, not a restriction on which compatible executables can
 be used. Bridges (including Pi ACP) are labelled separately from native ACP.
@@ -943,7 +961,9 @@ The same Rust catalogue supplies the native harness tool allowlists:
   only. Monitter creates one body-free card module and updates it in place on later calls,
   then sends all envelopes to one background Jev System One request containing five typed Choice
   questions per message (importance, intent, reply requirement, suggested owner, and suggested
-  action). The same cards are atomically enriched with provider/model/latency/token/cost evidence
+  action). Each answer's 0–100 confidence is retained; the visible overall confidence is the
+  minimum of those five values. Older persisted cards without the per-dimension evidence expose
+  zeroes rather than inventing historical metrics. The same cards are atomically enriched with provider/model/latency/token/cost evidence
   when supplied; a stale response from an older sync is discarded. Empty snapshots do not call Jev.
   `MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` selects the deterministic local fixture;
   missing or invalid live Jev results retain a visible 45% confidence fallback rather than
