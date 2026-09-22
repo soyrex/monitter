@@ -2034,21 +2034,6 @@
       workspaceConnected = false;
       error = text(reason);
     }
-    void discoverTerminals();
-  }
-  async function discoverTerminals() {
-    // Agent or LAN-initiated terminals live in the backend registry but never
-    // arrive via the snapshot. After every reload, surface any not yet mounted
-    // in this pane so the user can click the new tab.
-    if (!bridge.available) return;
-    try {
-      for (const session of await bridge.listTerminals()) {
-        if ($terminalSessions[session.id]) continue;
-        registerTerminal(session);
-        if (!openTerminalIds.includes(session.id)) openTerminalIds = [...openTerminalIds, session.id];
-        rememberTab({ kind: 'terminal', id: session.id });
-      }
-    } catch { /* Best-effort: the terminal itself surfaces read/input errors. */ }
   }
   async function run<T>(
     action: () => Promise<T>,
@@ -6476,6 +6461,7 @@
   .modern-tabs:not(.compact-tabs) > .topbar:has(> .workspace-context) .tab-entry:first-child { border-left:1px solid var(--line); }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { background:var(--soft); }
+  .modern-tabs:not(.compact-tabs) .tab-entry:hover { box-shadow:inset 0 -1px 0 var(--line); }
   .modern-tabs:not(.compact-tabs) .tab-entry > .tab:hover { background:transparent; }
   .modern-tabs:not(.compact-tabs) .workspace-context { padding:0; }
   .modern-tabs:not(.compact-tabs) .top-actions { padding:0 8px; }
