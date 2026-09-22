@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
-  import { ArrowRightLeft, Check, CircleStop, Inbox, Maximize2, MessageSquare, MoreHorizontal, Pencil, Share2, Terminal } from '@lucide/svelte';
-  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, RunEvent, Snapshot, Task } from '$lib/types';
+  import { ArrowRightLeft, Check, CircleStop, Inbox, Maximize2, MessageSquare, MoreHorizontal, Paperclip, Pencil, Share2, Terminal } from '@lucide/svelte';
+  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, QueuedMessage, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
@@ -39,6 +39,7 @@
     snapshot,
     conversationItems,
     optimisticMessages,
+    steeringMessages,
     confirmedDeliveryIds,
     pendingApprovals,
     selectedTaskStarting,
@@ -86,6 +87,7 @@
     snapshot: Snapshot;
     conversationItems: ConversationActivityItem[];
     optimisticMessages: OptimisticMessage[];
+    steeringMessages: QueuedMessage[];
     confirmedDeliveryIds: Record<string, true>;
     pendingApprovals: ApprovalRequest[];
     selectedTaskStarting: boolean;
@@ -133,12 +135,12 @@
 
   let taskMenuAnchor = $state<HTMLButtonElement>();
   let inboxView = $state(true);
-  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
+  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; steeringMessages: QueuedMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
   const taskMailBatches = $derived((snapshot.mailBatches ?? []).filter(batch => batch.taskId === task.id));
-  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, mailBatches: taskMailBatches, optimisticMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
+  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, mailBatches: taskMailBatches, optimisticMessages, steeringMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
   const transcriptBuffer = createTranscriptBuffer<TranscriptDisplay>(
     () => task.id,
-    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, mailBatches: taskMailBatches, conversationItems, optimisticMessages, confirmedDeliveryIds, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
+    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, mailBatches: taskMailBatches, conversationItems, optimisticMessages, steeringMessages, confirmedDeliveryIds, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
     () => transcriptFingerprint,
   );
   const display = $derived(transcriptBuffer.value());
@@ -146,6 +148,7 @@
   const displayAgent = $derived(display.agent);
   const displayItems = $derived(display.conversationItems);
   const displayOptimisticMessages = $derived(display.optimisticMessages);
+  const displaySteeringMessages = $derived(display.steeringMessages);
   const displayConfirmedDeliveryIds = $derived(display.confirmedDeliveryIds);
   const displayCollaborations = $derived(display.collaborations);
   const displaySubagents = $derived(display.subagents);
@@ -251,17 +254,19 @@
             {:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
             {:else if !message.collaborationId || !displayCollaborations.find(value => value.id === message.collaborationId)}
               {@const optimistic=displayOptimisticMessages.find(item=>item.id===message.id)}
+              {@const steering=displaySteeringMessages.find(item=>item.id===message.id)}
               {@const confirmed=displayConfirmedDeliveryIds[message.id]}
               {@const operator=message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}
               {@const humanName=operator?.name ?? (message.role==='user' ? senderName(message) : null)}
-              <article class:user={message.role==='user'} class:tinted={message.role==='user' && (display.settings.tintUserMessages || !!humanName)} style:--participant-colour={humanName ? participantColour(humanName) : undefined} data-participant={humanName ?? undefined} class:sticky-user-request={message.role==='user' && message.id===displayLatestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={optimistic?.status} aria-label={message.role==='user' && message.id===displayLatestUserRequest?.id ? 'Latest user request' : undefined}>
+              <article class:user={message.role==='user'} class:tinted={message.role==='user' && (display.settings.tintUserMessages || !!humanName)} style:--participant-colour={humanName ? participantColour(humanName) : undefined} data-participant={humanName ?? undefined} class:sticky-user-request={message.role==='user' && message.id===displayLatestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic || !!steering} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={steering?.status ?? optimistic?.status} aria-label={message.role==='user' && message.id===displayLatestUserRequest?.id ? 'Latest user request' : undefined}>
                 <div class="message-bubble">
                 <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (displayAgent?.name ?? 'Agent') : 'System')} createdAt={message.createdAt}>
                   {#snippet avatar()}{#if humanName}<span class="avatar message-avatar human-avatar" title={humanName}>{humanName.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null)}{/if}{/snippet}
-                  {#if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
+                  {#if steering}<span class="steering-status" data-steering-status={steering.status} role="status" aria-label={steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}>{steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}</span>{:else if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
                 {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>{:else}<Markdown text={message.role==='user' ? operatorMessageText(message.text) : message.text} preserveLineBreaks={message.role==='user'}/>{/if}
                 <AttachmentList attachments={message.attachments ?? []}/>
+                {#if steering?.attachmentIds.length}<small class="steering-attachments"><Paperclip size={11}/>{steering.attachmentIds.length} attachment{steering.attachmentIds.length === 1 ? '' : 's'}</small>{/if}
                 {#if message.streamStatus==='streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus==='interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
                 </div>
                 {#if message.role==='assistant' && message.responseMetadata}<ResponseMetadata metadata={message.responseMetadata}/>{/if}
@@ -346,6 +351,10 @@
   .context-cleared-event time { flex:none; }
   .optimistic-message .message-bubble { border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); }
   .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
+  .steering-status { display:inline-flex; align-items:center; margin-left:auto; padding:2px 6px; border:1px solid color-mix(in srgb,var(--accent) 38%,var(--line)); border-radius:999px; color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,var(--panel)); font:600 calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
+  .steering-status[data-steering-status="queued"] { color:var(--muted); border-color:var(--line); background:var(--panel); }
+  .steering-status[data-steering-status="error"] { color:#bd655b; border-color:color-mix(in srgb,#bd655b 38%,var(--line)); background:color-mix(in srgb,#bd655b 7%,var(--panel)); }
+  .steering-attachments { display:flex; align-items:center; gap:4px; margin-top:7px; color:var(--muted); font:calc(10px * var(--interface-font-ratio,1)) var(--mono); }
   :global(.delivery-status[data-delivery-status="sending"]) { color:var(--accent); }
   :global(.delivery-status[data-delivery-status="not-confirmed"]) { color:#bd655b; }
   .message :global(.markdown) { font-size:var(--chat-font-size,13px); line-height:var(--chat-line-height,1.65); }

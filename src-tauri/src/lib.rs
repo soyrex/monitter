@@ -1320,13 +1320,25 @@ impl Service {
         host: &Host,
         command: &mut std::process::Command,
     ) -> Result<(), String> {
-        if environment_secrets::should_inject_into_local_user_command(
-            &host.kind,
-            self.is_internal_agent_task(task_id),
-        ) {
-            self.environment_secrets.apply_to_command(command)?;
+        // Unit/integration test binaries are unsigned and must not trigger a
+        // real macOS Keychain access prompt while launching local fixtures.
+        // Environment vault behavior is covered by its isolated unit tests;
+        // signed production builds continue through the branch below.
+        #[cfg(test)]
+        {
+            let _ = (task_id, host, command);
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(test))]
+        {
+            if environment_secrets::should_inject_into_local_user_command(
+                &host.kind,
+                self.is_internal_agent_task(task_id),
+            ) {
+                self.environment_secrets.apply_to_command(command)?;
+            }
+            Ok(())
+        }
     }
 
     pub(crate) fn environment_secrets_for_local_user_task(
@@ -1334,11 +1346,19 @@ impl Service {
         task_id: &str,
         host: &Host,
     ) -> Option<&environment_secrets::EnvironmentSecretsStore> {
-        environment_secrets::should_inject_into_local_user_command(
-            &host.kind,
-            self.is_internal_agent_task(task_id),
-        )
-        .then_some(&self.environment_secrets)
+        #[cfg(test)]
+        {
+            let _ = (task_id, host);
+            None
+        }
+        #[cfg(not(test))]
+        {
+            environment_secrets::should_inject_into_local_user_command(
+                &host.kind,
+                self.is_internal_agent_task(task_id),
+            )
+            .then_some(&self.environment_secrets)
+        }
     }
 
     /// Saved agent IDs eligible to be referenced by an MCP server or managed
@@ -4315,11 +4335,11 @@ impl Service {
         let user_text = if text.trim().is_empty() { String::new() } else { text };
         // ACP startup makes the process available before the session is
         // marked resident. The extension is learned during that handshake;
-        // use the still-live runtime here and let send_mcode_acp_steer make
+        // use the still-live runtime here and let send_acp_steer make
         // the stricter session/turn checks immediately before it writes.
-        let mcode_steering = self
+        let acp_steering = self
             .available_runtime(&task_id)?
-            .is_some_and(|control| control.supports_mcode_acp_steer());
+            .is_some_and(|control| control.supports_acp_steer());
         let (execution_prompt, pending_steer) = self.mutate_data(Some(task_id.clone()), |data| {
             let state = &mut data.snapshot;
             let ix = state
@@ -4351,7 +4371,7 @@ impl Service {
                 let steer = (state.settings.busy_message_mode == "steer").then(|| {
                     match state.tasks[ix].provider.as_str() {
                         "codex" => Some("codex"),
-                        "acp" if mcode_steering => Some("mcode"),
+                        "acp" if acp_steering => Some("acp"),
                         _ => None,
                     }
                 }).flatten();
@@ -4369,7 +4389,11 @@ impl Service {
                     status: if steer.is_some() { "sending" } else { "queued" }.into(),
                     error: None,
                     sender_agent_id: None,
-                    origin: None,
+                    // Keep a live-steer follow-up in the transcript while its
+                    // native acknowledgement is pending. The marker survives
+                    // a FIFO fallback so the same bubble can change state
+                    // without moving or being duplicated in the queue dock.
+                    origin: steer.is_some().then(|| "steering".into()),
                 });
                 if let Some(steer) = steer {
                     return Ok((
@@ -4411,8 +4435,8 @@ impl Service {
             Ok((Some(accepted), None))
         })?;
         if let Some((prompt, queued_message_id, provider)) = pending_steer {
-            if provider == "mcode" {
-                self.mcode_steer_accepted(task_id, prompt, queued_message_id);
+            if provider == "acp" {
+                self.acp_steer_pending(task_id, prompt, queued_message_id);
             } else {
                 self.steer_accepted(task_id, prompt, queued_message_id);
             }
@@ -4795,7 +4819,7 @@ impl Service {
         }
     }
 
-    fn restore_unsteered_mcode_message(
+    fn restore_unsteered_acp_message(
         self: &Arc<Self>,
         task_id: &str,
         queued_message_id: &str,
@@ -4816,7 +4840,7 @@ impl Service {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "status".into(),
-                    title: "Mcode could not steer; message queued".into(),
+                    title: "ACP harness could not steer; message queued".into(),
                     detail: detail.into(),
                     created_at: now(),
                 }));
@@ -4832,7 +4856,7 @@ impl Service {
         }
     }
 
-    fn mcode_steer_accepted(
+    fn acp_steer_pending(
         self: &Arc<Self>,
         task_id: String,
         prompt: String,
@@ -4841,20 +4865,20 @@ impl Service {
         let control = match self.available_runtime(&task_id) {
             Ok(Some(control)) => control,
             Ok(None) => {
-                self.restore_unsteered_mcode_message(
+                self.restore_unsteered_acp_message(
                     &task_id,
                     &queued_message_id,
-                    "The Mcode ACP transport ended before the follow-up could be steered.",
+                    "The ACP transport ended before the follow-up could be steered.",
                 );
                 return;
             }
             Err(error) => {
-                self.restore_unsteered_mcode_message(&task_id, &queued_message_id, &error);
+                self.restore_unsteered_acp_message(&task_id, &queued_message_id, &error);
                 return;
             }
         };
-        if let Err(error) = control.send_mcode_acp_steer(&prompt, queued_message_id.clone()) {
-            self.mcode_acp_steer_rejected(&task_id, &control, &queued_message_id, &error);
+        if let Err(error) = control.send_acp_steer(&prompt, queued_message_id.clone()) {
+            self.acp_steer_rejected(&task_id, &control, &queued_message_id, &error);
         }
     }
 

@@ -825,10 +825,16 @@
     ? approvalRules.filter(rule => rule.agentId === selectedTask.agentId && rule.hostId === selectedTask.hostId && rule.cwd === selectedTask.cwd && rule.provider === selectedTask.provider)
     : []);
   const taskOptimisticMessages = $derived(optimisticMessages.filter(message => message.kind === 'task' && message.targetId === selectedTaskId));
+  const taskSteeringMessages = $derived(selectedTaskId
+    ? (indexes?.queuedByTask.get(selectedTaskId) ?? []).filter(message => message.origin === 'steering')
+    : []);
   const conversationItems = $derived(groupConversationActivity(
     [...messages, ...taskOptimisticMessages.map(message => ({
       id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
       createdAt: message.createdAt, attachments: message.attachments,
+    })), ...taskSteeringMessages.map(message => ({
+      id: message.id, taskId: message.taskId, role: 'user' as const, text: message.text,
+      createdAt: message.createdAt,
     }))],
     visibleEvents.filter(event => event.kind === "tool" || event.kind === "reasoning" || event.kind === "collaboration" || event.kind === "subagent"),
     snapshot?.settings.compressToolCalls === true,
@@ -3998,7 +4004,7 @@
   const effectiveRecipients = $derived([...new Set([...recipients, ...channelMentionIds])].filter(id=>activeChannel?.agentIds.includes(id)));
   const currentQueuedMessages = $derived(pane === 'channel'
     ? (selectedChannelId ? indexes?.queuedByChannel.get(selectedChannelId) ?? [] : [])
-    : (selectedTaskId ? indexes?.queuedByTask.get(selectedTaskId) ?? [] : []));
+    : (selectedTaskId ? (indexes?.queuedByTask.get(selectedTaskId) ?? []).filter(message => message.origin !== 'steering') : []));
   async function editQueuedMessage(id:string,text:string) { return Boolean(await run(()=>bridge.editQueuedMessage(id,text))); }
   async function removeQueuedMessage(id:string) { await run(()=>bridge.cancelQueuedMessage(id)); }
   async function sendChannel() {
@@ -4493,6 +4499,7 @@
           {snapshot}
           {conversationItems}
           optimisticMessages={taskOptimisticMessages}
+          steeringMessages={taskSteeringMessages}
           {confirmedDeliveryIds}
           pendingApprovals={pendingApprovalRequests}
           {selectedTaskStarting}

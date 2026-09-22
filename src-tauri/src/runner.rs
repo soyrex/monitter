@@ -1664,9 +1664,10 @@ pub struct RunControl {
     // durable queue record and its expected native turn together so the
     // reader can either confirm the send or safely return it to the queue.
     app_server_steer_requests: Mutex<HashMap<i64, AppServerSteerRequest>>,
-    // Mcode exposes steering through an opt-in ACP extension, not the Codex
-    // app-server method. Keep its request correlation separate so a generic
-    // ACP response cannot be mistaken for a provider turn completion.
+    // ACP harnesses may expose steering through a bounded, namespaced
+    // extension, not the Codex app-server method. Keep its request correlation
+    // separate so a generic ACP response cannot be mistaken for a provider
+    // turn completion.
     acp_steer_requests: Mutex<HashMap<i64, AcpSteerRequest>>,
     acp_config_requests: Mutex<HashSet<i64>>,
     // A later ACP turn is reserved before its optional model configuration is
@@ -1677,7 +1678,7 @@ pub struct RunControl {
     mcp_fingerprint: Mutex<Option<String>>,
     acp_session_result: Mutex<Option<Value>>,
     acp_slash_commands: Mutex<Vec<crate::model::SlashCommand>>,
-    mcode_acp_steer_available: AtomicBool,
+    acp_steer_method: Mutex<Option<String>>,
     app_server_instance_id: String,
     acp_transport: AtomicBool,
     acp_control: Mutex<Option<mpsc::SyncSender<AcpControlFrame>>>,
@@ -1734,7 +1735,13 @@ pub(crate) struct AppServerSteerRequest {
 pub(crate) struct AcpSteerRequest {
     pub queued_message_id: String,
     pub expected_turn_id: String,
+    pub client_request_id: String,
+    pub method: String,
+    pub prompt: String,
+    pub attempts: u16,
 }
+
+pub(crate) const ACP_STEER_READY_RETRY_LIMIT: u16 = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeTurnCommand {
@@ -1808,7 +1815,7 @@ impl RunControl {
             mcp_fingerprint: Mutex::new(None),
             acp_session_result: Mutex::new(None),
             acp_slash_commands: Mutex::new(Vec::new()),
-            mcode_acp_steer_available: AtomicBool::new(false),
+            acp_steer_method: Mutex::new(None),
             app_server_instance_id: crate::model::id(),
             acp_transport: AtomicBool::new(false),
             acp_control: Mutex::new(None),
@@ -2601,10 +2608,10 @@ impl RunControl {
         Ok(())
     }
 
-    /// Mcode's opt-in ACP extension injects a follow-up into the admitted
-    /// active prompt turn. It is deliberately unavailable to generic ACP
-    /// agents, even if they happen to use a similarly named slash command.
-    pub(crate) fn send_mcode_acp_steer(
+    /// Send a follow-up through the exact bounded ACP steering extension
+    /// advertised during initialize. Unknown or merely similarly named methods
+    /// are never called.
+    pub(crate) fn send_acp_steer(
         &self,
         prompt: &str,
         queued_message_id: String,
@@ -2612,34 +2619,61 @@ impl RunControl {
         if self.is_cancelled() {
             return Err("Task was stopped before the follow-up could be steered.".into());
         }
-        if !self.mcode_acp_steer_available.load(Ordering::SeqCst) {
-            return Err("This ACP session did not advertise Mcode live steering.".into());
-        }
-        let session_id = self
-            .current_app_server_thread()
-            .ok_or("Mcode is still starting; the follow-up cannot be steered yet.")?;
+        let method = self
+            .acp_steer_method
+            .lock()
+            .map_err(|_| "ACP steering capability lock failed.".to_string())?
+            .clone()
+            .ok_or("This ACP session did not advertise live steering.")?;
         let expected_turn_id = self
             .current_app_server_turn()
             .filter(|turn| turn.starts_with("acp:"))
-            .ok_or("Mcode has no active ACP prompt to steer.")?;
+            .ok_or("ACP has no active prompt to steer.")?;
+        let client_request_id = crate::model::id();
+        self.send_acp_steer_request(AcpSteerRequest {
+            queued_message_id,
+            expected_turn_id,
+            client_request_id,
+            method,
+            prompt: prompt.to_string(),
+            attempts: 0,
+        })
+    }
+
+    fn send_acp_steer_request(&self, request: AcpSteerRequest) -> Result<(), String> {
+        if self.is_cancelled() {
+            return Err("Task was stopped before the follow-up could be steered.".into());
+        }
+        let advertised = self
+            .acp_steer_method
+            .lock()
+            .map_err(|_| "ACP steering capability lock failed.".to_string())?
+            .clone();
+        if advertised.as_deref() != Some(request.method.as_str()) {
+            return Err("The ACP steering capability changed before delivery.".into());
+        }
+        let session_id = self
+            .current_app_server_thread()
+            .ok_or("ACP is still starting; the follow-up cannot be steered yet.")?;
+        if self.current_app_server_turn().as_deref() != Some(request.expected_turn_id.as_str()) {
+            return Err("The ACP prompt ended before the follow-up could be steered.".into());
+        }
         let request_id = self.next_app_server_request_id()?;
         self.acp_steer_requests
             .lock()
-            .map_err(|_| "Mcode ACP steering lock failed.".to_string())?
+            .map_err(|_| "ACP steering request lock failed.".to_string())?
             .insert(
                 request_id,
-                AcpSteerRequest {
-                    queued_message_id,
-                    expected_turn_id,
-                },
+                request.clone(),
             );
         let frame = crate::acp_protocol::request(
             serde_json::json!(request_id),
-            "mcode/session/steer",
+            &request.method,
             serde_json::json!({
                 "sessionId": session_id,
-                "text": prompt,
-                "clientRequestId": crate::model::id(),
+                "text": request.prompt,
+                "clientRequestId": request.client_request_id,
+                "expectedTurnId": request.expected_turn_id,
             }),
         )
         .to_string();
@@ -2648,6 +2682,14 @@ impl RunControl {
             return Err(error);
         }
         Ok(())
+    }
+
+    pub(crate) fn retry_acp_steer(&self, mut request: AcpSteerRequest) -> Result<(), String> {
+        if request.attempts >= ACP_STEER_READY_RETRY_LIMIT {
+            return Err("The ACP prompt did not become steerable before the retry limit.".into());
+        }
+        request.attempts += 1;
+        self.send_acp_steer_request(request)
     }
 
     fn send_acp_turn_reserved(&self, prompt: &str, task: &Task) -> Result<(), String> {
@@ -2757,29 +2799,41 @@ impl RunControl {
         }
     }
 
-    /// Mcode publishes its optional methods in namespaced initialize metadata.
-    /// Treat malformed or unknown metadata as unsupported rather than widening
+    /// Recognize only reviewed, versioned ACP steering extensions. Treat
+    /// malformed or unknown metadata as unsupported rather than widening
     /// generic ACP behavior.
     pub(crate) fn set_acp_extensions(&self, initialize_result: &Value) {
-        let extension = initialize_result
-            .get("_meta")
-            .and_then(|meta| meta.get("minimax-code/extensions"));
-        let supports_steer = extension
-            .filter(|extension| extension.get("version").and_then(Value::as_u64) == Some(1))
-            .and_then(|extension| extension.get("methods").and_then(Value::as_array))
-            .filter(|methods| methods.len() <= 64)
-            .is_some_and(|methods| {
-                methods.iter().any(|method| {
-                    method.as_str() == Some("mcode/session/steer")
-                        && method.as_str().is_some_and(|method| method.len() <= 128)
+        let metadata = initialize_result.get("_meta");
+        let advertises = |namespace: &str, expected: &str| {
+            metadata
+                .and_then(|meta| meta.get(namespace))
+                .filter(|extension| extension.get("version").and_then(Value::as_u64) == Some(1))
+                .and_then(|extension| extension.get("methods").and_then(Value::as_array))
+                .filter(|methods| methods.len() <= 64)
+                .is_some_and(|methods| {
+                    methods.iter().any(|method| {
+                        method.as_str() == Some(expected)
+                            && method.as_str().is_some_and(|method| method.len() <= 128)
+                    })
                 })
-            });
-        self.mcode_acp_steer_available
-            .store(supports_steer, Ordering::SeqCst);
+        };
+        let method = if advertises("mona/extensions", "mona/session/steer") {
+            Some("mona/session/steer".to_string())
+        } else if advertises("minimax-code/extensions", "mcode/session/steer") {
+            Some("mcode/session/steer".to_string())
+        } else {
+            None
+        };
+        if let Ok(mut slot) = self.acp_steer_method.lock() {
+            *slot = method;
+        }
     }
 
-    pub(crate) fn supports_mcode_acp_steer(&self) -> bool {
-        self.mcode_acp_steer_available.load(Ordering::SeqCst)
+    pub(crate) fn supports_acp_steer(&self) -> bool {
+        self.acp_steer_method
+            .lock()
+            .map(|method| method.is_some())
+            .unwrap_or(false)
     }
 
     pub(crate) fn replace_acp_slash_commands(&self, value: &Value) -> Result<(), String> {
@@ -3072,7 +3126,9 @@ impl RunControl {
     /// a prompt.
     pub(crate) fn retire_acp_transport(&self) {
         self.resident.store(false, Ordering::SeqCst);
-        self.mcode_acp_steer_available.store(false, Ordering::SeqCst);
+        if let Ok(mut method) = self.acp_steer_method.lock() {
+            *method = None;
+        }
         if let Ok(mut commands) = self.acp_slash_commands.lock() {
             commands.clear();
         }
@@ -4833,25 +4889,25 @@ for line in sys.stdin.buffer:
     }
 
     #[test]
-    fn mcode_steer_is_advertised_active_turn_only_and_preserves_correlation() {
+    fn acp_steer_is_advertised_active_turn_only_and_preserves_correlation() {
         let control = RunControl::new(false);
-        control.set_app_server_thread("mcode-session".into());
+        control.set_app_server_thread("mona-session".into());
         control.set_app_server_turn("acp:41".into());
         assert!(control
-            .send_mcode_acp_steer("change course", "queued-before-advertisement".into())
+            .send_acp_steer("change course", "queued-before-advertisement".into())
             .is_err());
 
         control.set_acp_extensions(&serde_json::json!({
-            "_meta": {"minimax-code/extensions": {
+            "_meta": {"mona/extensions": {
                 "version": 1,
-                "methods": ["mcode/session/steer"]
+                "methods": ["mona/session/steer"]
             }}
         }));
         let (sender, receiver) = mpsc::sync_channel(1);
         control.mark_acp_transport();
         control.set_acp_control(sender);
         control
-            .send_mcode_acp_steer("change course", "queued-follow-up".into())
+            .send_acp_steer("change course", "queued-follow-up".into())
             .unwrap();
 
         let frame: Value = serde_json::from_str(
@@ -4861,13 +4917,19 @@ for line in sys.stdin.buffer:
                 .frame,
         )
         .unwrap();
-        assert_eq!(frame["method"], "mcode/session/steer");
-        assert_eq!(frame["params"]["sessionId"], "mcode-session");
+        assert_eq!(frame["method"], "mona/session/steer");
+        assert_eq!(frame["params"]["sessionId"], "mona-session");
         assert_eq!(frame["params"]["text"], "change course");
+        assert_eq!(frame["params"]["expectedTurnId"], "acp:41");
         let request_id = frame["id"].as_i64().unwrap();
         let request = control.take_acp_steer_request(request_id).unwrap();
         assert_eq!(request.queued_message_id, "queued-follow-up");
         assert_eq!(request.expected_turn_id, "acp:41");
+        assert_eq!(request.method, "mona/session/steer");
+        assert_eq!(
+            frame["params"]["clientRequestId"],
+            request.client_request_id
+        );
     }
 
     #[test]
