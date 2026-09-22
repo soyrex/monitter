@@ -549,10 +549,10 @@ impl Service {
         }
     }
 
-    /// Mcode confirms an ACP extension steer independently of the original
+    /// An ACP harness confirms an extension steer independently of the original
     /// `session/prompt` completion. Persist it only after that acknowledgement;
     /// otherwise the durable FIFO record remains available for fallback.
-    pub(crate) fn mcode_acp_steer_accepted(
+    pub(crate) fn acp_steer_accepted(
         self: &Arc<Self>,
         task_id: &str,
         control: &Arc<RunControl>,
@@ -570,7 +570,7 @@ impl Service {
                         && message.channel_id.is_none()
                         && message.status == "sending"
                 })
-                .ok_or("The pending Mcode-steered message is no longer available.")?;
+                .ok_or("The pending ACP-steered message is no longer available.")?;
             let queued = data.snapshot.queued_messages.remove(message_index);
             let task = data
                 .snapshot
@@ -602,18 +602,18 @@ impl Service {
                 id: id(),
                 task_id: task_id.into(),
                 kind: "status".into(),
-                title: "Follow-up steered into active Mcode turn".into(),
+                title: "Follow-up steered into active ACP turn".into(),
                 detail: String::new().into(),
                 created_at: now(),
             }));
             Ok(())
         });
         if let Err(error) = accepted {
-            self.mcode_acp_steer_rejected(task_id, control, queued_message_id, &error);
+            self.acp_steer_rejected(task_id, control, queued_message_id, &error);
         }
     }
 
-    pub(crate) fn mcode_acp_steer_rejected(
+    pub(crate) fn acp_steer_rejected(
         self: &Arc<Self>,
         task_id: &str,
         control: &Arc<RunControl>,
@@ -644,7 +644,7 @@ impl Service {
                     id: id(),
                     task_id: task_id.into(),
                     kind: "status".into(),
-                    title: "Mcode could not steer; message queued".into(),
+                    title: "ACP harness could not steer; message queued".into(),
                     detail: detail.into(),
                     created_at: now(),
                 }));

@@ -1424,17 +1424,40 @@ fn run(
             phase_deadline = Instant::now() + INITIALIZE_TIMEOUT;
             continue;
         }
-        // Mcode's namespaced steering response is a non-terminal auxiliary
+        // A namespaced ACP steering response is a non-terminal auxiliary
         // request. A rejected steer must return its durable message to FIFO,
         // not fail the active ACP turn.
         if value.pointer("/error/message").is_some() {
             if let Some(id) = value.get("id").and_then(Value::as_i64) {
                 if let Some(steer) = control.take_acp_steer_request(id) {
+                    let code = value.pointer("/error/code").and_then(Value::as_i64);
+                    if code == Some(-32001)
+                        && steer.attempts < runner::ACP_STEER_READY_RETRY_LIMIT
+                        && control.current_app_server_turn().as_deref()
+                            == Some(steer.expected_turn_id.as_str())
+                    {
+                        let retry_service = Arc::clone(&service);
+                        let retry_control = Arc::clone(&control);
+                        let retry_task_id = task_id.clone();
+                        let queued_message_id = steer.queued_message_id.clone();
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(200));
+                            if let Err(error) = retry_control.retry_acp_steer(steer) {
+                                retry_service.acp_steer_rejected(
+                                    &retry_task_id,
+                                    &retry_control,
+                                    &queued_message_id,
+                                    &error,
+                                );
+                            }
+                        });
+                        continue;
+                    }
                     let detail = value
                         .pointer("/error/message")
                         .and_then(Value::as_str)
-                        .unwrap_or("Mcode rejected the live steering request.");
-                    service.mcode_acp_steer_rejected(
+                        .unwrap_or("The ACP harness rejected the live steering request.");
+                    service.acp_steer_rejected(
                         &task_id,
                         &control,
                         &steer.queued_message_id,
@@ -1780,26 +1803,31 @@ fn run(
             }
             if let Some(steer) = control.take_acp_steer_request(id) {
                 let result = value.get("result").unwrap_or(&Value::Null);
+                let returned_turn_matches = result.get("turnId").and_then(Value::as_str)
+                    == Some(steer.expected_turn_id.as_str());
+                let client_request_matches =
+                    match result.get("clientRequestId").and_then(Value::as_str) {
+                        Some(client_request_id) => client_request_id == steer.client_request_id,
+                        None => steer.method == "mcode/session/steer",
+                    };
                 let accepted = result.get("mode").and_then(Value::as_str) == Some("steered")
-                    && result
-                        .get("turnId")
-                        .and_then(Value::as_str)
-                        .is_some_and(|turn_id| !turn_id.is_empty() && turn_id.len() <= 256)
+                    && returned_turn_matches
+                    && client_request_matches
                     && control.current_app_server_turn().as_deref()
                         == Some(steer.expected_turn_id.as_str());
                 if accepted {
-                    service.mcode_acp_steer_accepted(
+                    service.acp_steer_accepted(
                         &task_id,
                         &control,
                         &steer.expected_turn_id,
                         &steer.queued_message_id,
                     );
                 } else {
-                    service.mcode_acp_steer_rejected(
+                    service.acp_steer_rejected(
                         &task_id,
                         &control,
                         &steer.queued_message_id,
-                        "Mcode returned an invalid or stale live-steering acknowledgement.",
+                        "The ACP harness returned an invalid or stale live-steering acknowledgement.",
                     );
                 }
                 continue;

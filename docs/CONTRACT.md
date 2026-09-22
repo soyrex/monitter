@@ -346,12 +346,17 @@ original text, attachment IDs, optional channel, status and error. A busy direct
 channel recipient queues its follow-up; idle recipients still start immediately, and a channel user
 message is recorded once at submission rather than again when a recipient drains. With `steer`, a live
 local Codex app-server task sends `turn/steer` using its current thread and turn IDs. An ACP task may
-also steer only after its initialize response explicitly advertises Mcode's
-`_meta["minimax-code/extensions"]` v1 `mcode/session/steer` method; Monitter sends that method with
-the live ACP session ID and only accepts a matching `mode: "steered"` reply while the same prompt turn
-is still active. Monitter retains a visible `sending` record until the harness acknowledges the matching
-turn, then persists it as a user message; an unavailable, stale, rejected, or unsteerable turn returns
-the record to FIFO with a visible fallback event. Other CLI adapters safely queue. The next queued item starts only after its owned native run releases. A
+also steer only after its initialize response explicitly advertises a reviewed v1 namespaced method:
+Mcode's `_meta["minimax-code/extensions"]` `mcode/session/steer`, or Mona's
+`_meta["mona/extensions"]` `mona/session/steer`. Monitter sends the advertised method with the live ACP
+session ID, expected prompt-turn ID, and a client request ID. It accepts only a correlated
+`mode: "steered"` reply while that same prompt remains active. Monitter retains the durable `sending`
+record as a user bubble in its chronological transcript with a `Steering` tag until the harness
+acknowledges the matching turn, then atomically replaces it with the persisted user message. A
+temporarily-not-ready harness is retried only while that exact prompt remains active. An unavailable,
+stale, rejected, or unsteerable turn returns the record to FIFO; its transcript bubble changes to
+`Queued` and a visible fallback event is recorded, without duplicating it in the queue dock. Other CLI
+adapters safely queue. The next queued item starts only after its owned native run releases. A
 restart changes an uncertain `sending` item to `error` and never replays it automatically. Cancelling, kicking,
 archiving or deleting prevents queued follow-ups from launching; task deletion removes their records.
 

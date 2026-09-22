@@ -41,8 +41,9 @@ fn fixture_with_args(name: &str, args: Vec<String>) -> Fixture {
     let script = std::env::temp_dir().join(format!("monitter-acp-fixture-{}.mjs", crate::id()));
     fs::write(&script, r#"#!/usr/bin/env node
 import readline from 'node:readline'; import fs from 'node:fs';
-let turns=0, session='fixture-session', configAcknowledged=true;
+let turns=0, session='fixture-session', configAcknowledged=true, steerAttempts=0;
 const reply=(id,result)=>console.log(JSON.stringify({jsonrpc:'2.0',id,result}));
+const reject=(id,code,message)=>console.log(JSON.stringify({jsonrpc:'2.0',id,error:{code,message}}));
 const updateItem=(text,id)=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text},id}}}));
 const update=(text)=>updateItem(text,`message-${turns}`);
 const usageUpdate=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'usage_update',inputTokens:321,outputTokens:123}}}));
@@ -50,12 +51,12 @@ const commandUpdate=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'sessio
 const routerTrace=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'router_trace',trace:{traceId:'fixture-route',trigger:'initial_prompt',applied:false,requestedModel:'gpt-6-astra',requestedEffort:'max',newModel:'gpt-5.5',newEffort:'high',applicationError:'model unavailable',confidence:0.9,rationale:'fixture rollback'}}}}));
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
- if(frame.method==='initialize') { const recovery=process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}; const http=process.argv[2]==='managed-no-http'?{}:{mcpCapabilities:{http:true}}; reply(frame.id,{protocolVersion:1,agentCapabilities:{...recovery,...http}}); }
+ if(frame.method==='initialize') { const recovery=process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}; const http=process.argv[2]==='managed-no-http'?{}:{mcpCapabilities:{http:true}}; const steer=process.argv[2]==='mcode-steer'?{'minimax-code/extensions':{version:1,methods:['mcode/session/steer']}}:['mona-steer','mona-steer-retry'].includes(process.argv[2])?{'mona/extensions':{version:1,methods:['mona/session/steer']}}:null; reply(frame.id,{protocolVersion:1,agentCapabilities:{...recovery,...http},...(steer?{_meta:steer}:{})}); }
  else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; reply(frame.id,mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(process.argv[2]==='mcode-steer'){ globalThis.activePromptId=frame.id; } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
- else if(frame.method==='mcode/session/steer'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`steer:${frame.params.text}\n`); reply(frame.id,{turnId:'fixture-mcode-turn',mode:'steered'}); update('mcode-steered'); reply(globalThis.activePromptId,{stopReason:'end_turn'}); }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['mcode-steer','mona-steer','mona-steer-retry'].includes(process.argv[2])){ globalThis.activePromptId=frame.id; if(process.argv[3]) fs.appendFileSync(process.argv[3],`prompt-active:${frame.id}\n`); } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
+ else if(['mcode/session/steer','mona/session/steer'].includes(frame.method)){ steerAttempts++; if(process.argv[3]) fs.appendFileSync(process.argv[3],`steer:${frame.method}:${frame.params.expectedTurnId}:${frame.params.text}\n`); if(process.argv[2]==='mona-steer-retry' && steerAttempts===1){ reject(frame.id,-32001,'prompt is not ready for steering'); } else { reply(frame.id,{turnId:frame.params.expectedTurnId,clientRequestId:frame.params.clientRequestId,mode:'steered'}); update('acp-steered'); reply(globalThis.activePromptId,{stopReason:'end_turn'}); } }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
 });
@@ -264,6 +265,109 @@ fn mona_prompt_result_persists_metadata_only_on_the_final_assistant_item() {
     }));
 }
 
+fn run_mona_steer_fixture(mode: &str, expected_attempts: usize) {
+    let capture = std::env::temp_dir().join(format!("monitter-{mode}-{}", crate::id()));
+    let fixture = fixture_with_args(
+        mode,
+        vec![mode.into(), capture.to_string_lossy().into_owned()],
+    );
+    fixture
+        .mutate(None, |snapshot| {
+            snapshot.settings.busy_message_mode = "steer".into();
+            Ok(())
+        })
+        .unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "Mona steer fixture".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let accepted = fixture
+        .accept_send(task.id.clone(), "start the long turn".into(), vec![])
+        .unwrap()
+        .unwrap();
+    // Drive the resident transport on an explicit worker. The fixture must
+    // remain blocked in session/prompt while this test submits its steer, so
+    // relying on Tauri's test-runtime scheduler would introduce a long and
+    // unrelated startup race.
+    let run_service = Arc::clone(&fixture.service);
+    let run_task_id = task.id.clone();
+    let run_thread = thread::spawn(move || run_service.deliver_accepted(run_task_id, accepted));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline
+        && !fs::read_to_string(&capture)
+            .unwrap_or_default()
+            .contains("prompt-active:")
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let startup_capture = fs::read_to_string(&capture).unwrap_or_default();
+    assert!(
+        startup_capture.contains("prompt-active:"),
+        "Mona fixture never entered its active ACP prompt. Capture: {startup_capture:?}. Snapshot: {:?}",
+        fixture.snapshot().unwrap()
+    );
+
+    fixture
+        .send_fast(task.id.clone(), "change course safely".into(), vec![])
+        .unwrap();
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot.messages.iter().any(|message| {
+            message.task_id == task.id
+                && message.role == "user"
+                && message.text == "change course safely"
+        }) && snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "completed")
+    });
+
+    let snapshot = fixture.snapshot().unwrap();
+    assert!(snapshot
+        .queued_messages
+        .iter()
+        .all(|message| message.task_id != task.id));
+    assert!(snapshot.events.iter().any(|event| {
+        event.task_id == task.id && event.title == "Follow-up steered into active ACP turn"
+    }));
+    let captured = fs::read_to_string(&capture).unwrap_or_default();
+    assert!(
+        captured.contains("steer:mona/session/steer:acp:3:change course safely"),
+        "Monitter did not send Mona's correlated steering method: {captured}"
+    );
+    assert_eq!(
+        captured
+            .lines()
+            .filter(|line| line.starts_with("steer:mona/session/steer:"))
+            .count(),
+        expected_attempts,
+        "unexpected Mona steering attempt count: {captured}"
+    );
+    run_thread.join().unwrap();
+    let _ = fs::remove_file(capture);
+}
+
+#[test]
+fn mona_extension_steers_the_exact_active_acp_prompt() {
+    run_mona_steer_fixture("mona-steer", 1);
+}
+
+#[test]
+fn mona_not_ready_steer_is_retried_for_the_same_active_prompt() {
+    run_mona_steer_fixture("mona-steer-retry", 2);
+}
+
 #[test]
 fn resident_fixture_advertises_and_executes_a_raw_slash_command() {
     let capture = std::env::temp_dir().join(format!("monitter-acp-commands-{}", crate::id()));
@@ -330,7 +434,7 @@ fn resident_fixture_advertises_and_executes_a_raw_slash_command() {
 }
 
 #[test]
-fn mcode_extension_metadata_is_opt_in_and_bounded() {
+fn acp_steering_extension_metadata_is_opt_in_namespaced_and_bounded() {
     let control = crate::runner::RunControl::new(false);
     control.set_acp_extensions(&serde_json::json!({
         "_meta": {"minimax-code/extensions": {
@@ -338,11 +442,18 @@ fn mcode_extension_metadata_is_opt_in_and_bounded() {
             "methods": ["mcode/session/steer"]
         }}
     }));
-    assert!(control.supports_mcode_acp_steer());
+    assert!(control.supports_acp_steer());
     control.set_acp_extensions(&serde_json::json!({
         "_meta": {"minimax-code/extensions": {"version": 2, "methods": ["mcode/session/steer"]}}
     }));
-    assert!(!control.supports_mcode_acp_steer());
+    assert!(!control.supports_acp_steer());
+    control.set_acp_extensions(&serde_json::json!({
+        "_meta": {"mona/extensions": {
+            "version": 1,
+            "methods": ["mona/session/steer"]
+        }}
+    }));
+    assert!(control.supports_acp_steer());
 }
 
 #[test]
