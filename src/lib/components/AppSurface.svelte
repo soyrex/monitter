@@ -2812,17 +2812,18 @@
     let routingNotice = '';
     const routeAgent = taskFormAgent;
     // An explicit model selection is a user preference and always wins. Jev
-    // never changes the sandbox or approval path; sensitive routes stop here
-    // because this screen has no consequential-action review gate.
+    // never changes the sandbox or approval path. A review-required result is
+    // advisory at chat creation: the harness can still inspect and discuss the
+    // request, while its normal approval boundary guards any later effect.
     if (routeAgent?.jevRouting && routeAgent.jevRouting !== 'off' && !modelSettings) {
       busy = true; error = ''; notice = '';
       try {
         const plan = await bridge.planJevRoute(routeAgent.id, textToSend);
         const decision = plan.decision;
-        if (decision.permission_tier === 'human_review_required') {
-          error = 'Jev marked this as consequential. It was not started; use a reviewed workflow before any effect.';
-          return;
-        }
+        const reviewNotice = decision.permission_tier === 'human_review_required'
+          ? 'Jev flagged this for human review before any consequential effect. The chat was started without granting additional authority.'
+          : '';
+        const withReviewNotice = (routeNotice: string) => reviewNotice ? `${reviewNotice} ${routeNotice}` : routeNotice;
         const label = `${decision.model_tier.replace('_', ' ')} · ${decision.reasoning_level} reasoning`;
         if (routeAgent.jevRouting === 'safe_auto' && decision.confidence >= 0.5) {
           const mappedModel = routeAgent.jevModelTiers?.[decision.model_tier] || routeAgent.model;
@@ -2838,15 +2839,15 @@
             if (selected) {
               const effort = routeAgent.provider === 'acp' || !selected.reasoningEfforts.some(option => option.id === decision.reasoning_level) ? null : decision.reasoning_level;
               modelSettings = { model: selected.id, reasoningEffort: effort, fastMode: null };
-              routingNotice = `Jev applied ${label} with ${selected.name} (${Math.round(decision.confidence * 100)}% confidence).`;
+              routingNotice = withReviewNotice(`Jev applied ${label} with ${selected.name} (${Math.round(decision.confidence * 100)}% confidence).`);
             } else {
-              routingNotice = `Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default was kept.`;
+              routingNotice = withReviewNotice(`Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default was kept.`);
             }
           } else {
-            routingNotice = `Jev recommends ${label}; this harness has no mapped model for that tier.`;
+            routingNotice = withReviewNotice(`Jev recommends ${label}; this harness has no mapped model for that tier.`);
           }
         } else {
-          routingNotice = `Jev recommends ${label} (${Math.round(decision.confidence * 100)}% confidence). Your model selection was kept.`;
+          routingNotice = withReviewNotice(`Jev recommends ${label} (${Math.round(decision.confidence * 100)}% confidence). Your model selection was kept.`);
         }
       } catch (reason) {
         error = `Jev routing could not run: ${text(reason)}`;
