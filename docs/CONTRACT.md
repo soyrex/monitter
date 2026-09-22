@@ -544,9 +544,12 @@ New ACP tasks copy the agent's launcher; editing the agent does not retarget an
 existing chat. Non-ACP tasks do not carry an ACP launcher. Session ownership
 distinguishes ACP launch configurations. ACP normally uses `harness-configured` permissions.
 An explicit `yolo` selection requests the live session's advertised `bypassPermissions` mode (including
-Mcode's process-scoped `permissionMode` selector); if that exact option is absent the launch fails visibly.
-This changes only the agent process's own confirmation policy: ACP remains a transport, not an OS sandbox,
-and it does not widen Monitter's native, LAN, filesystem, or collaboration permissions.
+Mcode's process-scoped `permissionMode` selector). If that exact option is absent, each live
+`session/request_permission` may receive only the agent's advertised opaque `allow_once` option.
+Malformed, missing, duplicate, or broader-only options are cancelled; Monitter never selects an
+`allow_always` option. This changes only the agent process's own confirmation policy: ACP remains a
+transport, not an OS sandbox, and it does not widen Monitter's native, LAN, filesystem, or collaboration
+permissions.
 
 An ACP harness that negotiates Monitter's `jev_routing` extension may emit a bounded
 `session/update` with `sessionUpdate: "router_trace"`. Monitter validates a structured trace no

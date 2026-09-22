@@ -670,6 +670,7 @@ fn handle_permission_request(
     params: Value,
     turn: String,
     pending: Arc<AtomicUsize>,
+    auto_approve_once: bool,
 ) {
     // A permission request itself proves the provider has reached a tool
     // boundary, even if its options are invalid or later denied.
@@ -681,6 +682,33 @@ fn handle_permission_request(
             &control,
             acp_protocol::response(id, acp_protocol::cancelled_permission()),
         );
+        return;
+    }
+    if auto_approve_once {
+        // An explicit YOLO selection still cannot manufacture broader
+        // authority. Use only the agent's opaque one-time option, after the
+        // same validation that protects the interactive approval path.
+        let outcome = match acp_protocol::permission_outcome(&params, true) {
+            Ok(outcome) => {
+                service.record(
+                    &task_id,
+                    "tool",
+                    "ACP YOLO permission",
+                    "Monitter selected this agent's advertised one-time permission option because YOLO is enabled.".into(),
+                );
+                outcome
+            }
+            Err(_) => {
+                service.record(
+                    &task_id,
+                    "error",
+                    "ACP YOLO permission cancelled",
+                    "This ACP permission request did not offer an allow_once option, so Monitter cancelled it.".into(),
+                );
+                acp_protocol::cancelled_permission()
+            }
+        };
+        let _ = send(&control, acp_protocol::response(id, outcome));
         return;
     }
     if pending
@@ -1230,6 +1258,7 @@ fn run(
     let mut resolved_cwd = task.cwd.clone();
     let mut seen_permission_ids = HashSet::<String>::new();
     let pending_permissions = Arc::new(AtomicUsize::new(0));
+    let mut yolo_uses_one_time_permissions = false;
     loop {
         // Retirement only wins after the lifecycle guard proved there is no
         // turn, configuration request, approval, or owned background work.
@@ -1369,6 +1398,7 @@ fn run(
                         params,
                         turn.clone(),
                         pending_permissions.clone(),
+                        yolo_uses_one_time_permissions,
                     );
                 }
             } else {
@@ -1629,7 +1659,22 @@ fn run(
                         return;
                     }
                 };
-                if let Some((method, params)) = permission {
+                if let crate::acp_session_config::PermissionConfiguration::UnavailableYolo(reason) =
+                    &permission
+                {
+                    yolo_uses_one_time_permissions = true;
+                    service.record(
+                        &task_id,
+                        "tool",
+                        "ACP YOLO compatibility",
+                        format!(
+                            "{reason} This agent will receive only its advertised allow_once permission option for each request."
+                        ),
+                    );
+                }
+                if let crate::acp_session_config::PermissionConfiguration::Request(method, params) =
+                    permission
+                {
                     if let Err(error) = send(
                         &control,
                         acp_protocol::request(json!(PERMISSION_CONFIG_ID), method, params),

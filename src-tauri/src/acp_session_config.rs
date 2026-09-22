@@ -221,48 +221,57 @@ pub fn configured_model_request(
     Err("This ACP agent did not advertise model selection. Clear the configured model to use its default.".into())
 }
 
-/// ACP owns permission semantics. YOLO is honored only when the live session
-/// advertises the exact full-access mode; Monitter never guesses from an agent
-/// name or silently treats a configured harness as unrestricted.
+/// ACP owns permission semantics. YOLO prefers the live session's exact
+/// full-access mode and otherwise permits only advertised one-time approvals;
+/// Monitter never guesses from an agent name or selects durable authority.
+pub enum PermissionConfiguration {
+    NoChange,
+    Request(&'static str, Value),
+    /// The requested bypass was unavailable. The caller may use only the
+    /// agent's advertised one-time permission option for an explicit YOLO run.
+    UnavailableYolo(String),
+}
+
 pub fn configured_permission_request(
     session_result: &Value,
     session_id: &str,
     sandbox: &str,
-) -> Result<Option<(&'static str, Value)>, String> {
+) -> Result<PermissionConfiguration, String> {
     if sandbox == "harness-configured" {
-        return Ok(None);
+        return Ok(PermissionConfiguration::NoChange);
     }
     if sandbox != "yolo" {
         return Err("This ACP task has an unsupported permission policy.".into());
     }
     let options = parse_options(&session_result["configOptions"])?;
-    let mode = options
-        .iter()
+    let Some(mode) = options.iter().find(|option| {
         // ACP categories are provider-owned presentation metadata. The only
         // authority-bearing contract here is the exact advertised value.
-        .find(|option| {
-            option
-                .options
-                .iter()
-                .any(|option| option.value == "bypassPermissions")
-        })
-        .ok_or(
-            "This ACP agent did not advertise a permission mode selector; YOLO was not enabled.",
-        )?;
+        option
+            .options
+            .iter()
+            .any(|option| option.value == "bypassPermissions")
+    }) else {
+        return Ok(PermissionConfiguration::UnavailableYolo(
+            "This ACP agent did not advertise bypassPermissions.".into(),
+        ));
+    };
     if !mode
         .options
         .iter()
         .any(|option| option.value == "bypassPermissions")
     {
-        return Err(
-            "This ACP agent did not advertise bypassPermissions; YOLO was not enabled.".into(),
-        );
+        return Ok(PermissionConfiguration::UnavailableYolo(
+            "This ACP agent did not advertise bypassPermissions.".into(),
+        ));
     }
     let params = selection_params(&options, session_id, &mode.id, "bypassPermissions")?;
-    Ok(
-        (mode.current_value != "bypassPermissions")
-            .then_some(("session/set_config_option", params)),
-    )
+    Ok((mode.current_value != "bypassPermissions")
+        .then_some(PermissionConfiguration::Request(
+            "session/set_config_option",
+            params,
+        ))
+        .unwrap_or(PermissionConfiguration::NoChange))
 }
 
 #[cfg(test)]
@@ -340,18 +349,38 @@ mod tests {
                 {"value":"bypassPermissions","name":"Bypass permissions"}
             ]
         }]});
-        assert!(
-            configured_permission_request(&result, "s", "harness-configured")
-                .unwrap()
-                .is_none()
-        );
-        let (method, params) = configured_permission_request(&result, "s", "yolo")
-            .unwrap()
-            .unwrap();
+        assert!(matches!(
+            configured_permission_request(&result, "s", "harness-configured").unwrap(),
+            PermissionConfiguration::NoChange
+        ));
+        let PermissionConfiguration::Request(method, params) =
+            configured_permission_request(&result, "s", "yolo").unwrap()
+        else {
+            panic!("expected an advertised bypass request");
+        };
         assert_eq!(method, "session/set_config_option");
         assert_eq!(params["configId"], "mode");
         assert_eq!(params["value"], "bypassPermissions");
-        assert!(configured_permission_request(&json!({}), "s", "yolo").is_err());
+        assert!(matches!(
+            configured_permission_request(&json!({}), "s", "yolo").unwrap(),
+            PermissionConfiguration::UnavailableYolo(_)
+        ));
+    }
+
+    #[test]
+    fn opencode_mode_choices_do_not_masquerade_as_bypass_permissions() {
+        let result = json!({"configOptions":[{
+            "id":"mode","name":"Session Mode","category":"mode","type":"select",
+            "currentValue":"orchestrator","options":[
+                {"value":"orchestrator","name":"orchestrator"},
+                {"value":"build","name":"build"},
+                {"value":"plan","name":"plan"}
+            ]
+        }]});
+        assert!(matches!(
+            configured_permission_request(&result, "session", "yolo").unwrap(),
+            PermissionConfiguration::UnavailableYolo(_)
+        ));
     }
 
     #[test]
@@ -364,9 +393,11 @@ mod tests {
                 {"value":"bypassPermissions","name":"Full access"}
             ]
         }]});
-        let (_, params) = configured_permission_request(&result, "mcode-session", "yolo")
-            .unwrap()
-            .unwrap();
+        let PermissionConfiguration::Request(_, params) =
+            configured_permission_request(&result, "mcode-session", "yolo").unwrap()
+        else {
+            panic!("expected an advertised bypass request");
+        };
         assert_eq!(params["configId"], "permissionMode");
         assert_eq!(params["value"], "bypassPermissions");
     }

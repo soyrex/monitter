@@ -220,7 +220,6 @@ export function subagentThreadLink(event: RunEvent): SubagentThreadLink | null {
     return null;
   }
 }
-
 export type ConversationActivityItem =
   | { type: 'message'; value: Message }
   | { type: 'activity'; value: RunEvent }

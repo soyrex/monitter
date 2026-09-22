@@ -207,9 +207,20 @@ pub fn resolve_command(command: &str) -> Result<PathBuf, String> {
         PathBuf::from(command)
     };
     if path.is_absolute() {
-        return executable(&path)
-            .then_some(path)
-            .ok_or("ACP executable was not found or is not executable.".into());
+        if executable(&path) {
+            return Ok(path);
+        }
+        if let Some(replacement) = replacement_for_stale_reviewed_path(&path, &local_dirs()) {
+            return Ok(replacement);
+        }
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("ACP executable");
+        return Err(format!(
+            "ACP executable '{name}' was not found or is not executable at {}. Select a current installed ACP agent; Monitter did not install or replace it.",
+            path.display()
+        ));
     }
     if command.contains('/') || command.contains('\\') {
         return Err("Use an absolute ACP executable path, or a name from PATH.".into());
@@ -221,6 +232,27 @@ pub fn resolve_command(command: &str) -> Result<PathBuf, String> {
         .ok_or(
             "ACP executable was not found. Install it separately or choose its full path.".into(),
         )
+}
+
+/// A bridge saved from a disposable worktree can disappear after an update.
+/// Only reviewed bridge shims from `node_modules/.bin` may fall back to the
+/// current PATH locations; other absolute launchers retain their exact-path
+/// semantics and never retarget a task's owned launch configuration.
+fn replacement_for_stale_reviewed_path(path: &Path, dirs: &[PathBuf]) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let parent = path.parent()?;
+    if parent.file_name()? != ".bin" || parent.parent()?.file_name()? != "node_modules" {
+        return None;
+    }
+    if !catalog()
+        .iter()
+        .any(|candidate| candidate.integration == "bridge" && candidate.launch.command == name)
+    {
+        return None;
+    }
+    dirs.iter()
+        .map(|dir| dir.join(name))
+        .find(|path| executable(path))
 }
 
 pub fn discover(host: &Host) -> Result<Vec<AcpCandidate>, String> {
@@ -459,5 +491,36 @@ mod tests {
         assert!(resolve_command("../agent").is_err());
         assert!(resolve_command("agent\nother").is_err());
         assert!(resolve_command("$(touch /tmp/monitter-not-created)").is_err());
+    }
+
+    #[test]
+    fn stale_reviewed_bridge_path_can_use_a_current_local_bridge() {
+        let root = std::env::temp_dir().join(format!("monitter-acp-bridge-{}", crate::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bridge = root.join("claude-agent-acp");
+        std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert_eq!(
+            replacement_for_stale_reviewed_path(
+                Path::new("/removed/worktree/node_modules/.bin/claude-agent-acp"),
+                std::slice::from_ref(&root),
+            ),
+            Some(bridge)
+        );
+        assert!(replacement_for_stale_reviewed_path(
+            Path::new("/removed/custom-wrapper"),
+            std::slice::from_ref(&root),
+        )
+        .is_none());
+        assert!(replacement_for_stale_reviewed_path(
+            Path::new("/removed/worktree/node_modules/.bin/opencode"),
+            std::slice::from_ref(&root),
+        )
+        .is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

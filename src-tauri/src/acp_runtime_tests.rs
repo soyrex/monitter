@@ -1,9 +1,9 @@
 //! End-to-end ACP fixtures. These are temporary local subprocesses only.
 
 use crate::{
-    Service,
     extensions::{ManagedSkill, McpServerConfig, McpTransport},
     model::{AcpLaunch, CreateTaskInput},
+    Service,
 };
 use std::collections::BTreeMap;
 use std::{
@@ -55,7 +55,7 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
  else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; reply(frame.id,mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['mcode-steer','mona-steer','mona-steer-retry'].includes(process.argv[2])){ globalThis.activePromptId=frame.id; if(process.argv[3]) fs.appendFileSync(process.argv[3],`prompt-active:${frame.id}\n`); } else if(process.argv[2]==='permission'){ console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['mcode-steer','mona-steer','mona-steer-retry'].includes(process.argv[2])){ globalThis.activePromptId=frame.id; if(process.argv[3]) fs.appendFileSync(process.argv[3],`prompt-active:${frame.id}\n`); } else if(['permission','permission-no-allow'].includes(process.argv[2])){ const options=process.argv[2]==='permission-no-allow'?[{kind:'reject_once',optionId:'opaque-reject'}]:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]; console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
  else if(['mcode/session/steer','mona/session/steer'].includes(frame.method)){ steerAttempts++; if(process.argv[3]) fs.appendFileSync(process.argv[3],`steer:${frame.method}:${frame.params.expectedTurnId}:${frame.params.text}\n`); if(process.argv[2]==='mona-steer-retry' && steerAttempts===1){ reject(frame.id,-32001,'prompt is not ready for steering'); } else { reply(frame.id,{turnId:frame.params.expectedTurnId,clientRequestId:frame.params.clientRequestId,mode:'steered'}); update('acp-steered'); reply(globalThis.activePromptId,{stopReason:'end_turn'}); } }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
@@ -255,14 +255,20 @@ fn mona_prompt_result_persists_metadata_only_on_the_final_assistant_item() {
     assert_eq!(metadata.model, "MiniMax-M2.7");
     assert_eq!(metadata.input_tokens, 321);
     assert_eq!(metadata.output_tokens, 123);
-    assert_eq!(metadata.jev_rationale.as_deref(), Some("fixture route rationale"));
+    assert_eq!(
+        metadata.jev_rationale.as_deref(),
+        Some("fixture route rationale")
+    );
     assert_eq!(metadata.requested_model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(metadata.requested_effort.as_deref(), Some("xhigh"));
     assert_eq!(metadata.confidence, Some(0.87));
     assert_eq!(metadata.route_applied, Some(true));
-    assert!(!fixture.snapshot().unwrap().events.iter().any(|event| {
-        event.task_id == task.id && event.title == "Usage capture warning"
-    }));
+    assert!(!fixture
+        .snapshot()
+        .unwrap()
+        .events
+        .iter()
+        .any(|event| { event.task_id == task.id && event.title == "Usage capture warning" }));
 }
 
 fn run_mona_steer_fixture(mode: &str, expected_attempts: usize) {
@@ -355,6 +361,124 @@ fn run_mona_steer_fixture(mode: &str, expected_attempts: usize) {
         "unexpected Mona steering attempt count: {captured}"
     );
     run_thread.join().unwrap();
+    let _ = fs::remove_file(capture);
+}
+
+#[test]
+fn unavailable_acp_yolo_uses_only_advertised_one_time_permissions() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-yolo-{}", crate::id()));
+    let fixture = fixture_with_args(
+        "no-bypass-mode",
+        vec!["permission".into(), capture.to_string_lossy().into_owned()],
+    );
+    fixture
+        .mutate(None, |snapshot| {
+            snapshot.agents[0].sandbox = "yolo".into();
+            Ok(())
+        })
+        .unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id.clone(),
+            title: "ACP YOLO compatibility".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let accepted = fixture
+        .accept_send(
+            task.id.clone(),
+            "continue with one-time ACP permissions".into(),
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "completed")
+    });
+    let snapshot = fixture.snapshot().unwrap();
+    assert!(snapshot.approval_requests.is_empty());
+    assert!(snapshot.events.iter().any(|event| {
+        event.task_id == task.id
+            && event.title == "ACP YOLO compatibility"
+            && event.detail.contains("allow_once")
+    }));
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.title == "ACP YOLO permission"));
+    assert!(fs::read_to_string(&capture)
+        .unwrap_or_default()
+        .contains("outcome-opaque-allow"));
+    let _ = fs::remove_file(capture);
+}
+
+#[test]
+fn unavailable_acp_yolo_cancels_a_permission_without_allow_once() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-yolo-cancel-{}", crate::id()));
+    let fixture = fixture_with_args(
+        "no-allow-once",
+        vec![
+            "permission-no-allow".into(),
+            capture.to_string_lossy().into_owned(),
+        ],
+    );
+    fixture
+        .mutate(None, |snapshot| {
+            snapshot.agents[0].sandbox = "yolo".into();
+            Ok(())
+        })
+        .unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "ACP YOLO missing allow once".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let accepted = fixture
+        .accept_send(
+            task.id.clone(),
+            "do not broaden this permission".into(),
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|item| item.id == task.id)
+            .is_some_and(|item| item.status == "completed")
+    });
+    let snapshot = fixture.snapshot().unwrap();
+    assert!(snapshot.approval_requests.is_empty());
+    assert!(snapshot
+        .events
+        .iter()
+        .any(|event| event.title == "ACP YOLO permission cancelled"));
+    assert!(fs::read_to_string(&capture)
+        .unwrap_or_default()
+        .contains("outcome-cancelled"));
     let _ = fs::remove_file(capture);
 }
 
@@ -618,11 +742,9 @@ fn managed_mcp_and_skill_reach_acp_launch_without_rewriting_user_transcript() {
         .map(|message| message.text)
         .collect::<Vec<_>>();
     assert_eq!(stored_user, vec!["original user request"]);
-    assert!(
-        !stored_user
-            .iter()
-            .any(|text| text.contains("MANAGED_SKILL_SENTINEL"))
-    );
+    assert!(!stored_user
+        .iter()
+        .any(|text| text.contains("MANAGED_SKILL_SENTINEL")));
 }
 
 #[test]
@@ -675,11 +797,9 @@ fn managed_http_mcp_is_rejected_before_prompt_without_advertised_capability() {
             .find(|item| item.id == task.id)
             .is_some_and(|item| item.status == "error")
     });
-    assert!(
-        !fs::read_to_string(&capture)
-            .unwrap_or_default()
-            .contains("prompt:")
-    );
+    assert!(!fs::read_to_string(&capture)
+        .unwrap_or_default()
+        .contains("prompt:"));
     let _ = fs::remove_file(&capture);
 }
 
@@ -1095,12 +1215,10 @@ fn ssh_shim_runs_real_supervisor_with_spaced_cwd_two_turns_and_cancel() {
     {
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        fixture
-            .collaboration_grants
-            .lock()
-            .is_ok_and(|grants| !grants.contains_key(&task.id))
-    );
+    assert!(fixture
+        .collaboration_grants
+        .lock()
+        .is_ok_and(|grants| !grants.contains_key(&task.id)));
     let _ = fs::remove_file(&capture);
     let _ = fs::remove_file(&shim);
 }
