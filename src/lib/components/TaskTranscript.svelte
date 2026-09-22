@@ -150,15 +150,20 @@
   const displayCollaborations = $derived(display.collaborations);
   const displaySubagents = $derived(display.subagents);
   const displayMailBatches = $derived(display.mailBatches);
-  const displayMailInboxes = $derived.by(() => {
+  // The inbox is a live surface, even when the chat transcript is held while
+  // the user reads older history. Keep the durable mail cards on the current
+  // snapshot so an agent's later check is visible without forcing the reader
+  // back to the bottom of the conversation.
+  const liveMailInboxes = $derived.by(() => {
     const latest = new Map<string, MailBatch>();
-    for (const batch of displayMailBatches) {
+    for (const batch of taskMailBatches) {
       const key = `${batch.source}\u0000${batch.accountLabel}`;
       const current = latest.get(key);
       if (!current || (batch.updatedAt || batch.createdAt) > (current.updatedAt || current.createdAt)) latest.set(key, batch);
     }
     return [...latest.values()].sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
   });
+  const displayMailInboxes = liveMailInboxes;
   const displayLatestUserRequest = $derived(displayItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
   const displayThinking = $derived.by(() => {
     if (displayTask.status !== 'running' || display.hasPendingApprovals) return false;
