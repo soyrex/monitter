@@ -214,11 +214,11 @@
       {#if route.rationale}<p>{route.rationale}</p>{/if}
     </div>
   </details>
-{:else if primary && emptyReasoning}
+{:else if !processTree && primary && emptyReasoning}
   <ThinkingStatus {running} {active} {avatar} startedAt={primary.createdAt}/>
-{:else if primary && reasoning}
+{:else if !processTree && primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning: {summaryPreview}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
-{:else if processTree && primary && (hasReasoning || items.length > 1 || approvals.length)}
+{:else if processTree && primary}
   <details class="activity process-tree">
     <summary aria-label={processLabel}><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>{processLabel}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary>
     <div class="process-steps" aria-label="Process steps">

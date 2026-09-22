@@ -242,7 +242,7 @@
             </RunActivity>
           {:else if item.type === 'tool-group'}
             {@const inlineSubagent=subagentForEvents(item.values)}
-            {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} compressed={display.settings.compressToolCalls === true} running={displayTask.status === 'running'}/>{/if}
+            {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} processTree compressed={display.settings.compressToolCalls === true} running={displayTask.status === 'running'}/>{/if}
           {:else if item.type === 'process-group'}
             <RunActivity active={active && !transcriptBuffer.held()} events={item.values} approvals={item.approvals} processGroups={item.groups} onapproval={onOpenApproval} onloaddetail={onLoadFullEventDetail} processTree running={displayTask.status === 'running'}/>
           {:else if item.type === 'approval'}
