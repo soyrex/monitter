@@ -155,11 +155,16 @@ impl Service {
                 }
                 ids.entry(key).or_insert_with(id).clone()
             };
-            if data
-                .snapshot
-                .messages
-                .iter()
-                .any(|m| m.id == message_id && m.stream_status.as_deref() == Some("complete"))
+            // A Mona ACP turn can explicitly finish an assistant message before
+            // its enclosing `session/prompt` result arrives. Keep ordinary late
+            // chunks idempotent, but allow that authoritative result to attach
+            // its model/usage/Jev metadata to the already-complete message.
+            if response_metadata.is_none()
+                && data
+                    .snapshot
+                    .messages
+                    .iter()
+                    .any(|m| m.id == message_id && m.stream_status.as_deref() == Some("complete"))
             {
                 return Ok(());
             }
