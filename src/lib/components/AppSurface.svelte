@@ -2448,6 +2448,18 @@
   }
   export function openTaskComposer(parentId: string | null = null, agentId: string | null = null, projectId?: string | null) {
     saveCurrentDraft();
+    // Cmd/Ctrl+T opens an empty tab first. If the user chooses “New chat”
+    // from that tab, turn the existing tab into the draft instead of opening
+    // a second tab beside it.
+    const reusableEmptyId = pane === 'empty' && selectedEmptyId ? selectedEmptyId : null;
+    if (reusableEmptyId) {
+      delete documents[reusableEmptyId];
+      delete documentContents[reusableEmptyId];
+      delete documentErrors[reusableEmptyId];
+      openEmptyIds = openEmptyIds.filter(item => item !== reusableEmptyId);
+      selectedEmptyId = null;
+      forgetTab({ kind: 'empty', id: reusableEmptyId });
+    }
     const id = localUuid();
     const scopedProject = activeWorkspaceKey.startsWith('project:') ? activeWorkspaceKey.slice(8) === 'unassigned' ? '' : activeWorkspaceKey.slice(8) : '';
     const scopedAgent = activeWorkspaceKey.startsWith('agent:') ? activeWorkspaceKey.slice(6) : '';
@@ -6519,12 +6531,14 @@
     max-width: 100%;
     margin: 0 0 24px;
   }
-  .message.user.tinted { background:color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+  .message.user.tinted { border-color:color-mix(in srgb, var(--accent) 32%, var(--soft)); background:color-mix(in srgb, var(--accent) 16%, var(--panel)); }
   .message.user {
     margin-left: auto;
     padding: 12px 14px;
+    border: 1px solid color-mix(in srgb, var(--ink) 14%, var(--soft));
     border-radius: 10px 10px 3px 10px;
     background: var(--soft);
+    box-shadow: none;
   }
   .message.final-answer {
     width: fit-content;

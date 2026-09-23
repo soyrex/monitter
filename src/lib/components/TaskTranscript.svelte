@@ -342,8 +342,8 @@
   .subagent-inline :global(.subagent-item) { border-color:var(--line); background:color-mix(in srgb,var(--accent) 4%,var(--panel)); }
   .message[data-participant] .human-avatar { background:color-mix(in srgb,var(--participant-colour) 25%,var(--panel));color:var(--ink); }
   .message.user { width:fit-content; margin-left:auto; }
-  .message.user .message-bubble { padding:12px 14px; border-radius:10px 10px 3px 10px; background:var(--soft); }
-  .message.user.tinted .message-bubble { background:color-mix(in srgb,var(--participant-colour,var(--accent)) 16%,var(--panel)); }
+  .message.user .message-bubble { padding:12px 14px; border:1px solid color-mix(in srgb,var(--ink) 14%,var(--soft)); border-radius:10px 10px 3px 10px; background:var(--soft); box-shadow:none; }
+  .message.user.tinted .message-bubble { border-color:color-mix(in srgb,var(--participant-colour,var(--accent)) 32%,var(--soft)); background:color-mix(in srgb,var(--participant-colour,var(--accent)) 16%,var(--panel)); }
   .message.final-answer { width:fit-content; }
   .message.final-answer .message-bubble { padding:12px 14px; border:1px solid color-mix(in srgb,#4f9d69 18%,var(--line)); border-radius:10px 10px 10px 3px; background:color-mix(in srgb,#4f9d69 7%,var(--panel)); }
   .message.system .message-bubble { padding-left:12px; border-left:2px solid var(--line); color:var(--muted); }
