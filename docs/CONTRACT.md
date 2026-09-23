@@ -907,9 +907,12 @@ receiver thread IDs, prompt/model/effort and `agentsStates`; `subAgentActivity` 
 lifecycle (`started`, `interacted`, `completed`). An ACP agent that advertises the `subagents` client
 capability (sent unconditionally in Monitter's `initialize` handshake; currently honored by
 claude-agent-acp for its Task/Agent tool) may instead push `subagent_spawned` (identity, keyed by
-`agentThreadId` = its ACP `subagentSessionId`) and `subagent_state_update` (`completed`, `failed`,
-`disconnected`, `cancelled`) notifications on the parent session; an agent that does not advertise
-support keeps folding that activity into the root transcript as before. Monitter delegations contribute
+`agentThreadId` = its ACP `subagentSessionId`, optionally including model and reasoning effort) and
+`subagent_state_update` (`completed`, `failed`, `disconnected`, `cancelled`, with optional terminal
+detail) notifications on the parent session. An ACP adapter that receives only a native swarm snapshot
+must project every non-root member through those same notifications, rather than silently keeping its
+background workers private. An agent that does not advertise support keeps folding that activity into the
+root transcript as before. Monitter delegations contribute
 the same projection from their authoritative collaboration record. The latest projection is persisted in
 SQLite, retained in compact LAN snapshots, and is therefore not lost when the event timeline is
 limited, paged or restarted. Terminal native observations are sticky so late interaction notices cannot

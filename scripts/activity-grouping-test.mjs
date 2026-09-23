@@ -175,6 +175,8 @@ assert.equal(toolFileChanges(event('wrapped-file', 0, 'fileChange', wrappedChang
 const truncatedChange = '{"changes":[{"diff":"@@ -1 +1 @@\\n-old\\n+new\\n","kind":{"type":"update"},"path":"/tmp/large-file.ts… [truncated]';
 assert.equal(readableToolDetail(event('truncated-file', 0, 'fileChange', truncatedChange)), 'Updated /tmp/large-file.ts (+1 −1)');
 assert.equal(toolFileChanges(event('truncated-file', 0, 'fileChange', truncatedChange))[0].diff, '@@ -1 +1 @@\n-old\n+new\n');
+const truncatedCommand = '{"aggregatedOutput":null,"command":"/bin/zsh -lc \\\"python3 - <<\\\"PY\\\"\\nprint(1)\\nPY\\\""}… [truncated]';
+assert.equal(readableToolDetail(event('truncated-command', 0, 'Run a command', truncatedCommand)), 'Command\n/bin/zsh -lc "python3 - <<"PY"\nprint(1)\nPY"');
 assert.equal(readableToolDetail(event('tools', 0, 'ToolSearch', '{"query":"select:mcp__monitter__list_agents,mcp__gmail__read_email","max_results":2}')), 'Tools requested:\n• monitter.list agents\n• gmail.read email');
 assert.equal(readableToolDetail(event('image', 0, 'imageView', '{"type":"imageView","id":"opaque","path":"/tmp/screenshot.png"}')), 'Viewed /tmp/screenshot.png');
 assert.equal(readableToolDetail(event('gmail', 0, 'gmail.search_emails', JSON.stringify({ content: [{ type: 'text', text: 'Action completed.' }], structured_content: { emails: [{ subject: 'Shipment update', from_: 'Carrier' }, { subject: 'Invoice', from_: 'Supplier' }] } }))), '2 emails\n\n• Shipment update — Carrier\n\n• Invoice — Supplier');

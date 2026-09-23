@@ -2221,6 +2221,25 @@ fn run(
                     }
                     _ => {}
                 }
+            } else if kind == "agent_message_done" {
+                // An ACP turn can contain several completed assistant messages,
+                // separated by tool work. Preserve each explicit message boundary
+                // immediately: if a later provider request fails during a transient
+                // network outage, only the still-streaming message is interrupted.
+                if let Some((item, text)) = messages.last() {
+                    if !text.is_empty() && !turn.is_empty() {
+                        if let Err(error) = service.app_server_message(
+                            &task_id, &control, &turn, item, text, None, true, None,
+                        ) {
+                            fail(&service, &task_id, &control, error);
+                            return;
+                        }
+                        dirty_messages.remove(item);
+                    }
+                }
+                // Mona emits this boundary without a provider item ID. Give the
+                // next anonymous delta a distinct durable message.
+                anonymous_message_item = anonymous_message_item.saturating_add(1).max(1);
             } else if matches!(kind, "agent_message_chunk" | "agent_message") {
                 let content = &value["params"]["update"]["content"];
                 let content_type = content["type"].as_str().unwrap_or("text");

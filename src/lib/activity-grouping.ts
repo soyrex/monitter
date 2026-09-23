@@ -520,6 +520,17 @@ function truncateDetail(value: string): string {
   return value.length <= MAX_DETAIL_LENGTH ? value : `${value.slice(0, MAX_DETAIL_LENGTH).trimEnd()}\n\n…output truncated`;
 }
 
+function commandFromRawDetail(value: string): string | null {
+  const match = value.match(/"(?:command|cmd)"\s*:\s*"((?:\\.|[^"\\])*)"/);
+  if (!match) return null;
+  try {
+    const decoded = JSON.parse(`"${match[1]}"`);
+    return typeof decoded === 'string' && decoded.trim() ? decoded.trim() : null;
+  } catch {
+    return match[1].replaceAll('\\n', '\n').replaceAll('\\"', '"').trim() || null;
+  }
+}
+
 function displayConnectorTool(value: string): string {
   return value
     .replace(/^mcp__/, '')
@@ -684,7 +695,10 @@ export function readableToolDetail(event: RunEvent): string {
   }
   let parsed: unknown;
   try { parsed = parseToolDetail(raw); }
-  catch { return truncateDetail(raw); }
+  catch {
+    const command = commandFromRawDetail(raw);
+    return command ? truncateDetail(`Command\n${command}`) : 'Tool completed without additional output.';
+  }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return truncateDetail(String(parsed ?? 'No additional details.'));
 
   const detail = parsed as Record<string, unknown>;

@@ -330,8 +330,8 @@
   @media (hover:hover) and (pointer:fine) { .task-heading:hover .task-title-edit { opacity:1; } }
   .task-title-edit:hover { color:var(--ink); }
   .task-overflow { position:relative; }
-  .task-menu { display:grid; min-width:155px; }
-  .task-menu button { display:flex; gap:7px; align-items:center; padding:7px; text-align:left; }
+  .task-menu { display:grid; grid-auto-rows:min-content; align-content:start; width:max-content; min-width:155px; max-width:min(240px,calc(100vw - 24px)); height:max-content; max-height:min(320px,calc(100vh - 24px)); overflow-y:auto; overflow-x:hidden; }
+  .task-menu button { display:flex; width:100%; min-height:32px; height:auto; flex:none; align-self:stretch; box-sizing:border-box; gap:7px; align-items:center; padding:7px; text-align:left; }
   .message { max-width:100%; margin:0 0 24px; }
   .approval-inline { display:flex; align-items:baseline; width:100%; min-height:30px; gap:8px; margin:0 0 4px; padding:4px 2px; border:0; color:var(--muted); background:transparent; text-align:left; font:calc(11px * var(--interface-font-ratio,1)) var(--interface-font,"IBM Plex Sans",sans-serif); }
   .approval-inline > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

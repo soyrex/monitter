@@ -7189,8 +7189,8 @@
   .tabs.show-tab-index > .tab-picker-list > .tab-entry .tab-shortcut::after { content:counter(tab-index); }
   .task-title { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
   .task-overflow { position: relative; }
-  .task-menu { display: grid; min-width: 155px; }
-  .task-menu button { display: flex; gap: 7px; align-items: center; padding: 7px; text-align: left; }
+  .task-menu { display: grid; grid-auto-rows: min-content; align-content: start; width: max-content; min-width: 155px; max-width: min(240px, calc(100vw - 24px)); height: max-content; max-height: min(320px, calc(100vh - 24px)); overflow-y: auto; overflow-x: hidden; }
+  .task-menu button { display: flex; width: 100%; min-height: 32px; height: auto; flex: none; align-self: stretch; box-sizing: border-box; gap: 7px; align-items: center; padding: 7px; text-align: left; }
   .agent-identity { margin: 0 0 14px; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
   .agent-identity summary { display: flex; gap: 9px; align-items: center; cursor: pointer; list-style: none; }
   .agent-identity summary::-webkit-details-marker { display: none; }

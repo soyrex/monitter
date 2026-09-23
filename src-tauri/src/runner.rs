@@ -1,10 +1,9 @@
 use crate::{
-    adapters,
+    ApprovalDecision, CreateApprovalRequest, Service, adapters,
     collaboration_transport::SessionGrant,
     model::{
-        valid_sandbox_for_provider, Host, SubagentSessionUpdate, Task, UsageContext, UsageTokens,
+        Host, SubagentSessionUpdate, Task, UsageContext, UsageTokens, valid_sandbox_for_provider,
     },
-    ApprovalDecision, CreateApprovalRequest, Service,
 };
 use serde_json::Value;
 use std::{
@@ -14,8 +13,9 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStderr, ChildStdin, Command, ExitStatus, Stdio},
     sync::{
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc, Arc, Condvar, Mutex,
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -698,7 +698,7 @@ fn build_command_with_options(
             return Err(format!(
                 "Provider '{}' is not implemented in Monitter.",
                 task.provider
-            ))
+            ));
         }
     };
     let cli = configured_path(host, &task.provider)?;
@@ -978,13 +978,15 @@ pub fn resume_command(host: &Host, task: &Task, native: &str) -> Result<String, 
             return Err(format!(
                 "Provider '{}' has no terminal resume command.",
                 task.provider
-            ))
+            ));
         }
     };
     let account_prefix = if task.provider == "codex" && host.kind == "local" {
         format!(
             "CODEX_HOME={} ",
-            posix_quote(&crate::codex_accounts::effective_home(task.codex_home.as_deref())?)
+            posix_quote(&crate::codex_accounts::effective_home(
+                task.codex_home.as_deref()
+            )?)
         )
     } else {
         String::new()
@@ -1334,7 +1336,10 @@ pub fn parse_codex_subagent_updates(
 /// `subagent_spawned` announces identity and `subagent_state_update` reports
 /// its terminal outcome; everything in between streams inline and is captured
 /// by the ACP runtime directly into `Snapshot.subagentTranscripts`.
-pub fn parse_acp_subagent_updates(value: &Value, parent_task_id: &str) -> Vec<SubagentSessionUpdate> {
+pub fn parse_acp_subagent_updates(
+    value: &Value,
+    parent_task_id: &str,
+) -> Vec<SubagentSessionUpdate> {
     let item = value.get("item").unwrap_or(value);
     let update_kind = item
         .get("sessionUpdate")
@@ -1363,6 +1368,16 @@ pub fn parse_acp_subagent_updates(value: &Value, parent_task_id: &str) -> Vec<Su
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .map(str::to_owned),
+            model: item
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
+            reasoning_effort: item
+                .get("reasoningEffort")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
             status: Some("running".into()),
             ..Default::default()
         }],
@@ -1374,14 +1389,20 @@ pub fn parse_acp_subagent_updates(value: &Value, parent_task_id: &str) -> Vec<Su
                 "cancelled" => Some("interrupted".into()),
                 _ => None,
             };
+            let detail = item
+                .get("detail")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned);
             vec![SubagentSessionUpdate {
                 id: format!("acp:{subagent_session_id}"),
                 source: "acp".into(),
                 parent_task_id: parent_task_id.into(),
                 agent_thread_id: Some(subagent_session_id.into()),
                 status,
+                result: (state == "completed").then_some(detail.clone()).flatten(),
                 error: matches!(state, "failed" | "disconnected")
-                    .then(|| format!("ACP subagent {state}.")),
+                    .then(|| detail.unwrap_or_else(|| format!("ACP subagent {state}."))),
                 ..Default::default()
             }]
         }
@@ -1760,7 +1781,10 @@ fn codex_native_turn_frame(
             if !arguments.trim().is_empty() {
                 return Err("/compact does not take arguments.".into());
             }
-            ("thread/compact/start", serde_json::json!({"threadId": thread_id}))
+            (
+                "thread/compact/start",
+                serde_json::json!({"threadId": thread_id}),
+            )
         }
         NativeTurnCommand::Review => {
             let target = if arguments.trim().is_empty() {
@@ -2662,10 +2686,7 @@ impl RunControl {
         self.acp_steer_requests
             .lock()
             .map_err(|_| "ACP steering request lock failed.".to_string())?
-            .insert(
-                request_id,
-                request.clone(),
-            );
+            .insert(request_id, request.clone());
         let frame = crate::acp_protocol::request(
             serde_json::json!(request_id),
             &request.method,
@@ -3058,10 +3079,7 @@ impl RunControl {
             .and_then(|mut requests| requests.remove(&id))
     }
 
-    pub(crate) fn take_app_server_native_turn_request(
-        &self,
-        id: i64,
-    ) -> Option<NativeTurnCommand> {
+    pub(crate) fn take_app_server_native_turn_request(&self, id: i64) -> Option<NativeTurnCommand> {
         self.app_server_native_turn_requests
             .lock()
             .ok()
@@ -3095,10 +3113,7 @@ impl RunControl {
             .unwrap_or(true)
     }
 
-    pub(crate) fn take_app_server_query(
-        &self,
-        id: i64,
-    ) -> Option<mpsc::SyncSender<Value>> {
+    pub(crate) fn take_app_server_query(&self, id: i64) -> Option<mpsc::SyncSender<Value>> {
         self.app_server_queries
             .lock()
             .ok()
@@ -3698,7 +3713,7 @@ fn wait_for_remote_app_server_ready(
                     "SSH Codex app-server closed before it was ready.".into()
                 } else {
                     format!("SSH Codex app-server closed before it was ready: {diagnostics}")
-                })
+                });
             }
             Ok(count) => {
                 pending.extend_from_slice(&chunk[..count]);
@@ -3712,13 +3727,13 @@ fn wait_for_remote_app_server_ready(
                                     && !cwd.contains('\0')
                                     && std::path::Path::new(&cwd).is_absolute() =>
                             {
-                                break 'ready Ok((cwd, diagnostics))
+                                break 'ready Ok((cwd, diagnostics));
                             }
                             _ => {
                                 break 'ready Err(
                                     "SSH Codex app-server returned an invalid working directory."
                                         .into(),
-                                )
+                                );
                             }
                         }
                     }
@@ -3742,7 +3757,7 @@ fn wait_for_remote_app_server_ready(
             Err(error) => {
                 break Err(format!(
                     "Could not read SSH Codex app-server startup diagnostics: {error}"
-                ))
+                ));
             }
         }
     };
@@ -3892,7 +3907,10 @@ fn broker_port(endpoint: &str) -> Result<u16, String> {
     Ok(port)
 }
 
-fn title_reader<R: Read + Send + 'static>(mut reader: R, limit: usize) -> mpsc::Receiver<Result<Vec<u8>, std::io::Error>> {
+fn title_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    limit: usize,
+) -> mpsc::Receiver<Result<Vec<u8>, std::io::Error>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -4336,11 +4354,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 return;
             }
         };
-        if let Err(error) = service.apply_environment_secrets_to_local_user_command(
-            &task_id,
-            &host,
-            &mut command,
-        ) {
+        if let Err(error) =
+            service.apply_environment_secrets_to_local_user_command(&task_id, &host, &mut command)
+        {
             if let Some(remote) = remote_collaboration.take() {
                 abort_remote_collaboration(remote);
             }
@@ -4833,11 +4849,13 @@ for line in sys.stdin.buffer:
                 .map(|_| line);
             let _ = sender.send(result);
         });
-        assert!(receiver
-            .recv_timeout(Duration::from_secs(3))
-            .unwrap()
-            .unwrap()
-            .starts_with("__MONITTER_APP_SERVER_CWD__"));
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap()
+                .starts_with("__MONITTER_APP_SERVER_CWD__")
+        );
     }
 
     fn fixture_grandchild(scratch: &BootstrapScratch) -> i32 {
@@ -4893,9 +4911,11 @@ for line in sys.stdin.buffer:
         let control = RunControl::new(false);
         control.set_app_server_thread("mona-session".into());
         control.set_app_server_turn("acp:41".into());
-        assert!(control
-            .send_acp_steer("change course", "queued-before-advertisement".into())
-            .is_err());
+        assert!(
+            control
+                .send_acp_steer("change course", "queued-before-advertisement".into())
+                .is_err()
+        );
 
         control.set_acp_extensions(&serde_json::json!({
             "_meta": {"mona/extensions": {
@@ -4910,13 +4930,9 @@ for line in sys.stdin.buffer:
             .send_acp_steer("change course", "queued-follow-up".into())
             .unwrap();
 
-        let frame: Value = serde_json::from_str(
-            &receiver
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap()
-                .frame,
-        )
-        .unwrap();
+        let frame: Value =
+            serde_json::from_str(&receiver.recv_timeout(Duration::from_secs(1)).unwrap().frame)
+                .unwrap();
         assert_eq!(frame["method"], "mona/session/steer");
         assert_eq!(frame["params"]["sessionId"], "mona-session");
         assert_eq!(frame["params"]["text"], "change course");
@@ -5126,16 +5142,20 @@ for line in sys.stdin.buffer:
             Duration::from_secs(5),
         ));
         control.retire_owned().unwrap();
-        assert!(!crate::process_metrics::retirement_process_identity_alive(
-            helper_identity.0,
-            helper_identity.1,
-        )
-        .unwrap());
-        assert!(crate::process_metrics::retirement_process_identity_alive(
-            unrelated_identity.0,
-            unrelated_identity.1,
-        )
-        .unwrap());
+        assert!(
+            !crate::process_metrics::retirement_process_identity_alive(
+                helper_identity.0,
+                helper_identity.1,
+            )
+            .unwrap()
+        );
+        assert!(
+            crate::process_metrics::retirement_process_identity_alive(
+                unrelated_identity.0,
+                unrelated_identity.1,
+            )
+            .unwrap()
+        );
         let _ = unsafe { libc::kill(unrelated.id() as libc::pid_t, libc::SIGKILL) };
         let _ = unrelated.wait_with_output();
     }
@@ -5166,9 +5186,11 @@ for line in sys.stdin.buffer:
         drop(stdin);
         thread::sleep(Duration::from_millis(60));
 
-        assert!(control
-            .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
-            .unwrap());
+        assert!(
+            control
+                .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
+                .unwrap()
+        );
         assert!(control.retirement_process_tree_is_safe());
         control.cancel();
         let _ = control.wait();
@@ -5183,9 +5205,11 @@ for line in sys.stdin.buffer:
         drop(stdin);
         thread::sleep(Duration::from_millis(60));
 
-        assert!(!control
-            .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
-            .unwrap());
+        assert!(
+            !control
+                .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
+                .unwrap()
+        );
         assert!(!control.retirement_process_tree_is_safe());
         control.cancel();
         let _ = control.wait();
@@ -5200,9 +5224,11 @@ for line in sys.stdin.buffer:
         thread::sleep(Duration::from_millis(60));
 
         control.mark_tool_work_observed();
-        assert!(!control
-            .refresh_runtime_process_baseline_if_no_tool_work()
-            .unwrap());
+        assert!(
+            !control
+                .refresh_runtime_process_baseline_if_no_tool_work()
+                .unwrap()
+        );
         assert!(!control.retirement_process_tree_is_safe());
         control.cancel();
         let _ = control.wait();
@@ -5215,18 +5241,24 @@ for line in sys.stdin.buffer:
         let mut local = host("local");
         local.codex_path = "/usr/bin/true".into();
         let command = build_command(&local, &scoped).unwrap();
-        assert!(command.get_envs().any(|(key, value)| key == std::ffi::OsStr::new("CODEX_HOME")
-            && (value == Some(std::ffi::OsStr::new("/private/tmp"))
-                || value == Some(std::ffi::OsStr::new("/tmp")))));
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == std::ffi::OsStr::new("CODEX_HOME")
+                    && (value == Some(std::ffi::OsStr::new("/private/tmp"))
+                        || value == Some(std::ffi::OsStr::new("/tmp"))))
+        );
     }
 
     #[test]
     fn selected_codex_home_is_rejected_for_ssh_command() {
         let mut scoped = task(None, "");
         scoped.codex_home = Some("/tmp".into());
-        assert!(build_command(&host("ssh"), &scoped)
-            .unwrap_err()
-            .contains("only run on this Mac"));
+        assert!(
+            build_command(&host("ssh"), &scoped)
+                .unwrap_err()
+                .contains("only run on this Mac")
+        );
     }
 
     #[test]
@@ -5253,7 +5285,9 @@ for line in sys.stdin.buffer:
         let mut local = host("local");
         local.codex_path = "/usr/bin/true".into();
         let command = resume_command(&local, &scoped, "thread-1").unwrap();
-        assert!(command.contains("CODEX_HOME='/private/tmp'") || command.contains("CODEX_HOME='/tmp'"));
+        assert!(
+            command.contains("CODEX_HOME='/private/tmp'") || command.contains("CODEX_HOME='/tmp'")
+        );
         assert!(command.contains("resume 'thread-1'"));
     }
 
@@ -5353,12 +5387,16 @@ for line in sys.stdin.buffer:
         let sandbox = args.iter().position(|arg| arg == "-s").unwrap();
         assert!(sandbox < resume);
         assert_eq!(&args[resume..], ["resume", "--json", "native", "-"]);
-        assert!(command
-            .get_envs()
-            .any(|(key, value)| key == "CODEX_THREAD_ID" && value.is_none()));
-        assert!(command
-            .get_envs()
-            .any(|(key, value)| key == "CODEX_SESSION_ID" && value.is_none()));
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "CODEX_THREAD_ID" && value.is_none())
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "CODEX_SESSION_ID" && value.is_none())
+        );
     }
 
     #[test]
@@ -5372,9 +5410,10 @@ for line in sys.stdin.buffer:
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+        );
         assert!(!args.windows(2).any(|pair| pair == ["-s", "yolo"]));
         assert!(!args.iter().any(|arg| arg == "-s"));
     }
@@ -5404,12 +5443,14 @@ for line in sys.stdin.buffer:
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["-c", "model_reasoning_effort=\"high\""]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["-c", "service_tier=\"priority\""]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "model_reasoning_effort=\"high\""])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "service_tier=\"priority\""])
+        );
     }
 
     #[test]
@@ -5433,17 +5474,19 @@ for line in sys.stdin.buffer:
     #[test]
     fn codex_collaboration_is_scoped_to_the_monitter_server() {
         let args = codex_args(&task(None, ""), Some("http://127.0.0.1:4444/mcp"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["-c", "mcp_servers.monitter.required=true"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "mcp_servers.monitter.required=true"])
+        );
         assert!(args.windows(2).any(|pair| pair
             == [
                 "-c",
                 "mcp_servers.monitter.default_tools_approval_mode=\"approve\""
             ]));
-        assert!(args
-            .iter()
-            .any(|arg| arg.contains("mcp_servers.monitter.enabled_tools")));
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains("mcp_servers.monitter.enabled_tools"))
+        );
         assert!(args.iter().any(|arg| arg.contains("list_agents")));
         assert!(args.iter().any(|arg| arg.contains("cancel_delegation")));
         assert!(args.iter().any(|arg| arg.contains("install_shared_skill")));
@@ -5455,15 +5498,19 @@ for line in sys.stdin.buffer:
         assert!(!claude_tool_names().contains("install_shared_skill"));
         assert!(claude_tool_names().contains("skills_help"));
         assert!(!args.iter().any(|arg| arg.contains("ignore-user-config")));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "mcp_servers.monitter.bearer_token_env_var=\"MONITTER_TOKEN\""));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "mcp_servers.monitter.url=\"http://127.0.0.1:4444/mcp\""));
-        assert!(!args
-            .iter()
-            .any(|arg| arg.contains("python3") || arg.contains("monitter.command")));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "mcp_servers.monitter.bearer_token_env_var=\"MONITTER_TOKEN\"")
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "mcp_servers.monitter.url=\"http://127.0.0.1:4444/mcp\"")
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("python3") || arg.contains("monitter.command"))
+        );
         assert!(!args.iter().any(|arg| arg.contains("not-in-argv")));
     }
 
@@ -5497,10 +5544,12 @@ for line in sys.stdin.buffer:
                 .any(|(key, value)| key == "MONITTER_TOKEN"
                     && value.as_deref() == Some("not-in-argv"))
         );
-        assert!(environment
-            .iter()
-            .any(|(key, value)| key == "MONITTER_ENDPOINT"
-                && value.as_deref() == Some("http://127.0.0.1:4444/mcp")));
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| key == "MONITTER_ENDPOINT"
+                    && value.as_deref() == Some("http://127.0.0.1:4444/mcp"))
+        );
     }
 
     #[test]
@@ -5552,14 +5601,18 @@ for line in sys.stdin.buffer:
             })
             .collect::<Vec<_>>();
         let expected = merge_opencode_mcp_config(None, "http://127.0.0.1:4444/mcp").unwrap();
-        assert!(environment
-            .iter()
-            .any(|(key, value)| key == "OPENCODE_CONFIG_CONTENT"
-                && value.as_deref() == Some(expected.as_str())));
-        assert!(!environment
-            .iter()
-            .any(|(key, value)| key == "OPENCODE_CONFIG_CONTENT"
-                && value.as_deref().unwrap_or_default().contains("approval")));
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| key == "OPENCODE_CONFIG_CONTENT"
+                    && value.as_deref() == Some(expected.as_str()))
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(key, value)| key == "OPENCODE_CONFIG_CONTENT"
+                    && value.as_deref().unwrap_or_default().contains("approval"))
+        );
     }
 
     #[test]
@@ -5868,7 +5921,8 @@ for line in sys.stdin.buffer:
         let spawned = parse_acp_subagent_updates(
             &serde_json::json!({
                 "sessionUpdate":"subagent_spawned", "subagentSessionId":"child-session",
-                "name":"math-helper", "task":"Compute 127 x 43 + 58"
+                "name":"math-helper", "task":"Compute 127 x 43 + 58",
+                "model":"gpt-5.6", "reasoningEffort":"medium"
             }),
             "parent-task",
         );
@@ -5877,21 +5931,24 @@ for line in sys.stdin.buffer:
         assert_eq!(spawned[0].source, "acp");
         assert_eq!(spawned[0].agent_thread_id.as_deref(), Some("child-session"));
         assert_eq!(spawned[0].agent_path.as_deref(), Some("math-helper"));
-        assert_eq!(
-            spawned[0].prompt.as_deref(),
-            Some("Compute 127 x 43 + 58")
-        );
+        assert_eq!(spawned[0].prompt.as_deref(), Some("Compute 127 x 43 + 58"));
         assert_eq!(spawned[0].status.as_deref(), Some("running"));
+        assert_eq!(spawned[0].model.as_deref(), Some("gpt-5.6"));
+        assert_eq!(spawned[0].reasoning_effort.as_deref(), Some("medium"));
 
         let completed = parse_acp_subagent_updates(
             &serde_json::json!({
                 "sessionUpdate":"subagent_state_update", "subagentSessionId":"child-session",
-                "state":"completed"
+                "state":"completed", "detail":"Checked the calculation"
             }),
             "parent-task",
         );
         assert_eq!(completed[0].status.as_deref(), Some("completed"));
         assert_eq!(completed[0].error, None);
+        assert_eq!(
+            completed[0].result.as_deref(),
+            Some("Checked the calculation")
+        );
 
         let failed = parse_acp_subagent_updates(
             &serde_json::json!({
@@ -5903,11 +5960,13 @@ for line in sys.stdin.buffer:
         assert_eq!(failed[0].status.as_deref(), Some("error"));
         assert!(failed[0].error.is_some());
 
-        assert!(parse_acp_subagent_updates(
-            &serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"x"}),
-            "parent-task"
-        )
-        .is_empty());
+        assert!(
+            parse_acp_subagent_updates(
+                &serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"x"}),
+                "parent-task"
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -5933,11 +5992,13 @@ for line in sys.stdin.buffer:
 
     #[test]
     fn only_agent_items_become_output() {
-        assert!(parse_codex_event(&serde_json::json!({
-            "type":"item.completed","item":{"type":"user_message","text":"no"}
-        }))
-        .assistant
-        .is_none());
+        assert!(
+            parse_codex_event(&serde_json::json!({
+                "type":"item.completed","item":{"type":"user_message","text":"no"}
+            }))
+            .assistant
+            .is_none()
+        );
     }
 
     #[test]
@@ -6135,7 +6196,9 @@ for line in sys.stdin.buffer:
 
     #[test]
     fn opencode_export_restores_only_matching_absolute_session_directory() {
-        let executable = fake_opencode("printf '%s\\n' '{\"info\":{\"id\":\"ses_123\",\"directory\":\"/original/project\"},\"messages\":[]}'");
+        let executable = fake_opencode(
+            "printf '%s\\n' '{\"info\":{\"id\":\"ses_123\",\"directory\":\"/original/project\"},\"messages\":[]}'",
+        );
         let mut local = host("local");
         local.opencode_path = executable.display().to_string();
         let control = RunControl::new(false);
@@ -6152,7 +6215,9 @@ for line in sys.stdin.buffer:
 
     #[test]
     fn opencode_export_accepts_the_cli_banner_before_metadata() {
-        let executable = fake_opencode("printf '%s\\n%s\\n' 'Exporting session: ses_123' '{\"info\":{\"id\":\"ses_123\",\"directory\":\"/original/project\"},\"messages\":[]}'");
+        let executable = fake_opencode(
+            "printf '%s\\n%s\\n' 'Exporting session: ses_123' '{\"info\":{\"id\":\"ses_123\",\"directory\":\"/original/project\"},\"messages\":[]}'",
+        );
         let mut local = host("local");
         local.opencode_path = executable.display().to_string();
         let control = RunControl::new(false);
@@ -6177,14 +6242,16 @@ for line in sys.stdin.buffer:
             let mut local = host("local");
             local.opencode_path = executable.display().to_string();
             let control = RunControl::new(false);
-            assert!(opencode_export_directory_with_timeout(
-                &local,
-                &opencode_task("ses_123"),
-                "ses_123",
-                &control,
-                Duration::from_secs(1)
-            )
-            .is_err());
+            assert!(
+                opencode_export_directory_with_timeout(
+                    &local,
+                    &opencode_task("ses_123"),
+                    "ses_123",
+                    &control,
+                    Duration::from_secs(1)
+                )
+                .is_err()
+            );
             let _ = std::fs::remove_file(executable);
         }
     }
@@ -6221,7 +6288,11 @@ for line in sys.stdin.buffer:
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].name, "search");
         assert_eq!(commands[0].input_hint.as_deref(), Some("query"));
-        assert!(commands.iter().all(|item| item.source == "acp" && item.provider == "acp"));
+        assert!(
+            commands
+                .iter()
+                .all(|item| item.source == "acp" && item.provider == "acp")
+        );
 
         control
             .replace_acp_slash_commands(&serde_json::json!([
@@ -6259,34 +6330,39 @@ for line in sys.stdin.buffer:
             .unwrap();
         assert_eq!(control.acp_slash_commands()[0].name, "memory show");
 
-        assert!(control
-            .replace_acp_slash_commands(&serde_json::json!([
-                {"name":"memory show","description":"x".repeat(2049)}
-            ]))
-            .is_err());
+        assert!(
+            control
+                .replace_acp_slash_commands(&serde_json::json!([
+                    {"name":"memory show","description":"x".repeat(2049)}
+                ]))
+                .is_err()
+        );
     }
 
     #[test]
     fn codex_native_slash_frames_use_protocol_operations_not_prompt_text() {
-        let compact = codex_native_turn_frame("thread-1", 40, NativeTurnCommand::Compact, "")
-            .unwrap();
+        let compact =
+            codex_native_turn_frame("thread-1", 40, NativeTurnCommand::Compact, "").unwrap();
         assert_eq!(compact["method"], "thread/compact/start");
-        assert_eq!(compact["params"], serde_json::json!({"threadId":"thread-1"}));
-        assert!(codex_native_turn_frame("thread-1", 41, NativeTurnCommand::Compact, "extra")
-            .is_err());
+        assert_eq!(
+            compact["params"],
+            serde_json::json!({"threadId":"thread-1"})
+        );
+        assert!(
+            codex_native_turn_frame("thread-1", 41, NativeTurnCommand::Compact, "extra").is_err()
+        );
 
-        let review = codex_native_turn_frame(
-            "thread-1",
-            42,
-            NativeTurnCommand::Review,
-            " focus on auth ",
-        )
-        .unwrap();
+        let review =
+            codex_native_turn_frame("thread-1", 42, NativeTurnCommand::Review, " focus on auth ")
+                .unwrap();
         assert_eq!(review["method"], "review/start");
         assert_eq!(review["params"]["delivery"], "inline");
-        assert_eq!(review["params"]["target"], serde_json::json!({
-            "type":"custom", "instructions":"focus on auth"
-        }));
+        assert_eq!(
+            review["params"]["target"],
+            serde_json::json!({
+                "type":"custom", "instructions":"focus on auth"
+            })
+        );
     }
 
     #[test]
