@@ -73,7 +73,9 @@ No fake conversations, progress, token counts, host connections or model replies
   interval usage without shared sampling state; resident memory is the current sum for live
   processes. Each live process includes its PID, parent PID, name, start time, own cumulative CPU,
   and resident memory for breakdown views. Unsupported platforms fail visibly instead of returning
-  fabricated values.
+  fabricated values. In the resource modal, a collapsed process group shows the sum of its own and
+  all live descendant CPU/RAM usage; an expanded group shows its own usage beside the child rows.
+  RAM value text is orange above 250 MiB and red above 500 MiB; row backgrounds are unchanged.
 - `list_system_fonts {}` -> `{ family: string, monospace: boolean }[]`.
   Native desktop only. It returns local OS font family names for Typography suggestions, without
   font file paths or embedded font data. Browser/LAN clients do not enumerate their viewer machine;

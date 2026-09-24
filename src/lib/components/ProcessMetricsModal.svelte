@@ -17,7 +17,7 @@
   let expandedTrees = $state<Record<string, boolean>>({});
   const processKey = (process: ProcessMetricsProcess) => `${process.pid}:${process.startedAt}`;
   const processCommand = (process: ProcessMetricsProcess) => process.commandLine?.trim() || process.name || 'Process';
-  type MetricRow = { process: ProcessMetricsProcess; depth: number; cpu: number | null };
+  type MetricRow = { process: ProcessMetricsProcess; depth: number; cpu: number | null; inclusiveCpu: number | null; inclusiveMemoryBytes: number };
   type AgentTree = { id: string; label: string; root: MetricRow; children: MetricRow[] };
   function processIcon(process: ProcessMetricsProcess) {
     if (process.pid === latest?.rootPid) return Monitor;
@@ -32,6 +32,7 @@
     const mib = bytes / (1024 * 1024);
     return mib >= 1024 ? `${(mib / 1024).toFixed(2)} GB` : `${Math.round(mib)} MB`;
   };
+  const memoryLevel = (bytes: number) => bytes > 500 * 1024 * 1024 ? 'critical' : bytes > 250 * 1024 * 1024 ? 'warning' : 'normal';
   const formatCpu = (value: number | null) => value === null ? '···' : `${value.toFixed(value >= 100 ? 0 : 1)}%`;
   function cpuDelta(current: ProcessMetricsSample, before: ProcessMetricsSample) {
     const elapsed = current.sampledAt - before.sampledAt;
@@ -79,6 +80,30 @@
       const elapsed = latest.sampledAt - (previous?.sampledAt ?? latest.sampledAt);
       return prior && elapsed > 0 ? Math.max(0, process.cpuTimeMs - prior.cpuTimeMs) / elapsed * 100 : null;
     };
+    const inclusive = new Map<number, { cpu: number | null; memoryBytes: number }>();
+    const visiting = new Set<number>();
+    const subtreeUsage = (process: ProcessMetricsProcess): { cpu: number | null; memoryBytes: number } => {
+      const cached = inclusive.get(process.pid);
+      if (cached) return cached;
+      if (visiting.has(process.pid)) return { cpu: null, memoryBytes: 0 };
+      visiting.add(process.pid);
+      let totalCpu = cpu(process);
+      let memoryBytes = process.residentMemoryBytes;
+      for (const child of children.get(process.pid) ?? []) {
+        if (child.pid === process.pid) continue;
+        const usage = subtreeUsage(child);
+        if (usage.cpu !== null) totalCpu = (totalCpu ?? 0) + usage.cpu;
+        memoryBytes += usage.memoryBytes;
+      }
+      visiting.delete(process.pid);
+      const usage = { cpu: totalCpu, memoryBytes };
+      inclusive.set(process.pid, usage);
+      return usage;
+    };
+    const row = (process: ProcessMetricsProcess, depth: number): MetricRow => {
+      const usage = subtreeUsage(process);
+      return { process, depth, cpu: cpu(process), inclusiveCpu: usage.cpu, inclusiveMemoryBytes: usage.memoryBytes };
+    };
     const processByPid = new Map(latest.processes.map(process => [process.pid, process]));
     const agentLabel = (process: ProcessMetricsProcess) => {
       const name = process.name.toLowerCase();
@@ -107,7 +132,7 @@
       const visit = (process: ProcessMetricsProcess, depth: number) => {
         if (visited.has(process.pid)) return;
         visited.add(process.pid);
-        output.push({ process, depth, cpu: cpu(process) });
+        output.push(row(process, depth));
         for (const child of (children.get(process.pid) ?? []).toSorted((a, b) => (cpu(b) ?? -1) - (cpu(a) ?? -1))) visit(child, depth + 1);
       };
       for (const child of (children.get(root.pid) ?? []).toSorted((a, b) => (cpu(b) ?? -1) - (cpu(a) ?? -1))) visit(child, 1);
@@ -118,7 +143,7 @@
       const children = descendants(root);
       assigned.add(root.pid);
       children.forEach(row => assigned.add(row.process.pid));
-      return { id: `${agentLabel(root)}:${processKey(root)}`, label: agentLabel(root)!, root: { process: root, depth: 0, cpu: cpu(root) }, children };
+      return { id: `${agentLabel(root)}:${processKey(root)}`, label: agentLabel(root)!, root: row(root, 0), children };
     }).sort((a, b) => (b.root.cpu ?? -1) - (a.root.cpu ?? -1));
     const root = latest.processes.find(process => process.pid === latest.rootPid);
     const other: MetricRow[] = [];
@@ -126,11 +151,11 @@
     const visitOther = (process: ProcessMetricsProcess, depth: number) => {
       if (visited.has(process.pid)) return;
       visited.add(process.pid);
-      other.push({ process, depth, cpu: cpu(process) });
+      other.push(row(process, depth));
       for (const child of (children.get(process.pid) ?? []).toSorted((a, b) => (cpu(b) ?? -1) - (cpu(a) ?? -1))) visitOther(child, depth + 1);
     };
     for (const process of latest.processes.filter(process => process.pid !== latest.rootPid && !assigned.has(process.pid) && process.parentPid === latest.rootPid)) visitOther(process, 1);
-    return { root: root ? { process: root, depth: 0, cpu: cpu(root) } : null, agents, other };
+    return { root: root ? row(root, 0) : null, agents, other };
   });
 
   function processHistory(process: ProcessMetricsProcess) {
@@ -152,7 +177,7 @@
     {#if latest}
       <div class="summary" aria-label="Current resource totals">
         <div><span>CPU</span><strong>{formatCpu(totalCpu)}</strong><small>Monitter + harnesses</small></div>
-        <div><span>RAM</span><strong>{formatMemory(latest.residentMemoryBytes)}</strong><small>{latest.processes.length} live {latest.processes.length === 1 ? 'process' : 'processes'}</small></div>
+        <div><span>RAM</span><strong class="memory-value" data-memory-level={memoryLevel(latest.residentMemoryBytes)}>{formatMemory(latest.residentMemoryBytes)}</strong><small>{latest.processes.length} live {latest.processes.length === 1 ? 'process' : 'processes'}</small></div>
         <div><span>WINDOW</span><strong>{historyLabel}</strong><small>Updated every 2 seconds</small></div>
       </div>
       <div class="charts">
@@ -164,7 +189,7 @@
           </svg>
         </section>
         <section class="memory-chart" aria-label={`RAM usage graph, currently ${formatMemory(latest.residentMemoryBytes)}`}>
-          <header><span>RAM usage</span><strong>{formatMemory(latest.residentMemoryBytes)}</strong></header>
+          <header><span>RAM usage</span><strong class="memory-value" data-memory-level={memoryLevel(latest.residentMemoryBytes)}>{formatMemory(latest.residentMemoryBytes)}</strong></header>
           <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="none" role="img" aria-label="RAM usage over time">
             <line x1="0" y1={chartHeight - 1} x2={chartWidth} y2={chartHeight - 1}/>
             {#if memoryPoints}<polyline points={memoryPoints}/>{/if}
@@ -180,7 +205,7 @@
             {@const RootIcon=processIcon(root.process)}
             <button class="process-row process-group-row process-tree-toggle" type="button" aria-expanded={expandedTrees.__monitter === true} onclick={() => expandedTrees = {...expandedTrees, __monitter: expandedTrees.__monitter !== true}}>
               <div class="process-name"><span class="process-chevron" class:open={expandedTrees.__monitter === true} aria-hidden="true">›</span><span class="process-icon" aria-hidden="true"><RootIcon size={14}/></span><span class="process-label"><strong>Monitter</strong><small title={processCommand(root.process)}>{processCommand(root.process)}</small></span></div>
-              <strong>{formatCpu(root.cpu)}</strong><strong>{formatMemory(root.process.residentMemoryBytes)}</strong>
+              <strong>{formatCpu(expandedTrees.__monitter ? root.cpu : root.inclusiveCpu)}</strong><strong class="memory-value" data-memory-level={memoryLevel(expandedTrees.__monitter ? root.process.residentMemoryBytes : root.inclusiveMemoryBytes)}>{formatMemory(expandedTrees.__monitter ? root.process.residentMemoryBytes : root.inclusiveMemoryBytes)}</strong>
               <svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="23" x2="92" y2="23"/>{#if rootPoints}<polyline points={rootPoints}/>{/if}</svg>
             </button>
             {#each processTree.agents as tree (tree.id)}
@@ -188,14 +213,14 @@
               {@const AgentIcon=processIcon(tree.root.process)}
               <button class="process-row process-group-row process-tree-toggle" type="button" aria-expanded={expandedTrees[tree.id] === true} onclick={() => expandedTrees = {...expandedTrees, [tree.id]: expandedTrees[tree.id] !== true}}>
                 <div class="process-name"><span class="process-chevron" class:open={expandedTrees[tree.id] === true} aria-hidden="true">›</span><span class="process-icon" aria-hidden="true"><AgentIcon size={14}/></span><span class="process-label"><strong>{tree.label}</strong><small title={processCommand(tree.root.process)}>{processCommand(tree.root.process)}</small></span></div>
-                <strong>{formatCpu(tree.root.cpu)}</strong><strong>{formatMemory(tree.root.process.residentMemoryBytes)}</strong>
+                <strong>{formatCpu(expandedTrees[tree.id] ? tree.root.cpu : tree.root.inclusiveCpu)}</strong><strong class="memory-value" data-memory-level={memoryLevel(expandedTrees[tree.id] ? tree.root.process.residentMemoryBytes : tree.root.inclusiveMemoryBytes)}>{formatMemory(expandedTrees[tree.id] ? tree.root.process.residentMemoryBytes : tree.root.inclusiveMemoryBytes)}</strong>
                 <svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="23" x2="92" y2="23"/>{#if points}<polyline points={points}/>{/if}</svg>
               </button>
               {#if expandedTrees[tree.id]}
                 {#each tree.children as row (processKey(row.process))}
                   {@const childPoints=processHistory(row.process)}
                   {@const ChildIcon=processIcon(row.process)}
-                  <div class="process-row process-child-row"><div class="process-name" style:padding-left={`${(row.depth + 1) * 17}px`}><i aria-hidden="true"></i><span class="process-icon" aria-hidden="true"><ChildIcon size={14}/></span><span class="process-label"><strong>{row.process.name || 'Process'}</strong><small title={processCommand(row.process)}>{processCommand(row.process)}</small></span></div><strong>{formatCpu(row.cpu)}</strong><strong>{formatMemory(row.process.residentMemoryBytes)}</strong><svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="23" x2="92" y2="23"/>{#if childPoints}<polyline points={childPoints}/>{/if}</svg></div>
+                  <div class="process-row process-child-row"><div class="process-name" style:padding-left={`${(row.depth + 1) * 17}px`}><i aria-hidden="true"></i><span class="process-icon" aria-hidden="true"><ChildIcon size={14}/></span><span class="process-label"><strong>{row.process.name || 'Process'}</strong><small title={processCommand(row.process)}>{processCommand(row.process)}</small></span></div><strong>{formatCpu(row.cpu)}</strong><strong class="memory-value" data-memory-level={memoryLevel(row.process.residentMemoryBytes)}>{formatMemory(row.process.residentMemoryBytes)}</strong><svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="23" x2="92" y2="23"/>{#if childPoints}<polyline points={childPoints}/>{/if}</svg></div>
                 {/each}
               {/if}
             {/each}
@@ -203,7 +228,7 @@
               {#each processTree.other as row (processKey(row.process))}
                 {@const points=processHistory(row.process)}
                 {@const ProcessIcon=processIcon(row.process)}
-                <div class="process-row process-child-row"><div class="process-name" style:padding-left={`${(row.depth + 1) * 17}px`}><i aria-hidden="true"></i><span class="process-icon" aria-hidden="true"><ProcessIcon size={14}/></span><span class="process-label"><strong>{row.process.name || 'Process'}</strong><small title={processCommand(row.process)}>{processCommand(row.process)}</small></span></div><strong>{formatCpu(row.cpu)}</strong><strong>{formatMemory(row.process.residentMemoryBytes)}</strong><svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="23" x2="92" y2="23"/>{#if points}<polyline points={points}/>{/if}</svg></div>
+                <div class="process-row process-child-row"><div class="process-name" style:padding-left={`${(row.depth + 1) * 17}px`}><i aria-hidden="true"></i><span class="process-icon" aria-hidden="true"><ProcessIcon size={14}/></span><span class="process-label"><strong>{row.process.name || 'Process'}</strong><small title={processCommand(row.process)}>{processCommand(row.process)}</small></span></div><strong>{formatCpu(row.cpu)}</strong><strong class="memory-value" data-memory-level={memoryLevel(row.process.residentMemoryBytes)}>{formatMemory(row.process.residentMemoryBytes)}</strong><svg class="process-sparkline" viewBox="0 0 92 24" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="23" x2="92" y2="23"/>{#if points}<polyline points={points}/>{/if}</svg></div>
               {/each}
             {/if}
           {:else}
@@ -219,6 +244,8 @@
 
 <style>
   .resource-modal{display:grid;gap:18px}.metrics-error,.empty{margin:0;padding:24px;color:var(--muted);text-align:center}.metrics-error{color:var(--danger)}
+  .memory-value[data-memory-level="warning"]{color:light-dark(#a95a0d,#ffb15c)}
+  .memory-value[data-memory-level="critical"]{color:light-dark(#b82f3e,#ff727b)}
   .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.summary>div{display:grid;gap:3px;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.summary span,.process-list>header{color:var(--muted);font:600 calc(9px * var(--interface-font-ratio,1)) var(--mono);letter-spacing:.08em}.summary strong{font:600 calc(19px * var(--interface-font-ratio,1)) var(--mono)}.summary small{overflow:hidden;color:var(--muted);font-size:calc(10px * var(--interface-font-ratio,1));text-overflow:ellipsis;white-space:nowrap}
   .charts{display:grid;grid-template-columns:1fr 1fr;gap:12px}.charts section{min-width:0;padding:11px 12px 8px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--panel) 84%,var(--soft))}.charts header{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;font-size:calc(11px * var(--interface-font-ratio,1))}.charts header span{color:var(--muted)}.charts header strong{font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono)}.charts svg{display:block;width:100%;height:112px;overflow:visible}.charts line,.process-sparkline line{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke}.charts polyline,.process-sparkline polyline{fill:none;stroke:var(--accent);stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.memory-chart polyline{stroke:#6e9f82}
   .process-list{overflow:hidden;border:1px solid var(--line);border-radius:9px}.process-list>header,.process-row{display:grid;grid-template-columns:minmax(190px,1fr) 72px 82px 100px;align-items:center;gap:10px}.process-list>header{padding:8px 12px;border-bottom:1px solid var(--line);background:var(--soft)}.process-list>header span:not(:first-child){text-align:right}.process-scroll{max-height:min(36vh,360px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.process-row{min-height:42px;padding:4px 12px;border:0;border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent);color:var(--ink);background:transparent;text-align:left}.process-row:last-child{border-bottom:0}.process-row>strong{text-align:right;font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono)}.process-tree-toggle{width:100%;cursor:pointer}.process-tree-toggle:hover,.process-tree-toggle:focus-visible{background:var(--soft)}.process-name{position:relative;display:flex;align-items:center;gap:8px;min-width:0}.process-name i{position:absolute;left:3px;width:9px;height:9px;border-bottom:1px solid var(--line);border-left:1px solid var(--line)}.process-label{display:grid;min-width:0;gap:2px}.process-label strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:calc(12px * var(--interface-font-ratio,1));font-weight:500}.process-label small{overflow:hidden;color:var(--muted);font:calc(9px * var(--interface-font-ratio,1)) var(--mono);text-overflow:ellipsis;white-space:nowrap}.process-chevron{display:grid;flex:none;width:10px;color:var(--muted);font-size:20px;line-height:1;transform:rotate(0deg);transition:transform .14s ease}.process-chevron.open{transform:rotate(90deg)}.process-icon{display:grid;flex:none;place-items:center;width:24px;height:24px;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:6px;color:var(--muted);background:color-mix(in srgb,var(--soft) 68%,transparent)}.process-sparkline{justify-self:end;width:92px;height:24px}
