@@ -16,10 +16,13 @@ name = "monitter_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
+# Child WebviewBuilder is Tauri's unstable API. Pin it exactly and deliberately
+# validate any Tauri upgrade against native child-webview lifecycle/ACL behavior.
+tauri = { version = "=2.11.5", features = ["macos-private-api", "unstable"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -37,11 +40,43 @@ chrono-tz = { version = "0.10", default-features = false, features = ["serde"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSEvent",
+    "NSPopover",
     "NSResponder",
+    "NSView",
     "NSWindow",
 ] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDictionary", "NSError", "NSString", "NSURL", "NSUUID"] }
+# Keep this exact binding series aligned with Tauri 2.11.5/Wry. The extension
+# host is intentionally macOS-only and does not embed a browser engine.
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "WKWebExtension",
+    "WKWebExtensionAction",
+    "WKWebExtensionContext",
+    "WKWebExtensionController",
+    "WKWebExtensionControllerConfiguration",
+    "WKWebExtensionControllerDelegate",
+    "WKWebExtensionTab",
+    "WKWebExtensionTabConfiguration",
+    "WKWebExtensionWindow",
+    "WKWebExtensionWindowConfiguration",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataStore",
+    "block2",
+    "objc2-app-kit",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Directly pin the platform handle API used inside `Webview::with_webview`.
+# Wry 0.55.1 already resolves this exact release transitively.
+webkit2gtk = "=2.0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Directly pin the WebView2 COM API paired with Wry 0.55.1.
+webview2-com = "=0.38.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

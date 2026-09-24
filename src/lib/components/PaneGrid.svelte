@@ -3,10 +3,10 @@
   import { animateMotion, motionEnabled } from '$lib/motion';
   import { paneIds, type PaneLayout, type PaneSplit, type PaneTabTransfer } from '$lib/panes';
   type Edge = 'center' | 'left' | 'right' | 'top' | 'bottom';
-  let { layout, activePaneId, expandedPaneId=null, showActivePaneBorder=true, dimInactivePanes=true, inactivePaneOpacity=.6, focusFollowsMouse=false, pointerDrag=null, onPointerDragEnd, onactivate, onresize, ondropTab, children }: {
+  let { layout, activePaneId, expandedPaneId=null, showActivePaneBorder=true, dimInactivePanes=true, inactivePaneOpacity=.6, focusFollowsMouse=false, pointerDrag=null, onPointerDragStart, onPointerDragEnd, onactivate, onresize, ondropTab, children }: {
     layout: PaneLayout; activePaneId: string; expandedPaneId?:string|null; showActivePaneBorder?:boolean; dimInactivePanes?:boolean;inactivePaneOpacity?:number; focusFollowsMouse?:boolean; onactivate: (id: string) => void;
     onresize: (id: string, ratio: number) => void;
-    pointerDrag?: {tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null; onPointerDragEnd?:()=>void; ondropTab: (id: string, edge: Edge, data: PaneTabTransfer, before?: {kind:PaneTabTransfer['kind'];id:string}) => void;
+    pointerDrag?: {tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null; onPointerDragStart?:()=>void; onPointerDragEnd?:()=>void; ondropTab: (id: string, edge: Edge, data: PaneTabTransfer, before?: {kind:PaneTabTransfer['kind'];id:string}) => void | Promise<void>;
     children: import('svelte').Snippet<[string]>;
   } = $props();
   let over = $state<{id:string;edge:Edge}|null>(null);
@@ -173,7 +173,7 @@
     event.preventDefault();event.stopPropagation();
     try {
       const data=JSON.parse(event.dataTransfer.getData(mime));
-      if(typeof data?.sourcePaneId==='string' && typeof data.id==='string' && ['task','draft','channel','terminal','settings'].includes(data.kind)) ondropTab(id,zone,data);
+      if(typeof data?.sourcePaneId==='string' && typeof data.id==='string' && ['task','draft','channel','terminal','browser','empty','settings'].includes(data.kind)) ondropTab(id,zone,data);
     } catch { /* Ignore unrelated drag data. */ }
   }
   function pointerTarget(event: PointerEvent) {
@@ -206,7 +206,7 @@
     const move=(event:PointerEvent)=>{
       if(event.pointerId!==drag.pointerId)return;
       if(!moved && Math.hypot(event.clientX-drag.startX,event.clientY-drag.startY)<6)return;
-      if(!moved){moved=true;source?.setPointerCapture(drag.pointerId);source?.setAttribute('data-tab-dragging','true');document.body.style.cursor='grabbing';}
+      if(!moved){moved=true;source?.setPointerCapture(drag.pointerId);source?.setAttribute('data-tab-dragging','true');document.body.style.cursor='grabbing';onPointerDragStart?.();}
       event.preventDefault();clearMarker();
       const target=pointerTarget(event);
       over=target && !target.bar?{id:target.id,edge:target.edge}:null;
@@ -217,7 +217,14 @@
       if(moved){
         const suppress=(click:MouseEvent)=>{click.preventDefault();click.stopImmediatePropagation();};
         window.addEventListener('click',suppress,true);setTimeout(()=>window.removeEventListener('click',suppress,true),0);
-        const target=pointerTarget(event);if(target)ondropTab(target.id,target.edge,drag.tab,target.before);
+        const target=pointerTarget(event);
+        if(target){
+          // Keep native browser children hidden until an asynchronous cross-pane
+          // move has finished restoring its destination layout.
+          try { void Promise.resolve(ondropTab(target.id,target.edge,drag.tab,target.before)).then(cancel,cancel); }
+          catch { cancel(); }
+          return;
+        }
       }
       cancel();
     };

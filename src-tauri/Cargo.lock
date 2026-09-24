@@ -2244,13 +2244,17 @@ name = "monitter"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "cc",
  "chrono",
  "chrono-tz",
  "croner",
  "jiff",
  "keyring",
  "libc",
+ "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "portable-pty",
  "regex",
  "rusqlite",
@@ -2261,6 +2265,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "uuid",
+ "webkit2gtk",
+ "webview2-com",
 ]
 
 [[package]]

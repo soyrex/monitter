@@ -1,6 +1,6 @@
 export { MAX_WORKSPACE_PANES } from './pane-constants.js';
 export type PaneLeaf={id:string}; export type PaneSplit={id:string;axis:'horizontal'|'vertical';ratio:number;first:PaneLayout;second:PaneLayout}; export type PaneLayout=PaneLeaf|PaneSplit;
-export type PaneTabTransfer={sourcePaneId:string;kind:'task'|'draft'|'channel'|'terminal'|'settings'|'empty';id:string};
+export type PaneTabTransfer={sourcePaneId:string;kind:'task'|'draft'|'channel'|'terminal'|'browser'|'settings'|'empty';id:string};
 export type PaneLayoutPreset='single'|'columns'|'grid'|'columns-3'|'columns-4'|'grid-3x2'|'grid-4x2';
 const presetDimensions:Record<PaneLayoutPreset,readonly [columns:number,rows:number]>={
   single:[1,1],columns:[2,1],grid:[2,2],

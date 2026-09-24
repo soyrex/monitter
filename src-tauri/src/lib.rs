@@ -64,6 +64,13 @@ mod menu;
 pub mod model;
 pub mod model_router;
 mod models;
+mod native_browser;
+#[cfg(any(target_os = "linux", windows))]
+mod native_browser_history_portable;
+#[cfg(target_os = "macos")]
+mod native_browser_extensions_macos;
+#[cfg(target_os = "macos")]
+mod native_browser_auth_macos;
 mod process_metrics;
 pub mod profile_init;
 mod runner;
@@ -8618,7 +8625,7 @@ pub fn run() {
             // atomically, allowing the LAN view to update without restarting
             // the native app. It must precede every bundled fallback root.
             let live_lan_root = dir.join("lan-web");
-            let service = Service::open(Some(app.handle().clone()), dir)?;
+            let service = Service::open(Some(app.handle().clone()), dir.clone())?;
             // Bundled assets remain a safe fallback if no successful live
             // publish exists. Tauri places them in Resources (the root or
             // `_up_`, depending on bundle layout); development uses local build.
@@ -8643,12 +8650,20 @@ pub fn run() {
             service.start_scheduler();
             app.manage(dev_ui_state);
             app.manage(AppState(service));
+            app.manage(native_browser::NativeBrowserState::new(dir.join("native-browser-profile"))?);
             // The listener may immediately dispatch through app.state(), so it
             // starts only after the Tauri state has been registered.
             let service = app.state::<AppState>().0.clone();
-            service
-                .start_lan(lan_roots)
-                .map_err(|error| format!("Cannot initialize LAN server: {error}"))?;
+            // Isolated debug browser smoke builds run alongside the installed
+            // app, which owns the fixed LAN port. This opt-out is unavailable
+            // in release builds and never changes normal desktop startup.
+            if !(cfg!(debug_assertions)
+                && std::env::var_os("MONITTER_BROWSER_SMOKE_DISABLE_LAN").is_some())
+            {
+                service
+                    .start_lan(lan_roots)
+                    .map_err(|error| format!("Cannot initialize LAN server: {error}"))?;
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -8738,6 +8753,15 @@ pub fn run() {
             resize_terminal,
             read_terminal,
             close_terminal,
+            native_browser::browser_open,
+            native_browser::browser_set_layout,
+            native_browser::browser_navigate,
+            native_browser::browser_back,
+            native_browser::browser_forward,
+            native_browser::browser_reload,
+            native_browser::browser_close,
+            native_browser::browser_get_state,
+            native_browser::browser_load_unpacked_extension,
             list_schedules,
             save_schedule,
             delete_schedule,

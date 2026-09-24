@@ -455,4 +455,14 @@ export interface TerminalTarget { cwd?: string; taskId?: string; agentId?: strin
 export interface TerminalSession { id: string; title: string; autoTitle?: string | null; customTitle?: string | null; hostId: string; cwd: string; status: 'running' | 'exited'; exitCode: number | null; }
 /** `session` is optional for an older LAN desktop; normal native reads include it. */
 export interface TerminalRead { chunks: { seq: number; data: number[] }[]; nextSeq: number; status: 'running' | 'exited'; exitCode: number | null; truncated: boolean; session?: TerminalSession; }
+/** Logical window coordinates for a native, pane-owned browser webview. */
+export interface BrowserBounds { x: number; y: number; width: number; height: number; }
+/** Runtime state only. Browser credentials and extension data never enter workspace snapshots. */
+export interface BrowserState {
+  tabId: string; url: string; title: string;
+  /** Null means the native engine cannot currently report this state. */
+  canGoBack: boolean | null; canGoForward: boolean | null;
+}
+/** Result of loading a local unpacked extension. No manifest permissions or credentials are persisted. */
+export interface BrowserExtensionLoadResult { path: string; displayName: string | null; }
 export interface AutonameTarget { taskId?: string; channelId?: string; terminalId?: string; content?: string; }
