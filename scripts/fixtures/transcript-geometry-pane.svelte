@@ -66,7 +66,7 @@
       {#snippet children(message)}
         <article class:assistant={message.role === 'assistant'} class="message" data-live-entry={message.streamStatus === 'streaming'}>
           <header><span>{message.role === 'assistant' ? 'Synthetic agent' : 'Synthetic operator'}</span><time>{new Date(message.createdAt).toLocaleTimeString()}</time></header>
-          <Markdown text={message.text}/>
+          {#if message.streamStatus === 'streaming'}<div class="streaming-text" data-stream-text>{message.text}</div>{:else}<Markdown text={message.text}/>{/if}
         </article>
       {/snippet}
     </TranscriptVirtualList>
@@ -79,4 +79,5 @@
   .fixture-pane :global(.message.assistant) { background: var(--soft); }
   .fixture-pane :global(.message header) { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 5px; color: var(--muted); font: 600 11px var(--interface-font, system-ui); }
   .fixture-pane :global(.message time) { font: 10px var(--mono, ui-monospace, monospace); }
+  .fixture-pane :global(.streaming-text) { white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

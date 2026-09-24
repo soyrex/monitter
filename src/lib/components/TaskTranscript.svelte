@@ -290,7 +290,9 @@
                   {#snippet avatar()}{#if humanName}<span class="avatar message-avatar human-avatar" title={humanName}>{humanName.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null)}{/if}{/snippet}
                   {#if steering}<span class="steering-status" data-steering-status={steering.status} role="status" aria-label={steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}>{steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}</span>{:else if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
-                {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>{:else}<Markdown text={message.role==='user' ? operatorMessageText(message.text) : message.text} preserveLineBreaks={message.role==='user'}/>{/if}
+                {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>
+                {:else if message.role==='assistant' && message.streamStatus==='streaming'}<div class="streaming-text" data-stream-text>{message.text}</div>
+                {:else}<Markdown text={message.role==='user' ? operatorMessageText(message.text) : message.text} preserveLineBreaks={message.role==='user'}/>{/if}
                 <AttachmentList attachments={message.attachments ?? []}/>
                 {#if steering?.attachmentIds.length}<small class="steering-attachments"><Paperclip size={11}/>{steering.attachmentIds.length} attachment{steering.attachmentIds.length === 1 ? '' : 's'}</small>{/if}
                 {#if message.streamStatus==='streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus==='interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
@@ -384,6 +386,9 @@
   :global(.delivery-status[data-delivery-status="sending"]) { color:var(--accent); }
   :global(.delivery-status[data-delivery-status="not-confirmed"]) { color:#bd655b; }
   .message :global(.markdown) { font-size:var(--chat-font-size,13px); line-height:var(--chat-line-height,1.65); }
+  /* A live reply patches one text node. Reparse its Markdown once, when the
+     provider marks it complete, instead of replacing HTML on every token. */
+  .streaming-text { min-width:0; max-width:100%; white-space:pre-wrap; overflow-wrap:anywhere; font-size:var(--chat-font-size,13px); line-height:var(--chat-line-height,1.65); }
   .message-avatar { width:20px; height:20px; flex-shrink:0; border-radius:5px; font-size:calc(10px * var(--interface-font-ratio,1)); }
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .blank-conversation { display:grid; min-height:260px; place-content:center; justify-items:center; max-width:360px; margin:auto; color:var(--muted); text-align:center; }

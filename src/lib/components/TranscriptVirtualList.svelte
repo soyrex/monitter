@@ -1,12 +1,12 @@
 <script lang="ts" generics="T">
-  import { createVirtualizer, defaultRangeExtractor, elementScroll, type VirtualizerOptions } from '@tanstack/svelte-virtual';
+  import { createVirtualizer, defaultRangeExtractor, type VirtualizerOptions } from '@tanstack/svelte-virtual';
   import { flushSync, tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { useTranscriptScrollController } from '$lib/transcript-scroll-owner';
   import { perfGeometryStart, perfMark, perfMeasure } from '$lib/perf-phases';
 
-  /** Bounded renderer with one virtualizer owning transcript geometry and scrolling. */
-  let { items, getKey, children, footer, estimateHeight = 120, overscan = 6, keepRecent = 30, stickyKey, active = true }: {
+  /** Bounded history renderer; explicit pane-follow owns the live bottom edge. */
+  let { items, getKey, children, footer, estimateHeight = 120, overscan = 6, keepRecent = 0, stickyKey, active = true }: {
     items: T[];
     getKey: (item: T, index: number) => string;
     children: Snippet<[item: T, index: number]>;
@@ -14,7 +14,7 @@
     footer?: Snippet;
     estimateHeight?: number;
     overscan?: number;
-    /** Keep the newest rows mounted so switching back to a chat is immediate. */
+    /** Optional additional mounted rows for callers that need them. */
     keepRecent?: number;
     /** Kept mounted by callers for their existing sticky CSS. */
     stickyKey?: string | null;
@@ -40,21 +40,20 @@
   const controller = useTranscriptScrollController();
   const isFollowing = () => controller?.isFollowing() !== false;
 
-  // One owner, one post-commit destination: the actual scrollable bottom.
-  // Distance is geometry, never permission to stop following. Coalesce work
-  // after Svelte commits row/spacer changes, rather than adding a frame of lag.
+  // The virtualizer owns history measurement, but not the live bottom edge.
+  // A single post-commit write follows the DOM that actually rendered. This
+  // avoids competing virtualizer end anchors and scroll adjustments per chunk.
   function followCommittedLayout() {
     if (followCommitPending || !isFollowing()) return;
     followCommitPending = true;
     void tick().then(() => {
       followCommitPending = false;
       const viewport = scrollParent;
-      if (!isFollowing() || !viewport || !viewport.isConnected) return;
+      if (!isFollowing() || !viewport?.isConnected || viewport.clientHeight === 0) return;
       const finishProbe = perfGeometryStart('follow-layout');
       try {
-        if (viewport.clientHeight === 0) return;
         const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        if (Math.abs(viewport.scrollTop - bottom) > 1) instance().scrollToOffset(bottom, { behavior: 'instant' });
+        if (bottom - viewport.scrollTop > 3) viewport.scrollTop = bottom;
       } finally { finishProbe?.(); }
     });
   }
@@ -83,19 +82,12 @@
     overscan: untrack(() => overscan),
     scrollMargin: 0,
     paddingEnd: 0,
-    // Chat is end-anchored: prepending preserves the reader's row and a
-    // streamed final row remains pinned only for an already-following reader.
-    anchorTo: 'end',
-    followOnAppend: 'instant',
-    scrollEndThreshold: Number.POSITIVE_INFINITY,
-    scrollToFn: (offset, options, owner) => {
-      // An earlier end request may still have a reconciliation callback queued
-      // when the reader scrolls up. Never let that request take the view back.
-      if (!isFollowing() && options.behavior === 'instant') return;
-      elementScroll(offset, options, owner);
-    },
+    // Start anchoring preserves a reader's place when older measured rows
+    // settle; the pane's explicit follow state alone controls the bottom.
+    anchorTo: 'start',
+    followOnAppend: false,
     // The adapter publishes before this callback. Flush the measured range
-    // before core applies a synchronous end-anchor adjustment.
+    // before core applies a synchronous start-anchor adjustment for history.
     onChange: onVirtualizerChange,
   });
 
@@ -174,11 +166,6 @@
         }
         return stickyIndex >= 0 && !indexes.includes(stickyIndex) ? [...indexes, stickyIndex].sort((a, b) => a - b) : indexes;
       },
-      // A deliberate upward read disables both append follow and end anchoring;
-      // being within the threshold must never silently recapture that reader.
-      anchorTo: controller?.isFollowing() === false ? 'start' : 'end',
-      followOnAppend: controller?.isFollowing() === false ? false : 'instant',
-      scrollEndThreshold: isFollowing() ? Number.POSITIVE_INFINITY : 1,
     });
   });
 
@@ -204,12 +191,8 @@
     if (scrollParent) observer.observe(scrollParent);
     unregisterOwner = controller?.register({
       scrollToLatest: followCommittedLayout,
-      isAtLatest: () => instance().isAtEnd(1),
-      setFollowing: following => setVirtualizerOptions({
-        anchorTo: following ? 'end' : 'start',
-        followOnAppend: following ? 'instant' : false,
-        scrollEndThreshold: following ? Number.POSITIVE_INFINITY : 1,
-      }),
+      isAtLatest: () => !!scrollParent && scrollParent.scrollHeight - scrollParent.clientHeight - scrollParent.scrollTop <= 3,
+      setFollowing: following => { if (following) followCommittedLayout(); },
     });
     return () => { observer.disconnect(); unregisterOwner?.(); unregisterOwner = undefined; scrollParent = null; };
   });
