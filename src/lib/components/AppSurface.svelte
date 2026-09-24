@@ -16,6 +16,10 @@
   import AnimatedTitle from "./AnimatedTitle.svelte";
   import WorkspaceLoadingScreen from "./WorkspaceLoadingScreen.svelte";
   import MessageMeta from "./MessageMeta.svelte";
+  import RichMarkdownComposer from './RichMarkdownComposer.svelte';
+  import ChatDateDivider from "./ChatDateDivider.svelte";
+  import { chatDay } from '$lib/chat-dates';
+  import { autoGrowTextarea } from '$lib/textarea-autogrow';
   import { autonaming } from "$lib/autoname-state";
   import { getContext, setContext, onMount, tick, untrack } from "svelte";
   import { sidebarReorder } from "$lib/sidebar-reorder";
@@ -67,6 +71,7 @@
     MessageSquarePlus,
     MoreHorizontal,
     MoveDiagonal,
+    Maximize2,
     Minimize2,
     Network,
     PanelRight,
@@ -406,8 +411,48 @@
     error = $state(""),
     notice = $state(""),
     composer = $state(""),
+    composerExpanded = $state(false),
     composerPending = $state<Record<string, boolean>>({}),
     taskTitle = $state("");
+  let composerDialog: HTMLDialogElement | undefined;
+  function updateExpandedComposerBounds(node: HTMLDialogElement) {
+    const workspace = node.closest<HTMLElement>('.workspace');
+    if (!workspace || !node.classList.contains('expanded')) return;
+    const pane = workspace.getBoundingClientRect();
+    const topbar = workspace.querySelector<HTMLElement>(':scope > .topbar');
+    const top = topbar?.getBoundingClientRect().bottom ?? pane.top;
+    // The interface scale uses CSS zoom, so fixed-position coordinates must be
+    // converted back from viewport pixels into the zoomed app's CSS pixels.
+    const scale = pane.width / workspace.offsetWidth || 1;
+    const origin = workspace.closest<HTMLElement>('.app-shell')?.getBoundingClientRect();
+    node.style.setProperty('--composer-pane-left', `${(pane.left - (origin?.left ?? 0)) / scale}px`);
+    node.style.setProperty('--composer-pane-top', `${(top - (origin?.top ?? 0)) / scale}px`);
+    node.style.setProperty('--composer-pane-width', `${pane.width / scale}px`);
+    node.style.setProperty('--composer-pane-height', `${Math.max(0, pane.bottom - top) / scale}px`);
+  }
+  function composerDialogLifecycle(node: HTMLDialogElement) {
+    composerDialog = node;
+    const workspace = node.closest<HTMLElement>('.workspace');
+    const updateBounds = () => updateExpandedComposerBounds(node);
+    const observer = new ResizeObserver(updateBounds);
+    if (workspace) observer.observe(workspace);
+    window.addEventListener('resize', updateBounds);
+    requestAnimationFrame(updateBounds);
+    return { destroy() {
+      observer.disconnect();
+      window.removeEventListener('resize', updateBounds);
+      if (node.open) node.close();
+      if (composerDialog === node) { composerDialog = undefined; composerExpanded = false; }
+    } };
+  }
+  async function toggleComposerExpanded() {
+    const dialog = composerDialog;
+    if (!dialog) return;
+    composerExpanded = !composerExpanded;
+    await tick();
+    if (composerExpanded) updateExpandedComposerBounds(dialog);
+    dialog.querySelector<HTMLElement>(composerExpanded ? '[contenteditable="true"]' : 'textarea')?.focus();
+  }
   // send_message starts a native run asynchronously, so its returned snapshot
   // may predate the persisted user message. Keep this UI-only record until a
   // later snapshot proves the message exists (or exposes its queued record).
@@ -3411,6 +3456,17 @@
     }
     if (isSendKey(event)) { event.preventDefault(); if (pane === "channel") void sendChannel(); else void send(); }
   }
+  function handleExpandedComposerKeydown(event: KeyboardEvent) {
+    if (event.isComposing) return;
+    if (slashOpen && isSlashCommand(composer) && ['ArrowDown', 'ArrowUp', 'Escape', 'Enter'].includes(event.key)) {
+      handleComposerKeydown(event);
+      return;
+    }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      if (pane === 'channel') void sendChannel(); else void send();
+    }
+  }
   function queueScale(delta: number) {
     const base = scaleQueued ?? activeInterfaceScale;
     scaleQueued = Math.max(80, Math.min(200, base + delta));
@@ -3433,7 +3489,7 @@
     const request = ++tabInputFocusRequest;
     void tick().then(() => {
       if (request !== tabInputFocusRequest || modal || palette || taskMenu || (embedded ? !active : activePaneId !== paneId)) return;
-      if (document.querySelector('dialog[open], [role="dialog"]')) return;
+      if (document.querySelector('dialog[open]:not(.composer), .composer.expanded, [role="dialog"]')) return;
       const root = document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(paneId)}"]`);
       if (!root) return;
       const target = pane === 'terminal'
@@ -4044,6 +4100,22 @@
   />
 {/snippet}
 
+{#snippet composerExpandButton()}
+  <button type="button" class="composer-expand" aria-label={composerExpanded ? 'Restore composer' : 'Expand composer'} title={composerExpanded ? 'Restore composer' : 'Expand composer'} onclick={toggleComposerExpanded}>
+    {#if composerExpanded}<Minimize2 size={15}/>{:else}<Maximize2 size={15}/>{/if}
+  </button>
+{/snippet}
+
+{#snippet composerEditor(placeholder: string, channel = false)}
+  {#if composerExpanded}
+    <div class="longform-editor"><RichMarkdownComposer bind:value={composer} {placeholder} oninput={updateSlash} onkeydown={handleExpandedComposerKeydown}/></div>
+  {:else if channel}
+    <MentionComposer bind:value={composer} agents={channelMentionAgents} oninput={updateSlash} onkeydown={handleComposerKeydown}/>
+  {:else}
+    <textarea bind:value={composer} use:autoGrowTextarea={composer} aria-label="Task message" {placeholder} oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
+  {/if}
+{/snippet}
+
 {#snippet sidebarChat(task: Task, detail = false, recent = false)}
   {@const sortGroup=sidebarView==='activity'?'':sidebarView==='projects'?`project-chats:${task.projectId??'unassigned'}`:`agent-chats:${task.agentId}`}
   {@const agent = visibleAgents.find(item=>item.id===task.agentId)}
@@ -4348,7 +4420,9 @@
               items={displayedChannelTranscript.messages}
               getKey={(message) => message.id}
               active={embedded ? active : activePaneId === 'main'}>
-              {#snippet children(message, _index)}<article
+              {#snippet children(message, index)}
+              {#if index === 0 || chatDay(message.createdAt) !== chatDay(displayedChannelTranscript.messages[index - 1].createdAt)}<ChatDateDivider at={message.createdAt}/>{/if}
+              <article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && displayedChannelTranscript.tintUserMessages}
                 class="message"
@@ -4361,7 +4435,8 @@
                 <Markdown text={message.text} taskId={message.taskId ?? undefined} preserveLineBreaks={message.role==='user'}/><AttachmentList attachments={message.attachments ?? []}/>
               </article>{/snippet}
               {#snippet footer()}
-              {#each displayedChannelTranscript.optimisticMessages as message (message.id)}
+              {#each displayedChannelTranscript.optimisticMessages as message, index (message.id)}
+                {#if index === 0 ? !displayedChannelTranscript.messages.length || chatDay(message.createdAt) !== chatDay(displayedChannelTranscript.messages.at(-1)!.createdAt) : chatDay(message.createdAt) !== chatDay(displayedChannelTranscript.optimisticMessages[index - 1].createdAt)}<ChatDateDivider at={message.createdAt}/>{/if}
                 <article class="message user optimistic-message" data-delivery-status={message.status}>
                   <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
                   <Markdown text={message.displayText} preserveLineBreaks/><AttachmentList attachments={message.attachments}/>
@@ -4386,10 +4461,13 @@
         </div>{/if}
         <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
         <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
-        {@render slashMenu()}
-        <div class="composer" use:fileDrop>
-            <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-          <MentionComposer bind:value={composer} agents={channelMentionAgents} oninput={updateSlash} onkeydown={handleComposerKeydown}/>
+        {#if !composerExpanded}{@render slashMenu()}{/if}
+        <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded channel composer' : 'Channel composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
+          {@render composerExpandButton()}
+          {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
+          {#if composerExpanded}{@render slashMenu()}{/if}
+          <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
+          {@render composerEditor('Message this channel… Use @ to mention an agent', true)}
           <div class="composer-footer">
             {@render attachmentTools()}
             <div class="recipient-picker">
@@ -4404,7 +4482,7 @@
             </div>
             {#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
           </div>
-        </div>
+        </dialog>
       </section>
       {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss channel members" onclick={()=>showDetail=false}></button>{/if}
       <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail channel-members" class:closed={!showDetail} aria-label="Channel members">
@@ -4436,12 +4514,15 @@
               <Markdown text={message.displayText} preserveLineBreaks/><AttachmentList attachments={message.attachments}/>
             </article>
           {/each}
-          {@render slashMenu()}
-          <div class="composer draft-composer" use:fileDrop>
+          {#if !composerExpanded}{@render slashMenu()}{/if}
+          <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer draft-composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded new chat composer' : 'New chat composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
+            {@render composerExpandButton()}
+            {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
+            {#if composerExpanded}{@render slashMenu()}{/if}
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-            <textarea bind:value={composer} aria-label="Task message" placeholder="Describe what you want this agent to do…" oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
+            {@render composerEditor('Describe what you want this agent to do…')}
       <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right">{#if taskFormAgent?.jevRouting && taskFormAgent.jevRouting !== 'off'}<span class="router-chip" title={taskFormAgent.jevRouting === 'safe_auto' ? 'Jev will safely apply a confidence-qualified model and reasoning mapping. Permissions stay unchanged.' : 'Jev will record a recommendation; your model selection stays unchanged.'}>Jev · {taskFormAgent.jevRouting === 'safe_auto' ? 'auto' : 'recommend'}</span>{/if}<ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
-          </div>
+          </dialog>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
             <button onclick={()=>{composer='Investigate the current issue and report what you find.'; updateSlash(composer);}}>Investigate an issue</button>
@@ -4468,16 +4549,13 @@
         {#snippet taskComposer()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
           <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
-          {@render slashMenu()}
-          <div class="composer" use:fileDrop>
+          {#if !composerExpanded}{@render slashMenu()}{/if}
+          <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded task composer' : 'Task composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
+            {@render composerExpandButton()}
+            {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
+            {#if composerExpanded}{@render slashMenu()}{/if}
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-            <textarea
-              bind:value={composer}
-              aria-label="Task message"
-              placeholder={`Message ${selectedAgent?.name ?? "agent"}…`}
-              oninput={(event) => updateSlash(event.currentTarget.value)}
-              onkeydown={handleComposerKeydown}
-            ></textarea>
+            {@render composerEditor(`Message ${selectedAgent?.name ?? 'agent'}…`)}
             <div class="composer-footer">
               <div class="composer-left">{@render attachmentTools()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
               <div class="composer-right">
@@ -4487,7 +4565,7 @@
               </div>
             </div>
             <ContextUsageBar usage={selectedTaskContextUsage}/>
-          </div>
+          </dialog>
         {/snippet}
         {#snippet subagentDock()}
           {#if activeTaskSubagents.length}
@@ -6060,13 +6138,11 @@
   .mobile-navigation :global(textarea), .mobile-navigation :global(input:not([type=checkbox]):not([type=radio]):not([type=range])) {
     font-size:max(16px,var(--chat-font-size,13px));
   }
-  .mobile-navigation :global(.composer) { max-height:none; }
-  .mobile-navigation :global(.composer textarea) { min-height:36px; max-height:min(120px,20dvh); resize:none; }
+  .mobile-navigation :global(.composer textarea) { min-height:36px; resize:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) { --pane-tabbar-height:52px; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-layout) { padding:8px 12px; align-content:start; mask-image:none; -webkit-mask-image:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-content > :not(.composer)) { display:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-composer.composer) { width:100%; margin:0; }
-  .mobile-navigation:global([data-keyboard-composer=true]) :global(.composer textarea) { height:52px; min-height:36px; max-height:72px; }
   .mobile-navigation .sidebar-footer { bottom:env(safe-area-inset-bottom,0px); }
   @media (prefers-reduced-motion:reduce) {
     .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid { transition:none; }
@@ -6391,6 +6467,8 @@
     min-height: 0;
     flex: 1;
     flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
   .tabs {
     display: flex;
@@ -6609,9 +6687,10 @@
     container-type: inline-size;
     position: relative;
     z-index: 1;
+    display: flex;
+    flex-direction: column;
     flex-shrink: 0;
-    max-height: 40dvh;
-    overflow: auto;
+    overflow: visible;
     overscroll-behavior: contain;
     width: min(var(--chat-content-max-width), calc(100% - (2 * var(--density-composer-margin-inline))));
     box-sizing: border-box;
@@ -6619,18 +6698,44 @@
     padding: 11px 12px 9px;
     border: 1px solid var(--line);
     border-radius: 10px;
+    color: var(--ink);
     background: color-mix(in srgb, var(--panel) 80%, transparent);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
   }
+  .composer.expanded {
+    position: fixed;
+    inset: calc(var(--composer-pane-top) + 12px) auto auto calc(var(--composer-pane-left) + var(--density-composer-margin-inline));
+    width: calc(var(--composer-pane-width) - 2 * var(--density-composer-margin-inline));
+    max-width: none;
+    height: calc(var(--composer-pane-height) - 12px - var(--density-composer-margin-bottom));
+    max-height: none;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 38px 18px 12px;
+    z-index: 1000;
+    background: var(--panel);
+    box-shadow: 0 22px 80px #0008;
+  }
+  .workspace:has(.composer.expanded)::after { content:''; position:absolute; z-index:999; inset:var(--pane-tabbar-height) 0 0; background:#0009; backdrop-filter:blur(5px); pointer-events:none; }
+  .workspace:has(.composer.expanded) .draft-layout { mask-image:none; -webkit-mask-image:none; }
+  .composer-expand { position:absolute; top:7px; right:7px; z-index:2; display:grid; place-items:center; width:27px; height:27px; padding:0; border:1px solid transparent; border-radius:6px; color:var(--muted); background:transparent; cursor:pointer; }
+  .composer-expand:hover, .composer-expand:focus-visible { border-color:var(--line); color:var(--ink); background:var(--soft); }
+  .composer.expanded .composer-expand { top:9px; right:11px; }
+  .composer-longform-hint { position:absolute; top:15px; left:18px; max-width:calc(100% - 60px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font:calc(10px * var(--interface-font-ratio,1)) var(--mono); }
+  .longform-editor { flex:1; min-height:0; padding:4px 2px; overflow:auto; overscroll-behavior:contain; }
+  .composer.expanded .composer-footer { padding-top:8px; border-top:1px solid var(--line); }
   .composer textarea {
     font-family: var(--chat-font, "IBM Plex Sans", system-ui, sans-serif);
     display: block;
     width: 100%;
     min-height: 52px;
-    max-height: 25vh;
-    resize: vertical;
+    box-sizing: border-box;
+    padding-right: 32px;
+    resize: none;
+    overflow: hidden;
     border: 0;
     outline: 0;
     color: var(--ink);
@@ -6644,6 +6749,7 @@
   }
   .composer-footer {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     justify-content: space-between;
     gap: 10px;

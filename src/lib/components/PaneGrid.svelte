@@ -148,7 +148,7 @@
     if(!focusFollowsMouse || activePaneId===id || event.pointerType!=='mouse' || event.buttons || !document.hasFocus())return;
     // Menus and dialogs keep keyboard focus until dismissed. Dragging must not
     // redirect input or disrupt selections while crossing a pane boundary.
-    if(document.querySelector('dialog[open], [role="dialog"], :popover-open'))return;
+    if(document.querySelector('dialog[open]:not(.composer), .composer.expanded, [role="dialog"], :popover-open'))return;
     onactivate(id);
     const pane=event.currentTarget as HTMLElement;
     const input=pane.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')

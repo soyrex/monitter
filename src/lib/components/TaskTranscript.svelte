@@ -6,9 +6,10 @@
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
   import { floating } from '$lib/floating';
-  import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, subagentThreadLink, showThinkingFallback, toolPresentation, type ConversationActivityItem } from '$lib/activity-grouping';
+  import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, modelSettingsChangeLabel, subagentThreadLink, showThinkingFallback, toolPresentation, type ConversationActivityItem } from '$lib/activity-grouping';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
+  import { chatDay } from '$lib/chat-dates';
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
@@ -18,6 +19,7 @@
   import UnifiedSubagentItem from '$lib/components/UnifiedSubagentItem.svelte';
   import ThinkingStatus from '$lib/components/ThinkingStatus.svelte';
   import MessageMeta from '$lib/components/MessageMeta.svelte';
+  import ChatDateDivider from '$lib/components/ChatDateDivider.svelte';
   import ResponseMetadata from '$lib/components/ResponseMetadata.svelte';
   import Markdown from '$lib/components/Markdown.svelte';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
@@ -153,6 +155,21 @@
   const displayCollaborations = $derived(display.collaborations);
   const displaySubagents = $derived(display.subagents);
   const displayMailBatches = $derived(display.mailBatches);
+  const displayDateBreaks = $derived.by(() => {
+    const hiddenMessageIds = new Set(displayMailBatches.map(batch => batch.messageId));
+    let previousDay: number | null = null;
+    return displayItems.map(item => {
+      if (item.type === 'message' && hiddenMessageIds.has(item.value.id)) return null;
+      const at = item.type === 'message' || item.type === 'activity' ? item.value.createdAt
+        : item.type === 'approval' ? item.value.resolvedAt ?? item.value.createdAt
+        : item.values[0]?.createdAt;
+      if (at === undefined) return null;
+      const day = chatDay(at);
+      if (day === null || day === previousDay) return null;
+      previousDay = day;
+      return at;
+    });
+  });
   // The inbox is a live surface, even when the chat transcript is held while
   // the user reads older history. Keep the durable mail cards on the current
   // snapshot so an agent's later check is visible without forcing the reader
@@ -235,7 +252,9 @@
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' || item.type === 'process-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
         stickyKey={displayLatestUserRequest?.id ?? null}
         {active}>
-        {#snippet children(item, _index)}
+        {#snippet children(item, index)}
+          {@const dateBreak = displayDateBreaks[index]}
+          {#if dateBreak !== null && dateBreak !== undefined}<ChatDateDivider at={dateBreak}/>{/if}
           {#if item.type === 'activity'}
             {@const inlineSubagent=subagentForEvents([item.value])}
             {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} event={item.value} onloaddetail={onLoadFullEventDetail}/>{/if}
@@ -254,8 +273,10 @@
           {:else}
             {@const message=item.value}
             {@const mailBatch=displayMailBatches.find(batch => batch.messageId === message.id)}
+            {@const settingsChange=modelSettingsChangeLabel(message)}
             {#if mailBatch}<!-- The durable live inbox is rendered at the transcript foot. -->
             {:else if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator" aria-label={`Context Cleared at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · Context Cleared</time><span aria-hidden="true"></span></div>
+            {:else if settingsChange}<div class="context-cleared-event" role="separator" aria-label={`${settingsChange} at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · {settingsChange}</time><span aria-hidden="true"></span></div>
             {:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
             {:else if !message.collaborationId || !displayCollaborations.find(value => value.id === message.collaborationId)}
               {@const optimistic=displayOptimisticMessages.find(item=>item.id===message.id)}

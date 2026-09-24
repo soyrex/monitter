@@ -2635,13 +2635,40 @@ impl Service {
             if task.archived {
                 return Err("Restore this archived task before changing its model.".into());
             }
+            let previous_model = task.model.clone();
+            let previous_effort = task.model_settings.as_ref().and_then(|value| value.reasoning_effort.clone());
             task.model = if reset {
                 String::new()
             } else {
                 settings.model.clone()
             };
             task.model_settings = if reset { None } else { Some(settings) };
-            task.updated_at = now();
+            let changed_at = now();
+            task.updated_at = changed_at;
+            let mut changes = Vec::new();
+            if previous_model != task.model {
+                changes.push(format!("Model → {}", if task.model.is_empty() { "Harness default" } else { &task.model }));
+            }
+            let current_effort = task.model_settings.as_ref().and_then(|value| value.reasoning_effort.as_deref());
+            if previous_effort.as_deref() != current_effort {
+                changes.push(format!("Thinking level → {}", current_effort.unwrap_or("Default")));
+            }
+            if !changes.is_empty() {
+                let timing = if task.status == "running" { " (next turn)" } else { "" };
+                snapshot.messages.push(Message {
+                    stream_status: None,
+                    phase: None,
+                    response_metadata: None,
+                    id: id(),
+                    task_id: task_id.into(),
+                    role: "system".into(),
+                    text: format!("{MODEL_SETTINGS_CHANGE_PREFIX}{}{timing}", changes.join(" · ")),
+                    created_at: changed_at,
+                    sender_agent_id: None,
+                    collaboration_id: None,
+                    attachments: vec![],
+                });
+            }
             Ok(snapshot.clone())
         })
     }
@@ -6035,15 +6062,24 @@ fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<Strin
     }
     messages
         .iter()
-        .find(|message| message.role == "system" && !is_context_cleared_message(message))
+        .find(|message| message.role == "system" && !is_context_cleared_message(message) && !is_model_settings_change_message(message))
         .map(|message| message.text.clone())
 }
 
 const CONTEXT_CLEARED_MESSAGE: &str = "Context Cleared";
+const MODEL_SETTINGS_CHANGE_PREFIX: &str = "[Monitter settings change] ";
 
 fn is_context_cleared_message(message: &Message) -> bool {
     message.role == "system"
         && message.text == CONTEXT_CLEARED_MESSAGE
+        && message.sender_agent_id.is_none()
+        && message.collaboration_id.is_none()
+        && message.attachments.is_empty()
+}
+
+fn is_model_settings_change_message(message: &Message) -> bool {
+    message.role == "system"
+        && message.text.starts_with(MODEL_SETTINGS_CHANGE_PREFIX)
         && message.sender_agent_id.is_none()
         && message.collaboration_id.is_none()
         && message.attachments.is_empty()
@@ -9555,6 +9591,16 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .unwrap();
         assert!(updated.model.is_empty());
         assert_eq!(updated.model_settings, None);
+        let snapshot = service.snapshot().unwrap();
+        let change = snapshot.messages.iter().find(|message| is_model_settings_change_message(message)).unwrap();
+        assert_eq!(change.task_id, task.id);
+        assert_eq!(change.text, "[Monitter settings change] Model → Harness default · Thinking level → Default");
+        assert!(!initial_task_instructions(&snapshot, &task.id).unwrap_or_default().contains(MODEL_SETTINGS_CHANGE_PREFIX));
+        let message_count = snapshot.messages.len();
+        service.set_task_model_settings(&task.id, ModelSettings {
+            model: String::new(), reasoning_effort: None, fast_mode: None,
+        }).unwrap();
+        assert_eq!(service.snapshot().unwrap().messages.len(), message_count, "unchanged settings do not add a divider");
         assert_eq!(
             service.set_task_model_settings(
                 &task.id,
@@ -9566,6 +9612,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             ),
             Err("Choose a model before setting reasoning effort or Fast mode.".into())
         );
+        drop(service);
+        assert!(Service::open(None, dir.clone()).unwrap().snapshot().unwrap().messages.iter().any(is_model_settings_change_message));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -9686,10 +9734,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                         id: "gpt-test".into(),
                         name: "Test".into(),
                         description: String::new(),
-                        reasoning_efforts: vec![ReasoningEffortOption {
-                            id: "high".into(),
-                            description: String::new(),
-                        }],
+                        reasoning_efforts: vec![
+                            ReasoningEffortOption { id: "high".into(), description: String::new() },
+                            ReasoningEffortOption { id: "low".into(), description: String::new() },
+                        ],
                         default_effort: Some("high".into()),
                         supports_fast: false,
                         fast_description: None,
@@ -9731,6 +9779,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             })
         );
         assert_eq!(updated.status, "running");
+        let first_change = service.snapshot().unwrap().messages.last().unwrap().clone();
+        assert_eq!(first_change.text, "[Monitter settings change] Model → gpt-test · Thinking level → high (next turn)");
+        service.set_task_model_settings(&task.id, ModelSettings {
+            model: "gpt-test".into(), reasoning_effort: Some("low".into()), fast_mode: None,
+        }).unwrap();
+        let thinking_change = service.snapshot().unwrap().messages.last().unwrap().clone();
+        assert_eq!(thinking_change.text, "[Monitter settings change] Thinking level → low (next turn)");
+        assert!(is_model_settings_change_message(&thinking_change));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -141,6 +141,7 @@ function acpReadableDetail(event: RunEvent): string | null {
 /** Durable, user-authored Stop record emitted by the native cancellation path. */
 export const CANCELLATION_EVENT_TITLE = 'You cancelled this run.';
 export const CONTEXT_CLEARED_TITLE = 'Context Cleared';
+const MODEL_SETTINGS_CHANGE_PREFIX = '[Monitter settings change] ';
 
 /** Only this concise status record belongs in the ordinary chat transcript. */
 export function isCancellationEvent(event: RunEvent): boolean {
@@ -157,6 +158,12 @@ export function isCancellationMessage(message: Pick<Message, 'role' | 'text' | '
 export function isContextClearedMessage(message: Pick<Message, 'role' | 'text' | 'senderAgentId' | 'attachments'>): boolean {
   return message.role === 'system' && message.text === CONTEXT_CLEARED_TITLE &&
     !message.senderAgentId && !message.attachments?.length;
+}
+
+/** UI-only history marker; never display its internal prefix as chat content. */
+export function modelSettingsChangeLabel(message: Pick<Message, 'role' | 'text' | 'senderAgentId' | 'attachments'>): string | null {
+  if (message.role !== 'system' || message.senderAgentId || message.attachments?.length || !message.text.startsWith(MODEL_SETTINGS_CHANGE_PREFIX)) return null;
+  return message.text.slice(MODEL_SETTINGS_CHANGE_PREFIX.length) || null;
 }
 
 /** Extract displayable summary text, never provider IDs or encrypted metadata. */

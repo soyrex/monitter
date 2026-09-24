@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { chatDateClock, chatDateTimeLabel } from '$lib/chat-dates';
 
   let { name, createdAt, avatar, children }: {
     name: string;
@@ -14,9 +15,7 @@
   const timestampValue = $derived(createdAt);
   const timestamp = $derived(new Date(timestampValue));
   const validTimestamp = $derived(Number.isFinite(timestamp.getTime()));
-  const time = $derived(validTimestamp
-    ? timestamp.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-    : '');
+  const time = $derived(validTimestamp ? chatDateTimeLabel(timestampValue, $chatDateClock) : '');
 </script>
 
 <div class="message-meta">
