@@ -43,7 +43,11 @@
   // The virtualizer owns history measurement, but not the live bottom edge.
   // A single post-commit write follows the DOM that actually rendered. This
   // avoids competing virtualizer end anchors and scroll adjustments per chunk.
-  function followCommittedLayout() {
+  //
+  // Pass `{ animate: true }` for an explicit reader-initiated jump so the
+  // viewport glides to the bottom. The streaming/follow path stays instant so
+  // live chats don't lag behind new tokens.
+  function followCommittedLayout(options: { animate?: boolean } = {}) {
     if (followCommitPending || !isFollowing()) return;
     followCommitPending = true;
     void tick().then(() => {
@@ -53,7 +57,12 @@
       const finishProbe = perfGeometryStart('follow-layout');
       try {
         const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        if (bottom - viewport.scrollTop > 3) viewport.scrollTop = bottom;
+        if (bottom - viewport.scrollTop <= 3) return;
+        if (options.animate && typeof viewport.scrollTo === 'function') {
+          viewport.scrollTo({ top: bottom, behavior: 'smooth' });
+        } else {
+          viewport.scrollTop = bottom;
+        }
       } finally { finishProbe?.(); }
     });
   }

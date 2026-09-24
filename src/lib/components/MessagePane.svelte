@@ -112,7 +112,7 @@
     resumeFollowingUntil = 0;
   }
 
-  async function jumpToLatest() {
+  async function jumpToLatest(options: { animate?: boolean } = {}) {
     readerDetached = false;
     setFollowing(true);
     showJump = false;
@@ -121,7 +121,7 @@
     // measurement pipeline before asking it for the end offset.
     await tick();
     if (request !== jumpRequest || readerDetached || !followingLatest) return;
-    if (owner) owner.scrollToLatest();
+    if (owner) owner.scrollToLatest(options);
     else pendingLatestRequest = true;
   }
 
@@ -184,7 +184,7 @@
     <div class="message-content" use:messageArrival>{@render children()}</div>
   </div>
   <button class="jump-latest" class:visible={jumpVisible} class:thinking data-pending-updates={pendingUpdates} aria-label="Jump to latest message" title={pendingUpdates ? 'Jump to latest message — new updates waiting' : 'Jump to latest message'} aria-hidden={!jumpVisible} tabindex={jumpVisible ? 0 : -1} disabled={!jumpVisible} onclick={() => {
-      jumpToLatest();
+      jumpToLatest({ animate: true });
       viewport?.focus({ preventScroll: true });
     }}><ArrowDown size={18} />{#if pendingUpdates}<span class="update-pending" aria-hidden="true">New updates waiting</span>{/if}</button>
 </div>
