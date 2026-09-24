@@ -42,6 +42,7 @@ try {
   const flowing = await request.evaluate(element => ({
     background: getComputedStyle(element).backgroundColor,
     top: element.getBoundingClientRect().top,
+    height: element.getBoundingClientRect().height,
   }));
   await viewport.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll')); });
   await expect(request).toBeVisible();
@@ -53,15 +54,13 @@ try {
   const stuck = await request.evaluate(element => ({
     background: getComputedStyle(element).backgroundColor,
     top: element.getBoundingClientRect().top,
-    fadeBottom: getComputedStyle(element, '::before').bottom,
-    fadeBackground: getComputedStyle(element, '::before').backgroundImage,
+    height: element.getBoundingClientRect().height,
   }));
   expect(stuck.background).toBe(flowing.background);
+  expect(stuck.height).toBe(flowing.height);
   expect(flowing.top).toBeGreaterThan(stuck.top + 1);
   expect(stuck.top).toBeGreaterThanOrEqual(8);
   expect(stuck.top).toBeLessThanOrEqual(10);
-  expect(stuck.fadeBottom).toBe('-20px');
-  expect(stuck.fadeBackground).toContain('linear-gradient');
   await page.getByRole('button', { name: 'Expand current request', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Collapse current request', exact: true })).toHaveAttribute('aria-expanded', 'true');
   expect(await request.locator('.markdown').evaluate(element => element.clientHeight)).toBeGreaterThan(collapsed.height);
@@ -71,7 +70,7 @@ try {
   expect(shortViewport.clamp).toBe('none');
   await expect(page.getByRole('button', { name: 'Collapse current request', exact: true })).toBeHidden();
   if (process.env.MONITTER_STICKY_SCREENSHOT) { await page.waitForTimeout(250); await page.screenshot({ path: process.env.MONITTER_STICKY_SCREENSHOT }); }
-  console.log('The latest user bubble itself sticks in place with an identical background and a 20px page-colour fade.');
+  console.log('The latest user bubble sticks without changing height, and its long text can be expanded.');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

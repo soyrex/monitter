@@ -19,8 +19,8 @@
     title: `Synthetic chat ${chat + 1}`,
     messages: Array.from({ length: messagesPerChat }, (_, index) => ({
       id: `synthetic-geometry-${chat}-${index}`,
-      role: index % 3 === 0 ? 'user' : 'assistant',
-      text: content(chat, index),
+      role: index === messagesPerChat - 2 || index % 3 === 0 ? 'user' : 'assistant',
+      text: index === messagesPerChat - 2 ? `Synthetic long request: ${'A'.repeat(4096)}` : content(chat, index),
       createdAt: now - (messagesPerChat - index) * 1_000,
       streamStatus: index === messagesPerChat - 1 ? 'streaming' : 'complete',
     })),

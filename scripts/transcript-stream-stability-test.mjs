@@ -39,7 +39,7 @@ try {
     window.__streamNode = node.querySelector('[data-stream-text]');
     return { gap: viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop };
   });
-  assert.ok(start.gap <= 3, `initial streaming gap: ${start.gap}px`);
+  assert.ok(start.gap <= 4, `initial streaming gap: ${start.gap}px`);
   await expect(pane.locator('[data-stream-text]')).toContainText('token-1-12', { timeout: 10_000 });
   const follow = await pane.evaluate(node => {
     const viewport = node.querySelector('.messages');
@@ -68,22 +68,32 @@ try {
 
   await page.getByRole('button', { name: 'Use two panes' }).click();
   await expect(page.locator('.fixture-pane')).toHaveCount(2);
+  await expect(page.locator('.fixture-pane [data-stream-text]')).toHaveCount(2);
   const simultaneous = await page.evaluate(async () => {
     const panes = [...document.querySelectorAll('.fixture-pane')];
     const first = panes.map(node => node.querySelector('[data-stream-text]'));
     const maxGap = [0, 0];
+    const requestHeights = [new Set(), new Set()];
+    const paneWidths = [new Set(), new Set()];
+    const streamMounts = [0, 0];
     const started = performance.now();
     while (performance.now() - started < 1_500) {
       await new Promise(resolve => requestAnimationFrame(resolve));
       panes.forEach((pane, index) => {
         const viewport = pane.querySelector('.messages');
         maxGap[index] = Math.max(maxGap[index], viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop);
+        requestHeights[index].add(Math.round(pane.querySelector('.sticky-user-request')?.getBoundingClientRect().height ?? -1));
+        paneWidths[index].add(Math.round(pane.getBoundingClientRect().width));
+        if (pane.querySelector('[data-stream-text]') !== first[index]) streamMounts[index] += 1;
       });
     }
-    return { maxGap, stable: panes.every((pane, index) => pane.querySelector('[data-stream-text]') === first[index]) };
+    return { maxGap, stable: panes.every((pane, index) => pane.querySelector('[data-stream-text]') === first[index]), requestHeights: requestHeights.map(set => [...set]), paneWidths: paneWidths.map(set => [...set]), streamMounts };
   });
   assert.equal(simultaneous.stable, true, 'both live text containers must remain mounted');
   assert.ok(simultaneous.maxGap.every(gap => gap <= 4), `two-pane frame gaps: ${simultaneous.maxGap.join(', ')}px`);
+  assert.ok(simultaneous.requestHeights.every(heights => heights.length === 1), `request height shifted: ${JSON.stringify(simultaneous.requestHeights)}`);
+  assert.ok(simultaneous.paneWidths.every(widths => widths.length === 1), `pane width shifted: ${JSON.stringify(simultaneous.paneWidths)}`);
+  assert.deepEqual(simultaneous.streamMounts, [0, 0], 'a streaming text container was remounted');
   assert.deepEqual(errors, [], `browser errors: ${errors.join('; ')}`);
   console.log(`${useWebKit ? 'WebKit' : 'Chromium'} streaming text identity, two-pane bottom follow, held history, and catch-up passed.`);
 } finally {

@@ -3,6 +3,7 @@
   import MessagePane from '../../src/lib/components/MessagePane.svelte';
   import TranscriptVirtualList from '../../src/lib/components/TranscriptVirtualList.svelte';
   import Markdown from '../../src/lib/components/Markdown.svelte';
+  import ExpandableUserRequest from '../../src/lib/components/ExpandableUserRequest.svelte';
   import { createTranscriptBuffer } from '../../src/lib/transcript-buffer.svelte';
 
   type Message = { id: string; role: 'user' | 'assistant'; text: string; createdAt: number; streamStatus: 'streaming' | 'complete' };
@@ -61,12 +62,12 @@
 </script>
 
 <section bind:this={root} class="fixture-pane" aria-label={`${pane} synthetic transcript`}>
-  <MessagePane active={active} resetKey={`${chatId}:${resetRevision}`} pendingUpdates={buffer.pendingUpdates()} onfollowchange={(value) => { following = value; buffer.setFollowing(value); sampleGeometry(); }}>
-    <TranscriptVirtualList items={displayed} getKey={(message) => message.id} active={active}>
+  <MessagePane active={active} stickyRequest resetKey={`${chatId}:${resetRevision}`} pendingUpdates={buffer.pendingUpdates()} onfollowchange={(value) => { following = value; buffer.setFollowing(value); sampleGeometry(); }}>
+    <TranscriptVirtualList items={displayed} getKey={(message) => message.id} stickyKey={displayed.at(-2)?.id ?? null} active={active}>
       {#snippet children(message)}
-        <article class:assistant={message.role === 'assistant'} class="message" data-live-entry={message.streamStatus === 'streaming'}>
+        <article class:assistant={message.role === 'assistant'} class:sticky-user-request={message.id === displayed.at(-2)?.id} class="message" data-live-entry={message.streamStatus === 'streaming'}>
           <header><span>{message.role === 'assistant' ? 'Synthetic agent' : 'Synthetic operator'}</span><time>{new Date(message.createdAt).toLocaleTimeString()}</time></header>
-          {#if message.streamStatus === 'streaming'}<div class="streaming-text" data-stream-text>{message.text}</div>{:else}<Markdown text={message.text}/>{/if}
+          {#if message.streamStatus === 'streaming'}<div class="streaming-text" data-stream-text>{message.text}</div>{:else if message.id === displayed.at(-2)?.id}<ExpandableUserRequest text={message.text}/>{:else}<Markdown text={message.text}/>{/if}
         </article>
       {/snippet}
     </TranscriptVirtualList>
