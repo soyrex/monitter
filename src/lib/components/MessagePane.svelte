@@ -214,8 +214,7 @@
   @media (max-width: 640px) { .message-content { padding-top: 14px; padding-bottom: calc(var(--scroll-fade) + 8px); } .jump-latest { bottom: 10px; } }
   @media (min-height:501px) {
     .has-sticky-request .messages { -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); }
-    :global(.message.sticky-user-request) { position:sticky; z-index:4; top:9px; isolation:isolate; box-shadow:0 8px 24px #0002,0 2px 7px #00000012; }
-    :global(.message.sticky-user-request)::before { content:""; position:absolute; z-index:-1; top:-9px; right:0; bottom:-20px; left:0; pointer-events:none; background:linear-gradient(to bottom,var(--paper) 0 9px,transparent 9px calc(100% - 20px),var(--paper) calc(100% - 20px),transparent 100%); }
+    :global(.message.sticky-user-request) { position:sticky; z-index:4; top:9px; }
   }
   @media (prefers-reduced-motion:reduce) {
     .jump-latest { transition:none; }

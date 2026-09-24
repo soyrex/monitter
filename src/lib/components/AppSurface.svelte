@@ -1420,6 +1420,29 @@
     } finally { workspaceTransition = false; persistWorkspace(); }
     return activeWorkspaceKey === next;
   }
+  async function openProjectWorkspace(project: Project) {
+    const scope = `project:${project.id}` as WorkspaceKey;
+    if (!await switchWorkspace(scope) || activeWorkspaceKey !== scope) return;
+    mobileMain = true;
+    collapsedProjects[project.id] = false;
+    const tabs = paneIds(layout).flatMap(owner => (owner === 'main' ? allTabs() : paneRefs[owner]?.allTabs() ?? [])
+      .map(tab => ({ owner, tab })));
+    if (!tabs.length) { openProject(project); return; }
+
+    const latestChat = tabs.reduce<(typeof tabs)[number] | null>((latest, candidate) => {
+      if (candidate.tab.kind !== 'task') return latest;
+      const task = snapshot?.tasks.find(item => item.id === candidate.tab.id);
+      if (!task) return latest;
+      const previous = latest && snapshot?.tasks.find(item => item.id === latest.tab.id);
+      return !previous || task.updatedAt > previous.updatedAt ? candidate : latest;
+    }, null);
+    const selected = activePaneId === 'main' ? currentVimTab() : paneRefs[activePaneId]?.currentVimTab();
+    const current = tabs.find(({ owner, tab }) => owner === activePaneId && tab.kind === selected?.kind && tab.id === selected.id);
+    const target = latestChat ?? current ?? tabs.at(-1)!;
+    activePaneId = target.owner;
+    if (target.owner === 'main') focusExistingTab(target.tab);
+    else paneRefs[target.owner]?.focusExistingTab(target.tab);
+  }
   async function openGlobalOverview() {
     // `all` is deliberately its own persisted workspace. Returning to it must
     // not reuse or overwrite the current agent/project pane tree.
@@ -3944,7 +3967,7 @@
         if (channel) { if (activeWorkspaceKey !== 'all') { if (await switchWorkspace('all')) routeChannel(channel); } else routeChannel(channel); }
       } else if (kind === 'project') {
         const project = projects.find(project=>project.id===itemId);
-        if (project) { const scope=`project:${project.id}` as WorkspaceKey; if(scope===activeWorkspaceKey)openProject(project);else await switchWorkspace(scope); }
+        if (project) await openProjectWorkspace(project);
       } else {
         const agent = visibleAgents.find(agent=>agent.id===itemId);
         if (agent) { const scope=`agent:${agent.id}` as WorkspaceKey; if(scope===activeWorkspaceKey)openAgent(agent);else await switchWorkspace(scope); }
@@ -4795,7 +4818,7 @@
               <button class="folder-toggle" aria-label={`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} project ${project.name}`} aria-expanded={!collapsedProjects[project.id]} onclick={event=>toggleSidebarGroup('project',project.id,event.currentTarget)}>
                 <ChevronDown class="group-chevron" style={collapsedProjects[project.id]?'transform:rotate(-90deg)':undefined} size={13}/>
               </button>
-              <button class="project-name" aria-label={`Open project ${project.name}`} onclick={()=>{const target=`project:${project.id}` as WorkspaceKey;if(target!==activeWorkspaceKey)void switchWorkspace(target);else openProject(project);}}><ProjectIcon size={14} style={`color:${project.color}`}/><span>{project.name}</span>{#if approvalCount(`project:${project.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`project:${project.id}`)} pending approvals`}>{approvalCount(`project:${project.id}`)}</span>{/if}<small>{projectTasks.length}</small></button>
+              <button class="project-name" aria-label={`Open project ${project.name}`} onclick={()=>{void openProjectWorkspace(project);}}><ProjectIcon size={14} style={`color:${project.color}`}/><span>{project.name}</span>{#if approvalCount(`project:${project.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`project:${project.id}`)} pending approvals`}>{approvalCount(`project:${project.id}`)}</span>{/if}<small>{projectTasks.length}</small></button>
               <button class="quiet" aria-label={`New chat in ${project.name}`} title="New chat" onclick={()=>routeProjectDraft(project.id)}><Plus size={14}/></button>
               <button class="quiet" aria-label={`Edit project ${project.name}`} title="Edit project" onclick={()=>editProject(project)}><MoreHorizontal size={14}/></button>
             </div>
