@@ -415,6 +415,8 @@
   let browserLayoutTail: Promise<void> = Promise.resolve();
   const browserLayoutRevision = new Map<string, number>();
   const browserOpenings = new Map<string, Promise<boolean>>();
+  const browserClosings = new Set<string>();
+  const browserCloseTasks = new Map<string, Promise<void>>();
   const browserRequestedUrls = new Map<string, string>();
   const browserEpoch = new Map<string, number>();
   let openEmptyIds=$state<string[]>([]), selectedEmptyId=$state<string|null>(null);
@@ -1493,22 +1495,18 @@
   export async function retireBrowserTabs() {
     if (!nativeRuntime || !bridge.available) return;
     const tabs = Object.values(browserTabs);
-    for (const tab of tabs) browserEpoch.set(tab.id, (browserEpoch.get(tab.id) ?? 0) + 1);
-    // A pending browser_open observes its changed epoch and closes itself
-    // after resolution. Loaded children are closed before pane state changes.
-    await Promise.all(tabs.filter(tab => !tab.unloaded).map(async tab => {
-      try { await bridge.browserClose(tab.id); }
-      // An in-flight open may not be registered natively yet. Its epoch check
-      // closes the eventual child, so a current not-found is not fatal.
-      catch (reason) { if (!browserOpenings.has(tab.id)) error = `Could not retire browser tab: ${text(reason)}`; }
-    }));
+    const results = await Promise.allSettled(tabs.map(tab => retireNativeBrowser(tab.id)));
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw new Error(`Could not retire browser tab: ${text(failed.reason)}`);
   }
   async function retireCurrentWorkspaceBrowsers() {
     const children = paneIds(layout).filter(id => id !== 'main').flatMap(id => {
       const pane = paneRefs[id] as unknown as { retireBrowserTabs?: () => Promise<void> } | undefined;
       return pane?.retireBrowserTabs ? [pane.retireBrowserTabs()] : [];
     });
-    await Promise.all([retireBrowserTabs(), ...children]);
+    const results = await Promise.allSettled([retireBrowserTabs(), ...children]);
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
   async function switchWorkspace(next: WorkspaceKey): Promise<boolean> {
     if (next === activeWorkspaceKey) return true;
@@ -1516,7 +1514,11 @@
     if (!persistWorkspace()) return false;
     workspaceTransition = true;
     try {
-      await retireCurrentWorkspaceBrowsers();
+      try { await retireCurrentWorkspaceBrowsers(); }
+      catch (reason) {
+        error = `Could not switch workspace: ${text(reason)}. Browser tabs remain available to retry.`;
+        return false;
+      }
       activeWorkspaceKey = next;
       const saved = workspaceSet?.workspaces[next];
       if (saved) {
@@ -2664,7 +2666,7 @@
   }
   async function ensureNativeBrowser(id: string): Promise<boolean> {
     const tab = browserTabs[id], bounds = browserBounds[id];
-    if (!tab || !bounds || !nativeRuntime || !bridge.available) return false;
+    if (!tab || browserClosings.has(id) || !bounds || !nativeRuntime || !bridge.available) return false;
     if (!tab.unloaded) return true;
     const pending = browserOpenings.get(id); if (pending) return pending;
     const epoch = browserEpoch.get(id) ?? 0;
@@ -2685,7 +2687,7 @@
   }
   async function layoutBrowser(id: string, viewport: BrowserViewport) {
     const tab = browserTabs[id];
-    if (!tab || !nativeRuntime || !bridge.available) return;
+    if (!tab || browserClosings.has(id) || !nativeRuntime || !bridge.available) return;
     // DOM rects are CSS coordinates after the renderer WebView zoom. Tauri
     // child-webview bounds are window logical coordinates before that zoom.
     // At the default 125% UI scale this multiplies the CSS rect by 1.25,
@@ -2718,10 +2720,10 @@
     const write = browserLayoutTail.catch(() => {}).then(async () => {
       // Collapse bursts of resize/movement reports to the newest bounds for
       // this tab, and never resurrect a child after unload or close.
-      if (browserLayoutRevision.get(id) !== revision || !browserTabs[id] || browserTabs[id].unloaded) return;
+      if (browserLayoutRevision.get(id) !== revision || browserClosings.has(id) || !browserTabs[id] || browserTabs[id].unloaded) return;
       try { await bridge.browserSetLayout(id, bounds, visible); }
       catch (reason) {
-        if (browserLayoutRevision.get(id) === revision && browserTabs[id] && !browserTabs[id].unloaded)
+        if (browserLayoutRevision.get(id) === revision && !browserClosings.has(id) && browserTabs[id] && !browserTabs[id].unloaded)
           error = `Could not position browser tab: ${text(reason)}`;
       }
     });
@@ -2742,6 +2744,7 @@
   }
   async function navigateBrowser(id: string, url: string) {
     const tab = browserTabs[id], address = browserAddress(url);
+    if (browserClosings.has(id)) return;
     if (!tab || !address || !nativeRuntime || !bridge.available) { if (tab && url.trim()) error = 'Enter an http or https address without embedded credentials.'; return; }
     browserRequestedUrls.set(id, address);
     browserTabs[id] = { ...tab, url: address, title: tab.title || 'Browser' };
@@ -2775,16 +2778,40 @@
     try { await browserLayoutTail; await bridge.browserClose(id); if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true }; delete browserBounds[id]; delete browserHistory[id]; browserLayoutRevision.delete(id); browserRequestedUrls.delete(id); }
     catch (reason) { error = `Could not unload browser tab: ${text(reason)}`; }
   }
-  async function closeBrowserTab(id: string, collapse = true) {
-    const tab = browserTabs[id]; if (!tab) return;
-    // Remove the UI record first: a creation that resolves after this point
-    // observes the missing record and closes its orphan native child.
+  function retireNativeBrowser(id: string): Promise<void> {
+    const existing = browserCloseTasks.get(id); if (existing) return existing;
+    browserClosings.add(id);
+    browserEpoch.set(id, (browserEpoch.get(id) ?? 0) + 1);
     browserLayoutRevision.set(id, (browserLayoutRevision.get(id) ?? 0) + 1);
-    delete browserTabs[id]; delete browserBounds[id]; delete browserHistory[id]; browserRequestedUrls.delete(id); openBrowserIds = openBrowserIds.filter(item => item !== id); forgetTab({ kind: 'browser', id });
-    if (!tab.unloaded && nativeRuntime && bridge.available) try { await browserLayoutTail; await bridge.browserClose(id); } catch (reason) { error = `Browser tab closed locally; native cleanup failed: ${text(reason)}`; }
-    browserLayoutRevision.delete(id);
-    if (selectedBrowserId === id) { selectedBrowserId = null; openOverview(); }
-    if (collapse) collapseTablessPane();
+    const closing = (async () => {
+      // A pending open observes the changed epoch and retires itself. The
+      // idempotent final close catches any child that survived that path.
+      await browserOpenings.get(id);
+      if (nativeRuntime && bridge.available) await bridge.browserClose(id);
+      if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true };
+      delete browserBounds[id]; delete browserHistory[id]; browserRequestedUrls.delete(id);
+      browserLayoutRevision.delete(id); browserEpoch.delete(id);
+    })();
+    browserCloseTasks.set(id, closing);
+    void closing.finally(() => { if (browserCloseTasks.get(id) === closing) browserCloseTasks.delete(id); browserClosings.delete(id); }).catch(() => {});
+    return closing;
+  }
+  async function closeBrowserTab(id: string, collapse = true) {
+    if (!browserTabs[id] || browserClosings.has(id)) return;
+    // Keep the tab and its close controls until the native child has actually
+    // accepted cleanup. In-flight opens see the changed epoch and retire their
+    // child; a final idempotent close also catches a failed retirement.
+    try {
+      // Do not wait behind a stalled resize invoke. Native close hides the
+      // child first, and invalidated layout revisions prevent new writes.
+      await retireNativeBrowser(id);
+      delete browserTabs[id]; delete browserBounds[id]; delete browserHistory[id]; browserRequestedUrls.delete(id); openBrowserIds = openBrowserIds.filter(item => item !== id); forgetTab({ kind: 'browser', id });
+      browserLayoutRevision.delete(id); browserEpoch.delete(id);
+      if (selectedBrowserId === id) { selectedBrowserId = null; openOverview(); }
+      if (collapse) collapseTablessPane();
+    } catch (reason) {
+      error = `Could not close browser tab: ${text(reason)}. Its controls remain available to retry.`;
+    }
   }
   function closeEmptyTab(id: string, collapse = true) {
     delete documents[id]; delete documentContents[id]; delete documentErrors[id];

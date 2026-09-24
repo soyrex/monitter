@@ -59,6 +59,7 @@ pub struct BrowserExtensionState {
 struct BrowserTab {
     webview: Webview<tauri::Wry>,
     state: BrowserState,
+    closing: bool,
 }
 
 #[derive(Clone)]
@@ -471,6 +472,20 @@ fn apply_layout(
     .map_err(|error| format!("Cannot update native browser tab visibility: {error}"))
 }
 
+// Detaching the macOS delegate is important, but a stalled main-thread
+// callback must never prevent the child WebView itself from closing. The
+// caller retains its tab record if dispatching close fails, so it can retry.
+fn close_after_detach(
+    detach_result: Result<(), String>,
+    close: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let close_result = close();
+    if let Err(error) = detach_result {
+        eprintln!("Native browser authentication cleanup failed: {error}");
+    }
+    close_result
+}
+
 /// Opens a native child webview. This is async by design: Tauri documents a
 /// Windows deadlock risk for synchronous commands that perform webview work.
 #[tauri::command]
@@ -644,6 +659,7 @@ pub async fn browser_open(
         BrowserTab {
             webview,
             state: browser_state.clone(),
+            closing: false,
         },
     );
     Ok(browser_state)
@@ -658,18 +674,17 @@ pub async fn browser_set_layout(
     visible: bool,
 ) -> Result<BrowserState, String> {
     ensure_owner(&owner_webview)?;
-    let webview = state
-        .tab(&tab_id)?
+    // Hold the registry lock through dispatch so close cannot hide the child
+    // and then have an older resize/show command bring it back on top.
+    let tabs = state.tab(&tab_id)?;
+    let tab = tabs
         .get(&tab_id)
-        .ok_or("Native browser tab was not found.")?
-        .webview
-        .clone();
-    apply_layout(&webview, &bounds, visible)?;
-    state
-        .tab(&tab_id)?
-        .get(&tab_id)
-        .map(state_for)
-        .ok_or("Native browser tab was closed while updating its layout.".into())
+        .ok_or("Native browser tab was not found.")?;
+    if tab.closing {
+        return Err("Native browser tab is closing.".into());
+    }
+    apply_layout(&tab.webview, &bounds, visible)?;
+    Ok(state_for(tab))
 }
 
 #[tauri::command]
@@ -771,17 +786,42 @@ pub async fn browser_close(
     tab_id: String,
 ) -> Result<(), String> {
     ensure_owner(&owner_webview)?;
-    let webview = state
-        .tab(&tab_id)?
-        .get(&tab_id)
-        .ok_or("Native browser tab was not found.")?
-        .webview
-        .clone();
+    let webview = {
+        let mut tabs = state.tab(&tab_id)?;
+        match tabs.get_mut(&tab_id) {
+            Some(tab) if !tab.closing => {
+                tab.closing = true;
+                tab.webview.clone()
+            }
+            Some(_) => return Err("Native browser tab is already closing.".into()),
+            // Teardown is idempotent: an in-flight open or a second close can
+            // race with the caller's first successful cleanup.
+            None => return Ok(()),
+        }
+    };
+    // Remove the native overlay immediately, even when delegate cleanup or
+    // the following close dispatch needs to wait for AppKit.
+    let hide_result = webview
+        .hide()
+        .map_err(|error| format!("Cannot hide native browser tab before close: {error}"));
     #[cfg(target_os = "macos")]
-    set_macos_basic_auth_bridge(&webview, false, None, None).await?;
-    webview
-        .close()
-        .map_err(|error| format!("Cannot close native browser tab: {error}"))?;
+    let detach_result = set_macos_basic_auth_bridge(&webview, false, None, None).await;
+    #[cfg(not(target_os = "macos"))]
+    let detach_result = Ok(());
+    if let Err(error) = hide_result {
+        eprintln!("{error}");
+    }
+    let close_result = close_after_detach(detach_result, || {
+        webview
+            .close()
+            .map_err(|error| format!("Cannot close native browser tab: {error}"))
+    });
+    if let Err(error) = close_result {
+        if let Some(tab) = state.tab(&tab_id)?.get_mut(&tab_id) {
+            tab.closing = false;
+        }
+        return Err(error);
+    }
     state.tab(&tab_id)?.remove(&tab_id);
     Ok(())
 }
@@ -859,6 +899,25 @@ pub async fn browser_load_unpacked_extension(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_close_is_attempted_even_when_auth_detach_fails() {
+        let mut close_attempted = false;
+        let result = close_after_detach(Err("delegate timed out".into()), || {
+            close_attempted = true;
+            Ok(())
+        });
+        assert!(close_attempted);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn native_close_error_is_returned_after_auth_detach_failure() {
+        let result = close_after_detach(Err("delegate timed out".into()), || {
+            Err("close failed".into())
+        });
+        assert_eq!(result, Err("close failed".into()));
+    }
+
     #[test]
     fn tab_id_and_url_validation_are_bounded() {
         assert!(validate_tab_id("6ec50cf0-555b-4bd2-89f5-1e2afced5540").is_ok());

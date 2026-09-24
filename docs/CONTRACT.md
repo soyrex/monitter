@@ -32,7 +32,10 @@ No fake conversations, progress, token counts, host connections or model replies
   `browser_forward { tabId: string }` -> `BrowserState`; `browser_reload { tabId: string }` -> `BrowserState`;
   `browser_close { tabId: string }` -> `()`; `browser_get_state { tabId: string }` ->
   `{ tabId, url, title, canGoBack, canGoForward }`. Native browser process and page state remain
-  authoritative; local tab metadata is only a restore hint. macOS reads and moves the native
+  authoritative; local tab metadata is only a restore hint. Close is idempotent for an absent tab,
+  hides the native child before teardown, and removes the local tab controls only after native
+  cleanup accepts the close; a failed close retains those controls for retry. Workspace switching
+  also waits for native browser retirement and stays put if any child fails to close. macOS reads and moves the native
   `WKWebView` history stack through a main-thread bridge. Windows and Linux use the corresponding
   WebView2/WebKitGTK native history APIs. Those portable paths compile only on their target
   platforms and still require native runtime validation before being advertised as supported.
