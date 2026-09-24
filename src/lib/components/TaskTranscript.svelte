@@ -366,7 +366,8 @@
   .task-menu { display:grid; grid-auto-rows:min-content; align-content:start; width:max-content; min-width:155px; max-width:min(240px,calc(100vw - 24px)); height:max-content; max-height:min(320px,calc(100vh - 24px)); overflow-y:auto; overflow-x:hidden; }
   .task-menu button { display:flex; width:100%; min-height:32px; height:auto; flex:none; align-self:stretch; box-sizing:border-box; gap:7px; align-items:center; padding:7px; text-align:left; }
   .message { max-width:100%; margin:12px 0; }
-  .message-actions { display:inline-flex; flex:none; align-items:center; gap:2px; color:var(--muted); }
+  .message-actions { display:inline-flex; flex:none; align-items:center; gap:2px; max-width:0; overflow:hidden; color:var(--muted); opacity:0; pointer-events:none; transform:translateX(26px); transition:max-width .16s ease, opacity .12s ease, transform .16s ease; }
+  .message-bubble:hover .message-actions,.message-bubble:focus-within .message-actions { max-width:78px; opacity:1; pointer-events:auto; transform:translateX(0); }
   .message-actions button { display:grid; place-items:center; width:23px; height:23px; padding:0; border:0; border-radius:5px; color:inherit; background:transparent; cursor:pointer; }
   .message-actions button:hover:not(:disabled),.message-actions button:focus-visible { color:var(--accent-ink,var(--accent)); background:var(--soft); }
   .message-actions button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
@@ -410,7 +411,8 @@
   .blank-conversation :global(svg) { color:var(--accent); }
   .blank-conversation h2 { margin:10px 0 5px; color:var(--ink); font-size:calc(15px * var(--interface-font-ratio,1)); }
   .blank-conversation p { margin:0; font-size:calc(12.5px * var(--interface-font-ratio,1)); line-height:1.55; }
-  @media (hover:none),(pointer:coarse) { .task-title-edit { opacity:1; pointer-events:auto; } .approval-inline { min-height:44px; padding-block:8px; } }
+  @media (hover:none),(pointer:coarse) { .task-title-edit { opacity:1; pointer-events:auto; } .message-actions { max-width:78px; opacity:1; pointer-events:auto; transform:none; } .approval-inline { min-height:44px; padding-block:8px; } }
+  @media (prefers-reduced-motion:reduce) { .message-actions { transition:none; } }
   @container workspace-pane (width < 1000px) { .conversation { --chat-side-padding:20px; } .conversation-head { padding-left:20px; padding-right:20px; } }
   @media (max-width:640px) { .conversation-head { padding:12px; gap:8px; } .conversation-head h1 { font-size:calc(18px * var(--interface-font-ratio,1)); } .task-actions { flex-wrap:wrap; } }
   @media (max-height:500px) { .conversation-head { padding-top:10px; padding-bottom:10px; gap:6px; } .task-heading { padding-top:10px; } }

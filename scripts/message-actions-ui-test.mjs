@@ -32,7 +32,7 @@ try {
     };
   ` });
   await page.goto('http://127.0.0.1:18422/monitter-app-ui/', { timeout: 60000 });
-  await page.locator('.sidebar .task-select').filter({ hasText:'Message actions' }).click();
+  await page.locator('.task-row').filter({ hasText:'Message actions' }).click();
   const answer = page.locator('.message').filter({ hasText:'First answer' });
   await expect(answer).toBeVisible();
   const messageMargins = await answer.evaluate(node => {
@@ -54,6 +54,16 @@ try {
   expect(edges.opacity).toBe('0.6');
   await tree.hover();
   await expect.poll(() => tree.evaluate(node => getComputedStyle(node).opacity)).toBe('1');
+  const hiddenActions = await answer.evaluate(node => {
+    const actions = node.querySelector('.message-actions');
+    const style = getComputedStyle(actions);
+    return { opacity:style.opacity, pointerEvents:style.pointerEvents, width:actions.getBoundingClientRect().width };
+  });
+  expect(hiddenActions.opacity).toBe('0');
+  expect(hiddenActions.pointerEvents).toBe('none');
+  expect(hiddenActions.width).toBeLessThan(1);
+  await answer.locator('.message-bubble').hover();
+  await expect.poll(() => answer.locator('.message-actions').evaluate(node => getComputedStyle(node).opacity)).toBe('1');
   const positions = await answer.evaluate(node => {
     const author = node.querySelector('.message-author').getBoundingClientRect();
     const actions = node.querySelector('.message-actions').getBoundingClientRect();
@@ -96,7 +106,7 @@ try {
   expect(attachmentArgs).not.toHaveProperty('previewDataUrl');
   expect(attachmentArgs).toHaveProperty('sourceId', 'source-id');
   expect(errors).toEqual([]);
-  console.log('Message actions: timestamp layout, copy, reply attachment, and model-selected fork passed.');
+  console.log('Message actions: hover reveal, timestamp layout, copy, reply attachment, and model-selected fork passed.');
 } finally {
   await browser.close();
 }
