@@ -5,6 +5,7 @@ export const sharedAppearanceVariables = [
   '--paper', '--sidebar', '--panel', '--line', '--soft', '--code', '--ink', '--muted',
   '--accent', '--accent-rgb', '--accent-ink', '--on-accent', '--mono', '--interface-font',
   '--chat-font', '--chat-font-size', '--chat-line-height', '--interface-font-ratio', '--chat-font-ratio',
+  '--interface-font-weight', '--chat-font-weight',
 ] as const;
 export interface SharedChatAppearance {
   theme: 'light' | 'dark';
@@ -41,6 +42,7 @@ function safeAppearanceValue(property: string, value: unknown): value is string 
   if (property === '--accent-rgb') return /^\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*$/.test(value);
   if (property.endsWith('-font') || property === '--mono') return CSS.supports('font-family', value);
   if (property === '--chat-font-size') return /^\d+(\.\d+)?px$/.test(value) && parseFloat(value) >= 8 && parseFloat(value) <= 48;
+  if (property === '--interface-font-weight' || property === '--chat-font-weight') return /^(300|400|500|600|700)$/.test(value);
   return /^\d+(\.\d+)?$/.test(value) && Number(value) > 0 && Number(value) <= 4;
 }
 

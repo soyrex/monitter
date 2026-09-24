@@ -1029,6 +1029,12 @@ pub struct Settings {
     pub chat_font_size: u8,
     #[serde(default = "default_interface_font_size")]
     pub interface_font_size: u8,
+    #[serde(default = "default_font_weight")]
+    pub interface_font_weight: u16,
+    #[serde(default = "default_font_weight")]
+    pub chat_font_weight: u16,
+    #[serde(default = "default_font_weight")]
+    pub terminal_font_weight: u16,
     #[serde(default = "default_chat_line_height")]
     pub chat_line_height: f64,
     #[serde(default = "default_terminal_line_height")]
@@ -1112,6 +1118,9 @@ fn default_chat_font_size() -> u8 {
 }
 fn default_interface_font_size() -> u8 {
     14
+}
+fn default_font_weight() -> u16 {
+    400
 }
 fn default_chat_line_height() -> f64 {
     1.65
@@ -1656,6 +1665,9 @@ pub fn default_snapshot() -> Snapshot {
             terminal_font_size: default_terminal_font_size(),
             chat_font_size: default_chat_font_size(),
             interface_font_size: default_interface_font_size(),
+            interface_font_weight: default_font_weight(),
+            chat_font_weight: default_font_weight(),
+            terminal_font_weight: default_font_weight(),
             chat_line_height: default_chat_line_height(),
             terminal_line_height: default_terminal_line_height(),
             terminal_font: String::new(),
@@ -1890,6 +1902,9 @@ mod task_migration_tests {
         assert_eq!(snapshot.settings.terminal_font_size, 14);
         assert_eq!(snapshot.settings.chat_font_size, 13);
         assert_eq!(snapshot.settings.interface_font_size, 14);
+        assert_eq!(snapshot.settings.interface_font_weight, 400);
+        assert_eq!(snapshot.settings.chat_font_weight, 400);
+        assert_eq!(snapshot.settings.terminal_font_weight, 400);
         assert!(snapshot.approval_requests.is_empty());
         assert!(snapshot.subagent_sessions.is_empty());
     }

@@ -366,6 +366,7 @@ const emptyPreviewSnapshot = (): Snapshot => ({
   approvalRequests: [],
   approvalRules: [],
   settings: { accent: "#3f9d6a", theme: "system", interfaceScale: 125, interfaceDensity: 'normal', windowSurface: 'opaque', windowTransparency: 18,
+    interfaceFontWeight: 400, chatFontWeight: 400, terminalFontWeight: 400,
     showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard', busyMessageMode: 'queue' },
 });
 const emptyUsageOverview = (): UsageOverview => ({ generatedAt: Date.now(), capturedSince: null, subscriptions: [], providerTotals: [], recentRuns: [] });

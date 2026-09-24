@@ -7455,6 +7455,16 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     {
         return Err("Font sizes must be between 8 and 32 pixels.".into());
     }
+    if [
+        settings.interface_font_weight,
+        settings.chat_font_weight,
+        settings.terminal_font_weight,
+    ]
+    .iter()
+    .any(|weight| !(300..=700).contains(weight) || *weight % 100 != 0)
+    {
+        return Err("Font weights must be 300, 400, 500, 600, or 700.".into());
+    }
     if !settings.chat_line_height.is_finite()
         || !(1.0..=2.5).contains(&settings.chat_line_height)
         || !settings.terminal_line_height.is_finite()
@@ -9129,6 +9139,9 @@ name@rafa.test",
         settings.interface_font_size = 18;
         settings.chat_font_size = 20;
         settings.terminal_font_size = 16;
+        settings.interface_font_weight = 500;
+        settings.chat_font_weight = 600;
+        settings.terminal_font_weight = 300;
         settings.chat_line_height = 1.8;
         settings.terminal_line_height = 1.2;
         let restored: Settings =
@@ -9142,6 +9155,17 @@ name@rafa.test",
                     0 => invalid.interface_font_size = size,
                     1 => invalid.chat_font_size = size,
                     _ => invalid.terminal_font_size = size,
+                }
+                assert!(validate_settings(&invalid).is_err());
+            }
+        }
+        for field in 0..3 {
+            for weight in [200, 350, 800] {
+                let mut invalid = restored.clone();
+                match field {
+                    0 => invalid.interface_font_weight = weight,
+                    1 => invalid.chat_font_weight = weight,
+                    _ => invalid.terminal_font_weight = weight,
                 }
                 assert!(validate_settings(&invalid).is_err());
             }

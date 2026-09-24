@@ -53,7 +53,7 @@
 </div>
 
 <style>
-  .rich-editor { position:relative; min-height:100%; color:var(--ink); font:var(--chat-font-size,13px)/var(--chat-line-height,1.65) var(--chat-font,"IBM Plex Sans",system-ui,sans-serif); }
+  .rich-editor { position:relative; min-height:100%; color:var(--ink); font:var(--chat-font-weight,400) var(--chat-font-size,13px)/var(--chat-line-height,1.65) var(--chat-font,"IBM Plex Sans",system-ui,sans-serif); }
   .placeholder { position:absolute; top:0; left:0; color:var(--muted); pointer-events:none; }
   .rich-editor :global(.tiptap) { min-height:100%; outline:none; overflow-wrap:anywhere; white-space:pre-wrap; }
   .rich-editor :global(.tiptap > :first-child) { margin-top:0; }

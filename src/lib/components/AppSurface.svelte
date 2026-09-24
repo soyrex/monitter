@@ -2117,6 +2117,9 @@
     root.style.setProperty('--chat-font-ratio', String((settings.chatFontSize ?? 13) / 13));
     root.style.setProperty('--chat-font-size', `${settings.chatFontSize ?? 13}px`);
     root.style.setProperty('--terminal-font-size', String(settings.terminalFontSize ?? 14));
+    root.style.setProperty('--interface-font-weight', String(settings.interfaceFontWeight ?? 400));
+    root.style.setProperty('--chat-font-weight', String(settings.chatFontWeight ?? 400));
+    root.style.setProperty('--terminal-font-weight', String(settings.terminalFontWeight ?? 400));
     root.style.setProperty('--chat-line-height', String(settings.chatLineHeight ?? 1.65));
     root.style.setProperty('--terminal-line-height', String(settings.terminalLineHeight ?? 1));
     root.style.setProperty('--window-transparency', `${settings.windowTransparency ?? 18}%`);
@@ -5931,6 +5934,7 @@
     --density-draft-composer-margin-top: 12px;
     --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-family: var(--interface-font, "IBM Plex Sans", system-ui, sans-serif);
+    font-weight: var(--interface-font-weight, 400);
     color: var(--ink);
     background: var(--paper);
     font-synthesis: none;
@@ -7048,6 +7052,7 @@
   .composer.expanded .composer-footer { padding-top:8px; border-top:1px solid var(--line); }
   .composer textarea {
     font-family: var(--chat-font, "IBM Plex Sans", system-ui, sans-serif);
+    font-weight: var(--chat-font-weight, 400);
     display: block;
     width: 100%;
     min-height: 52px;

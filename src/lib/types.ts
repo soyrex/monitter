@@ -279,6 +279,7 @@ export interface Settings {
   tintUserMessages?: boolean;
   compressToolCalls?: boolean;
   terminalFontSize?: number; chatFontSize?: number; interfaceFontSize?: number;
+  terminalFontWeight?: number; chatFontWeight?: number; interfaceFontWeight?: number;
   chatLineHeight?: number; terminalLineHeight?: number;
   terminalFont?: string; chatFont?: string; interfaceFont?: string;
   windowSurface?: 'opaque' | 'translucent' | 'glass';

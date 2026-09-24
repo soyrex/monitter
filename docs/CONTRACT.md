@@ -483,6 +483,8 @@ Base sizes `interfaceFontSize`, `chatFontSize`, and `terminalFontSize` are integ
 
 Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions.
 
+`interfaceFontWeight`, `chatFontWeight`, and `terminalFontWeight` are saved independently as numeric weights 300, 400, 500, 600, or 700, each defaulting to 400 for older snapshots. The Typography sliders preview changes while dragged and save on release. Interface weight changes ordinary UI text without removing explicit heading/bold emphasis; chat weight applies to messages and the composer; terminal weight updates xterm's normal and bold renderers in existing sessions. A selected font may map an unavailable weight to its nearest installed style.
+
 Terminal colour themes are client-local and stored in `monitter.appearance.terminal-theme.v1` so native,
 browser, and remote views can differ without a backend rebuild. The choices are Monitter, Catppuccin
 Mocha, Dracula, Gruvbox Dark, Molokai, Nord, One Dark, Solarized Dark, Wombat, and XTerm. Changing

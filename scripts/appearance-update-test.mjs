@@ -15,6 +15,7 @@ const settings = {
   userName: 'Alex', shortcutMode: 'standard', showTabCloseButtons: true, autoHideTabs: false,
   tabStyle: 'classic', interfaceDensity: 'normal', tintUserMessages: true,
   compressToolCalls: false, terminalFontSize: 14, chatFontSize: 13, interfaceFontSize: 14,
+  terminalFontWeight: 400, chatFontWeight: 400, interfaceFontWeight: 400,
   chatLineHeight: 1.65, terminalLineHeight: 1, terminalFont: 'IBM Plex Mono',
   chatFont: 'IBM Plex Sans', interfaceFont: 'IBM Plex Sans', windowSurface: 'opaque',
   windowTransparency: 18, showActivePaneBorder: true, dimInactivePanes: false,
@@ -26,6 +27,7 @@ const theme = { light: 'monitter', dark: 'monitter', accent: '#3f9d6a', contrast
 const appearanceFields = [
   'theme', 'windowSurface', 'interfaceDensity', 'interfaceFontSize', 'chatFontSize',
   'terminalFontSize', 'chatLineHeight', 'terminalLineHeight', 'windowTransparency',
+  'interfaceFontWeight', 'chatFontWeight', 'terminalFontWeight',
   'interfaceFont', 'chatFont', 'terminalFont',
 ];
 const changed = [];
@@ -91,6 +93,9 @@ const rendererFactory = (tint, native) => new Function('appearanceKey', 'browser
 const renderer = rendererFactory(20, false);
 const before = { ...writes };
 renderer.applyAppearance(settings, theme, 125);
+assert.equal(style['--interface-font-weight'], '400');
+assert.equal(style['--chat-font-weight'], '400');
+assert.equal(style['--terminal-font-weight'], '400');
 const afterFirst = { ...writes };
 for (let i = 0; i < 1000; i++) renderer.applyAppearance({ ...settings }, { ...theme }, 125);
 assert.deepEqual(writes, afterFirst, 'identical fresh snapshot objects must not repeat DOM/storage writes');
@@ -98,6 +103,8 @@ const afterRepeats = { ...writes };
 assert.ok(afterFirst.style > before.style && afterFirst.storage > before.storage, 'first appearance must write DOM and storage');
 renderer.applyAppearance({ ...settings, chatFont: 'Changed Font' }, theme, 125);
 assert.ok(writes.style > afterFirst.style, 'font change must reapply appearance');
+renderer.applyAppearance({ ...settings, chatFontWeight: 600 }, theme, 125);
+assert.equal(style['--chat-font-weight'], '600', 'weight change must reach the document');
 const afterFont = { ...writes };
 renderer.applyAppearance(settings, { ...theme, light: 'nord', dark: 'dracula' }, 125);
 assert.ok(writes.style > afterFont.style, 'theme palette change must reapply appearance');

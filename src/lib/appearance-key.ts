@@ -9,6 +9,7 @@ export function appearanceKey(settings: Settings, theme: AppThemeSelection, scal
   return JSON.stringify([
     settings.theme, settings.windowSurface, settings.interfaceDensity,
     settings.interfaceFontSize, settings.chatFontSize, settings.terminalFontSize,
+    settings.interfaceFontWeight, settings.chatFontWeight, settings.terminalFontWeight,
     settings.chatLineHeight, settings.terminalLineHeight, settings.windowTransparency,
     settings.interfaceFont, settings.chatFont, settings.terminalFont,
     theme.light, theme.dark, theme.accent, theme.contrast, scale, tint, nativeRuntime,

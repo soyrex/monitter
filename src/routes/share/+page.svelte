@@ -412,7 +412,7 @@ onMount(() => {
 <style>
 :global(*){box-sizing:border-box}
 :global(body){margin:0;background:var(--sidebar,#20211f);color:var(--ink,#e9e7e1)}
-.share-stage{height:100dvh;display:grid;place-items:center;padding:24px;overflow:hidden;font:400 14px/1.5 var(--interface-font,'IBM Plex Sans',system-ui,sans-serif)}
+.share-stage{height:100dvh;display:grid;place-items:center;padding:24px;overflow:hidden;font:var(--interface-font-weight,400) 14px/1.5 var(--interface-font,'IBM Plex Sans',system-ui,sans-serif)}
 .share{width:min(1180px,100%);height:min(800px,100%);min-height:0;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line,#3d403b);border-radius:12px;background:var(--paper,#282a27);box-shadow:0 18px 58px #0007}
 .brand{flex:none;height:46px;display:flex;gap:12px;align-items:center;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel,#30322f)}
 .brand a{color:var(--ink);font-weight:600;text-decoration:none}
@@ -468,7 +468,7 @@ article.user .bubble{width:fit-content;min-width:min(260px,100%);margin-left:aut
 .pending button{display:grid;padding:0;border:0;background:transparent;color:var(--muted)}
 form{flex:none;padding:0 16px 12px;background:var(--paper)}
 .composer{position:relative;box-sizing:border-box;margin:0 auto;padding:11px 12px 9px;border:1px solid var(--line);border-radius:10px;background:color-mix(in srgb,var(--panel) 80%,transparent);backdrop-filter:blur(16px);box-shadow:0 8px 30px #0002;overflow:hidden}
-.composer textarea{font-family:var(--chat-font,'IBM Plex Sans',system-ui,sans-serif);display:block;width:100%;min-height:52px;max-height:25vh;resize:vertical;border:0;outline:0;padding:2px;color:var(--ink);background:transparent;font-size:var(--chat-font-size,13px);line-height:var(--chat-line-height,1.65)}
+.composer textarea{font-family:var(--chat-font,'IBM Plex Sans',system-ui,sans-serif);font-weight:var(--chat-font-weight,400);display:block;width:100%;min-height:52px;max-height:25vh;resize:vertical;border:0;outline:0;padding:2px;color:var(--ink);background:transparent;font-size:var(--chat-font-size,13px);line-height:var(--chat-line-height,1.65)}
 .composer textarea:focus-visible{outline:none;box-shadow:none}
 .composer textarea::placeholder{color:var(--muted)}
 .composer-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 10px;color:var(--muted);font:calc(10px * var(--interface-font-ratio,1)) var(--mono,monospace)}
@@ -504,7 +504,7 @@ form{flex:none;padding:0 16px 12px;background:var(--paper)}
 
 .conversation :global(.avatar){display:grid;flex:none;place-items:center;width:21px;height:21px;border-radius:5px;background:var(--soft);color:#fff;font:600 10px var(--mono,monospace)}
 
-.messages{font:var(--chat-font-size,13px)/var(--chat-line-height,1.65) var(--chat-font,'IBM Plex Sans',system-ui,sans-serif)}
+.messages{font:var(--chat-font-weight,400) var(--chat-font-size,13px)/var(--chat-line-height,1.65) var(--chat-font,'IBM Plex Sans',system-ui,sans-serif)}
 
 @media(max-width:700px){.shared-nav{display:none;background:var(--sidebar,#191b19);opacity:1;z-index:8}
 .sidebar-open .shared-nav{display:block;transform:translateX(0)}

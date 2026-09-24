@@ -22,6 +22,7 @@
   type Category = "profile" | "appearance" | "typography" | "behaviour" | "conversation" | "approvals" | "agents" | "lan" | "remote" | "extensions" | "environment";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
+  type FontWeightKey = "interfaceFontWeight" | "chatFontWeight" | "terminalFontWeight";
   type LineHeightKey = "chatLineHeight" | "terminalLineHeight";
 
   let {
@@ -73,10 +74,10 @@
     { id: "approvals", label: "Approvals", detail: "Saved always-approve rules", icon: ShieldCheck },
     { id: "conversation", label: "Conversation", detail: "Messages and activity", icon: MessageSquare },
   ];
-  const fonts: { key: FontKey; sizeKey: FontSizeKey; size: number; label: string; fallback: string }[] = [
-    { key: "interfaceFont", sizeKey: "interfaceFontSize", size: 14, label: "Interface font", fallback: "IBM Plex Sans" },
-    { key: "chatFont", sizeKey: "chatFontSize", size: 13, label: "Chat font", fallback: "IBM Plex Sans" },
-    { key: "terminalFont", sizeKey: "terminalFontSize", size: 14, label: "Terminal font", fallback: "IBM Plex Mono" },
+  const fonts: { key: FontKey; sizeKey: FontSizeKey; weightKey: FontWeightKey; size: number; label: string; fallback: string }[] = [
+    { key: "interfaceFont", sizeKey: "interfaceFontSize", weightKey: "interfaceFontWeight", size: 14, label: "Interface font", fallback: "IBM Plex Sans" },
+    { key: "chatFont", sizeKey: "chatFontSize", weightKey: "chatFontWeight", size: 13, label: "Chat font", fallback: "IBM Plex Sans" },
+    { key: "terminalFont", sizeKey: "terminalFontSize", weightKey: "terminalFontWeight", size: 14, label: "Terminal font", fallback: "IBM Plex Mono" },
   ];
   const activeCategory = $derived(categories.some((item) => item.id === category) ? category as Category : "appearance");
   const densities = ['tight', 'normal', 'spacious'] as const;
@@ -93,6 +94,7 @@
   const advancedAccent = $derived($appTheme.accent ?? selectedLightTheme.light.accent);
 
   let pending = $state(0);
+  let previewWeights = $state<Partial<Record<FontWeightKey, number>>>({});
   let saveError = $state("");
   let userNameError = $state("");
   let savedAt = $state(0);
@@ -112,8 +114,10 @@
     try {
       await onsave(patch);
       savedAt = Date.now();
+      return true;
     } catch (reason) {
       saveError = reason instanceof Error ? reason.message : String(reason);
+      return false;
     } finally {
       pending -= 1;
     }
@@ -131,6 +135,25 @@
   function saveNumber(event: Event, key: FontSizeKey, fallback: number) {
     const input = event.currentTarget as HTMLInputElement;
     if (input.checkValidity()) void save({ [key]: Number(input.value || fallback) });
+  }
+
+  function previewFontWeight(event: Event, key: FontWeightKey) {
+    const weight = Number((event.currentTarget as HTMLInputElement).value);
+    previewWeights = { ...previewWeights, [key]: weight };
+    document.documentElement.style.setProperty(`--${key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`, String(weight));
+  }
+
+  async function saveFontWeight(event: Event, key: FontWeightKey) {
+    const input = event.currentTarget as HTMLInputElement;
+    const weight = Number(input.value);
+    const saved = await save({ [key]: weight });
+    if (!saved) {
+      input.value = String(settings[key] ?? 400);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    const next = { ...previewWeights };
+    delete next[key];
+    previewWeights = next;
   }
 
   function saveLineHeight(event: Event, key: LineHeightKey, fallback: number) {
@@ -419,12 +442,13 @@
               <div class="font-setting">
                 <label>{font.label}<input aria-label={font.label} list={font.key === "terminalFont" ? "terminal-font-choices" : "text-font-choices"} placeholder={font.fallback + " (default)"} maxlength="100" value={settings[font.key] ?? ""} onchange={(event) => void save({ [font.key]: event.currentTarget.value.trim() })} /></label>
                 <label>{font.label} base size (px)<input type="number" aria-label={font.label + " base size"} min="8" max="32" step="1" value={settings[font.sizeKey] ?? font.size} onchange={(event) => saveNumber(event, font.sizeKey, font.size)} /></label>
+                <label class="font-weight-row"><span>{font.label} weight <strong>{previewWeights[font.weightKey] ?? settings[font.weightKey] ?? 400}</strong></span><input class="range" type="range" use:rangeFill={previewWeights[font.weightKey] ?? settings[font.weightKey] ?? 400} aria-label={font.label + " weight"} min="300" max="700" step="100" value={settings[font.weightKey] ?? 400} oninput={event => previewFontWeight(event, font.weightKey)} onchange={event => void saveFontWeight(event, font.weightKey)} /><small>Light · Regular · Medium · Semibold · Bold</small></label>
               </div>
             {/each}
           </div>
           <datalist id="text-font-choices">{#each ["IBM Plex Sans", "Arial", "Helvetica Neue", "Avenir Next", "Georgia", "Verdana", "IBM Plex Mono", "Menlo"] as name}<option value={name}></option>{/each}</datalist>
           <datalist id="terminal-font-choices">{#each ["IBM Plex Mono", "Menlo", "Monaco", "Courier New", "SF Mono", "JetBrains Mono", "Fira Code"] as name}<option value={name}></option>{/each}</datalist>
-          <p class="hint">Base sizes are before interface scaling. Use a monospace font for terminals; unavailable fonts fall back to the default.</p>
+          <p class="hint">Base sizes are before interface scaling. Weight steps depend on the selected font's available styles; headings and bold text retain their emphasis. Use a monospace font for terminals.</p>
         </section>
         <section class="setting-card" aria-labelledby="line-height-heading">
           <div class="card-heading"><h2 id="line-height-heading">Line height</h2><p>Control the vertical space in chat messages and terminal output.</p></div>
@@ -499,6 +523,12 @@
   .profile-name { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.profile-name input { width:100%; max-width:420px; padding:8px 9px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--paper); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); }.profile-name input:focus { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }
   .switch-row { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:5px 0; }.switch-row span { display:grid; gap:3px; }.switch-row strong,.range-setting { font-size:calc(12px * var(--interface-font-ratio, 1)); }.switch-row small { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); line-height:1.45; }.switch-row input { appearance:none; -webkit-appearance:none; position:relative; flex:none; width:32px; height:18px; margin:0; border:1px solid var(--line); border-radius:999px; background:var(--soft); cursor:pointer; transition:.15s ease; }.switch-row input::after { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--muted); content:""; transition:.15s ease; }.switch-row input:checked { border-color:var(--accent); background:var(--accent); }.switch-row input:checked::after { left:16px; background:var(--on-accent, #fff); }.switch-row input:focus-visible,.settings-nav button:focus-visible,.segmented button:focus-visible,.swatches button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .range-setting { display:grid; grid-template-columns:1fr auto; gap:9px; padding-top:8px; }.range-setting input { grid-column:1 / -1; }.range-setting.disabled { opacity:.52; }.font-grid { display:grid; gap:16px; }.font-setting { display:grid; grid-template-columns:minmax(0, 1fr) 180px; gap:12px; padding-bottom:16px; border-bottom:1px solid var(--line); }.font-setting:last-child { padding-bottom:0; border-bottom:0; }.font-setting label { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.font-setting input { width:100%; padding:8px 9px; border:1px solid var(--line); border-radius:6px; outline:none; color:var(--ink); background:var(--paper); font:calc(12px * var(--interface-font-ratio, 1)) var(--interface-font, sans-serif); }.font-setting input:focus { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }.error { max-width:760px; margin:0 auto 14px; padding:9px 11px; border:1px solid color-mix(in srgb, #b84c44 40%, var(--line)); border-radius:7px; color:#b84c44; background:color-mix(in srgb, #b84c44 7%, transparent); font-size:calc(11.5px * var(--interface-font-ratio, 1)); }
+  .font-setting .font-weight-row { grid-column:1 / -1; gap:8px; }
+  .font-weight-row span { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+  .font-weight-row strong { color:var(--accent-ink,var(--accent)); font:600 calc(11px * var(--interface-font-ratio,1)) var(--mono,monospace); }
+  .font-setting .font-weight-row input[type="range"] { width:100%; padding:0; border:0; border-radius:0; box-shadow:none; background:transparent; accent-color:var(--accent); cursor:pointer; }
+  .font-setting .font-weight-row input[type="range"]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  .font-weight-row small { color:var(--muted); font-size:calc(10px * var(--interface-font-ratio,1)); }
   @keyframes spin { to { transform:rotate(360deg); } }
   @container (max-width:620px) { .settings-pane { grid-template-columns:150px minmax(0,1fr); }.settings-nav { padding:14px 7px; }.settings-nav button { padding:9px 7px; }.settings-nav small { display:none; }.settings-content { padding:18px 14px; }.settings-header { margin-bottom:18px; }.settings-header h1 { font-size:calc(20px * var(--interface-font-ratio, 1)); }.save-state { font-size:calc(10px * var(--interface-font-ratio, 1)); }.font-setting { grid-template-columns:1fr; gap:10px; } }
   @container (max-width:430px) { .settings-pane { grid-template-columns:52px minmax(0,1fr); }.settings-nav { padding:12px 8px; }.nav-heading,.settings-nav span { display:none; }.settings-nav button { justify-content:center; padding:10px; }.settings-content { padding:16px 12px; }.setting-card { padding:14px; }.settings-header { align-items:center; }.save-state { font-size:0; }.save-state :global(svg) { width:14px; height:14px; }.swatches { gap:7px; }.colour-picker { margin-left:0; }.app-theme-selectors { grid-template-columns:1fr; }.theme-default-row { align-items:flex-start; flex-direction:column; } }
