@@ -49,6 +49,7 @@
     ChartPie,
     ArrowUp,
     ArrowRightLeft,
+    GitFork,
     ArrowLeft,
     Search,
     ChevronDown,
@@ -104,10 +105,12 @@
     Settings,
     Task,
     ModelSettings,
+    ModelCatalog,
     TerminalTarget,
     TaskGitStatus,
     Attachment,
     AttachmentTarget,
+    Message,
     AttachmentFileData,
     ApprovalDecision,
     ApprovalRequest,
@@ -612,6 +615,7 @@
       | "host"
       | "taskSettings"
       | "handoff"
+      | "fork"
       | "channel"
       | "archived"
       | "project"
@@ -641,6 +645,10 @@
     taskCwd = $state(""),
     renameTitle = $state("");
   let handoffAgentId = $state(""), handoffNote = $state("");
+  let forkSourceTaskId = $state(""), forkMessageId = $state(""), forkAgentId = $state(""), forkModelSettings = $state<ModelSettings | null>(null), forkError = $state("");
+  let forkCatalog = $state<ModelCatalog | null>(null), forkCatalogLoading = $state(false), forkCatalogError = $state(''), forkCatalogRevision = 0;
+  const forkSourceTask = $derived(snapshot?.tasks.find(task => task.id === forkSourceTaskId) ?? null);
+  const forkTargetAgent = $derived(visibleAgents.find(agent => agent.id === forkAgentId) ?? null);
   let palette = $state<"switch" | "controls" | null>(null);
   let jevPalette = $state<{ query: string; loading: boolean; error?: string; suggestion?: { candidateId: string; label: string; detail: string } }>({ query: '', loading: false });
   let jevPaletteRequest = 0;
@@ -3073,6 +3081,76 @@
       error = `Could not hand off this chat: ${text(reason)}`;
     } finally { busy = false; }
   }
+  function visibleMessageText(message: Message) {
+    return message.role === 'user' ? operatorMessageText(message.text) : message.text;
+  }
+  async function copyMessage(message: Message) {
+    try {
+      await navigator.clipboard.writeText(visibleMessageText(message));
+      notice = 'Message text copied.';
+    } catch (reason) {
+      error = `Could not copy this message: ${text(reason)}`;
+    }
+  }
+  async function replyWithMessage(message: Message) {
+    if (!selectedTask) return;
+    const sourceTaskId = selectedTask.id;
+    const author = senderName(message) ?? (message.role === 'user' ? 'You' : selectedAgent?.name ?? 'Agent');
+    const safeAuthor = author.replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 48) || 'message';
+    await attachFiles([new File([visibleMessageText(message)], `Reply to ${safeAuthor}.md`, { type: 'text/markdown' })]);
+    if (selectedTask?.id !== sourceTaskId) return;
+    if (!error) {
+      notice = `Attached ${author}'s message for your reply.`;
+      void tick().then(() => composerDialog?.querySelector<HTMLElement>(composerExpanded ? '[contenteditable="true"]' : 'textarea')?.focus());
+    }
+  }
+  function beginFork(message: Message) {
+    if (!selectedTask) return;
+    forkSourceTaskId = selectedTask.id;
+    forkMessageId = message.id;
+    forkAgentId = visibleAgents.some(agent => agent.id === selectedTask.agentId) ? selectedTask.agentId : (visibleAgents[0]?.id ?? '');
+    forkModelSettings = forkAgentId === selectedTask.agentId ? (selectedTask.modelSettings ?? (selectedTask.model ? { model: selectedTask.model, reasoningEffort: null, fastMode: null } : null)) : null;
+    forkError = '';
+    void loadForkCatalog(forkAgentId);
+    modal = 'fork';
+  }
+  async function loadForkCatalog(agentId: string) {
+    const revision = ++forkCatalogRevision;
+    forkCatalog = null; forkCatalogError = ''; forkCatalogLoading = true;
+    const agent = visibleAgents.find(item => item.id === agentId);
+    try {
+      const catalog = await bridge.getModelCatalog({ agentId, projectId: forkSourceTask?.projectId ?? null, codexHome: agent?.provider === 'codex' ? agent.codexHome ?? null : null });
+      if (revision === forkCatalogRevision && agentId === forkAgentId) forkCatalog = catalog;
+    } catch (reason) {
+      if (revision === forkCatalogRevision) forkCatalogError = `Could not load models: ${text(reason)}`;
+    } finally {
+      if (revision === forkCatalogRevision) forkCatalogLoading = false;
+    }
+  }
+  function changeForkAgent(agentId: string) {
+    forkAgentId = agentId;
+    const source = forkSourceTask;
+    forkModelSettings = source && agentId === source.agentId ? (source.modelSettings ?? (source.model ? { model: source.model, reasoningEffort: null, fastMode: null } : null)) : null;
+    void loadForkCatalog(agentId);
+  }
+  function changeForkModel(modelId: string) {
+    const model = forkCatalog?.models.find(item => item.id === modelId);
+    forkModelSettings = modelId ? { model: modelId, reasoningEffort: model?.defaultEffort ?? null, fastMode: null } : null;
+  }
+  async function forkSelectedMessage() {
+    if (!forkSourceTaskId || !forkMessageId || !forkAgentId || busy) return;
+    busy = true; forkError = '';
+    try {
+      const target = await bridge.forkTask({ sourceTaskId: forkSourceTaskId, throughMessageId: forkMessageId, agentId: forkAgentId, modelSettings: forkModelSettings });
+      const fresh = await bridge.getSnapshot();
+      applySnapshot(fresh, ++snapshotIssued);
+      modal = null;
+      openTask(fresh.tasks.find(task => task.id === target.id) ?? target);
+      notice = 'Fork opened. The new agent will receive copied conversation text when you send a message.';
+    } catch (reason) {
+      forkError = `Could not fork this chat: ${text(reason)}`;
+    } finally { busy = false; }
+  }
   async function send() {
     if (busy || handleSlashSubmit()) return;
     if (currentDraftId) { await createTask(); return; }
@@ -4941,6 +5019,9 @@
           onEditTask={() => { renameTitle = selectedTask.title; taskProjectId = selectedTask.projectId ?? ''; modal = 'taskSettings'; }}
           onShare={shareSelectedChat}
           onHandoff={beginHandoff}
+          onCopyMessage={(message) => { void copyMessage(message); }}
+          onReplyMessage={(message) => { void replyWithMessage(message); }}
+          onForkMessage={beginFork}
           onMaximise={() => expandTab(true)}
         />{/key}
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
@@ -5825,6 +5906,25 @@
       </select></label>
       <label>Handoff note <span class="optional">Optional</span><textarea aria-label="Handoff note" bind:value={handoffNote} disabled={busy} placeholder="What should the next harness prioritise?"></textarea></label>
       <footer><button type="button" class="secondary" disabled={busy} onclick={() => (modal = null)}>Cancel</button><button class="primary" disabled={busy || !handoffAgentId}><ArrowRightLeft size={15}/>Hand off and continue</button></footer>
+</form>{/if}</Modal
+>
+<Modal
+  title="Fork this chat"
+  open={modal === "fork"}
+  onclose={() => (modal = null)}
+  >{#if forkSourceTask}<form class="form" onsubmit={(event) => { event.preventDefault(); void forkSelectedMessage(); }}>
+      <p class="hint">Copies this chat's visible user and agent messages through the selected message into a new tab. The original native session, tools, attachments, approvals and credentials are not copied. On your first send, the new agent receives the latest 32 copied messages as startup context (up to 2,500 characters each).</p>
+      <label>Continue with<select aria-label="Fork target agent" value={forkAgentId} disabled={busy} onchange={(event) => changeForkAgent(event.currentTarget.value)}>
+        {#each visibleAgents as agent}<option value={agent.id}>{agent.name} · {agent.provider}</option>{/each}
+      </select></label>
+      {#if forkTargetAgent}<label>Model for the new chat<select aria-label="Fork model" value={forkModelSettings?.model ?? ''} disabled={busy || forkCatalogLoading} onchange={(event) => changeForkModel(event.currentTarget.value)}>
+        <option value="">Agent default{forkTargetAgent.model ? ` · ${forkTargetAgent.model}` : ''}</option>
+        {#if forkModelSettings?.model && !forkCatalog?.models.some(model => model.id === forkModelSettings?.model)}<option value={forkModelSettings.model}>Current model · {forkModelSettings.model}</option>{/if}
+        {#each forkCatalog?.models ?? [] as model (model.id)}<option value={model.id}>{model.name} · {model.id}</option>{/each}
+      </select></label>{/if}
+      {#if forkCatalogLoading}<p class="hint" role="status">Reading available models…</p>{:else if forkCatalogError}<p class="hint">{forkCatalogError} The current or default model remains available.</p>{/if}
+      {#if forkError}<p class="error" role="alert">{forkError}</p>{/if}
+      <footer><button type="button" class="secondary" disabled={busy} onclick={() => (modal = null)}>Cancel</button><button class="primary" disabled={busy || !forkAgentId}><GitFork size={15}/>Create fork</button></footer>
     </form>{/if}</Modal
 >
 <Modal

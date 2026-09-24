@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
-  import { ArrowRightLeft, Check, CircleStop, Inbox, Maximize2, MessageSquare, MoreHorizontal, Paperclip, Pencil, Share2, Terminal } from '@lucide/svelte';
+  import { ArrowRightLeft, Check, CircleStop, Copy, GitFork, Inbox, Maximize2, MessageSquare, MoreHorizontal, Paperclip, Pencil, Reply, Share2, Terminal } from '@lucide/svelte';
   import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, QueuedMessage, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
   import { floating } from '$lib/floating';
-  import { isBlankReasoning, isCancellationMessage, isContextClearedMessage, modelSettingsChangeLabel, subagentThreadLink, showThinkingFallback, toolPresentation, type ConversationActivityItem } from '$lib/activity-grouping';
+  import { forkBoundaryLabel, isBlankReasoning, isCancellationMessage, isContextClearedMessage, modelSettingsChangeLabel, subagentThreadLink, showThinkingFallback, toolPresentation, type ConversationActivityItem } from '$lib/activity-grouping';
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
   import { chatDay } from '$lib/chat-dates';
@@ -81,6 +81,9 @@
     onEditTask,
     onShare,
     onHandoff,
+    onCopyMessage,
+    onReplyMessage,
+    onForkMessage,
     onMaximise,
   }: {
     active: boolean;
@@ -129,6 +132,9 @@
     onEditTask: () => void;
     onShare: () => void;
     onHandoff: () => void;
+    onCopyMessage: (message: Message) => void;
+    onReplyMessage: (message: Message) => void;
+    onForkMessage: (message: Message) => void;
     onMaximise: () => void;
   } = $props();
 
@@ -274,9 +280,11 @@
             {@const message=item.value}
             {@const mailBatch=displayMailBatches.find(batch => batch.messageId === message.id)}
             {@const settingsChange=modelSettingsChangeLabel(message)}
+            {@const forkBoundary=forkBoundaryLabel(message)}
             {#if mailBatch}<!-- The durable live inbox is rendered at the transcript foot. -->
             {:else if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator" aria-label={`Context Cleared at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · Context Cleared</time><span aria-hidden="true"></span></div>
             {:else if settingsChange}<div class="context-cleared-event" role="separator" aria-label={`${settingsChange} at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · {settingsChange}</time><span aria-hidden="true"></span></div>
+            {:else if forkBoundary}<div class="context-cleared-event" role="separator" aria-label={`${forkBoundary} at ${formatTime(message.createdAt)}`}><span aria-hidden="true"></span><time datetime={new Date(message.createdAt).toISOString()}>{formatTime(message.createdAt)} · {forkBoundary}</time><span aria-hidden="true"></span></div>
             {:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>
             {:else if !message.collaborationId || !displayCollaborations.find(value => value.id === message.collaborationId)}
               {@const optimistic=displayOptimisticMessages.find(item=>item.id===message.id)}
@@ -284,11 +292,13 @@
               {@const confirmed=displayConfirmedDeliveryIds[message.id]}
               {@const operator=message.role === 'user' ? splitOperatorMessage(message.text.replace(/^\[Two human operators are collaborating[^\n]*\]\n/, '')) : null}
               {@const humanName=operator?.name ?? (message.role==='user' ? senderName(message) : null)}
+              {@const messageAgent=message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null}
               <article class:user={message.role==='user'} class:tinted={message.role==='user' && (display.settings.tintUserMessages || !!humanName)} style:--participant-colour={humanName ? participantColour(humanName) : undefined} data-participant={humanName ?? undefined} class:sticky-user-request={message.role==='user' && message.id===displayLatestUserRequest?.id} class:system={message.role==='system'} class:final-answer={message.role==='assistant' && message.phase==='final_answer'} class:optimistic-message={!!optimistic || !!steering} class="message" data-message-phase={message.phase} data-live-entry={message.streamStatus==='streaming'} data-delivery-status={steering?.status ?? optimistic?.status} aria-label={message.role==='user' && message.id===displayLatestUserRequest?.id ? 'Latest user request' : undefined}>
                 <div class="message-bubble">
-                <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (displayAgent?.name ?? 'Agent') : 'System')} createdAt={message.createdAt}>
-                  {#snippet avatar()}{#if humanName}<span class="avatar message-avatar human-avatar" title={humanName}>{humanName.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(message.senderAgentId ? display.agents.find(agent=>agent.id===message.senderAgentId) : message.role==='assistant' ? displayAgent : null)}{/if}{/snippet}
+                <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (messageAgent?.name ?? (message.senderAgentId ? 'Previous agent' : displayAgent?.name ?? 'Agent')) : 'System')} createdAt={message.createdAt}>
+                  {#snippet avatar()}{#if humanName}<span class="avatar message-avatar human-avatar" title={humanName}>{humanName.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(messageAgent)}{/if}{/snippet}
                   {#if steering}<span class="steering-status" data-steering-status={steering.status} role="status" aria-label={steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}>{steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}</span>{:else if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
+                  {#snippet actions()}{#if message.role === 'user' || message.role === 'assistant'}<span class="message-actions" aria-label="Message actions"><button type="button" title="Copy message text" aria-label="Copy message text" disabled={!message.text} onclick={() => onCopyMessage(message)}><Copy size={13}/></button><button type="button" title="Attach message to reply" aria-label="Attach message to reply" disabled={!message.text} onclick={() => onReplyMessage(message)}><Reply size={14}/></button><button type="button" title="Fork chat through this message" aria-label="Fork chat through this message" disabled={message.streamStatus === 'streaming'} onclick={() => onForkMessage(message)}><GitFork size={13}/></button></span>{/if}{/snippet}
                 </MessageMeta>
                 {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>
                 {:else if message.role==='assistant' && message.streamStatus==='streaming'}<div class="streaming-text" data-stream-text>{message.text}</div>
@@ -355,7 +365,12 @@
   .task-overflow { position:relative; }
   .task-menu { display:grid; grid-auto-rows:min-content; align-content:start; width:max-content; min-width:155px; max-width:min(240px,calc(100vw - 24px)); height:max-content; max-height:min(320px,calc(100vh - 24px)); overflow-y:auto; overflow-x:hidden; }
   .task-menu button { display:flex; width:100%; min-height:32px; height:auto; flex:none; align-self:stretch; box-sizing:border-box; gap:7px; align-items:center; padding:7px; text-align:left; }
-  .message { max-width:100%; margin:0 0 24px; }
+  .message { max-width:100%; margin:12px 0; }
+  .message-actions { display:inline-flex; flex:none; align-items:center; gap:2px; color:var(--muted); }
+  .message-actions button { display:grid; place-items:center; width:23px; height:23px; padding:0; border:0; border-radius:5px; color:inherit; background:transparent; cursor:pointer; }
+  .message-actions button:hover:not(:disabled),.message-actions button:focus-visible { color:var(--accent-ink,var(--accent)); background:var(--soft); }
+  .message-actions button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .message-actions button:disabled { opacity:.3; cursor:not-allowed; }
   .approval-inline { display:flex; align-items:baseline; width:100%; min-height:30px; gap:8px; margin:0 0 4px; padding:4px 2px; border:0; color:var(--muted); background:transparent; text-align:left; font:calc(11px * var(--interface-font-ratio,1)) var(--interface-font,"IBM Plex Sans",sans-serif); }
   .approval-inline > span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .approval-inline:hover,.approval-inline:focus-visible { color:var(--ink); text-decoration:underline; text-decoration-color:var(--accent); text-underline-offset:3px; }

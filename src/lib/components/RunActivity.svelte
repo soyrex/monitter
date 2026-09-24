@@ -296,9 +296,10 @@
   .activity[open] :global(.chevron),.activity-trigger[aria-expanded=true] :global(.chevron),.call[open] :global(.call-chevron){transform:rotate(90deg)}
   .reasoning summary :global(svg){color:var(--accent-ink)}small{flex-shrink:0;color:var(--muted);font:calc(10px * var(--interface-font-ratio, 1)) var(--mono)}
   .activity-body{padding:0 14px 12px;overflow:auto;max-height:280px}
-  .process-tree{margin:10px 0}
-  .process-tree > summary{padding:9px 10px;color:var(--ink);font-size:calc(11px * var(--interface-font-ratio,1))}
-  .process-steps{position:relative;display:grid;gap:2px;margin:0 10px 10px 24px;padding-left:12px;border-left:1px solid var(--line)}
+  .process-tree{margin:10px 0;opacity:.6;transition:opacity .18s ease}
+  .process-tree:hover,.process-tree:focus-within{opacity:1}
+  .process-tree > summary{padding:9px 0;color:var(--ink);font-size:calc(11px * var(--interface-font-ratio,1))}
+  .process-steps{position:relative;display:grid;gap:2px;margin:0 0 10px 24px;padding-left:12px;border-left:1px solid var(--line)}
   .process-branch{position:relative;min-width:0}.process-branch > summary{gap:6px;padding:6px 5px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1))}.process-branch > summary span{display:flex;align-items:center;gap:6px}.process-branch > summary time{font-size:calc(9px * var(--interface-font-ratio,1))}.process-branch[open] > summary{color:var(--ink);background:color-mix(in srgb,var(--soft) 55%,transparent)}
   .process-branch-steps{display:grid;gap:2px;margin:0 0 5px 17px;padding-left:12px;border-left:1px solid var(--line)}
   .process-step{position:relative;min-width:0;border:0;border-radius:5px}
@@ -320,6 +321,7 @@
   .tool-image-preview{display:block;width:min(220px,calc(100% - 18px));margin:0 9px 9px;padding:0;border:1px solid var(--line);border-radius:6px;background:var(--soft);cursor:zoom-in;overflow:hidden}.tool-image-preview:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.tool-image-preview img{display:block;width:100%;max-height:150px;object-fit:contain;background:var(--paper)}
   pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(11px * var(--interface-font-ratio, 1))/1.6 var(--mono)}
   @media (max-width:640px){.activity{margin:2px 0 7px}.activity-trigger{padding:6px 0}}
+  @media (prefers-reduced-motion:reduce){.process-tree{transition:none}}
 </style>
 
 <ImageLightbox bind:image={lightbox} returnFocus={lightboxOpener}/>

@@ -147,6 +147,7 @@ No fake conversations, progress, token counts, host connections or model replies
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
 
 - `create_task { input: CreateTaskInput }` -> Task (rejects the internal Monitter Admin agent as a chat recipient)
+- `fork_task { input: { sourceTaskId, throughMessageId, agentId, modelSettings? } }` -> Task (copies ordinary user/assistant text through the selected message into a new idle chat; no native session or automatic model turn)
 - `plan_jev_route { agentId: string, prompt: string }` -> `JevRoutePlan` (native-owner only; requires an
   explicit non-internal harness opt-in and the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). It classifies a fresh prompt,
   writes an app-local trace containing a prompt fingerprint and typed decision/evidence, and does not create a
@@ -1167,6 +1168,19 @@ no queued messages or pending approval. The brief contains only recent ordinary 
 the source provider, working folder and optional user note; it deliberately excludes raw provider state,
 attachments, approval data and secrets. The target receives fresh permissions and is linked to the
 source through `parentTaskId` for provenance.
+
+The message header aligns its timestamp at the right and offers Copy, Reply and Fork beside
+the author. Copy writes only displayed message text to the clipboard. Reply stores that text
+as a normal Markdown attachment in the current task's working folder and places it in the
+composer, without sending. Fork selects an agent and optional model, then calls `fork_task`.
+The fork copies up to 2,000 visible user/assistant messages or 8 MiB of text, preserving
+their order and timestamps but not file attachments, diagnostic/tool events, response usage,
+native provider state, queued messages, approvals, or credentials. It adds a visible fork
+divider, stays idle until the user sends, and links to the source with `parentTaskId`.
+On that first send only, a bounded latest-32-message text excerpt (2,500 characters per
+message) accompanies the new request so the new harness can use the copied history as
+context. The modal discloses that limit and the fresh-session boundary. An unfinished
+streaming message cannot be the cutoff.
 
 ## Pane layouts and navigation
 

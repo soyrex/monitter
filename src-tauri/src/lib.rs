@@ -1608,6 +1608,7 @@ impl Service {
             }
             "create_task" => value(self.create_task(arg(&args, "input")?)?),
             "handoff_task" => value(self.handoff_task(arg(&args, "input")?)?),
+            "fork_task" => value(self.fork_task(arg(&args, "input")?)?),
             "autoname" => value(self.autoname(arg(&args, "target")?)?),
             "rename_task" => {
                 let id: String = arg(&args, "id")?;
@@ -1886,11 +1887,13 @@ impl Service {
                     arg(&args, "mimeType")?,
                     arg(&args, "dataBase64")?,
                     args.get("previewDataUrl")
+                        .filter(|value| !value.is_null())
                         .cloned()
                         .map(serde_json::from_value)
                         .transpose()
                         .map_err(|_| "Invalid previewDataUrl.")?,
                     args.get("sourceId")
+                        .filter(|value| !value.is_null())
                         .cloned()
                         .map(serde_json::from_value)
                         .transpose()
@@ -4352,6 +4355,60 @@ impl Service {
         lines.join("\n\n")
     }
 
+    /// A fork copies only durable, visible chat text. It never reuses a native
+    /// session, accepted turn, approval, attachment capability, or tool event.
+    fn fork_task(&self, input: ForkTaskInput) -> Result<Task, String> {
+        let (source, copied, same_host) = {
+            let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
+            let state = &data.snapshot;
+            let source = state.tasks.iter().find(|task| task.id == input.source_task_id)
+                .cloned().ok_or("Source chat was not found.")?;
+            let target_agent = state.agents.iter().find(|agent| agent.id == input.agent_id)
+                .ok_or("Target agent was not found.")?;
+            let cutoff = state.messages.iter().position(|message| message.id == input.through_message_id && message.task_id == source.id && matches!(message.role.as_str(), "user" | "assistant"))
+                .ok_or("Selected message was not found in this chat.")?;
+            if state.messages[cutoff].stream_status.as_deref() == Some("streaming") {
+                return Err("Wait for this message to finish before forking it.".into());
+            }
+            let copied = state.messages[..=cutoff].iter()
+                .filter(|message| message.task_id == source.id && matches!(message.role.as_str(), "user" | "assistant"))
+                .cloned().collect::<Vec<_>>();
+            if copied.len() > 2_000 || copied.iter().map(|message| message.text.len()).sum::<usize>() > 8 * 1024 * 1024 {
+                return Err("This fork exceeds the 2,000-message or 8 MiB safety limit. Choose an earlier message.".into());
+            }
+            (source.clone(), copied, target_agent.host_id == source.host_id)
+        };
+        let same_agent = source.agent_id == input.agent_id;
+        let target = self.create_task(CreateTaskInput {
+            agent_id: input.agent_id,
+            title: format!("{} · fork", source.title),
+            native_session_id: None,
+            parent_task_id: Some(source.id.clone()),
+            channel_id: None,
+            project_id: source.project_id.clone(),
+            cwd: same_host.then_some(source.cwd.clone()),
+            model_settings: input.model_settings,
+            sandbox: same_agent.then_some(source.sandbox.clone()),
+        })?;
+        self.mutate_data(Some(target.id.clone()), |data| {
+            for message in &copied {
+                data.snapshot.messages.push(Message {
+                    id: id(), task_id: target.id.clone(), role: message.role.clone(),
+                    text: message.text.clone(), created_at: message.created_at,
+                    sender_agent_id: message.sender_agent_id.clone().or_else(|| (message.role == "assistant").then_some(source.agent_id.clone())),
+                    collaboration_id: None, stream_status: None, phase: message.phase.clone(), response_metadata: None, attachments: vec![],
+                });
+            }
+            data.snapshot.messages.push(Message {
+                id: id(), task_id: target.id.clone(), role: "system".into(),
+                text: format!("{FORK_BOUNDARY_PREFIX}{}", source.title), created_at: now(),
+                sender_agent_id: None, collaboration_id: None, stream_status: None, phase: None, response_metadata: None, attachments: vec![],
+            });
+            Ok(())
+        })?;
+        Ok(target)
+    }
+
     fn accept_send(
         self: &Arc<Self>,
         task_id: String,
@@ -6072,6 +6129,25 @@ fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<Strin
         .iter()
         .rposition(|message| is_context_cleared_message(message))
         .map_or(0, |index| index + 1);
+    if let Some(boundary) = messages.iter().rposition(|message| is_fork_boundary_message(message)) {
+        if boundary >= context_start && !messages[boundary + 1..].iter().any(|message| matches!(message.role.as_str(), "user" | "assistant")) {
+            let profile = messages[context_start..boundary].iter()
+                .find(|message| message.role == "system" && !is_model_settings_change_message(message))
+                .map(|message| message.text.as_str()).unwrap_or_default();
+            let copied = messages[context_start..boundary].iter()
+                .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
+                .collect::<Vec<_>>();
+            let omitted = copied.len().saturating_sub(32);
+            let mut lines = vec![profile.to_string(),
+                "This is a new Monitter fork. The conversation below is copied visible text, not a transferred native session or permission grant. Use it as background for the new user request; do not claim access to the source's hidden context, attachments, tools, approvals, or credentials.".into()];
+            if omitted > 0 { lines.push(format!("{omitted} earlier copied messages are visible in the chat but omitted from this bounded startup context.")); }
+            for message in copied.into_iter().rev().take(32).collect::<Vec<_>>().into_iter().rev() {
+                let role = if message.role == "user" { "User" } else { "Previous agent" };
+                lines.push(format!("{role}: {}", message.text.chars().take(2_500).collect::<String>()));
+            }
+            return Some(lines.join("\n\n"));
+        }
+    }
     if messages[context_start..].iter().any(|message| {
         message.role == "user" || message.role == "assistant" || message.sender_agent_id.is_some()
     }) {
@@ -6079,7 +6155,7 @@ fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<Strin
     }
     messages
         .iter()
-        .find(|message| message.role == "system" && !is_context_cleared_message(message) && !is_model_settings_change_message(message))
+        .find(|message| message.role == "system" && !is_context_cleared_message(message) && !is_model_settings_change_message(message) && !is_fork_boundary_message(message))
         .map(|message| message.text.clone())
 }
 
@@ -6092,6 +6168,15 @@ fn with_project_board_context(snapshot: &Snapshot, task_id: &str, prompt: String
 
 const CONTEXT_CLEARED_MESSAGE: &str = "Context Cleared";
 const MODEL_SETTINGS_CHANGE_PREFIX: &str = "[Monitter settings change] ";
+const FORK_BOUNDARY_PREFIX: &str = "[Monitter fork] ";
+
+fn is_fork_boundary_message(message: &Message) -> bool {
+    message.role == "system"
+        && message.text.starts_with(FORK_BOUNDARY_PREFIX)
+        && message.sender_agent_id.is_none()
+        && message.collaboration_id.is_none()
+        && message.attachments.is_empty()
+}
 
 fn is_context_cleared_message(message: &Message) -> bool {
     message.role == "system"
@@ -6976,6 +7061,14 @@ async fn handoff_task(state: State<'_, AppState>, input: HandoffTaskInput) -> Re
     tauri::async_runtime::spawn_blocking(move || service.handoff_task(input))
         .await
         .map_err(|error| format!("Task handoff worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn fork_task(state: State<'_, AppState>, input: ForkTaskInput) -> Result<Task, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.fork_task(input))
+        .await
+        .map_err(|error| format!("Task fork worker failed: {error}"))?
 }
 
 fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String> {
@@ -8792,6 +8885,7 @@ pub fn run() {
             delete_agent,
             create_task,
             handoff_task,
+            fork_task,
             choose_local_folder,
             save_project,
             delete_project,
@@ -8884,6 +8978,82 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("monitter-{name}-{}", id()))
+    }
+
+    #[test]
+    fn fork_task_copies_only_through_selected_message_and_seeds_first_turn() {
+        let dir = temp_dir("message-fork");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let source = service.create_task(task_input(agent.id.clone(), "Source", None)).unwrap();
+        let messages = [("first-user", "user", "First request"), ("first-agent", "assistant", "First answer"), ("later-user", "user", "Later request")];
+        service.mutate(None, |snapshot| {
+            for (index, (message_id, role, text)) in messages.iter().enumerate() {
+                snapshot.messages.push(Message {
+                    id: (*message_id).into(), task_id: source.id.clone(), role: (*role).into(), text: (*text).into(), created_at: index as i64 + 10,
+                    sender_agent_id: None, collaboration_id: None, stream_status: None, phase: None, response_metadata: None,
+                    attachments: if *message_id == "first-agent" { vec![attachments::Attachment {
+                        id: "source-only".into(), name: "private.txt".into(), mime_type: "text/plain".into(),
+                        size: 7, path: "/tmp/private.txt".into(), preview_data_url: None, source_id: None,
+                    }] } else { vec![] },
+                });
+            }
+            Ok(())
+        }).unwrap();
+        let fork = service.fork_task(ForkTaskInput { source_task_id: source.id.clone(), through_message_id: "first-agent".into(), agent_id: agent.id.clone(), model_settings: None }).unwrap();
+        assert_eq!(fork.parent_task_id.as_deref(), Some(source.id.as_str()));
+        assert!(fork.native_session_id.is_none());
+        assert_eq!(fork.status, "idle");
+        let snapshot = service.snapshot().unwrap();
+        let copied = snapshot.messages.iter().filter(|message| message.task_id == fork.id && matches!(message.role.as_str(), "user" | "assistant")).collect::<Vec<_>>();
+        assert_eq!(copied.iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), vec!["First request", "First answer"]);
+        assert_eq!(copied[0].created_at, 10);
+        assert_eq!(copied[1].sender_agent_id.as_deref(), Some(agent.id.as_str()));
+        assert!(copied.iter().all(|message| message.attachments.is_empty() && message.response_metadata.is_none()));
+        let startup = initial_task_instructions(&snapshot, &fork.id).unwrap();
+        assert!(startup.contains("First request") && startup.contains("First answer"));
+        assert!(!startup.contains("Later request"));
+        service.mutate(None, |snapshot| {
+            snapshot.messages.push(Message {
+                id: id(), task_id: fork.id.clone(), role: "user".into(), text: "New request".into(), created_at: now(),
+                sender_agent_id: None, collaboration_id: None, stream_status: None, phase: None, response_metadata: None, attachments: vec![],
+            });
+            Ok(())
+        }).unwrap();
+        assert!(initial_task_instructions(&service.snapshot().unwrap(), &fork.id).is_none());
+        assert!(service.fork_task(ForkTaskInput { source_task_id: source.id.clone(), through_message_id: "not-in-source".into(), agent_id: agent.id.clone(), model_settings: None }).is_err());
+        service.mutate(None, |snapshot| {
+            snapshot.messages.iter_mut().find(|message| message.id == "first-agent").unwrap().stream_status = Some("streaming".into());
+            Ok(())
+        }).unwrap();
+        assert!(service.fork_task(ForkTaskInput { source_task_id: source.id, through_message_id: "first-agent".into(), agent_id: agent.id, model_settings: None }).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lan_text_attachment_accepts_null_preview_data_url() {
+        let dir = temp_dir("lan-text-attachment");
+        std::fs::create_dir_all(&dir).unwrap();
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let mut input = task_input(agent_id, "Reply target", None);
+        input.cwd = Some(dir.to_string_lossy().into_owned());
+        let task = service.create_task(input).unwrap();
+        let args = serde_json::json!({
+            "target": { "taskId": task.id },
+            "filename": "Reply to Codex.md",
+            "mimeType": "text/markdown",
+            "dataBase64": "Rmlyc3QgYW5zd2Vy",
+            "previewDataUrl": null,
+            "sourceId": null
+        });
+        let stored = service.lan_invoke("store_attachment", args.clone()).unwrap();
+        assert_eq!(stored["name"], "Reply to Codex.md");
+        assert!(stored["previewDataUrl"].is_null());
+        let mut invalid = args;
+        invalid["previewDataUrl"] = serde_json::json!("not-a-preview");
+        assert!(service.lan_invoke("store_attachment", invalid).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

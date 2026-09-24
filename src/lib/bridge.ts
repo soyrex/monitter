@@ -10,6 +10,7 @@ import type {
   Channel,
   CreateTaskInput,
   HandoffTaskInput,
+  ForkTaskInput,
   Host,
   ProbeResult,
   Project,
@@ -78,6 +79,7 @@ export interface MonitterBridge {
   deleteAgent(id: string, chatHandling?: 'archive' | 'delete'): Promise<Snapshot>;
   createTask(input: CreateTaskInput): Promise<Task>;
   handoffTask(input: HandoffTaskInput): Promise<Task>;
+  forkTask(input: ForkTaskInput): Promise<Task>;
   chooseLocalFolder(initial?: string): Promise<string | null>;
   renameTask(id: string, title: string): Promise<Snapshot>;
   autoname(target: AutonameTarget): Promise<Snapshot>;
@@ -277,6 +279,7 @@ const nativeBridge: MonitterBridge = {
     invoke<Snapshot>("delete_agent", { id, chatHandling }),
   createTask: (input) => invoke<Task>("create_task", { input }),
   handoffTask: (input) => invoke<Task>("handoff_task", { input }),
+  forkTask: (input) => invoke<Task>("fork_task", { input }),
   chooseLocalFolder: (initial = '') => isLanBrowser() ? desktopOnly() : invoke<string | null>("choose_local_folder", { initial }),
   renameTask: (id, title) => invoke<Snapshot>("rename_task", { id, title }),
   autoname: target => invoke<Snapshot>("autoname", { target }),
@@ -337,7 +340,7 @@ const nativeBridge: MonitterBridge = {
   getTaskGitDiff: (taskId, path, scope) => invoke<TaskGitDiff>("get_task_git_diff", { taskId, path, scope }),
   previewTaskDeletion: taskId => invoke<TaskDeletionPreview>("preview_task_deletion", { taskId }),
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
-  storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, previewDataUrl, sourceId}),
+  storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}),
   readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
   readAttachmentImage: attachmentId => invoke<AttachmentFileData>('read_attachment_image', {attachmentId}),
   onChanged: async (handler) => {
@@ -398,6 +401,7 @@ const previewBridge: MonitterBridge = {
   deleteAgent: () => desktopOnly(),
   createTask: () => desktopOnly(),
   handoffTask: () => desktopOnly(),
+  forkTask: () => desktopOnly(),
   chooseLocalFolder: () => desktopOnly(),
   renameTask: () => desktopOnly(),
   autoname: () => desktopOnly(),
@@ -495,6 +499,7 @@ export function getBridge(): MonitterBridge {
       createTask: (input) =>
         test.invoke("create_task", { input }) as Promise<Task>,
       handoffTask: (input) => test.invoke("handoff_task", { input }) as Promise<Task>,
+      forkTask: (input) => test.invoke("fork_task", { input }) as Promise<Task>,
       chooseLocalFolder: (initial = '') => test.invoke("choose_local_folder", { initial }) as Promise<string | null>,
       renameTask: (id, title) =>
         test.invoke("rename_task", { id, title }) as Promise<Snapshot>,
@@ -568,7 +573,7 @@ export function getBridge(): MonitterBridge {
       getTaskGitDiff: (taskId, path, scope) => test.invoke("get_task_git_diff", {taskId, path, scope}) as Promise<TaskGitDiff>,
       previewTaskDeletion: taskId => test.invoke("preview_task_deletion", {taskId}) as Promise<TaskDeletionPreview>,
       deleteArchivedTask: (taskId, removeNativeFiles) => test.invoke("delete_archived_task", {taskId, removeNativeFiles}) as Promise<Snapshot>,
-      storeAttachment: (target, file, previewDataUrl = null, sourceId) => test.invoke("store_attachment", {target, ...file, previewDataUrl, sourceId}) as Promise<Attachment>,
+      storeAttachment: (target, file, previewDataUrl = null, sourceId) => test.invoke("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}) as Promise<Attachment>,
       readAttachmentFile: sourcePath => test.invoke("read_attachment_file", {sourcePath}) as Promise<AttachmentFileData>,
       readAttachmentImage: attachmentId => test.invoke('read_attachment_image', {attachmentId}) as Promise<AttachmentFileData>,
       onChanged: (handler) => test.listen("monitter:changed", handler),

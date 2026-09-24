@@ -417,6 +417,11 @@ export interface CreateTaskInput {
 export interface HandoffTaskInput {
   sourceTaskId: string; agentId: string; note?: string | null;
 }
+/** Copy visible chat history through one message into a new, idle task. */
+export interface ForkTaskInput {
+  sourceTaskId: string; throughMessageId: string; agentId: string;
+  modelSettings?: ModelSettings | null;
+}
 
 export interface Goal {
   objective: string; status: string; tokenBudget?: number | null;

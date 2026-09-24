@@ -2,11 +2,12 @@
   import type { Snippet } from 'svelte';
   import { chatDateClock, chatDateTimeLabel } from '$lib/chat-dates';
 
-  let { name, createdAt, avatar, children }: {
+  let { name, createdAt, avatar, children, actions }: {
     name: string;
     createdAt: number;
     avatar?: Snippet;
     children?: Snippet;
+    actions?: Snippet;
   } = $props();
 
   // Parent snapshots replace message objects while streaming. Stabilize the
@@ -21,8 +22,9 @@
 <div class="message-meta">
   {@render avatar?.()}
   <span class="message-author" title={name}>{name}</span>
-  {#if validTimestamp}<time datetime={timestamp.toISOString()} title={timestamp.toLocaleString()}>{time}</time>{/if}
   {@render children?.()}
+  {@render actions?.()}
+  {#if validTimestamp}<time datetime={timestamp.toISOString()} title={timestamp.toLocaleString()}>{time}</time>{/if}
 </div>
 
 <style>
@@ -46,6 +48,7 @@
   }
   time {
     flex: none;
+    margin-left: auto;
     color: var(--muted);
     font-family: var(--mono, "IBM Plex Mono", ui-monospace, monospace);
     font-size: calc(10px * var(--interface-font-ratio, 1));

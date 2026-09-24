@@ -160,6 +160,12 @@ export function isContextClearedMessage(message: Pick<Message, 'role' | 'text' |
     !message.senderAgentId && !message.attachments?.length;
 }
 
+export function forkBoundaryLabel(message: Pick<Message, 'role' | 'text' | 'senderAgentId' | 'attachments'>): string | null {
+  const prefix = '[Monitter fork] ';
+  if (message.role !== 'system' || message.senderAgentId || message.attachments?.length || !message.text.startsWith(prefix)) return null;
+  return `Forked from ${message.text.slice(prefix.length)}`;
+}
+
 /** UI-only history marker; never display its internal prefix as chat content. */
 export function modelSettingsChangeLabel(message: Pick<Message, 'role' | 'text' | 'senderAgentId' | 'attachments'>): string | null {
   if (message.role !== 'system' || message.senderAgentId || message.attachments?.length || !message.text.startsWith(MODEL_SETTINGS_CHANGE_PREFIX)) return null;

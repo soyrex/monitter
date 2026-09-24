@@ -1493,6 +1493,16 @@ pub struct HandoffTaskInput {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkTaskInput {
+    pub source_task_id: String,
+    pub through_message_id: String,
+    pub agent_id: String,
+    #[serde(default)]
+    pub model_settings: Option<ModelSettings>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
