@@ -17,6 +17,81 @@
   const geometryAnimations = new Set<Animation>();
   const mime = 'application/x-monitter-tab';
 
+  function traceActiveTab(node: HTMLElement, enabled: boolean) {
+    let active = enabled;
+    let frame = 0;
+    let observedTopbar: HTMLElement | null = null;
+    let observedTab: HTMLElement | null = null;
+    const setTraced = (traced: boolean) => {
+      if (traced && node.dataset.tabContour !== 'true') node.dataset.tabContour = 'true';
+      else if (!traced && node.dataset.tabContour) delete node.dataset.tabContour;
+    };
+    const measure = () => {
+      frame = 0;
+      if (!active) { setTraced(false); return; }
+      const outline = node.querySelector<SVGSVGElement>('.active-pane-contour');
+      const path = outline?.querySelector('path');
+      if (!outline || !path) return;
+      const pane = node.getBoundingClientRect();
+      const topbar = node.querySelector<HTMLElement>('.topbar');
+      const tab = topbar?.querySelector<HTMLElement>('.tab-picker-list > .tab-entry.active');
+      const picker = topbar?.querySelector<HTMLElement>('.tabs');
+      if (observedTopbar !== topbar) {
+        if (observedTopbar) resize.unobserve(observedTopbar);
+        observedTopbar = topbar;
+        if (topbar) resize.observe(topbar);
+      }
+      if (observedTab !== tab) {
+        if (observedTab) resize.unobserve(observedTab);
+        observedTab = tab ?? null;
+        if (tab) resize.observe(tab);
+      }
+      if (!topbar || !tab || !picker || node.querySelector('.workspace.compact-tabs, .workspace.tab-expanded')) {
+        setTraced(false);
+        return;
+      }
+      const bar = topbar.getBoundingClientRect();
+      const entry = tab.getBoundingClientRect();
+      const visibleTabs = picker.getBoundingClientRect();
+      const width = pane.width, height = pane.height;
+      const left = Math.max(1, entry.left - pane.left);
+      const right = Math.min(width - 1, entry.right - pane.left);
+      const top = Math.max(1, entry.top - pane.top);
+      const baseline = Math.min(height - 1, bar.bottom - pane.top);
+      if (width < 4 || height < 4 || right <= left || baseline <= top + 2 || bar.bottom <= pane.top || entry.left < visibleTabs.left || entry.right > visibleTabs.right) {
+        setTraced(false);
+        return;
+      }
+      const x = width - 1, bottom = height - 1;
+      const nativeWindow = !!node.closest('.app-shell.native-mac:not(.native-fullscreen)');
+      const topRadius = nativeWindow && node.classList.contains('window-top-right') ? Math.min(16, x - right, (bottom - baseline) / 2) : 0;
+      const bottomRadius = nativeWindow && node.classList.contains('window-bottom-right') ? Math.min(16, x / 2, (bottom - baseline) / 2) : 0;
+      const topRight = topRadius ? `H ${x - topRadius} Q ${x} ${baseline} ${x} ${baseline + topRadius}` : `H ${x} V ${baseline}`;
+      const bottomRight = bottomRadius ? `V ${bottom - bottomRadius} Q ${x} ${bottom} ${x - bottomRadius} ${bottom}` : `V ${bottom} H ${x}`;
+      path.setAttribute('d', `M 1 ${baseline} H ${left} V ${top} H ${right} V ${baseline} ${topRight} ${bottomRight} H 1 Z`);
+      outline.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      setTraced(true);
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
+    const resize = new ResizeObserver(schedule);
+    resize.observe(node);
+    const mutations = new MutationObserver(schedule);
+    mutations.observe(node, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style'] });
+    node.addEventListener('scroll', schedule, true);
+    window.addEventListener('resize', schedule);
+    schedule();
+    return {
+      update(value: boolean) { active = value; schedule(); },
+      destroy() {
+        cancelAnimationFrame(frame);
+        resize.disconnect();
+        mutations.disconnect();
+        node.removeEventListener('scroll', schedule, true);
+        window.removeEventListener('resize', schedule);
+      },
+    };
+  }
+
   function layoutSignature(item: PaneLayout): string {
     return 'axis' in item
       ? `${item.id}:${item.axis}:${item.ratio}:${layoutSignature(item.first)}:${layoutSignature(item.second)}`
@@ -179,9 +254,10 @@
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (contains independently interactive chat controls) -->
-    <section class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:show-active-border={showActivePaneBorder} class:window-top-right={!!expandedPaneId || topRight} class:window-bottom-right={!!expandedPaneId || bottomRight} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
+    <section use:traceActiveTab={activePaneId===item.id && showActivePaneBorder} class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:show-active-border={showActivePaneBorder} class:window-top-right={!!expandedPaneId || topRight} class:window-bottom-right={!!expandedPaneId || bottomRight} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
       {@render children(item.id)}
       <div class="pane-dim-overlay" aria-hidden="true"></div>
+      <svg class="active-pane-contour" aria-hidden="true" preserveAspectRatio="none"><path vector-effect="non-scaling-stroke"/></svg>
       {#if over?.id===item.id}<div class="pane-drop" data-edge={over.edge}><span>{over.edge==='center'?'Move tab here':`Split ${over.edge}`}</span></div>{/if}
     </section>
   {/if}
@@ -198,6 +274,10 @@
   .focus-hidden{display:none!important}
   .pane-split.column{flex-direction:column}.pane-leaf{position:relative;background:var(--paper)}.pane-leaf.active{outline:none}
   .pane-leaf.active.show-active-border::after{content:"";position:absolute;inset:0;z-index:25;border:2px solid var(--accent);pointer-events:none}
+  .pane-leaf.active.show-active-border:global([data-tab-contour="true"])::after{content:none}
+  .active-pane-contour{position:absolute;inset:0;z-index:25;width:100%;height:100%;overflow:visible;pointer-events:none;visibility:hidden;fill:none;stroke:var(--accent);stroke-width:2}
+  .pane-leaf.active.show-active-border:global([data-tab-contour="true"]) .active-pane-contour{visibility:visible}
+  :global(:root:has([data-active-modal])) .active-pane-contour{visibility:hidden!important}
   :global(.app-shell.native-mac:not(.native-fullscreen)) .pane-leaf.window-top-right.active.show-active-border::after{border-top-right-radius:16px}
   :global(.app-shell.native-mac:not(.native-fullscreen)) .pane-leaf.window-bottom-right.active.show-active-border::after{border-bottom-right-radius:16px}
   :global(:root:has([data-active-modal])) .pane-leaf.active.show-active-border::after{content:none}
