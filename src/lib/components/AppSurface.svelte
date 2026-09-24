@@ -4257,7 +4257,7 @@
           {/if}
           {:else if tab.kind === 'task'}{@const task=snapshot?.tasks.find(item=>item.id===tab.id)}{#if task}
             <div class="tab-entry task-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
-              {#if task.status==='running'}<SparkleField active mirror contained />{/if}
+              {#if task.status==='running'}<SparkleField active animation={snapshot?.settings.activityAnimation ?? 'sparkles'} mirror contained />{/if}
               <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => selectTabPicker(() => openTask(task))} title={task.title}><span class="tab-kind-icon" aria-hidden="true"><MessageSquare size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
 
               <button class="edit-tab" aria-label={`Edit name for ${task.title}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openTask(task);renameTitle=task.title;taskProjectId=task.projectId??'';modal='taskSettings';}}><Pencil size={15}/></button>

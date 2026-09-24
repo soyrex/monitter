@@ -239,7 +239,7 @@
   </div>
 {/if}
 <section class="conversation">
-    <SparkleField active={task.status === 'running'} pane />
+    <SparkleField active={task.status === 'running'} animation={snapshot.settings.activityAnimation ?? 'sparkles'} pane />
     <TaskActivity goal={null} onclear={onClearGoal} tools={computerTools} onstop={onStop} disabled={busy} />
     {#if inboxView && displayMailInboxes.length}
       <div class="mail-inbox-surface" aria-label="Mail inbox">

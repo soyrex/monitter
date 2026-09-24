@@ -7502,6 +7502,12 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     ) {
         return Err("Interface density must be tight, normal, or spacious.".into());
     }
+    if !matches!(
+        settings.activity_animation.as_str(),
+        "sparkles" | "grid" | "matrix"
+    ) {
+        return Err("Activity animation must be sparkles, grid, or matrix.".into());
+    }
     Ok(())
 }
 
@@ -9192,6 +9198,20 @@ name@rafa.test",
         assert_eq!(
             validate_settings(&settings),
             Err("Interface scale must be between 80% and 200%.".into())
+        );
+    }
+
+    #[test]
+    fn settings_validation_limits_activity_animation() {
+        let mut settings = default_snapshot().settings;
+        for animation in ["sparkles", "grid", "matrix"] {
+            settings.activity_animation = animation.into();
+            assert!(validate_settings(&settings).is_ok());
+        }
+        settings.activity_animation = "aurora".into();
+        assert_eq!(
+            validate_settings(&settings),
+            Err("Activity animation must be sparkles, grid, or matrix.".into())
         );
     }
 

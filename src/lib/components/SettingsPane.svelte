@@ -367,6 +367,17 @@
           <p class="hint">Saved on this device/browser.</p>
         </section>
 
+        <section class="setting-card" aria-labelledby="activity-animation-heading">
+          <div class="card-heading"><h2 id="activity-animation-heading">Working animation</h2><p>Choose the accent effect shown while an agent is working.</p></div>
+          <div class="segmented activity-animation" aria-label="Working animation">
+            {#each [{ id: 'sparkles', label: 'Sparkles' }, { id: 'grid', label: 'Pulse grid' }, { id: 'matrix', label: 'Letter stream' }] as option}
+              <button type="button" class:chosen={(settings.activityAnimation ?? 'sparkles') === option.id} aria-pressed={(settings.activityAnimation ?? 'sparkles') === option.id}
+                onclick={() => void save({ activityAnimation: option.id as NonNullable<Settings['activityAnimation']> })}>{option.label}</button>
+            {/each}
+          </div>
+          <p class="hint">Letter stream uses changing glyphs in a Matrix-style cascade. The Motion setting above can still reduce or turn off all movement.</p>
+        </section>
+
         <section class="setting-card" aria-labelledby="scale-heading">
           <div class="card-heading inline-heading"><div><h2 id="scale-heading">Interface scale</h2><p>Resize text and controls for this {interfaceScale === undefined ? 'connection' : 'viewer type'}.</p></div><strong>{displayedInterfaceScale}%</strong></div>
           <input class="range" type="range" use:rangeFill={displayedInterfaceScale} aria-label="Interface scale" min="80" max="200" step="5" value={displayedInterfaceScale} onchange={(event) => void saveInterfaceScale(Number(event.currentTarget.value))} />

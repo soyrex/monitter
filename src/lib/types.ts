@@ -284,6 +284,8 @@ export interface Settings {
   windowSurface?: 'opaque' | 'translucent' | 'glass';
   windowTransparency?: number;
   showActivePaneBorder?: boolean; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
+  /** Decorative effect shown while an agent is working. */
+  activityAnimation?: 'sparkles' | 'grid' | 'matrix';
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
   showToolActivity: boolean; showReasoningSummaries: boolean; sendWithEnter: boolean;
   /** Legacy migration seed; active sidebar selection is client-local UI state. */

@@ -1079,6 +1079,8 @@ pub struct Settings {
     pub tab_style: String,
     #[serde(default = "default_interface_density")]
     pub interface_density: String,
+    #[serde(default = "default_activity_animation")]
+    pub activity_animation: String,
 }
 impl Eq for Settings {}
 fn default_terminal_font_size() -> u8 {
@@ -1095,6 +1097,9 @@ fn default_tab_style() -> String {
 }
 fn default_interface_density() -> String {
     "normal".into()
+}
+fn default_activity_animation() -> String {
+    "sparkles".into()
 }
 fn default_window_surface() -> String {
     "opaque".into()
@@ -1677,6 +1682,7 @@ pub fn default_snapshot() -> Snapshot {
             auto_hide_tabs: false,
             tab_style: default_tab_style(),
             interface_density: default_interface_density(),
+            activity_animation: default_activity_animation(),
         },
     }
 }
@@ -1722,6 +1728,7 @@ mod tests {
         assert!(settings.show_tab_close_buttons);
         assert_eq!(settings.tab_style, "classic");
         assert_eq!(settings.interface_density, "normal");
+        assert_eq!(settings.activity_animation, "sparkles");
     }
 
     #[test]
@@ -1744,6 +1751,7 @@ mod tests {
         assert_eq!(value["showTabCloseButtons"], true);
         assert_eq!(value["tabStyle"], "classic");
         assert_eq!(value["interfaceDensity"], "normal");
+        assert_eq!(value["activityAnimation"], "sparkles");
     }
 
     #[test]
@@ -1792,6 +1800,18 @@ mod tests {
         settings.interface_density = "tight".into();
         let serialized = serde_json::to_string(&settings).unwrap();
         assert!(serialized.contains("\"interfaceDensity\":\"tight\""));
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serialized).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn activity_animation_round_trips_through_settings_json() {
+        let mut settings = default_snapshot().settings;
+        settings.activity_animation = "matrix".into();
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(serialized.contains("\"activityAnimation\":\"matrix\""));
         assert_eq!(
             serde_json::from_str::<Settings>(&serialized).unwrap(),
             settings
