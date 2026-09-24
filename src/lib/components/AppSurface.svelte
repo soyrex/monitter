@@ -189,6 +189,7 @@
   import ModelPicker from '$lib/components/ModelPicker.svelte';
   import AgentModelPicker from '$lib/components/AgentModelPicker.svelte';
   import AccessPicker from '$lib/components/AccessPicker.svelte';
+  import DraftPicker from '$lib/components/DraftPicker.svelte';
   import TerminalPane from '$lib/components/TerminalPane.svelte';
   import BrowserTabPanel, { type BrowserTabMetadata, type BrowserViewport } from '$lib/components/BrowserTabPanel.svelte';
   import { terminalSessions, registerTerminal, closeTerminalSession, recentTerminalOutput } from '$lib/terminal-runtime';
@@ -259,6 +260,52 @@
   let compactTabs = $state(false);
   let queuedAttachments=$state<Record<string,Attachment[]>>({}), attachmentContexts=$state<Record<string,string>>({}), pendingUploads=$state<Record<string,boolean>>({});
   let filePicker=$state<HTMLInputElement>();
+  // Draft-form focus cascade: agent → project → composer textarea.
+  type DraftPickerHandle = { focus: () => void; focusTrigger: () => void };
+  let agentPicker = $state<DraftPickerHandle | null>(null);
+  let projectPicker = $state<DraftPickerHandle | null>(null);
+  let composerTextarea=$state<HTMLTextAreaElement>();
+  let lastDraftFocusId=$state<string|null>(null);
+  const draftAgentOptions = $derived(visibleAgents.map((agent) => ({
+    id: agent.id,
+    label: agent.name,
+    secondary: agent.provider,
+    description: agent.description || undefined,
+    color: agent.color || null
+  })));
+  const draftProjectOptions = $derived([
+    { id: '', label: 'No project', secondary: '', description: '' },
+    ...projects.map((project) => ({
+      id: project.id,
+      label: project.name,
+      secondary: '',
+      description: project.description || undefined,
+      color: project.color || null
+    }))
+  ]);
+  function focusAgentPicker() {
+    void tick().then(() => agentPicker?.focusTrigger());
+  }
+  function focusProjectPicker() {
+    void tick().then(() => projectPicker?.focusTrigger());
+  }
+  function focusComposerTextarea() {
+    void tick().then(() => {
+      composerTextarea?.focus({ preventScroll: true });
+      const length = composerTextarea?.value.length ?? 0;
+      if (composerTextarea) composerTextarea.selectionStart = composerTextarea.selectionEnd = length;
+    });
+  }
+  // When a draft tab opens, focus the Agent picker so the cascade begins.
+  // We track the last draft ID we focused for so re-selecting the same draft
+  // (e.g. via workspace restore) does not steal focus from a chat that the
+  // user already started typing in.
+  $effect(() => {
+    const id = currentDraftId;
+    if (!id || id === lastDraftFocusId) return;
+    lastDraftFocusId = id;
+    void tick().then(() => agentPicker?.focusTrigger());
+  });
   const currentAttachments=$derived(queuedAttachments[currentDraftKey() ?? ''] ?? []);
   const filesBusy=$derived(pendingUploads[currentDraftKey() ?? ''] ?? false);
   let overviewOpen = $state(untrack(()=>!embedded));
@@ -4506,7 +4553,7 @@
   {:else if channel}
     <MentionComposer bind:value={composer} agents={channelMentionAgents} oninput={updateSlash} onkeydown={handleComposerKeydown}/>
   {:else}
-    <textarea bind:value={composer} use:autoGrowTextarea={composer} aria-label="Task message" {placeholder} oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
+    <textarea bind:this={composerTextarea} bind:value={composer} use:autoGrowTextarea={composer} aria-label="Task message" {placeholder} oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
   {/if}
 {/snippet}
 
@@ -4904,8 +4951,8 @@
             <p>Ask a question, explore a project, or describe a change. Your agent starts when you send.</p>
           </div>
           <div class="draft-options form-grid">
-            <label>Agent<select class="draft-select" aria-label="Agent" bind:value={taskAgentId} onchange={routeChangedDraft} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId}>{#each visibleAgents as agent}<option value={agent.id}>{agent.name} · {agent.provider}</option>{/each}</select></label>
-            <label>Project<select class="draft-select" id="task-project" aria-label="Project" bind:value={taskProjectId} onchange={routeChangedDraft} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId}><option value="">No project</option>{#each projects as project}<option value={project.id}>{project.name}</option>{/each}</select></label>
+            <label>Agent<DraftPicker bind:this={agentPicker} options={draftAgentOptions} bind:value={taskAgentId} ariaLabel="Agent" placeholder="Choose an agent" searchPlaceholder="Search agents…" onchange={routeChangedDraft} onselect={focusProjectPicker} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId} /></label>
+            <label>Project<DraftPicker bind:this={projectPicker} options={draftProjectOptions} bind:value={taskProjectId} ariaLabel="Project" placeholder="No project" searchPlaceholder="Search projects…" onchange={routeChangedDraft} onselect={focusComposerTextarea} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId} /></label>
           </div>
           {#if taskFormAgent && !taskProjectId}<label class="task-workspace-editor"><span><Folder size={13}/>Working folder</span><div><input aria-label="Working folder" bind:value={taskCwd} placeholder={inheritedTaskCwd || '/path/to/project'} disabled={busy || !!currentTaskDraft.createdTaskId}/>{#if nativeRuntime && snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.kind === 'local'}<button class="icon" aria-label="Browse working folder" title="Choose folder" disabled={busy || !!currentTaskDraft.createdTaskId} onclick={browseTaskFolder}><Folder size={15}/></button>{/if}</div></label>{:else if taskFormAgent}<p class="task-workspace-preview"><Folder size={13}/><span><b>{snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.name ?? 'Host'}</b><code>{taskFormCwd}</code></span></p>{/if}
           {#each optimisticMessages.filter(message => message.kind === 'draft' && message.targetId === currentDraftId) as message (message.id)}
