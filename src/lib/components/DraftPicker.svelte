@@ -3,7 +3,7 @@
   import { tick } from 'svelte';
   import { floating } from '$lib/floating';
 
-  export type DraftPickerOption = {
+  type DraftPickerOption = {
     id: string;
     label: string;
     description?: string;

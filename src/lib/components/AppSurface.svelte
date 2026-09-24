@@ -266,23 +266,6 @@
   let projectPicker = $state<DraftPickerHandle | null>(null);
   let composerTextarea=$state<HTMLTextAreaElement>();
   let lastDraftFocusId=$state<string|null>(null);
-  const draftAgentOptions = $derived(visibleAgents.map((agent) => ({
-    id: agent.id,
-    label: agent.name,
-    secondary: agent.provider,
-    description: agent.description || undefined,
-    color: agent.color || null
-  })));
-  const draftProjectOptions = $derived([
-    { id: '', label: 'No project', secondary: '', description: '' },
-    ...projects.map((project) => ({
-      id: project.id,
-      label: project.name,
-      secondary: '',
-      description: project.description || undefined,
-      color: project.color || null
-    }))
-  ]);
   function focusAgentPicker() {
     void tick().then(() => agentPicker?.focusTrigger());
   }
@@ -775,6 +758,23 @@
   }
 
   const projects = $derived(indexes?.snapshot.projects ?? []);
+  const draftAgentOptions = $derived(visibleAgents.map((agent) => ({
+    id: agent.id,
+    label: agent.name,
+    secondary: agent.provider,
+    description: agent.description || undefined,
+    color: agent.color || null
+  })));
+  const draftProjectOptions = $derived([
+    { id: '', label: 'No project', secondary: '', description: '' },
+    ...projects.map((project) => ({
+      id: project.id,
+      label: project.name,
+      secondary: '',
+      description: project.description || undefined,
+      color: project.color || null
+    }))
+  ]);
   const railProject = $derived(railProjectId && railProjectId !== 'unassigned'
     ? indexes?.projectById.get(railProjectId) ?? null
     : null);
