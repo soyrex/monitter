@@ -187,6 +187,7 @@
   import AgentModelPicker from '$lib/components/AgentModelPicker.svelte';
   import AccessPicker from '$lib/components/AccessPicker.svelte';
   import TerminalPane from '$lib/components/TerminalPane.svelte';
+  import BrowserTabPanel, { type BrowserTabMetadata, type BrowserViewport } from '$lib/components/BrowserTabPanel.svelte';
   import { terminalSessions, registerTerminal, closeTerminalSession, recentTerminalOutput } from '$lib/terminal-runtime';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ApprovalRequestCard from '$lib/components/ApprovalRequestCard.svelte';
@@ -203,15 +204,15 @@
   // renderer as bundled content when choosing native-only APIs.
   const nativeRuntime = !isLanBrowser() && isTauri();
 
-  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, parentMobileSidebar = false, workspaceKey = 'all', onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
+  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, parentMobileSidebar = false, workspaceKey = 'all', parentGeometryRevision = '', parentBrowserVisible = true, onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
     { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; snapshotIndexes?: SnapshotIndexes | null; parentMobileSidebar?: boolean; workspaceKey?: WorkspaceKey;
-      onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void;
-      parentExpandedPaneId?:string|null; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: PaneLayoutPreset) => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
+      onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void | Promise<void>;
+      parentExpandedPaneId?:string|null; parentGeometryRevision?:string; parentBrowserVisible?:boolean; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: PaneLayoutPreset) => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
-  type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
+  type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; browser?: BrowserTabMetadata; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
   type MarkdownDocument = { taskId: string; path: string; title: string };
-  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
+  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openBrowserIds:string[];selectedBrowserId:string|null;browserTabs:Record<string,BrowserTabMetadata>;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let sidebarSelected = $state(false);
   let pendingEmptyPaneIds = $state<string[]>([]);
@@ -221,7 +222,7 @@
   const paneLocal = createPaneLocalState();
   let expandedPaneId=$state<string|null>(null), focusStep=$state<0|1|2>(0), focusTarget=$state('');
   const workspaceExpansion=$derived(embedded?parentExpandedPaneId:expandedPaneId);
-  const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
+  const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='browser'?selectedBrowserId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
   function setPaneExpansion(id:string|null){if(embedded)onExpandPane?.(id);else{expandedPaneId=id;if(id)activePaneId=id;}}
   function resetTabExpansion(){focusStep=0;focusTarget='';if(workspaceExpansion===paneId)setPaneExpansion(null);}
   function expandTab(workspace=false){
@@ -236,6 +237,7 @@
   $effect(()=>{if(!embedded && expandedPaneId && (activePaneId!==expandedPaneId || !paneIds(layout).includes(expandedPaneId)))expandedPaneId=null;});
 
   let pointerTabDrag = $state<{tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null>(null);
+  let browserDragActive = $state(false);
   let paneRefs = $state<Record<string, PaneSurfaceHandle<PaneState, TabPayload>>>({});
   let paneSelections = $state<Record<string,string|null>>({});
   let workspaceReady = $state(false);
@@ -273,6 +275,7 @@
   $effect(()=>{ onSelection?.(selectedTaskId); });
 
   const bridge = getBridge();
+  type BrowserBounds = Pick<BrowserViewport, 'x' | 'y' | 'width' | 'height'>;
   let codexAccounts = $state<CodexAccount[]>([]);
   let codexAccountsError = $state('');
   let codexAccountsLoading = $state(false);
@@ -385,7 +388,7 @@
   let snapshot = $state.raw<Snapshot | null>(null),
     selectedTaskId = $state<string | null>(null),
     selectedChannelId = $state<string | null>(null),
-    pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "settings">(untrack(()=>embedded?"empty":"overview"));
+    pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "browser" | "settings">(untrack(()=>embedded?"empty":"overview"));
   // Embedded panes share this projection from the root surface. Only a root
   // snapshot update rebuilds the indexes, rather than every pane re-filtering
   // messages/events/approvals from the full snapshot independently.
@@ -400,6 +403,17 @@
   const visibleActiveTasks = $derived(indexes?.visibleActiveTasks ?? []);
   const visibleActivityTasks = $derived(indexes?.visibleActivityTasks ?? []);
   let openTerminalIds=$state<string[]>([]), selectedTerminalId=$state<string|null>(null), terminalBusy=$state(false);
+  let openBrowserIds=$state<string[]>([]), selectedBrowserId=$state<string|null>(null);
+  let browserTabs=$state<Record<string,BrowserTabMetadata>>({});
+  let browserHistory=$state<Record<string, { canGoBack: boolean | null; canGoForward: boolean | null }>>({});
+  let browserBounds=$state<Record<string, BrowserBounds>>({});
+  // Tauri invokes may finish out of order. Serialize native layout writes
+  // across tabs so a late hide cannot cover a newly selected browser view.
+  let browserLayoutTail: Promise<void> = Promise.resolve();
+  const browserLayoutRevision = new Map<string, number>();
+  const browserOpenings = new Map<string, Promise<boolean>>();
+  const browserRequestedUrls = new Map<string, string>();
+  const browserEpoch = new Map<string, number>();
   let openEmptyIds=$state<string[]>([]), selectedEmptyId=$state<string|null>(null);
   let documents=$state<Record<string,MarkdownDocument>>({});
   let documentContents=$state<Record<string,string>>({});
@@ -407,6 +421,49 @@
   let documentLoading=$state<Record<string,boolean>>({});
   const selectedTerminal=$derived(selectedTerminalId ? $terminalSessions[selectedTerminalId] ?? null : null);
   const openTerminals=$derived(openTerminalIds.flatMap(id=>$terminalSessions[id]?[$terminalSessions[id]]:[]));
+  const selectedBrowser=$derived(selectedBrowserId ? browserTabs[selectedBrowserId] ?? null : null);
+  const selectedBrowserHistory=$derived(selectedBrowserId ? browserHistory[selectedBrowserId] ?? { canGoBack: null, canGoForward: null } : { canGoBack: null, canGoForward: null });
+  // Each pane only accepts state for its own persisted tab IDs. This also
+  // avoids leaking native history/auth information into workspace metadata.
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    if (!nativeRuntime) return;
+    void bridge.onBrowserState(state => {
+      const tab = browserTabs[state.tabId];
+      // Creating a child starts at about:blank. Do not let that transient
+      // native event replace the address a user has just submitted.
+      const requested = browserRequestedUrls.get(state.tabId);
+      // Creation intentionally opens a blank child first. Preserve the
+      // submitted address across that one event, but accept HTTP(S) redirects
+      // and ordinary link navigation immediately.
+      if (requested && state.url === 'about:blank') return;
+      if (tab) applyBrowserState(state);
+    }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(reason => { if (!disposed && nativeRuntime) error = `Could not listen for browser state: ${text(reason)}`; });
+    return () => { disposed = true; unlisten?.(); };
+  });
+  onMount(() => {
+    if (embedded || !nativeRuntime) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listen<{ tabId: string }>('monitter:browser-focus', event => {
+      const tabId = event.payload?.tabId;
+      if (typeof tabId !== 'string') return;
+      // Native children receive pointer events outside the shell WebView, so
+      // PaneGrid's onpointerdowncapture cannot activate their owning pane.
+      // Ignore events from a closing or otherwise hidden browser tab.
+      const owner = paneIds(layout).find(id => {
+        const selected = id === 'main' ? currentVimTab() : paneRefs[id]?.currentVimTab();
+        return selected?.kind === 'browser' && selected.id === tabId;
+      });
+      if (!owner) return;
+      activePaneId = owner;
+      sidebarSelected = false;
+    }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(reason => {
+      if (!disposed) error = `Could not listen for browser focus: ${text(reason)}`;
+    });
+    return () => { disposed = true; unlisten?.(); };
+  });
   let showDetail = $state(true),
     busy = $state(false),
     error = $state(""),
@@ -589,6 +646,14 @@
   let jevPaletteRequest = 0;
   let tabPickerOpen = $state(false);
   let autoHiddenTabsRevealed = $state(false);
+  // A browser child view uses window coordinates, so a position-only pane
+  // change matters even when ResizeObserver sees unchanged viewport dimensions.
+  // Pass the root topology revision into embedded split panes as well.
+  const browserGeometryRevision = $derived(`${parentGeometryRevision}:${activeInterfaceScale}:${JSON.stringify(layout)}:${activePaneId}:${sidebarSelected ? 1 : 0}:${expandedPaneId ?? ''}:${activeWorkspaceKey}:${autoHiddenTabsRevealed ? 1 : 0}:${snapshot?.settings.showActivePaneBorder === false ? 0 : 1}`);
+  // A browser page stays visible in its split even when another pane has
+  // keyboard focus. Focus and on-screen visibility are different states.
+  const browserGlobalVisible = $derived(!browserDragActive && !modal && !palette && (!mobileSidebar || mobileMain));
+  const browserPaneVisible = $derived((embedded ? parentBrowserVisible : browserGlobalVisible) && !modal && !palette && (!workspaceExpansion || workspaceExpansion === paneId) && (!mobileSidebar || mobileMain));
   let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
   let vimCommandInput = $state<HTMLInputElement>();
   let vimArmed = $state(false);
@@ -1098,6 +1163,7 @@
       ...openDraftIds.map(id=>({kind:'draft' as const,id})),
       ...openChannelIds.map(id=>({kind:'channel' as const,id})),
       ...openTerminalIds.map(id=>({kind:'terminal' as const,id})),
+      ...openBrowserIds.map(id=>({kind:'browser' as const,id})),
       ...openEmptyIds.map(id=>({kind:'empty' as const,id})),
       ...(settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
     ];
@@ -1185,7 +1251,7 @@
   export function hasPending() { return terminalBusy || Object.values(composerPending).some(Boolean) || Object.values(pendingUploads).some(Boolean); }
   export function captureState():PaneState {
     // Persistence must only read reactive state: writing here can recursively trigger itself.
-    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
+    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
     const key=currentDraftKey();
     if(key)captured.drafts[key]=composer;
     if(pane==='channel' && selectedChannelId)captured.channelRecipients[selectedChannelId]=[...recipients];
@@ -1197,7 +1263,7 @@
   export function restoreState(value:PaneState) {
     value = applySharedComposers(value as unknown as Record<string, unknown>) as unknown as PaneState;
     agentDraft=value.settingsEditor?.draft??null;agentEdits=value.settingsEditor?.edits??{};
-    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
+    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
     paneLocal.restore(Array.isArray(value.tabOrder) ? value.tabOrder : [], availableTabs());
     composer=drafts[currentDraftKey() ?? ''] ?? '';
     recipients=selectedChannelId?channelRecipients[selectedChannelId]??[]:[];
@@ -1306,6 +1372,15 @@
         return ['profile','extensions','appearance','typography','behaviour','conversation','approvals','agents','lan','remote','environment'].includes(raw ?? '') ? raw! : 'appearance';
       })(),
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
+      openBrowserIds: Array.isArray(saved.openBrowserIds) ? saved.openBrowserIds.filter(id => typeof id === 'string') : [],
+      selectedBrowserId: typeof saved.selectedBrowserId === 'string' ? saved.selectedBrowserId : null,
+      browserTabs: saved.browserTabs && typeof saved.browserTabs === 'object' && !Array.isArray(saved.browserTabs)
+        ? Object.fromEntries(Object.entries(saved.browserTabs).flatMap(([id, value]) => {
+            const tab = value as BrowserTabMetadata;
+            // Native child webviews are process-local. A restored workspace retains
+            // only this metadata, so its first visible layout must create a child.
+            return typeof tab?.url === 'string' && typeof tab?.title === 'string' && typeof tab?.unloaded === 'boolean' ? [[id, { id, url: tab.url, title: tab.title, unloaded: true }]] : [];
+          })) : {},
       openEmptyIds: Array.isArray(saved.openEmptyIds) ? saved.openEmptyIds : fallback.openEmptyIds,
       documents: saved.documents && typeof saved.documents === 'object' && !Array.isArray(saved.documents)
         ? Object.fromEntries(Object.entries(saved.documents).filter(([id, item]) => {
@@ -1315,13 +1390,13 @@
       openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,
       openDraftIds: Array.isArray(saved.openDraftIds) ? saved.openDraftIds : fallback.openDraftIds,
       openChannelIds: Array.isArray(saved.openChannelIds) ? saved.openChannelIds : fallback.openChannelIds,
-      tabOrder: Array.isArray(saved.tabOrder) ? saved.tabOrder.filter((tab): tab is TabKey => !!tab && typeof tab === 'object' && ['task','draft','channel','terminal','settings','empty'].includes((tab as TabKey).kind) && typeof (tab as TabKey).id === 'string') : fallback.tabOrder,
+      tabOrder: Array.isArray(saved.tabOrder) ? saved.tabOrder.filter((tab): tab is TabKey => !!tab && typeof tab === 'object' && ['task','draft','channel','terminal','browser','settings','empty'].includes((tab as TabKey).kind) && typeof (tab as TabKey).id === 'string') : fallback.tabOrder,
       taskDrafts: saved.taskDrafts && typeof saved.taskDrafts === 'object' ? saved.taskDrafts : fallback.taskDrafts,
       drafts: saved.drafts && typeof saved.drafts === 'object' ? saved.drafts : fallback.drafts,
       queuedAttachments: saved.queuedAttachments && typeof saved.queuedAttachments === 'object' ? saved.queuedAttachments : fallback.queuedAttachments,
       attachmentContexts: saved.attachmentContexts && typeof saved.attachmentContexts === 'object' ? saved.attachmentContexts : fallback.attachmentContexts,
       channelRecipients: saved.channelRecipients && typeof saved.channelRecipients === 'object' ? saved.channelRecipients : fallback.channelRecipients,
-      pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
+      pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'browser', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
       detailTab: ['run', 'git', 'timeline', 'approvals', 'subagents'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
     };
     const taskIds = new Set((snapshot?.tasks ?? []).filter(task => !task.archived && indexes?.visibleAgentIds.has(task.agentId) === true && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
@@ -1330,6 +1405,8 @@
     const projectIds = new Set(snapshot?.projects.map(project => project.id) ?? []);
     state.openTaskIds = state.openTaskIds.filter(id => taskIds.has(id));
     state.openChannelIds = state.openChannelIds.filter(id => channelIds.has(id));
+    state.openBrowserIds = state.openBrowserIds.filter(id => !!state.browserTabs[id]);
+    if (!state.selectedBrowserId || !state.openBrowserIds.includes(state.selectedBrowserId)) state.selectedBrowserId = null;
     state.openDraftIds = state.openDraftIds.filter(id => {
       const draft = state.taskDrafts[id];
       return !!draft && agentIds.has(draft.agentId) && taskBelongsToWorkspace(draft, scope);
@@ -1341,7 +1418,7 @@
     }));
     state.tabOrder = normalizeTabOrder(state.tabOrder, [
       ...state.openTaskIds.map(id=>({kind:'task' as const,id})), ...state.openDraftIds.map(id=>({kind:'draft' as const,id})),
-      ...state.openChannelIds.map(id=>({kind:'channel' as const,id})), ...state.openTerminalIds.map(id=>({kind:'terminal' as const,id})),
+      ...state.openChannelIds.map(id=>({kind:'channel' as const,id})), ...state.openTerminalIds.map(id=>({kind:'terminal' as const,id})), ...state.openBrowserIds.map(id=>({kind:'browser' as const,id})),
       ...(state.openEmptyIds ?? []).map(id=>({kind:'empty' as const,id})),
       ...(state.settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
     ]);
@@ -1354,6 +1431,7 @@
     if (state.pane === 'channel' && !state.selectedChannelId) state.pane = 'overview';
     if (state.pane === 'settings' && !state.settingsOpen) state.pane = 'overview';
     if (state.pane === 'terminal' && !state.selectedTerminalId) state.pane = 'overview';
+    if (state.pane === 'browser' && !state.selectedBrowserId) state.pane = 'overview';
     if (state.pane === 'overview' && !state.overviewOpen) state.pane = 'empty';
     return state;
   }
@@ -1402,7 +1480,27 @@
   }
   function emptyWorkspace() {
     const state = captureState();
-    return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
+    return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openBrowserIds: [], selectedBrowserId: null, browserTabs: {}, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
+  }
+  export async function retireBrowserTabs() {
+    if (!nativeRuntime || !bridge.available) return;
+    const tabs = Object.values(browserTabs);
+    for (const tab of tabs) browserEpoch.set(tab.id, (browserEpoch.get(tab.id) ?? 0) + 1);
+    // A pending browser_open observes its changed epoch and closes itself
+    // after resolution. Loaded children are closed before pane state changes.
+    await Promise.all(tabs.filter(tab => !tab.unloaded).map(async tab => {
+      try { await bridge.browserClose(tab.id); }
+      // An in-flight open may not be registered natively yet. Its epoch check
+      // closes the eventual child, so a current not-found is not fatal.
+      catch (reason) { if (!browserOpenings.has(tab.id)) error = `Could not retire browser tab: ${text(reason)}`; }
+    }));
+  }
+  async function retireCurrentWorkspaceBrowsers() {
+    const children = paneIds(layout).filter(id => id !== 'main').flatMap(id => {
+      const pane = paneRefs[id] as unknown as { retireBrowserTabs?: () => Promise<void> } | undefined;
+      return pane?.retireBrowserTabs ? [pane.retireBrowserTabs()] : [];
+    });
+    await Promise.all([retireBrowserTabs(), ...children]);
   }
   async function switchWorkspace(next: WorkspaceKey): Promise<boolean> {
     if (next === activeWorkspaceKey) return true;
@@ -1410,6 +1508,7 @@
     if (!persistWorkspace()) return false;
     workspaceTransition = true;
     try {
+      await retireCurrentWorkspaceBrowsers();
       activeWorkspaceKey = next;
       const saved = workspaceSet?.workspaces[next];
       if (saved) {
@@ -1514,6 +1613,12 @@
       forgetTab(tab);
       return {tab};
     }
+    if(tab.kind==='browser') {
+      const browser = browserTabs[tab.id]; if (!browser) return null;
+      delete browserTabs[tab.id]; delete browserBounds[tab.id]; openBrowserIds = openBrowserIds.filter(id => id !== tab.id);
+      if (pane === 'browser' && selectedBrowserId === tab.id) { selectedBrowserId = null; openOverview(); }
+      forgetTab(tab); return { tab, browser: { ...browser } };
+    }
     const attachments=queuedAttachments[`${tab.kind}:${tab.id}`], attachmentContext=attachmentContexts[`${tab.kind}:${tab.id}`];
     if (tab.kind === 'draft') {
       const draft = taskDrafts[tab.id];
@@ -1538,6 +1643,11 @@
     if(tab.kind==='empty') { if (!openEmptyIds.includes(tab.id)) openEmptyIds = [...openEmptyIds, tab.id]; if(payload.document) documents[tab.id]=payload.document; selectedEmptyId=tab.id; selectedTaskId=null; selectedChannelId=null; selectedTerminalId=null; currentDraftId=null; pane='empty'; rememberTab(tab,before); return; }
     if(tab.kind==='settings') {agentDraft=payload.settingsEditor?.draft??null;agentEdits=payload.settingsEditor?.edits??{};settingsCategory=payload.settingsCategory??'appearance';openSettings();rememberTab(tab,before);return;}
     if(tab.kind==='terminal') {openTerminalTab(tab.id);rememberTab(tab,before);return;}
+    if(tab.kind==='browser') {
+      const browser = payload.browser;
+      if (!browser || browser.id !== tab.id || typeof browser.url !== 'string' || typeof browser.title !== 'string' || typeof browser.unloaded !== 'boolean') return;
+      browserTabs[tab.id] = { ...browser }; openBrowser(tab.id); rememberTab(tab,before); return;
+    }
     if(tab.kind==='channel')channelRecipients[tab.id]=payload.recipients ?? [];
     queuedAttachments[`${tab.kind}:${tab.id}`]=payload.attachments ?? [];
     if(payload.attachmentContext) attachmentContexts[`${tab.kind}:${tab.id}`]=payload.attachmentContext;
@@ -1606,7 +1716,7 @@
     }
   }
   async function dropTab(targetId: string, edge: DropEdge, tab: PaneTabTransfer, before?: TabKey, keepEmptySource = false) {
-    if(embedded) { onTabDrop?.(targetId,edge,tab,before); return; }
+    if(embedded) return onTabDrop?.(targetId,edge,tab,before);
     if (workspaceTransition || composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`] || terminalBusy) { notice='Wait for the current action before moving this tab.'; return; }
     const ids=paneIds(layout);
     if (!ids.includes(tab.sourcePaneId) || !ids.includes(targetId)) return;
@@ -2377,6 +2487,7 @@
     if(pane!=='overview')return;
     if(next.kind==='settings')openSettings();
     else if(next.kind==='terminal')openTerminalTab(next.id);
+    else if(next.kind==='browser')openBrowser(next.id);
     else if(next.kind==='draft')openTaskDraft(taskDrafts[next.id]);
     else if(next.kind==='task'){const task=snapshot?.tasks.find(item=>item.id===next.id);if(task)openTask(task);}
     else {const channel=availableChannels.find(item=>item.id===next.id);if(channel)openChannel(channel);}
@@ -2511,6 +2622,159 @@
     rememberTab({ kind: 'empty', id });
     focusSelectedTabInput();
   }
+  export function openBrowserTab() {
+    if (!nativeRuntime || !bridge.available) { notice = 'Browser tabs require the native desktop app.'; return; }
+    saveCurrentDraft();
+    const id = localUuid();
+    // A tab is inert until the user enters an address. Never create a network
+    // request merely because a workspace or a tab strip was restored.
+    browserTabs[id] = { id, url: '', title: 'New browser tab', unloaded: true };
+    openBrowserIds = [...openBrowserIds, id];
+    selectedBrowserId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; selectedEmptyId = null; currentDraftId = null;
+    focusedAgentId = null; focusedProjectId = null; composer = ''; pane = 'browser';
+    rememberTab({ kind: 'browser', id });
+  }
+  function openBrowser(id: string) {
+    const tab = browserTabs[id]; if (!tab) return;
+    saveCurrentDraft(); if (!openBrowserIds.includes(id)) openBrowserIds = [...openBrowserIds, id];
+    selectedBrowserId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; selectedEmptyId = null; currentDraftId = null;
+    focusedAgentId = null; focusedProjectId = null; composer = ''; pane = 'browser'; rememberTab({ kind: 'browser', id });
+    if (!tab.unloaded && nativeRuntime && bridge.available) void refreshBrowserState(id);
+  }
+  function applyBrowserState(state: { tabId: string; url: string; title: string; canGoBack: boolean | null; canGoForward: boolean | null }, preserveAddress = false) {
+    const tab = browserTabs[state.tabId];
+    if (!tab) return;
+    browserTabs[state.tabId] = { ...tab, url: preserveAddress ? tab.url : state.url, title: state.title || tab.title, unloaded: false };
+    browserHistory[state.tabId] = { canGoBack: state.canGoBack, canGoForward: state.canGoForward };
+  }
+  async function refreshBrowserState(id: string) {
+    try { applyBrowserState(await bridge.browserGetState(id)); }
+    catch { /* The native child may still be creating or have been unloaded. */ }
+  }
+  async function ensureNativeBrowser(id: string): Promise<boolean> {
+    const tab = browserTabs[id], bounds = browserBounds[id];
+    if (!tab || !bounds || !nativeRuntime || !bridge.available) return false;
+    if (!tab.unloaded) return true;
+    const pending = browserOpenings.get(id); if (pending) return pending;
+    const epoch = browserEpoch.get(id) ?? 0;
+    const opening = (async () => {
+      try {
+        // Creation is deliberately blank. `navigateBrowser` performs the only
+        // user-requested navigation after this child view is available.
+        const state = await bridge.browserOpen(id, 'about:blank', bounds);
+        const current = browserTabs[id];
+        if ((browserEpoch.get(id) ?? 0) !== epoch || !current) { try { await bridge.browserClose(id); } catch { /* Closing an already-removed child is harmless. */ } return false; }
+        applyBrowserState(state, true);
+        return true;
+      } catch (reason) { error = `Could not show browser tab: ${text(reason)}`; return false; }
+      finally { browserOpenings.delete(id); }
+    })();
+    browserOpenings.set(id, opening);
+    return opening;
+  }
+  async function layoutBrowser(id: string, viewport: BrowserViewport) {
+    const tab = browserTabs[id];
+    if (!tab || !nativeRuntime || !bridge.available) return;
+    // DOM rects are CSS coordinates after the renderer WebView zoom. Tauri
+    // child-webview bounds are window logical coordinates before that zoom.
+    // At the default 125% UI scale this multiplies the CSS rect by 1.25,
+    // preventing the native child from rendering at the observed 0.8 size.
+    const nativeZoom = nativeRuntime ? activeInterfaceScale / 100 : 1;
+    // The active pane outline is drawn by the shell renderer and cannot paint
+    // above a native child WebView. Leave its 2 CSS-pixel left/right/bottom
+    // stroke exposed; the top stroke is above this content viewport already.
+    const focusedPane = embedded ? active : !sidebarSelected && activePaneId === 'main';
+    const borderInset = focusedPane && snapshot?.settings.showActivePaneBorder !== false ? 2 : 0;
+    const left = Math.round((viewport.x + borderInset) * nativeZoom);
+    const top = Math.round(viewport.y * nativeZoom);
+    const right = Math.round((viewport.x + viewport.width - borderInset) * nativeZoom);
+    const bottom = Math.round((viewport.y + viewport.height - borderInset) * nativeZoom);
+    const candidate: BrowserBounds = {
+      x: left, y: top,
+      width: Math.max(0, right - left), height: Math.max(0, bottom - top),
+    };
+    // Webview teardown may report 0×0. Native bounds reject that shape, so
+    // retain the last valid geometry for the mandatory hidden transition.
+    if (candidate.width > 0 && candidate.height > 0) browserBounds[id] = candidate;
+    const bounds = browserBounds[id];
+    if (!bounds) return;
+    // An unloaded tab has no child to hide or resize. It remains inert until
+    // address submission creates its blank native child.
+    if (tab.unloaded) return;
+    const revision = (browserLayoutRevision.get(id) ?? 0) + 1;
+    browserLayoutRevision.set(id, revision);
+    const visible = viewport.visible;
+    const write = browserLayoutTail.catch(() => {}).then(async () => {
+      // Collapse bursts of resize/movement reports to the newest bounds for
+      // this tab, and never resurrect a child after unload or close.
+      if (browserLayoutRevision.get(id) !== revision || !browserTabs[id] || browserTabs[id].unloaded) return;
+      try { await bridge.browserSetLayout(id, bounds, visible); }
+      catch (reason) {
+        if (browserLayoutRevision.get(id) === revision && browserTabs[id] && !browserTabs[id].unloaded)
+          error = `Could not position browser tab: ${text(reason)}`;
+      }
+    });
+    browserLayoutTail = write;
+    await write;
+  }
+  function browserAddress(raw: string): string | null {
+    const candidate = raw.trim(); if (!candidate) return null;
+    const bareHostPort = /^(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|[a-z0-9.-]+):\d+(?:[/?#]|$)/i.test(candidate);
+    const localHostPort = /^(?:localhost|(?:\d{1,3}\.){3}\d{1,3}):\d+(?:[/?#]|$)/i.test(candidate);
+    const withScheme = bareHostPort ? `${localHostPort ? 'http' : 'https'}://${candidate}`
+      : /^[a-z][a-z0-9+.-]*:/i.test(candidate) ? candidate : `https://${candidate}`;
+    try {
+      const parsed = new URL(withScheme);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+      return parsed.href;
+    } catch { return null; }
+  }
+  async function navigateBrowser(id: string, url: string) {
+    const tab = browserTabs[id], address = browserAddress(url);
+    if (!tab || !address || !nativeRuntime || !bridge.available) { if (tab && url.trim()) error = 'Enter an http or https address without embedded credentials.'; return; }
+    browserRequestedUrls.set(id, address);
+    browserTabs[id] = { ...tab, url: address, title: tab.title || 'Browser' };
+    try {
+      if (!await ensureNativeBrowser(id)) return;
+      const state = await bridge.browserNavigate(id, address);
+      applyBrowserState(state);
+    } catch (reason) { error = `Could not navigate browser tab: ${text(reason)}`; }
+    finally { if (browserRequestedUrls.get(id) === address) browserRequestedUrls.delete(id); }
+  }
+  async function reloadBrowser(id: string) {
+    const tab = browserTabs[id]; if (!tab || !tab.url || !nativeRuntime || !bridge.available) return;
+    // A restored tab has no native document yet; its reload action is the
+    // explicit user consent to load the remembered address for the first time.
+    if (tab.unloaded) { await navigateBrowser(id, tab.url); return; }
+    if (!await ensureNativeBrowser(id)) return;
+    try { applyBrowserState(await bridge.browserReload(id)); }
+    catch (reason) { error = `Could not reload browser tab: ${text(reason)}`; }
+  }
+  async function browserBack(id: string) {
+    if (!browserTabs[id] || !nativeRuntime || !bridge.available) return;
+    try { applyBrowserState(await bridge.browserBack(id)); } catch (reason) { error = `Could not go back: ${text(reason)}`; }
+  }
+  async function browserForward(id: string) {
+    if (!browserTabs[id] || !nativeRuntime || !bridge.available) return;
+    try { applyBrowserState(await bridge.browserForward(id)); } catch (reason) { error = `Could not go forward: ${text(reason)}`; }
+  }
+  async function unloadBrowser(id: string) {
+    const tab = browserTabs[id]; if (!tab || tab.unloaded || !nativeRuntime || !bridge.available) return;
+    browserLayoutRevision.set(id, (browserLayoutRevision.get(id) ?? 0) + 1);
+    try { await browserLayoutTail; await bridge.browserClose(id); if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true }; delete browserBounds[id]; delete browserHistory[id]; browserLayoutRevision.delete(id); browserRequestedUrls.delete(id); }
+    catch (reason) { error = `Could not unload browser tab: ${text(reason)}`; }
+  }
+  async function closeBrowserTab(id: string, collapse = true) {
+    const tab = browserTabs[id]; if (!tab) return;
+    // Remove the UI record first: a creation that resolves after this point
+    // observes the missing record and closes its orphan native child.
+    browserLayoutRevision.set(id, (browserLayoutRevision.get(id) ?? 0) + 1);
+    delete browserTabs[id]; delete browserBounds[id]; delete browserHistory[id]; browserRequestedUrls.delete(id); openBrowserIds = openBrowserIds.filter(item => item !== id); forgetTab({ kind: 'browser', id });
+    if (!tab.unloaded && nativeRuntime && bridge.available) try { await browserLayoutTail; await bridge.browserClose(id); } catch (reason) { error = `Browser tab closed locally; native cleanup failed: ${text(reason)}`; }
+    browserLayoutRevision.delete(id);
+    if (selectedBrowserId === id) { selectedBrowserId = null; openOverview(); }
+    if (collapse) collapseTablessPane();
+  }
   function closeEmptyTab(id: string, collapse = true) {
     delete documents[id]; delete documentContents[id]; delete documentErrors[id];
     openEmptyIds = openEmptyIds.filter(item => item !== id); forgetTab({ kind: 'empty', id });
@@ -2583,9 +2847,9 @@
     settingsOpen=false;forgetTab({kind:'settings',id:'settings'});if(pane!=='settings'){if (collapse) collapseTablessPane();return;}
     const task=openTasks.at(-1), draft=openDrafts.at(-1);
     const channel=availableChannels.find(item=>item.id===openChannelIds.at(-1));
-    const terminal=openTerminalIds.at(-1);
+    const terminal=openTerminalIds.at(-1), browser=openBrowserIds.at(-1);
     if(task)openTask(task);else if(draft)openTaskDraft(draft);else if(channel)openChannel(channel);
-    else if(terminal)openTerminalTab(terminal);else openOverview();
+    else if(terminal)openTerminalTab(terminal);else if(browser)openBrowser(browser);else openOverview();
     if (collapse) collapseTablessPane();
   }
   async function savePreference(patch:Partial<Settings>) {
@@ -2602,6 +2866,7 @@
     if(pane==='overview'){closeOverview();return;}
     if(pane==='empty'){if(selectedEmptyId)closeEmptyTab(selectedEmptyId);else closeOverview();return;}
     if(pane==='settings'){closeSettings();return;}
+    if(pane==='browser' && selectedBrowserId){ void closeBrowserTab(selectedBrowserId); return; }
     if (pane === 'terminal' && selectedTerminalId) { void closeTerminalTab(selectedTerminalId); return; }
     if (pane === 'task' && currentDraftId) { closeTaskDraft(currentDraftId); return; }
     if (pane === 'task' && selectedTaskId) { closeTaskTab(selectedTaskId); return; }
@@ -2633,6 +2898,7 @@
     if (pane === 'task') return currentDraftId ? {kind:'draft',id:currentDraftId} : selectedTaskId ? {kind:'task',id:selectedTaskId} : null;
     if (pane === 'channel' && selectedChannelId) return {kind:'channel',id:selectedChannelId};
     if (pane === 'terminal' && selectedTerminalId) return {kind:'terminal',id:selectedTerminalId};
+    if (pane === 'browser' && selectedBrowserId) return {kind:'browser',id:selectedBrowserId};
     if (pane === 'empty' && selectedEmptyId) return {kind:'empty',id:selectedEmptyId};
     return pane === 'settings' ? {kind:'settings',id:'settings'} : null;
   }
@@ -2644,7 +2910,7 @@
     if(tab.kind==='task'){const item=snapshot?.tasks.find(item=>item.id===tab.id);if(item)openTask(item);}
     else if(tab.kind==='draft'){const item=taskDrafts[tab.id];if(item)openTaskDraft(item);}
     else if(tab.kind==='channel'){const item=availableChannels.find(item=>item.id===tab.id);if(item)openChannel(item);}
-    else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings();
+    else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='browser')openBrowser(tab.id); else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings();
     focusSelectedTabInput();
     return true;
   }
@@ -3520,6 +3786,8 @@
       if (!root) return;
       const target = pane === 'terminal'
         ? root.querySelector<HTMLElement>('.terminal-pane .xterm-helper-textarea')
+        : pane === 'browser'
+          ? root.querySelector<HTMLInputElement>('input[aria-label="Browser address"]')
         : pane === 'task' || pane === 'channel'
           ? root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Task message"], textarea[aria-label="Channel message"]')
           : pane === 'empty'
@@ -3547,6 +3815,7 @@
     if (pane === 'task') return currentDraftId ? taskDrafts[currentDraftId]?.title || 'New chat' : selectedTask?.title || 'Chat';
     if (pane === 'channel') return activeChannel?.name || 'Channel';
     if (pane === 'terminal') return selectedTerminal ? terminalTabTitle(selectedTerminal, snapshot?.hosts ?? []) : 'Terminal';
+    if (pane === 'browser') return selectedBrowser?.title || 'Browser';
     if (pane === 'empty') return selectedEmptyId && documents[selectedEmptyId]?.title || 'New tab';
     if (pane === 'settings') return settingsTabTitle(settingsCategory);
     if (pane === 'agent') return focusedAgent?.name || 'Agent';
@@ -4294,6 +4563,9 @@
           {:else if tab.kind === 'terminal'}{@const session=$terminalSessions[tab.id]}{#if session}
             {@const terminalTitle=terminalTabTitle(session,snapshot?.hosts??[])}<div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><span class="tab-kind-icon" aria-hidden="true"><SquareTerminal size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={terminalTitle} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${terminalTitle}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
+          {:else if tab.kind === 'browser'}{@const browser=browserTabs[tab.id]}{#if browser}
+            <div class="tab-entry browser-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='browser' && selectedBrowserId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'browser',tab.id)} onpointerdown={event=>startTabPointer(event,'browser',tab.id)} aria-pressed={pane==='browser'&&selectedBrowserId===tab.id} onclick={()=>selectTabPicker(()=>openBrowser(tab.id))} title={browser.url}><span class="tab-kind-icon" aria-hidden="true"><Globe size={13}/><span class="tab-shortcut"></span></span><span>{browser.title || 'Browser'}</span></button><button class="close-tab" aria-label={`Close browser tab ${browser.title}`} title="Close browser tab" onclick={()=>{void closeBrowserTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+          {/if}
           {:else if tab.kind === 'empty'}
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}<FileText size={13}/><span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {:else if tab.kind === 'settings'}
@@ -4338,8 +4610,14 @@
     {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
       <button class="pane-choice" disabled={busy} onkeydown={handleEmptyChoiceKeydown} onclick={()=>visibleAgents.length?openTaskComposer():routeAgentSettings(blankAgent())}><MessageSquare size={22}/><span>New chat</span></button>
       <button class="pane-choice" disabled={terminalBusy} onkeydown={handleEmptyChoiceKeydown} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={22} class="spin"/>{:else}<SquareTerminal size={22}/>{/if}<span>Terminal</span></button>
+      <button class="pane-choice" disabled={!nativeRuntime || !bridge.available} onkeydown={handleEmptyChoiceKeydown} onclick={()=>openBrowserTab()}><Globe size={22}/><span>Browser</span></button>
     </div></section>
     {:else if pane === 'terminal' && selectedTerminal}<div class="terminal-surface">{#if !mobileSidebar}<div class="terminal-pane-overlay">{@render paneExpandControl()}</div>{/if}<TerminalPane sessionId={selectedTerminal.id} active={(embedded?active:activePaneId==='main') && !modal && !palette}/></div>
+    {:else if pane === 'browser' && selectedBrowser}
+      {#key selectedBrowser.id}
+        {@const browserId = selectedBrowser.id}
+        <BrowserTabPanel tab={selectedBrowser} active={browserPaneVisible} available={nativeRuntime && bridge.available} layoutRevision={browserGeometryRevision} canGoBack={selectedBrowserHistory.canGoBack} canGoForward={selectedBrowserHistory.canGoForward} onLayout={viewport=>void layoutBrowser(browserId,viewport)} onNavigate={url=>void navigateBrowser(browserId,url)} onBack={()=>void browserBack(browserId)} onForward={()=>void browserForward(browserId)} onRefreshState={()=>void refreshBrowserState(browserId)} onReload={()=>void reloadBrowser(browserId)} onUnload={()=>void unloadBrowser(browserId)} onLoadExtension={path=>bridge.browserLoadUnpackedExtension(path)} onClose={()=>void closeBrowserTab(browserId)}/>
+      {/key}
     {:else if pane === 'project' && focusedProject}
       {@const ProjectIcon = projectIconComponent(focusedProject.icon)}
       <section class="overview project-overview">
@@ -4389,7 +4667,7 @@
           <button class="secondary" disabled={terminalBusy} onclick={newTerminal}>
             {#if terminalBusy}<LoaderCircle size={16} class="spin" />{:else}<SquareTerminal size={16} />{/if}
             New terminal
-          </button></div>
+          </button><button class="secondary" disabled={!nativeRuntime || !bridge.available} onclick={()=>openBrowserTab()}><Globe size={16}/>New browser</button></div>
         </div>
         {#if !snapshot.hosts.length || !visibleAgents.length}<section
             class="onboarding"
@@ -4907,9 +5185,9 @@
     </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
-    <PaneGrid {layout} activePaneId={sidebarSelected?'sidebar':activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragEnd={()=>pointerTabDrag=null} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} showActivePaneBorder={snapshot?.settings.showActivePaneBorder ?? true} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>{activePaneId=id;sidebarSelected=false}} onresize={resizeSplit} ondropTab={dropTab}>
+    <PaneGrid {layout} activePaneId={sidebarSelected?'sidebar':activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragStart={()=>browserDragActive=true} onPointerDragEnd={()=>{browserDragActive=false;pointerTabDrag=null}} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} showActivePaneBorder={snapshot?.settings.showActivePaneBorder ?? true} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>{activePaneId=id;sidebarSelected=false}} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
-        <AppSurface embedded={true} paneId={id} active={!sidebarSelected && activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey}
+        <AppSurface embedded={true} paneId={id} active={!sidebarSelected && activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey} parentGeometryRevision={browserGeometryRevision} parentBrowserVisible={browserGlobalVisible && (!expandedPaneId || expandedPaneId === id)}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
           onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={handleChildWorkspaceChange} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}

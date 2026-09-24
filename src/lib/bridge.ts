@@ -52,6 +52,9 @@ import type {
   JevCommandPlan,
   MailDetail,
   MailDetailRequestResult,
+  BrowserBounds,
+  BrowserState,
+  BrowserExtensionLoadResult,
 } from "./types";
 
 export interface MonitterBridge {
@@ -117,6 +120,16 @@ export interface MonitterBridge {
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   readTerminal(id: string, afterSeq: number): Promise<TerminalRead>;
   closeTerminal(id: string): Promise<void>;
+  browserOpen(tabId: string, url: string, bounds: BrowserBounds): Promise<BrowserState>;
+  browserSetLayout(tabId: string, bounds: BrowserBounds, visible: boolean): Promise<BrowserState>;
+  browserNavigate(tabId: string, url: string): Promise<BrowserState>;
+  browserBack(tabId: string): Promise<BrowserState>;
+  browserForward(tabId: string): Promise<BrowserState>;
+  browserReload(tabId: string): Promise<BrowserState>;
+  browserLoadUnpackedExtension(path: string): Promise<BrowserExtensionLoadResult>;
+  browserClose(tabId: string): Promise<void>;
+  browserGetState(tabId: string): Promise<BrowserState>;
+  onBrowserState(handler: (state: BrowserState) => void): Promise<UnlistenFn>;
   getModelCatalog(target: ModelTarget): Promise<ModelCatalog>;
   setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
   setTaskSandbox(taskId: string, sandbox: Sandbox): Promise<Snapshot>;
@@ -302,6 +315,16 @@ const nativeBridge: MonitterBridge = {
   resizeTerminal: (id, cols, rows) => invoke<void>('resize_terminal', {id,cols,rows}),
   readTerminal: (id, afterSeq) => invoke<TerminalRead>('read_terminal', {id,afterSeq}),
   closeTerminal: id => invoke<void>('close_terminal', {id}),
+  browserOpen: (tabId, url, bounds) => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_open', {tabId, url, bounds}),
+  browserSetLayout: (tabId, bounds, visible) => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_set_layout', {tabId, bounds, visible}),
+  browserNavigate: (tabId, url) => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_navigate', {tabId, url}),
+  browserBack: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_back', {tabId}),
+  browserForward: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_forward', {tabId}),
+  browserReload: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_reload', {tabId}),
+  browserLoadUnpackedExtension: path => isLanBrowser() ? desktopOnly() : invoke<BrowserExtensionLoadResult>('browser_load_unpacked_extension', {path}),
+  browserClose: tabId => isLanBrowser() ? desktopOnly() : invoke<void>('browser_close', {tabId}),
+  browserGetState: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_get_state', {tabId}),
+  onBrowserState: handler => isLanBrowser() ? desktopOnly() : listen<BrowserState>('monitter:browser-state', event => handler(event.payload)),
   getModelCatalog: target => invoke<ModelCatalog>("get_model_catalog", {target}),
   setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
   setTaskSandbox: (taskId, sandbox) => invoke<Snapshot>('set_task_sandbox', {taskId,sandbox}),
@@ -411,6 +434,16 @@ const previewBridge: MonitterBridge = {
   resizeTerminal: () => desktopOnly(),
   readTerminal: () => desktopOnly(),
   closeTerminal: () => desktopOnly(),
+  browserOpen: () => desktopOnly(),
+  browserSetLayout: () => desktopOnly(),
+  browserNavigate: () => desktopOnly(),
+  browserBack: () => desktopOnly(),
+  browserForward: () => desktopOnly(),
+  browserReload: () => desktopOnly(),
+  browserLoadUnpackedExtension: () => desktopOnly(),
+  browserClose: () => desktopOnly(),
+  browserGetState: () => desktopOnly(),
+  onBrowserState: () => desktopOnly(),
   getModelCatalog: () => desktopOnly(),
   setTaskModelSettings: () => desktopOnly(),
   setTaskSandbox: () => desktopOnly(),
@@ -512,6 +545,16 @@ export function getBridge(): MonitterBridge {
       resizeTerminal: (id, cols, rows) => test.invoke('resize_terminal', {id,cols,rows}) as Promise<void>,
       readTerminal: (id, afterSeq) => test.invoke('read_terminal', {id,afterSeq}) as Promise<TerminalRead>,
       closeTerminal: id => test.invoke('close_terminal', {id}) as Promise<void>,
+      browserOpen: (tabId, url, bounds) => test.invoke('browser_open', {tabId, url, bounds}) as Promise<BrowserState>,
+      browserSetLayout: (tabId, bounds, visible) => test.invoke('browser_set_layout', {tabId, bounds, visible}) as Promise<BrowserState>,
+      browserNavigate: (tabId, url) => test.invoke('browser_navigate', {tabId, url}) as Promise<BrowserState>,
+      browserBack: tabId => test.invoke('browser_back', {tabId}) as Promise<BrowserState>,
+      browserForward: tabId => test.invoke('browser_forward', {tabId}) as Promise<BrowserState>,
+      browserReload: tabId => test.invoke('browser_reload', {tabId}) as Promise<BrowserState>,
+      browserLoadUnpackedExtension: path => test.invoke('browser_load_unpacked_extension', {path}) as Promise<BrowserExtensionLoadResult>,
+      browserClose: tabId => test.invoke('browser_close', {tabId}) as Promise<void>,
+      browserGetState: tabId => test.invoke('browser_get_state', {tabId}) as Promise<BrowserState>,
+      onBrowserState: async () => () => {},
       getModelCatalog: target => test.invoke("get_model_catalog", {target}) as Promise<ModelCatalog>,
       setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
       setTaskSandbox: (taskId, sandbox) => test.invoke('set_task_sandbox', {taskId,sandbox}) as Promise<Snapshot>,

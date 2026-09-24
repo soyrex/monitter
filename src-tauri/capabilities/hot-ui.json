@@ -6,6 +6,6 @@
   "remote": {
     "urls": ["http://127.0.0.1:18420/monitter-app-ui/*"]
   },
-  "windows": ["main"],
+  "webviews": ["main"],
   "permissions": ["allow-use-packaged-ui"]
 }

@@ -1,0 +1,12 @@
+{
+  "identifier": "com.monitter.browser-smoke",
+  "productName": "Monitter Browser Smoke",
+  "build": {
+    "beforeBuildCommand": "",
+    "frontendDist": "../build"
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"]
+  }
+}

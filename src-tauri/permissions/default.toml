@@ -22,7 +22,8 @@ commands.allow = [
   "send_channel_message_fast", "get_resume_command", "get_model_catalog", "set_task_model_settings",
   "set_task_sandbox", "get_task_goal", "get_task_slash_commands", "execute_task_slash_command", "get_subagent_transcript", "clear_task_goal", "get_task_git_status", "wait_for_task_git_marker",
   "get_task_git_diff", "open_terminal", "list_terminals", "write_terminal", "resize_terminal",
-  "read_terminal", "close_terminal"
+  "read_terminal", "close_terminal",
+  "browser_open", "browser_set_layout", "browser_navigate", "browser_back", "browser_forward", "browser_reload", "browser_close", "browser_get_state", "browser_load_unpacked_extension"
 ]
 
 [[permission]]

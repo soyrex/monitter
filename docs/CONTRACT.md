@@ -7,6 +7,47 @@ No fake conversations, progress, token counts, host connections or model replies
 
 ## Commands (Tauri invoke names and JSON argument keys)
 
+- Native browser commands are owner-desktop-only; they are absent from LAN, mobile, and shared
+  visitor dispatch. All coordinates below are finite logical window pixels and `tabId` is a UUID.
+  Browser views use an app-private browsing profile shared across browser tabs, never the Monitter
+  shell's profile. External pages receive no Monitter Tauri IPC capability. Only inert `about:blank`,
+  `http:`, and `https:` navigation is accepted. HTTP(S) URLs containing userinfo credentials reject;
+  explicit Basic Auth credentials, extension state, and page contents are never
+  written to workspace snapshots or command logs. Tab URLs and titles are saved
+  as restore hints; sites can place secrets in URLs, so this metadata is private
+  workspace data and must not be exposed to shared or LAN clients.
+- `browser_open { tabId: string, url: string, bounds: { x, y, width, height } }` ->
+  `{ tabId, url, title, canGoBack, canGoForward }`. History availability fields may be `null`
+  when the native engine cannot report them. Creates or restores one native child webview.
+  On macOS, profile-isolated browser tabs require macOS 14 or newer; older systems receive an
+  explicit unsupported error rather than silently sharing the shell's profile. Browser-extension
+  hosting, if enabled, requires macOS 15.4 or newer and must be validated per extension. Basic
+  Auth is not advertised as supported: Monitter supplies no credentials/custom challenge callback,
+  and WKWebView may reject an unhandled HTTP authentication challenge.
+- `browser_set_layout { tabId: string, bounds: { x, y, width, height }, visible: boolean }` ->
+  `BrowserState`.
+  Hiding a tab retains its live page; closing its view unloads it. Reopening an unloaded tab
+  reloads its URL and may lose unsaved page state.
+- `browser_navigate { tabId: string, url: string }` -> `BrowserState`; `browser_back { tabId: string }` -> `BrowserState`;
+  `browser_forward { tabId: string }` -> `BrowserState`; `browser_reload { tabId: string }` -> `BrowserState`;
+  `browser_close { tabId: string }` -> `()`; `browser_get_state { tabId: string }` ->
+  `{ tabId, url, title, canGoBack, canGoForward }`. Native browser process and page state remain
+  authoritative; local tab metadata is only a restore hint. macOS reads and moves the native
+  `WKWebView` history stack through a main-thread bridge. Windows and Linux use the corresponding
+  WebView2/WebKitGTK native history APIs. Those portable paths compile only on their target
+  platforms and still require native runtime validation before being advertised as supported.
+- `monitter:browser-state` emits `BrowserState` when native navigation or document title changes.
+  The owner desktop updates only the matching local tab; unmounted browser panes unsubscribe.
+  The event never carries page content, credentials, or extension data.
+- `monitter:browser-focus` emits `{ tabId: string }` to the local main webview when a mouse
+  click lands inside a macOS native browser child. The root workspace activates that tab's
+  owning pane without stealing focus from the website. The child page receives no Monitter
+  command capability or injected script for this signal.
+- `browser_load_unpacked_extension { path: string }` -> `{ path, displayName }` is an
+  owner-desktop-only macOS 15.4+ operation. `path` must be an absolute unpacked
+  directory with a bounded JSON manifest. A successful return means WebKit
+  accepted and activated the extension context, not that its popup, permissions,
+  native messaging, or autofill work. Direct Web Store installation is outside v1.
 - `load_dev_ui {}` -> `()`. Owner desktop only. The native app connects directly to exact IPv4
   loopback port 18420, requires a compatible Monitter marker, and then navigates the existing main
   WebView to its dedicated Vite bridge path. It does not start a server, launch another backend, or
