@@ -3727,7 +3727,7 @@
     monitterSlash("settings", "/settings", "Open Monitter preferences"),
     monitterSlash("terminal", "/terminal", "Run a command in a terminal tab: /terminal <command>"),
     ...(pane === "task" ? [monitterSlash("project", "/project", "Choose the project for this chat")] : []),
-    ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel && !projectBoardId(activeChannel.id)) ? [monitterSlash("autoname", "/autoname", "Generate a title from recent content")] : []),
+    ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel && !projectBoardId(activeChannel.id)) ? [monitterSlash("autoname", "/rename", "Generate a title from recent content")] : []),
     ...(selectedTask?.status === "running" ? [monitterSlash("stop", "/stop", "Stop this running task")] : []),
     ...(pane === 'task' && selectedTask ? providerSlashCommands.map(item => ({
       ...item,
@@ -4271,7 +4271,7 @@
     {id:"new-task",label:"New chat",group:"Create"},
     {id:"vim-command",label:"Vim command",detail:"Open : command mode for workspace controls",keywords:"vim ex command tabnew split terminal quit",group:"Workspace"},
     {id:"new-terminal",label:"New terminal",detail:"Open a shell in this host and folder",group:"Create",disabled:terminalBusy},
-    ...(selectedTask || (activeChannel && !projectBoardId(activeChannel.id)) || selectedTerminal ? [{id:"autoname",label:"Auto-name current pane",detail:"Generate a title from recent visible content",keywords:"/autoname rename title",group:"Current pane",disabled:terminalBusy}] : []),
+    ...(selectedTask || (activeChannel && !projectBoardId(activeChannel.id)) || selectedTerminal ? [{id:"autoname",label:"Auto-name current pane",detail:"Generate a title from recent visible content",keywords:"/rename title",group:"Current pane",disabled:terminalBusy}] : []),
     {id:"new-agent",label:"New agent",group:"Create"},
     {id:"agents-directory",label:"Browse agents",detail:"Open the Agents settings to browse, configure, or create an agent",group:"Collaborate"},
     {id:"new-channel",label:"New channel",group:"Create"},

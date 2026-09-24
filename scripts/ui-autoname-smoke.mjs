@@ -5,7 +5,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.goto(process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18433');
-  await expect(page.getByRole('button', { name: 'Preferences', exact: true })).toBeVisible({ timeout: 60000 });
+  await expect(page.getByRole('tab', { name: 'Agents view' })).toBeVisible({ timeout: 60000 });
   await page.evaluate(() => {
     const q = window.__MONITTER_QA__, s = q.snapshot(), now = Date.now();
     s.tasks = [{ id: 'autoname-chat', agentId: 'atlas', title: 'Old chat title', nativeSessionId: 'native-stays', status: 'completed', archived: false, createdAt: now, updatedAt: now, parentTaskId: null, channelId: null, projectId: null, hostId: 'local', cwd: '/tmp/monitter-ui-test', provider: 'codex', model: '', sandbox: 'read-only' }];
@@ -26,9 +26,11 @@ try {
   await expect(page.locator('.animated-title.naming')).toHaveCount(0);
   await expect(composer).toHaveValue('Unsent draft survives naming');
   const beforeSuggestions = await page.locator('.composer').boundingBox();
-  await composer.fill('/autoname');
-  const suggestions=page.getByRole('menu',{name:'Monitter commands'});
+  await composer.fill('/rename');
+  const suggestions=page.getByRole('menu',{name:'Available slash commands'});
   await expect(suggestions).toBeVisible();
+  await expect(suggestions.getByText('/rename', { exact: true })).toBeVisible();
+  await expect(suggestions.getByText('/autoname', { exact: true })).toHaveCount(0);
   await expect(composer).toBeFocused();
   const menuBounds=await suggestions.boundingBox(),inputBounds=await page.locator('.composer').boundingBox();
   expect(menuBounds.y+menuBounds.height).toBeLessThanOrEqual(inputBounds.y);
@@ -41,7 +43,7 @@ try {
 
   await page.keyboard.press('Meta+k');
   await page.getByRole('dialog', { name: 'Switch to' }).getByText('Old channel title', { exact: true }).click();
-  await page.getByLabel('Channel message', { exact: true }).fill('/autoname');
+  await page.getByLabel('Channel message', { exact: true }).fill('/rename');
   await page.keyboard.press('Enter');
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().channels[0].name)).toBe('Generated channel title');
   expect(await page.evaluate(() => window.__MONITTER_QA__.snapshot().channels[0].agentIds)).toEqual(['atlas']);
