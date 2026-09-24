@@ -37,12 +37,17 @@ import readline from 'node:readline';
 const session = 'stream-session';
 const reply = (id, result) => console.log(JSON.stringify({jsonrpc:'2.0', id, result}));
 const update = (messageId, content) => console.log(JSON.stringify({jsonrpc:'2.0', method:'session/update', params:{sessionId:session, update:{sessionUpdate:'agent_message_chunk', messageId, content}}}));
+const thought = text => console.log(JSON.stringify({jsonrpc:'2.0', method:'session/update', params:{sessionId:session, update:{sessionUpdate:'agent_thought_chunk', content:{type:'text', text}}}}));
 readline.createInterface({input:process.stdin}).on('line', line => {
   const frame = JSON.parse(line);
   if (frame.method === 'initialize') reply(frame.id, {protocolVersion:1, agentCapabilities:{mcpCapabilities:{http:true}}});
   else if (frame.method === 'session/new') reply(frame.id, {sessionId:session});
   else if (frame.method === 'session/prompt') {
-    if (process.argv[2] === 'anonymous') {
+    if (process.argv[2] === 'reasoning') {
+      thought('Before reply');
+      update('answer', {type:'text', text:'Final answer'});
+      thought('Late thought');
+    } else if (process.argv[2] === 'anonymous') {
       update(undefined, {type:'text', text:'before tool'});
       console.log(JSON.stringify({jsonrpc:'2.0', method:'session/update', params:{sessionId:session, update:{sessionUpdate:'tool_call', toolCallId:'fixture-tool', title:'Read fixture', kind:'read', status:'completed'}}}));
       update(undefined, {type:'text', text:'after tool'});
@@ -85,6 +90,43 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         root,
         script,
     }
+}
+
+#[test]
+fn acp_reasoning_precedes_reply_and_completed_answer_is_final() {
+    let fixture = fixture(Some("reasoning"));
+    let agent = fixture.service.snapshot().unwrap().agents[0].clone();
+    let task = fixture
+        .service
+        .create_task(CreateTaskInput {
+            agent_id: agent.id,
+            title: "ACP reasoning order".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let prompt = fixture
+        .service
+        .accept_send(task.id.clone(), "reason".into(), vec![])
+        .unwrap()
+        .unwrap();
+    fixture.service.launch_accepted(task.id.clone(), Some(prompt));
+    wait_for(&fixture.service, &task.id);
+    let snapshot = fixture.service.snapshot().unwrap();
+    let answer = snapshot.messages.iter().find(|message| {
+        message.task_id == task.id && message.role == "assistant" && message.text == "Final answer"
+    }).expect("completed answer");
+    assert_eq!(answer.phase.as_deref(), Some("final_answer"));
+    assert_eq!(answer.stream_status.as_deref(), Some("complete"));
+    let before = snapshot.events.iter().find(|event| {
+        event.task_id == task.id && event.kind == "reasoning" && event.detail.as_ref() == "Before reply"
+    }).expect("reasoning before reply");
+    assert!(before.created_at <= answer.created_at);
 }
 
 fn wait_for(service: &Service, task_id: &str) {

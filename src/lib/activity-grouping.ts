@@ -241,6 +241,27 @@ export type ConversationActivityItem =
   | { type: 'tool-group'; values: RunEvent[] }
   | { type: 'process-group'; values: RunEvent[]; approvals?: ApprovalRequest[]; groups?: Extract<ConversationActivityItem, { type: 'reasoning-group' | 'tool-group' }>[] };
 
+/** Older ACP snapshots have no phase; show the last completed reply of each turn as final. */
+export function withAcpFinalAnswers(messages: Message[], currentTurnRunning: boolean): Message[] {
+  const result = [...messages];
+  let candidate = -1;
+  const finishTurn = () => {
+    if (candidate < 0) return;
+    const message = result[candidate];
+    if (!message.phase && message.streamStatus === 'complete') {
+      result[candidate] = { ...message, phase: 'final_answer' };
+    }
+    candidate = -1;
+  };
+  for (let index = 0; index < result.length; index += 1) {
+    const message = result[index];
+    if (message.role === 'user' || message.role === 'system') finishTurn();
+    else if (message.role === 'assistant') candidate = index;
+  }
+  if (!currentTurnRunning) finishTurn();
+  return result;
+}
+
 /** One waiting indicator per conversation, never alongside a reply or approval. */
 export function showThinkingFallback(items: ConversationActivityItem[], working: boolean, awaitingApproval = false): boolean {
   if (!working || awaitingApproval) return false;
@@ -760,8 +781,32 @@ export function groupConversationActivity(
     ...approvals.filter(value => value.status !== 'pending').map(value => ({ type: 'approval' as const, value, at: value.resolvedAt ?? value.createdAt })),
   ].sort((left, right) => left.at - right.at);
 
+  // ACP may persist a buffered thought after its streamed reply was created.
+  // A finished final answer is the visual end of that turn: keep any immediately
+  // following reasoning from the same task above it without rewriting history.
+  const displayOrdered: typeof ordered = [];
+  for (let index = 0; index < ordered.length; index += 1) {
+    const item = ordered[index];
+    if (item.type === 'message' && item.value.role === 'assistant' &&
+        item.value.phase === 'final_answer' && item.value.streamStatus !== 'streaming') {
+      let next = index + 1;
+      while (next < ordered.length) {
+        const following = ordered[next];
+        if (following.type !== 'activity' || following.value.kind !== 'reasoning' ||
+            following.value.taskId !== item.value.taskId) break;
+        next += 1;
+      }
+      if (next > index + 1) {
+        displayOrdered.push(...ordered.slice(index + 1, next), item);
+        index = next - 1;
+        continue;
+      }
+    }
+    displayOrdered.push(item);
+  }
+
   const grouped: ConversationActivityItem[] = [];
-  for (const item of ordered) {
+  for (const item of displayOrdered) {
     if (item.type === 'activity' && item.value.kind === 'reasoning') {
       const previous = grouped.at(-1);
       if (previous?.type === 'reasoning-group' && previous.values[0].taskId === item.value.taskId) {

@@ -150,7 +150,7 @@
   import Markdown from "$lib/components/Markdown.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import { activeComputerTools } from "$lib/activity";
-  import { groupConversationActivity, isNativeMessageTransportArtifact } from '$lib/activity-grouping';
+  import { groupConversationActivity, isNativeMessageTransportArtifact, withAcpFinalAnswers } from '$lib/activity-grouping';
   import { projectBoardChannels, projectBoardId } from '$lib/project-board-channels';
   import UnifiedSubagentVisor from '$lib/components/UnifiedSubagentVisor.svelte';
   import UnifiedSubagentSidebar from '$lib/components/UnifiedSubagentSidebar.svelte';
@@ -948,7 +948,7 @@
     ? (indexes?.queuedByTask.get(selectedTaskId) ?? []).filter(message => message.origin === 'steering')
     : []);
   const conversationItems = $derived(groupConversationActivity(
-    [...messages, ...taskOptimisticMessages.map(message => ({
+    [...(selectedTask?.provider === 'acp' ? withAcpFinalAnswers(messages, selectedTask.status === 'running') : messages), ...taskOptimisticMessages.map(message => ({
       id: message.id, taskId: message.targetId, role: 'user' as const, text: message.text,
       createdAt: message.createdAt, attachments: message.attachments,
     })), ...taskSteeringMessages.map(message => ({

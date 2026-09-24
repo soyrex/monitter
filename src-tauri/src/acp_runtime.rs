@@ -1939,6 +1939,8 @@ fn run(
                     let metadata = (metadata_item == Some(item.as_str()))
                         .then(|| response_metadata.clone())
                         .flatten();
+                    let message_phase = (status == "completed" && metadata_item == Some(item.as_str()))
+                        .then_some("final_answer");
                     if let Err(error) = service
                         .app_server_message(
                             &task_id,
@@ -1946,7 +1948,7 @@ fn run(
                             &turn,
                             item,
                             text,
-                            None,
+                            message_phase,
                             true,
                             metadata,
                         )
@@ -2241,6 +2243,14 @@ fn run(
                 // next anonymous delta a distinct durable message.
                 anonymous_message_item = anonymous_message_item.saturating_add(1).max(1);
             } else if matches!(kind, "agent_message_chunk" | "agent_message") {
+                // Preserve the provider's thought-before-reply order even when
+                // reasoning has not reached its periodic persistence flush yet.
+                if let Err(error) =
+                    flush_reasoning(&service, &task_id, &control, &turn, &mut pending_reasoning)
+                {
+                    fail(&service, &task_id, &control, error);
+                    return;
+                }
                 let content = &value["params"]["update"]["content"];
                 let content_type = content["type"].as_str().unwrap_or("text");
                 let placeholder = match content_type {
