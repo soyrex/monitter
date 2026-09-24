@@ -36,6 +36,7 @@ rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"
 croner = "4"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 chrono-tz = { version = "0.10", default-features = false, features = ["serde"] }
+fontdb = "0.23"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

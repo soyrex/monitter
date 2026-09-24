@@ -74,6 +74,10 @@ No fake conversations, progress, token counts, host connections or model replies
   processes. Each live process includes its PID, parent PID, name, start time, own cumulative CPU,
   and resident memory for breakdown views. Unsupported platforms fail visibly instead of returning
   fabricated values.
+- `list_system_fonts {}` -> `{ family: string, monospace: boolean }[]`.
+  Native desktop only. It returns local OS font family names for Typography suggestions, without
+  font file paths or embedded font data. Browser/LAN clients do not enumerate their viewer machine;
+  they keep manual entry and packaged fallback suggestions when this command is unavailable.
 - `get_task_event_detail { taskId: string, eventId: string, offset?: number, limit?: number }` ->
   `{ chunk: string, nextOffset: number | null, totalBytes: number }`. Full tool detail remains in
   the local store and is read only after its activity row is expanded. Chunks default to 32 KiB
@@ -485,7 +489,7 @@ changes never persist through backend Settings; clients can differ independently
 
 Base sizes `interfaceFontSize`, `chatFontSize`, and `terminalFontSize` are integer pixels (8–32), defaulting to 14, 13, and 14 respectively. Interface typography retains its relative hierarchy; native interface zoom scales all three exactly once.
 
-Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions.
+Settings include optional `interfaceFont`, `chatFont`, and `terminalFont` family names. Empty or missing values use IBM Plex Sans for interface/chat and IBM Plex Mono for terminals. Installed custom family names are supported with fallback fonts; changes apply to existing terminals without restarting sessions. The desktop Typography picker asks `list_system_fonts` for local OS family-name suggestions, keeps manual entry available, and falls back to the packaged suggestion list if enumeration fails.
 
 `interfaceFontWeight`, `chatFontWeight`, and `terminalFontWeight` are saved independently as numeric weights 300, 400, 500, 600, or 700, each defaulting to 400 for older snapshots. The Typography sliders preview changes while dragged and save on release. Interface weight changes ordinary UI text without removing explicit heading/bold emphasis; chat weight applies to messages and the composer; terminal weight updates xterm's normal and bold renderers in existing sessions. A selected font may map an unavailable weight to its nearest installed style.
 

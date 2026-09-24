@@ -1,7 +1,7 @@
 <script lang="ts">
   import { rangeFill } from '$lib/range-fill';
   import { Bot, Check, ChevronDown, KeyRound, LoaderCircle, MessageSquare, Palette, ShieldCheck, Smartphone, Type, UserRound, Blocks } from "@lucide/svelte";
-  import type { Agent, ApprovalRule, Host, Settings } from "$lib/types";
+  import type { Agent, ApprovalRule, Host, Settings, SystemFontFamily } from "$lib/types";
   import { getBridge } from '$lib/bridge';
   import { surfaceTint, setSurfaceTint, DEFAULT_SURFACE_TINT } from '$lib/surface-tint';
   import { borderOpacity, setBorderOpacity, DEFAULT_BORDER_OPACITY } from '$lib/border-opacity';
@@ -79,6 +79,8 @@
     { key: "chatFont", sizeKey: "chatFontSize", weightKey: "chatFontWeight", size: 13, label: "Chat font", fallback: "IBM Plex Sans" },
     { key: "terminalFont", sizeKey: "terminalFontSize", weightKey: "terminalFontWeight", size: 14, label: "Terminal font", fallback: "IBM Plex Mono" },
   ];
+  const defaultTextFonts = ["IBM Plex Sans", "Arial", "Helvetica Neue", "Avenir Next", "Georgia", "Verdana", "IBM Plex Mono", "Menlo"];
+  const defaultTerminalFonts = ["IBM Plex Mono", "Menlo", "Monaco", "Courier New", "SF Mono", "JetBrains Mono", "Fira Code"];
   const activeCategory = $derived(categories.some((item) => item.id === category) ? category as Category : "appearance");
   const densities = ['tight', 'normal', 'spacious'] as const;
   const windowSurfaces = ['opaque', 'translucent', 'glass'] as const;
@@ -93,12 +95,42 @@
   const selectedDarkPalette = $derived(applyThemeContrast(selectedDarkTheme.dark, 'dark', $appTheme.contrast));
   const advancedAccent = $derived($appTheme.accent ?? selectedLightTheme.light.accent);
 
+  function uniqueFontChoices(...groups: (string | SystemFontFamily)[][]) {
+    const choices: string[] = [];
+    const seen = new Set<string>();
+    for (const group of groups) {
+      for (const item of group) {
+        const family = typeof item === "string" ? item : item.family;
+        const key = family.trim().toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        choices.push(family);
+      }
+    }
+    return choices;
+  }
+
   let pending = $state(0);
   let previewWeights = $state<Partial<Record<FontWeightKey, number>>>({});
+  let systemFonts = $state<SystemFontFamily[]>([]);
+  let systemFontsLoaded = $state(false);
+  let systemFontError = $state("");
   let saveError = $state("");
   let userNameError = $state("");
   let savedAt = $state(0);
   let remoteControlHost = $state<HTMLDivElement | null>(null);
+  const systemFontsByMonospace = $derived([...systemFonts].sort((left, right) => Number(right.monospace) - Number(left.monospace) || left.family.localeCompare(right.family)));
+  const textFontChoices = $derived(uniqueFontChoices(defaultTextFonts, systemFonts));
+  const terminalFontChoices = $derived(uniqueFontChoices(defaultTerminalFonts, systemFontsByMonospace));
+
+  $effect(() => {
+    if (!visible || activeCategory !== "typography" || systemFontsLoaded) return;
+    systemFontsLoaded = true;
+    systemFontError = "";
+    void getBridge().listSystemFonts()
+      .then((families) => { systemFonts = families; })
+      .catch((reason) => { systemFontError = reason instanceof Error ? reason.message : String(reason); });
+  });
 
   // Register only the visible Remote-control category. The route-root controller
   // remains mounted when this target changes, so remembered phones keep reconnecting.
@@ -436,7 +468,7 @@
     {:else if activeCategory === "typography"}
       <div class="section-stack">
         <section class="setting-card" aria-labelledby="fonts-heading">
-          <div class="card-heading"><h2 id="fonts-heading">Fonts</h2><p>Installed family names work too. Clear a field to restore its default.</p></div>
+          <div class="card-heading"><h2 id="fonts-heading">Fonts</h2><p>Choose from fonts installed on this desktop, or type a family name. Clear a field to restore its default.</p></div>
           <div class="font-grid">
             {#each fonts as font}
               <div class="font-setting">
@@ -446,9 +478,9 @@
               </div>
             {/each}
           </div>
-          <datalist id="text-font-choices">{#each ["IBM Plex Sans", "Arial", "Helvetica Neue", "Avenir Next", "Georgia", "Verdana", "IBM Plex Mono", "Menlo"] as name}<option value={name}></option>{/each}</datalist>
-          <datalist id="terminal-font-choices">{#each ["IBM Plex Mono", "Menlo", "Monaco", "Courier New", "SF Mono", "JetBrains Mono", "Fira Code"] as name}<option value={name}></option>{/each}</datalist>
-          <p class="hint">Base sizes are before interface scaling. Weight steps depend on the selected font's available styles; headings and bold text retain their emphasis. Use a monospace font for terminals.</p>
+          <datalist id="text-font-choices">{#each textFontChoices as name}<option value={name}></option>{/each}</datalist>
+          <datalist id="terminal-font-choices">{#each terminalFontChoices as name}<option value={name}></option>{/each}</datalist>
+          <p class="hint">{#if systemFontError}Could not load local font suggestions: {systemFontError}. You can still type any installed family name.{:else if systemFonts.length}Loaded {systemFonts.length} local font families. {/if}Base sizes are before interface scaling. Weight steps depend on the selected font's available styles; headings and bold text retain their emphasis. Use a monospace font for terminals.</p>
         </section>
         <section class="setting-card" aria-labelledby="line-height-heading">
           <div class="card-heading"><h2 id="line-height-heading">Line height</h2><p>Control the vertical space in chat messages and terminal output.</p></div>

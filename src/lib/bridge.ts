@@ -37,6 +37,7 @@ import type {
   UiSnapshotResponse,
   TaskEventsPage,
   ProcessMetricsSample,
+  SystemFontFamily,
   EventDetailChunk,
   MarkdownDocument,
   SendAccepted,
@@ -67,6 +68,7 @@ export interface MonitterBridge {
   getUsageOverview(policy?: UsageRefreshPolicy): Promise<UsageOverview>;
   listCodexAccounts(): Promise<CodexAccount[]>;
   getProcessMetrics(): Promise<ProcessMetricsSample>;
+  listSystemFonts(): Promise<SystemFontFamily[]>;
   getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
   readMarkdownFile(taskId: string, href: string, basePath?: string): Promise<MarkdownDocument>;
   getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
@@ -266,6 +268,7 @@ const nativeBridge: MonitterBridge = {
   getUsageOverview: (policy) => invoke<UsageOverview>('get_usage_overview', policy === undefined ? {} : { policy }),
   listCodexAccounts: () => invoke<CodexAccount[]>('list_codex_accounts'),
   getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
+  listSystemFonts: () => isLanBrowser() ? Promise.resolve([]) : invoke<SystemFontFamily[]>('list_system_fonts'),
   getTaskEventDetail: (taskId, eventId, offset, limit) => invoke<EventDetailChunk>('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
   readMarkdownFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke<MarkdownDocument>('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   getSubagentTranscript: (taskId, subagentId) => invoke<SubagentTranscriptEntry[]>('get_subagent_transcript', { taskId, subagentId }),
@@ -389,6 +392,7 @@ const previewBridge: MonitterBridge = {
   planJevCommand: () => desktopOnly(),
   listCodexAccounts: () => desktopOnly(),
   getProcessMetrics: () => desktopOnly(),
+  listSystemFonts: async () => [],
   getTaskEventDetail: () => desktopOnly(),
   readMarkdownFile: () => desktopOnly(),
   getSubagentTranscript: () => desktopOnly(),
@@ -481,6 +485,7 @@ export function getBridge(): MonitterBridge {
       planJevCommand: (query, candidates) => test.invoke('plan_jev_command', { query, candidates }) as Promise<JevCommandPlan>,
       listCodexAccounts: () => test.invoke('list_codex_accounts') as Promise<CodexAccount[]>,
       getProcessMetrics: () => test.invoke('get_process_metrics') as Promise<ProcessMetricsSample>,
+      listSystemFonts: () => test.invoke('list_system_fonts') as Promise<SystemFontFamily[]>,
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
       readMarkdownFile: (taskId, href, basePath) => test.invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<MarkdownDocument>,
       getSubagentTranscript: (taskId, subagentId) => test.invoke('get_subagent_transcript', { taskId, subagentId }) as Promise<SubagentTranscriptEntry[]>,

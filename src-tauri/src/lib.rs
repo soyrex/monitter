@@ -115,6 +115,35 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Clone)]
 struct AppState(Arc<Service>);
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemFontFamily {
+    family: String,
+    monospace: bool,
+}
+
+fn load_system_font_families() -> Vec<SystemFontFamily> {
+    let mut database = fontdb::Database::new();
+    database.load_system_fonts();
+    let mut families = std::collections::BTreeMap::<String, bool>::new();
+    for face in database.faces() {
+        for (family, _) in &face.families {
+            let family = family.trim();
+            if family.is_empty() {
+                continue;
+            }
+            families
+                .entry(family.to_string())
+                .and_modify(|monospace| *monospace |= face.monospaced)
+                .or_insert(face.monospaced);
+        }
+    }
+    families
+        .into_iter()
+        .map(|(family, monospace)| SystemFontFamily { family, monospace })
+        .collect()
+}
+
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AutonameTarget {
@@ -6452,6 +6481,15 @@ async fn get_process_metrics() -> Result<process_metrics::ProcessMetricsSample, 
         .map_err(|error| format!("Process metrics worker failed: {error}"))?
 }
 
+/// Native desktop only. Browser engines cannot reliably enumerate installed
+/// families; the Rust backend queries the host OS and returns names only.
+#[tauri::command]
+async fn list_system_fonts() -> Result<Vec<SystemFontFamily>, String> {
+    tauri::async_runtime::spawn_blocking(load_system_font_families)
+        .await
+        .map_err(|error| format!("System font worker failed: {error}"))
+}
+
 /// Native desktop only. This command is deliberately absent from the LAN
 /// dispatcher and Snapshot because MCP environment/header values are private.
 #[tauri::command]
@@ -8857,6 +8895,7 @@ pub fn run() {
             plan_jev_route,
             plan_jev_command,
             get_process_metrics,
+            list_system_fonts,
             get_extension_config,
             save_extension_config,
             list_environment_secrets,
