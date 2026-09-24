@@ -1,7 +1,8 @@
 <script lang="ts">
   import { ChevronRight, GitBranch, Play, SquareTerminal } from '@lucide/svelte';
-  import type { Task, TaskGitStatus, TerminalSession } from '$lib/types';
-  let { task, gitStatus = null, tasks = [], terminalSessions = [], onOpenGit }: { task: Task; gitStatus?: TaskGitStatus | null; tasks?: Task[]; terminalSessions?: TerminalSession[]; onOpenGit?: () => void } = $props();
+  import type { Task, TaskGitStatus, TerminalSession, WorkPlan } from '$lib/types';
+  import WorkPlanPanel from '$lib/components/WorkPlanPanel.svelte';
+  let { task, gitStatus = null, tasks = [], terminalSessions = [], workPlans, onOpenGit }: { task: Task; gitStatus?: TaskGitStatus | null; tasks?: Task[]; terminalSessions?: TerminalSession[]; workPlans?: WorkPlan[]; onOpenGit?: () => void } = $props();
   const tracked = $derived([
     ...tasks.filter(item => item.status === 'running' && item.hostId === task.hostId && item.cwd === task.cwd).map(item => ({ key:`task:${item.id}`, label: item.id === task.id ? `${item.provider} task` : `${item.provider} task · ${item.title}` })),
     ...terminalSessions.filter(item => item.status === 'running' && item.hostId === task.hostId && item.cwd === task.cwd).map(item => ({ key:`terminal:${item.id}`, label:`Terminal · ${item.title}` })),
@@ -20,6 +21,7 @@
       <span class="git-chevron"><ChevronRight size={13}/></span>
     </button>
   {/if}
+  {#if workPlans !== undefined}<WorkPlanPanel plans={workPlans}/>{/if}
   <div class="processes"><h3>TRACKED PROCESSES</h3>{#each tracked as item (item.key)}<p><Play size={11}/>{item.label}</p>{:else}<p class="empty"><SquareTerminal size={11}/>No Monitter-tracked process in this folder.</p>{/each}</div>
 </section>
 <style>.run-summary{display:grid;gap:9px;padding:11px 0;min-width:0}

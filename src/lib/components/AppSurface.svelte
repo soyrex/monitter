@@ -4939,8 +4939,8 @@
         </div>
       </section>
     {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
-        {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Run detail views">
-          <div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Run detail</button></div>
+        {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Task detail views">
+          <div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Task detail</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>Approvals</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>Subagents <span>{taskSubagents.length}</span></button></div>
@@ -5072,7 +5072,7 @@
                     </dd>
                   </div>{/if}
               </dl>
-              <RunSummary task={selectedTask} gitStatus={gitState.status} tasks={visibleTasks} terminalSessions={Object.values($terminalSessions)} onOpenGit={()=>detailTab='git'}/>
+              <RunSummary task={selectedTask} gitStatus={gitState.status} tasks={visibleTasks} terminalSessions={Object.values($terminalSessions)} workPlans={snapshot.workPlans?.filter(plan=>plan.taskId===selectedTask.id)} onOpenGit={()=>detailTab='git'}/>
               <section class="detail-section collaboration-list"><h3>COLLABORATION <span>{taskCollaborations.length}</span></h3>{#each taskCollaborations as collaboration}<button class="collaboration-row" onclick={()=>{const id=collaboration.fromTaskId===selectedTask?.id?collaboration.toTaskId:collaboration.fromTaskId; const task=snapshot?.tasks.find(item=>item.id===id); if(task) openTask(task)}}><span class={`dot ${collaboration.status === 'running' ? 'running' : collaboration.status === 'error' ? 'error' : 'completed'}`}></span><span><b>{collaboration.kind === 'delegation' ? 'Delegation' : 'Agent message'} · {visibleAgents.find(agent=>agent.id===(collaboration.fromTaskId===selectedTask?.id?collaboration.toAgentId:collaboration.fromAgentId))?.name ?? 'Agent'}</b><small>{collaborationStatus(collaboration)} · {relative(collaboration.updatedAt)}</small>{#if collaboration.result}<em>{collaboration.result}</em>{/if}{#if collaboration.error}<em class="collaboration-error">{collaboration.error}</em>{:else if !collaboration.result}<em>{collaboration.text}</em>{/if}</span></button>{:else}<p class="detail-empty">No routed agent messages or delegations yet.</p>{/each}</section>
               <section class="detail-section">
                 <h3>DELEGATED TASKS <span>{delegated.length}</span></h3>

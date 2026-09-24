@@ -381,7 +381,10 @@ same request ID and payload return the existing plan. Updates are idempotent.
 Close requires every item to be `completed`, `blocked`, or `skipped`; it cannot
 silently discard `pending` or `in_progress` work. The durable `Snapshot.workPlans`
 projection uses camelCase fields and Unix millisecond timestamps. Plan history
-is removed when its task is permanently deleted, not when archived.
+is removed when its task is permanently deleted, not when archived. The owner
+Task detail sidebar displays the selected task's current plan directly below
+its Git branch, including item states and notes; prior plans are collapsible.
+Shared visitors do not receive the work-plan projection.
 
 ### Follow-up: managed MCP over SSH (not implemented)
 
@@ -551,7 +554,7 @@ Activity toggles filter both inline blocks and run detail without deleting captu
 Cancelling a running task writes a durable system transcript record, `You cancelled this run.`,
 and a matching diagnostic status event. The transcript record appears inline in the owning
 desktop/LAN and paired-mobile chat with a stop icon and right-aligned timestamp; it is not an
-agent reply. Other status diagnostics remain in Run detail, and visitor sharing continues to
+agent reply. Other status diagnostics remain in Task detail, and visitor sharing continues to
 exclude activity events.
 Only reasoning summaries emitted by the harness can be rendered; missing reasoning is not fabricated.
 Consecutive reasoning events for the same chat render inside one expandable reasoning bubble. Messages,
@@ -956,7 +959,7 @@ conversation surfaces:
   eligible-agent set all filter out the internal record before iteration.
 - Archived chats, the share control, mobile projections, and paired-mobile / controller replies
   never surface the internal agent or its task. Visitor snapshots exclude them by construction.
-- Run detail, the right sidebar, and any agent-attributed chat metadata skip the internal record.
+- Task detail, the right sidebar, and any agent-attributed chat metadata skip the internal record.
 
 Editing the existing admin via `save_agent` preserves `internal: true`, the canonical "Monitter
 Admin" name, and `collaborationEnabled: false`. Generic callers cannot create a new internal record
@@ -1407,12 +1410,13 @@ while a terminal is focused on other platforms. Terminal rendering uses
 [xterm.js](https://xtermjs.org/docs/api/terminal/classes/terminal/) and native PTYs use
 [portable-pty](https://docs.rs/portable-pty/latest/portable_pty/).
 
-## Run detail and timeline
+## Task detail and timeline
 
-The right sidebar separates Run detail, Timeline, and (when available) Git changes. Run detail keeps
+The right sidebar separates Task detail, Timeline, and (when available) Git changes. Task detail keeps
 agent identity and settings, adds a compact branch/staged/changed/untracked summary from the existing
-Git status poll, and lists running Monitter tasks and terminals in the same host/folder. This list is
-labelled Tracked processes: it does not claim to enumerate arbitrary OS processes or undisclosed jobs
+Git status poll, displays the selected task's agent work plan beneath the Git branch, and lists
+running Monitter tasks and terminals in the same host/folder. This list is labelled Tracked
+processes: it does not claim to enumerate arbitrary OS processes or undisclosed jobs
 inside a harness. Timeline owns diagnostic events, with bounded previews and expandable full output.
 Each tab scrolls within the sidebar; panels preserve their selected detail tab during pane movement.
 
