@@ -194,11 +194,13 @@ impl Database {
             tasks: read_vec(&connection, "tasks")?,
             messages: read_vec(&connection, "messages")?,
             mail_batches: read_vec(&connection, "mail_batches")?,
+            work_plans: read_vec(&connection, "work_plans")?,
             events: read_vec::<RunEvent>(&connection, "events")?
                 .into_iter()
                 .map(Arc::new)
                 .collect(),
             channels: read_vec(&connection, "channels")?,
+            project_board_messages: read_vec(&connection, "project_board_messages")?,
             projects: read_vec(&connection, "projects")?,
             settings,
             collaborations: read_vec(&connection, "collaborations")?,
@@ -407,8 +409,10 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
         &snapshot.mail_batches,
         mail_batch_key,
     )?;
+    write_vec(transaction, "work_plans", &snapshot.work_plans, plain_id)?;
     write_vec(transaction, "events", &snapshot.events, event_key)?;
     write_vec(transaction, "channels", &snapshot.channels, plain_id)?;
+    write_vec(transaction, "project_board_messages", &snapshot.project_board_messages, plain_id)?;
     write_vec(transaction, "projects", &snapshot.projects, plain_id)?;
     write_vec(
         transaction,
@@ -509,6 +513,7 @@ fn diff_state(
         &after_snapshot.mail_batches,
         mail_batch_key,
     )?;
+    diff_vec(transaction, "work_plans", &before_snapshot.work_plans, &after_snapshot.work_plans, plain_id)?;
     diff_events(transaction, &before_snapshot.events, &after_snapshot.events)?;
     diff_vec(
         transaction,
@@ -517,6 +522,7 @@ fn diff_state(
         &after_snapshot.channels,
         plain_id,
     )?;
+    diff_vec(transaction, "project_board_messages", &before_snapshot.project_board_messages, &after_snapshot.project_board_messages, plain_id)?;
     diff_vec(
         transaction,
         "projects",
@@ -629,8 +635,10 @@ has_id!(
     Task,
     Message,
     MailBatch,
+    WorkPlan,
     RunEvent,
     Channel,
+    ProjectBoardMessage,
     Project,
     Collaboration,
     SubagentSession,

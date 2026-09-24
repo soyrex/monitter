@@ -733,6 +733,7 @@ pub(crate) fn delete_task_blocking_public(service: &Arc<Service>, id: &str) -> R
             return Err("Cancel a running task before deleting it.".into());
         }
         data.snapshot.tasks.retain(|task| task.id != id);
+        data.snapshot.work_plans.retain(|plan| plan.task_id != id);
         data.snapshot
             .messages
             .retain(|message| message.task_id != id);

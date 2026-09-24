@@ -162,6 +162,14 @@ export interface MailBatch {
   queryLabel: string; createdAt: number; updatedAt: number; syncCount: number; lastAdded: number;
   lastUpdated: number; lastMovedToHistory: number; classifier: MailClassifierTrace; items: MailCard[];
 }
+export interface WorkPlanItem {
+  id: string; title: string; status: 'pending' | 'in_progress' | 'completed' | 'blocked' | 'skipped';
+  note: string | null; updatedAt: number;
+}
+export interface WorkPlan {
+  id: string; taskId: string; requestId: string; title: string; status: 'active' | 'closed';
+  items: WorkPlanItem[]; summary: string | null; createdAt: number; updatedAt: number; closedAt: number | null;
+}
 export interface MailDetail {
   mailId: string; source: 'gmail'; accountLabel: string; from: string; to: string[]; cc: string[];
   subject: string; receivedAt: number; bodyText: string;
@@ -216,6 +224,7 @@ export interface MarkdownDocument { path: string; title: string; content: string
 export interface ChannelMessage {
   id: string; role: 'user' | 'assistant'; agentId: string | null;
   text: string; createdAt: number; taskId: string | null;
+  authorName?: string;
   attachments?: Attachment[];
 }
 export interface Channel {
@@ -258,6 +267,8 @@ export interface InteractionInput {
   url: string | null;
 }
 export interface Settings {
+  /** Opt-in private coordination board for project tasks. */
+  projectBoardEnabled?: boolean;
   /** Optional user identity supplied to agents for chats started after saving. */
   userName?: string;
   shortcutMode?: 'standard' | 'vim';
@@ -308,7 +319,11 @@ export interface Snapshot {
   hosts: Host[]; agents: Agent[]; tasks: Task[]; messages: Message[];
   /** Body-free owner projection. Older runtimes and shared visitors omit it. */
   mailBatches?: MailBatch[];
+  /** Task-scoped checklists maintained through the injected collaboration MCP. */
+  workPlans?: WorkPlan[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
+  /** Owner-only project notes; absent from shared-visitor projections. */
+  projectBoardMessages?: ProjectBoardMessage[];
   collaborations: Collaboration[]; queuedMessages: QueuedMessage[];
   /** Omitted by older runtimes; current runtimes always provide this durable projection. */
   subagentSessions?: SubagentSession[];
@@ -330,6 +345,11 @@ export interface Snapshot {
    * restarts; an empty list means "no throwaway work pending".
    */
   pendingThrowawayTaskIds?: string[];
+}
+
+export interface ProjectBoardMessage {
+  id: string; projectId: string; taskId: string | null; agentId: string | null;
+  authorName: string; text: string; requestId: string | null; createdAt: number; sequence: number;
 }
 
 /**

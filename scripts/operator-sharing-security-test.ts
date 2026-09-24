@@ -49,6 +49,8 @@ const source: Snapshot & { futureOwnerSecret: string } = {
       suggestedAction: 'reply', confidence: 90, rationale: 'private mail rationale' }] }],
   events: [{ id: 'event', taskId: selectedId, kind: 'log', title: 'secret log', detail: '/private/log', createdAt: 1 }],
   channels: [{ id: 'channel-1', name: 'secret channel', description: '', agentIds: [], messages: [] }],
+  projectBoardMessages: [{ id: 'private-board-note', projectId: 'project-1', taskId: selectedId,
+    agentId: 'agent', authorName: 'Agent', text: 'private project coordination', requestId: 'request-1', createdAt: 1, sequence: 1 }],
   projects: [], settings, collaborations: [],
   queuedMessages: [{ id: 'queue', taskId: selectedId, channelId: null, text: 'secret queued text', attachmentIds: [], createdAt: 1, status: 'queued' }],
   approvalRequests: [{ id: 'approval', taskId: selectedId, provider: 'codex', runId: 'run', tool: 'shell',
@@ -87,8 +89,9 @@ assert.deepEqual(visitor.approvalRules, []);
 const serialized = JSON.stringify(visitor);
 for (const secret of ['/private', 'secret instructions', 'secret system profile', 'hidden chat',
   'secret queued text', 'secret approval', 'future private value', 'native-', 'codexHome', '.codex-work',
-  'private-mail-account', 'private-provider-message', 'private mail snippet']) assert.ok(!serialized.includes(secret), secret);
+  'private-mail-account', 'private-provider-message', 'private mail snippet', 'private project coordination']) assert.ok(!serialized.includes(secret), secret);
 assert.equal('mailBatches' in visitor, false, 'Mail cards are owner-only and must be absent from visitor projections.');
+assert.equal('projectBoardMessages' in visitor, false, 'Project boards are owner-only and must be absent from visitor projections.');
 assert.equal(source.tasks[0].cwd, '/private/workspace', 'Projection must not mutate owner state.');
 assert.equal(source.messages[0].attachments?.[0].path, '/private/secret.txt');
 

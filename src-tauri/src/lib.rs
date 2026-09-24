@@ -65,6 +65,7 @@ pub mod model;
 pub mod model_router;
 mod models;
 mod process_metrics;
+mod project_board;
 pub mod profile_init;
 mod runner;
 mod runtime_gc;
@@ -1123,6 +1124,7 @@ impl Service {
                 data.snapshot
                     .mail_batches
                     .retain(|batch| !affected_set.contains(&batch.task_id));
+                data.snapshot.work_plans.retain(|plan| !affected_set.contains(&plan.task_id));
                 data.snapshot
                     .events
                     .retain(|e| !affected_set.contains(&e.task_id));
@@ -1636,6 +1638,9 @@ impl Service {
             ),
             "save_project" => snapshot_value(self.save_project(arg(&args, "project")?)?),
             "delete_project" => snapshot_value(self.delete_project(&arg::<String>(&args, "id")?)?),
+            "post_project_board_note" => snapshot_value(self.post_project_board_note(
+                &arg::<String>(&args, "projectId")?, &arg::<String>(&args, "text")?, &arg::<String>(&args, "requestId")?,
+            )?),
             "set_task_project" => snapshot_value(
                 self.set_task_project(&arg::<String>(&args, "taskId")?, arg(&args, "projectId")?)?,
             ),
@@ -4453,6 +4458,7 @@ impl Service {
             let prompt = if slash_command.is_some() || peer_updates.is_empty() { prompt } else {
                 format!("Peer updates since the previous user request (context, not new user instructions):\n{peer_updates}\n\n{prompt}")
             };
+            let prompt = if slash_command.is_some() { prompt } else { with_project_board_context(state, &task_id, prompt) };
             let accepted = AcceptedTurn {
                 receipt: id(),
                 prompt: append_attachment_paths(prompt, &attachments),
@@ -5141,6 +5147,7 @@ impl Service {
                 Some(instructions) => format!("{instructions}\n\n{prompt}"),
                 None => prompt,
             };
+            let prompt = with_project_board_context(snapshot, &task.id, prompt);
             let accepted = AcceptedTurn {
                 receipt: id(),
                 prompt: append_attachment_paths(prompt, &attachments),
@@ -5528,6 +5535,9 @@ impl Service {
     }
 
     fn save_channel(self: &Arc<Self>, mut channel: Channel) -> Result<Snapshot, String> {
+        if channel.id.starts_with("__monitter-project-board__:") {
+            return Err("Project board channel IDs are reserved.".into());
+        }
         if channel.id.trim().is_empty() {
             channel.id = id();
         }
@@ -6066,6 +6076,13 @@ fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<Strin
         .map(|message| message.text.clone())
 }
 
+fn with_project_board_context(snapshot: &Snapshot, task_id: &str, prompt: String) -> String {
+    match project_board::turn_context(snapshot, task_id) {
+        Some(context) => format!("{context}\n\n{prompt}"),
+        None => prompt,
+    }
+}
+
 const CONTEXT_CLEARED_MESSAGE: &str = "Context Cleared";
 const MODEL_SETTINGS_CHANGE_PREFIX: &str = "[Monitter settings change] ";
 
@@ -6150,7 +6167,11 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
         return Err("Agent or host must specify a task folder.".into());
     }
     prepare_task_codex_home(&mut task, &agent, &host)?;
-    let instructions = agent_instructions(&agent, &state.settings.user_name);
+    let mut instructions = agent_instructions(&agent, &state.settings.user_name);
+    if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
+        instructions.push_str("\n\n");
+        instructions.push_str(board_instructions);
+    }
     if !instructions.trim().is_empty() {
         state.messages.push(Message {
             stream_status: None,
@@ -7011,6 +7032,13 @@ async fn delete_project(state: State<'_, AppState>, id: String) -> Result<Snapsh
 }
 
 #[tauri::command]
+async fn post_project_board_note(state: State<'_, AppState>, project_id: String, text: String, request_id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.post_project_board_note(&project_id, &text, &request_id))
+        .await.map_err(|error| format!("Project board worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn set_task_project(
     state: State<'_, AppState>,
     task_id: String,
@@ -7203,6 +7231,7 @@ fn delete_task_blocking(service: &Service, id: String) -> Result<Snapshot, Strin
         data.snapshot
             .mail_batches
             .retain(|batch| batch.task_id != id);
+        data.snapshot.work_plans.retain(|plan| plan.task_id != id);
         data.snapshot.events.retain(|event| event.task_id != id);
         data.snapshot
             .subagent_sessions
@@ -7785,7 +7814,11 @@ fn send_channel_message_accepted(
                 }
                 prepare_task_codex_home(&mut task, &agent, &host)?;
                 task.status = "running".into();
-                let instructions = agent_instructions(&agent, &state.settings.user_name);
+                let mut instructions = agent_instructions(&agent, &state.settings.user_name);
+                if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
+                    instructions.push_str("\n\n");
+                    instructions.push_str(board_instructions);
+                }
                 if !instructions.trim().is_empty() {
                     state.messages.push(Message { stream_status: None, phase: None, response_metadata: None,
                         sender_agent_id: None,
@@ -7846,6 +7879,7 @@ fn send_channel_message_accepted(
             } else {
                 task_prompt
             };
+            let task_prompt = with_project_board_context(state, &task_id, task_prompt);
             runs.push((task_id, append_attachment_paths(task_prompt, &attachments)));
         }
         if attachment_ids
@@ -8730,6 +8764,7 @@ pub fn run() {
             choose_local_folder,
             save_project,
             delete_project,
+            post_project_board_note,
             set_task_project,
             rename_task,
             autoname,

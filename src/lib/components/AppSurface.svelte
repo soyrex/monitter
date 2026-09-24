@@ -148,6 +148,7 @@
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import { activeComputerTools } from "$lib/activity";
   import { groupConversationActivity, isNativeMessageTransportArtifact } from '$lib/activity-grouping';
+  import { projectBoardChannels, projectBoardId } from '$lib/project-board-channels';
   import UnifiedSubagentVisor from '$lib/components/UnifiedSubagentVisor.svelte';
   import UnifiedSubagentSidebar from '$lib/components/UnifiedSubagentSidebar.svelte';
   import { activeUnifiedSubagent, unifiedSubagentsFromSnapshot, type UnifiedSubagent } from '$lib/unified-subagents';
@@ -1016,7 +1017,7 @@
       const task = snapshot?.tasks.find(item => item.id === id);
       if (task) target?.openTask(task);
     } else {
-      const channel = snapshot?.channels.find(item => item.id === id);
+      const channel = availableChannels.find(item => item.id === id);
       if (channel) target?.openChannel(channel);
     }
     void tick().then(() => document.querySelector<HTMLElement>(`.pane-leaf[data-pane-id="${CSS.escape(owner)}"]`)?.focus({ preventScroll: true }));
@@ -1324,7 +1325,7 @@
       detailTab: ['run', 'git', 'timeline', 'approvals', 'subagents'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
     };
     const taskIds = new Set((snapshot?.tasks ?? []).filter(task => !task.archived && indexes?.visibleAgentIds.has(task.agentId) === true && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
-    const channelIds = new Set(snapshot?.channels.map(channel => channel.id) ?? []);
+    const channelIds = new Set(availableChannels.map(channel => channel.id));
     const agentIds = indexes?.visibleAgentIds ?? new Set<string>();
     const projectIds = new Set(snapshot?.projects.map(project => project.id) ?? []);
     state.openTaskIds = state.openTaskIds.filter(id => taskIds.has(id));
@@ -1524,7 +1525,7 @@
       const task = snapshot?.tasks.find(task=>task.id===tab.id);
       if (task) { drafts[`task:${tab.id}`] = payload.text ?? ''; openTask(task); rememberTab(tab,before); }
     } else if (tab.kind === 'channel') {
-      const channel = snapshot?.channels.find(channel=>channel.id===tab.id);
+      const channel = availableChannels.find(channel=>channel.id===tab.id);
       if (channel) { drafts[`channel:${tab.id}`] = payload.text ?? ''; openChannel(channel); rememberTab(tab,before); }
     }
   }
@@ -1577,7 +1578,7 @@
       const task = snapshot?.tasks.find(item => item.id === id);
       if (task) receiver.openTask(task, true);
     } else {
-      const channel = snapshot?.channels.find(item => item.id === id);
+      const channel = availableChannels.find(item => item.id === id);
       if (channel) receiver.openChannel(channel, true);
     }
   }
@@ -1702,6 +1703,7 @@
   async function attachFiles(items:(File|string)[]) {
     const key=currentDraftKey(), targets=attachmentTargets(), scope=attachmentScope;
     if(!key || filesBusy || busy)return;
+    if(pane==='channel' && selectedChannelId && projectBoardId(selectedChannelId)) {error='Project board notes support text only.';return;}
     if(!targets.length) {error='Choose an agent to receive these files.';return;}
     pendingUploads[key]=true;error='';
     try {
@@ -1777,8 +1779,9 @@
       ? (indexes?.tasksByParent.get(selectedTask.id) ?? [])
       : [],
   );
+  const availableChannels = $derived([...(snapshot?.channels ?? []), ...projectBoardChannels(snapshot)]);
   const activeChannel = $derived(
-    selectedChannelId ? indexes?.channelById.get(selectedChannelId) ?? null : null,
+    selectedChannelId ? availableChannels.find(channel => channel.id === selectedChannelId) ?? null : null,
   );
   const activeChannelTasks = $derived(
     activeChannel
@@ -2311,7 +2314,7 @@
       if(pane!=='terminal'||!selectedTerminalId||sessions[selectedTerminalId]) { collapseTablessPane(); return; }
       const terminal=openTerminalIds.at(-1);
       const task=snapshot?.tasks.find(task=>task.id===openTaskIds.at(-1));
-      const channel=snapshot?.channels.find(channel=>channel.id===openChannelIds.at(-1));
+      const channel=availableChannels.find(channel=>channel.id===openChannelIds.at(-1));
       const draft=taskDrafts[openDraftIds.at(-1)??''];
       if(terminal)openTerminalTab(terminal);
       else if(task)openTask(task);
@@ -2353,7 +2356,7 @@
     else if(next.kind==='terminal')openTerminalTab(next.id);
     else if(next.kind==='draft')openTaskDraft(taskDrafts[next.id]);
     else if(next.kind==='task'){const task=snapshot?.tasks.find(item=>item.id===next.id);if(task)openTask(task);}
-    else {const channel=snapshot?.channels.find(item=>item.id===next.id);if(channel)openChannel(channel);}
+    else {const channel=availableChannels.find(item=>item.id===next.id);if(channel)openChannel(channel);}
   }
   async function removeEmptyPane(id:string) {
     if(embedded){onClosePane?.(id);return;}
@@ -2556,7 +2559,7 @@
   function closeSettings(collapse = true) {
     settingsOpen=false;forgetTab({kind:'settings',id:'settings'});if(pane!=='settings'){if (collapse) collapseTablessPane();return;}
     const task=openTasks.at(-1), draft=openDrafts.at(-1);
-    const channel=snapshot?.channels.find(item=>item.id===openChannelIds.at(-1));
+    const channel=availableChannels.find(item=>item.id===openChannelIds.at(-1));
     const terminal=openTerminalIds.at(-1);
     if(task)openTask(task);else if(draft)openTaskDraft(draft);else if(channel)openChannel(channel);
     else if(terminal)openTerminalTab(terminal);else openOverview();
@@ -2617,7 +2620,7 @@
     const tab=tabs[targetIndex]; if(!tab)return false;
     if(tab.kind==='task'){const item=snapshot?.tasks.find(item=>item.id===tab.id);if(item)openTask(item);}
     else if(tab.kind==='draft'){const item=taskDrafts[tab.id];if(item)openTaskDraft(item);}
-    else if(tab.kind==='channel'){const item=snapshot?.channels.find(item=>item.id===tab.id);if(item)openChannel(item);}
+    else if(tab.kind==='channel'){const item=availableChannels.find(item=>item.id===tab.id);if(item)openChannel(item);}
     else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings();
     focusSelectedTabInput();
     return true;
@@ -2649,7 +2652,7 @@
       if(kept){
         if(kept.pane==='task'&&kept.currentDraftId&&taskDrafts[kept.currentDraftId])openTaskDraft(taskDrafts[kept.currentDraftId]);
         else if(kept.pane==='task'){const task=snapshot?.tasks.find(t=>t.id===kept.selectedTaskId);if(task)openTask(task);}
-        else if(kept.pane==='channel'){const channel=snapshot?.channels.find(c=>c.id===kept.selectedChannelId);if(channel)openChannel(channel);}
+        else if(kept.pane==='channel'){const channel=availableChannels.find(c=>c.id===kept.selectedChannelId);if(channel)openChannel(channel);}
         else if(kept.pane==='terminal'&&kept.selectedTerminalId)openTerminalTab(kept.selectedTerminalId);
         else if(kept.pane==='settings')openSettings(kept.settingsCategory);
         else openOverview();
@@ -3231,7 +3234,7 @@
     if (busy || terminalBusy) return;
     const terminalId = pane === 'terminal' ? selectedTerminal?.id ?? null : null;
     const target = pane === 'task' && selectedTask ? { taskId: selectedTask.id }
-      : pane === 'channel' && activeChannel ? { channelId: activeChannel.id }
+      : pane === 'channel' && activeChannel && !projectBoardId(activeChannel.id) ? { channelId: activeChannel.id }
       : pane === 'terminal' && selectedTerminal ? { terminalId: selectedTerminal.id, content: recentTerminalOutput(selectedTerminal.id) }
       : null;
     if (!target) { error = 'Open a chat, channel, or terminal with recent content to auto-name it.'; return; }
@@ -3272,7 +3275,7 @@
     return { id, label, detail, name: label.slice(1), description: detail, source: 'monitter', provider: selectedTask?.provider ?? 'codex' };
   }
   const slashItems = $derived<SlashPaletteItem[]>([
-    ...(pane === "channel" ? channelCommands.map(item => monitterSlash(item.id, item.label, item.detail)) : []),
+    ...(pane === "channel" && !projectBoardId(activeChannel?.id ?? '') ? channelCommands.map(item => monitterSlash(item.id, item.label, item.detail)) : []),
     ...(pane === "task" ? [
       monitterSlash("context-new", "/new", "Clear context; add a title to rename this pane"),
       monitterSlash("context-clear", "/clear", "Alias for /new"),
@@ -3280,7 +3283,7 @@
     monitterSlash("settings", "/settings", "Open Monitter preferences"),
     monitterSlash("terminal", "/terminal", "Run a command in a terminal tab: /terminal <command>"),
     ...(pane === "task" ? [monitterSlash("project", "/project", "Choose the project for this chat")] : []),
-    ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel) ? [monitterSlash("autoname", "/autoname", "Generate a title from recent content")] : []),
+    ...((pane === "task" && selectedTask) || (pane === "channel" && activeChannel && !projectBoardId(activeChannel.id)) ? [monitterSlash("autoname", "/autoname", "Generate a title from recent content")] : []),
     ...(selectedTask?.status === "running" ? [monitterSlash("stop", "/stop", "Stop this running task")] : []),
     ...(pane === 'task' && selectedTask ? providerSlashCommands.map(item => ({
       ...item,
@@ -3811,7 +3814,7 @@
       detail:`${task.archived ? "Select to restore · " : ""}${visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? task.archivedAgentName ?? "Agent"}${task.archived && task.model ? ` · ${task.model}` : ""}`,
       keywords:`${task.provider} ${task.model ?? ''} ${task.cwd} ${task.archivedAgentName ?? ''}`,
     })),
-    ...(snapshot?.channels ?? []).map(channel=>({id:`channel:${channel.id}`,label:channel.name,group:"Channels",detail:channel.description})),
+    ...availableChannels.map(channel=>({id:`channel:${channel.id}`,label:channel.name,group:"Channels",detail:channel.description})),
     ...visibleAgents.map(agent=>({id:`agent:${agent.id}`,label:agent.name,group:"Agents",detail:`${agent.provider} · ${agent.description}`})),
     ...projects.map(project=>({id:`project:${project.id}`,label:project.name,group:'Projects',detail:project.description || `${activityTasks.filter(task=>task.projectId===project.id).length} chats`})),
   ]);
@@ -3821,7 +3824,7 @@
     {id:"new-task",label:"New chat",group:"Create"},
     {id:"vim-command",label:"Vim command",detail:"Open : command mode for workspace controls",keywords:"vim ex command tabnew split terminal quit",group:"Workspace"},
     {id:"new-terminal",label:"New terminal",detail:"Open a shell in this host and folder",group:"Create",disabled:terminalBusy},
-    ...(selectedTask || activeChannel || selectedTerminal ? [{id:"autoname",label:"Auto-name current pane",detail:"Generate a title from recent visible content",keywords:"/autoname rename title",group:"Current pane",disabled:terminalBusy}] : []),
+    ...(selectedTask || (activeChannel && !projectBoardId(activeChannel.id)) || selectedTerminal ? [{id:"autoname",label:"Auto-name current pane",detail:"Generate a title from recent visible content",keywords:"/autoname rename title",group:"Current pane",disabled:terminalBusy}] : []),
     {id:"new-agent",label:"New agent",group:"Create"},
     {id:"agents-directory",label:"Browse agents",detail:"Open the Agents settings to browse, configure, or create an agent",group:"Collaborate"},
     {id:"new-channel",label:"New channel",group:"Create"},
@@ -3937,7 +3940,7 @@
         const task = snapshot?.tasks.find(task=>task.id===itemId);
         if (task?.archived) await archiveTask(task,false); else if (task) routeTaskWorkspace(task);
       } else if (kind === "channel") {
-        const channel = snapshot?.channels.find(channel=>channel.id===itemId);
+        const channel = availableChannels.find(channel=>channel.id===itemId);
         if (channel) { if (activeWorkspaceKey !== 'all') { if (await switchWorkspace('all')) routeChannel(channel); } else routeChannel(channel); }
       } else if (kind === 'project') {
         const project = projects.find(project=>project.id===itemId);
@@ -4022,6 +4025,7 @@
   }
   function editActiveChannel() {
     if(!activeChannel)return;
+    if (projectBoardId(activeChannel.id)) { error = 'Project boards are configured in Settings and Projects.'; return; }
     taskMenu=false;channelDraft={...activeChannel,agentIds:[...activeChannel.agentIds],messages:activeChannel.messages};modal='channel';
   }
   async function changeChannelMembership(agentId:string,member:boolean) {
@@ -4054,6 +4058,7 @@
       ? recipients.filter((entry) => entry !== id)
       : [...recipients, id];
   }
+  const boardPostRetries = new Map<string, { text: string; requestId: string }>();
   async function stopChannel() {
     if(activeChannel) await run(()=>bridge.stopChannelAgentConversation(activeChannel.id), "Channel stopped.");
   }
@@ -4067,7 +4072,23 @@
   async function editQueuedMessage(id:string,text:string) { return Boolean(await run(()=>bridge.editQueuedMessage(id,text))); }
   async function removeQueuedMessage(id:string) { await run(()=>bridge.cancelQueuedMessage(id)); }
   async function sendChannel() {
-    if (busy || handleSlashSubmit()) return;
+    if (busy) return;
+    const boardProjectId = activeChannel ? projectBoardId(activeChannel.id) : null;
+    if (boardProjectId) {
+      if (!canSend) return;
+      if (currentAttachments.length) { error = 'Project board notes support text only.'; return; }
+      const sentDraft = composer;
+      const sentText = promptText(sentDraft);
+      const retry = boardPostRetries.get(boardProjectId);
+      const requestId = retry?.text === sentText ? retry.requestId : localUuid();
+      boardPostRetries.set(boardProjectId, { text: sentText, requestId });
+      if (await run(() => bridge.postProjectBoardNote(boardProjectId, sentText, requestId), 'Project note posted.')) {
+        boardPostRetries.delete(boardProjectId);
+        clearSentDraft(`channel:${activeChannel!.id}`, sentDraft);
+      }
+      return;
+    }
+    if (handleSlashSubmit()) return;
     if (!activeChannel || !canSend || !effectiveRecipients.length) { error = "Choose at least one agent to receive this channel message."; return; }
     const channelId = activeChannel.id, sentDraft = composer, agentIds = [...effectiveRecipients], key = `channel:${channelId}`, attachmentIds=currentAttachments.map(item=>item.id);
     const sentText = promptText(sentDraft);
@@ -4244,8 +4265,8 @@
               <button class="close-tab" aria-label={`Close tab ${task.title}`} title="Close tab" onclick={() => {closeTaskTab(tab.id);tabPickerOpen=false;}}><X size={12} /></button>
             </div>
           {/if}
-          {:else if tab.kind === 'channel'}{@const channel=snapshot?.channels.find(item=>item.id===tab.id)}{#if channel}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button><button class="edit-tab" aria-label={`Edit name for ${channel.name}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openChannel(channel);editActiveChannel();}}><Pencil size={15}/></button><button class="close-tab" aria-label={`Close channel tab ${channel.name}`} title="Close tab" onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();collapseTablessPane();tabPickerOpen=false;}}><X size={12}/></button></div>
+          {:else if tab.kind === 'channel'}{@const channel=availableChannels.find(item=>item.id===tab.id)}{#if channel}
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedChannelId===tab.id}><button class="tab" aria-pressed={selectedChannelId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'channel',tab.id)} onpointerdown={event=>startTabPointer(event,'channel',tab.id)} onclick={()=>selectTabPicker(()=>openChannel(channel))}><Radio size={13}/><span><AnimatedTitle text={channel.name} active={$autonaming[`channel:${channel.id}`]}/></span></button>{#if !projectBoardId(channel.id)}<button class="edit-tab" aria-label={`Edit name for ${channel.name}`} title="Edit name" disabled={busy} onclick={()=>{tabPickerOpen=false;openChannel(channel);editActiveChannel();}}><Pencil size={15}/></button>{/if}<button class="close-tab" aria-label={`Close channel tab ${channel.name}`} title="Close tab" onclick={()=>{saveCurrentDraft();openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);if(selectedChannelId===tab.id)openOverview();collapseTablessPane();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'terminal'}{@const session=$terminalSessions[tab.id]}{#if session}
             {@const terminalTitle=terminalTabTitle(session,snapshot?.hosts??[])}<div class="tab-entry terminal-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='terminal' && selectedTerminalId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'terminal',tab.id)} onpointerdown={event=>startTabPointer(event,'terminal',tab.id)} aria-pressed={pane==='terminal'&&selectedTerminalId===tab.id} onclick={()=>selectTabPicker(()=>openTerminalTab(tab.id))} title={session.cwd}><span class="tab-kind-icon" aria-hidden="true"><SquareTerminal size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={terminalTitle} active={$autonaming[`terminal:${session.id}`]}/>{session.status==='exited'?' · exited':''}</span></button><button class="close-tab" aria-label={`Close terminal ${terminalTitle}`} title="Close terminal and end its session" disabled={terminalBusy} onclick={()=>{closeTerminalTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
@@ -4403,12 +4424,12 @@
           <span class="avatar task-header-avatar" aria-label="Group chat"><Radio size={18}/></span>
           <h1 title={activeChannel.description || undefined}><AnimatedTitle text={activeChannel.name} active={$autonaming[`channel:${activeChannel.id}`]}/></h1>
           <div class="task-actions">
-            <div class="task-overflow">
+            {#if !projectBoardId(activeChannel.id)}<div class="task-overflow">
               <button bind:this={taskMenuAnchor} class="icon" aria-label="Channel actions" aria-haspopup="menu" aria-expanded={taskMenu} onclick={()=>taskMenu=!taskMenu}><MoreHorizontal size={17}/></button>
               {#if taskMenu && taskMenuAnchor}<div use:floating={{anchor:taskMenuAnchor}} class="task-menu floating-panel" role="menu" aria-label="Channel actions">
                 <button role="menuitem" onclick={editActiveChannel}><Settings2 size={15}/>Edit channel</button>
               </div>{/if}
-            </div>
+            </div>{/if}
             {@render paneExpandControl()}
             {@render rightSidebarControl()}
           </div>
@@ -4428,7 +4449,7 @@
                 class="message"
                   data-live-entry={message.role==='assistant'}
               >
-                <MessageMeta name={message.role === "user" ? "You" : (displayedChannelTranscript.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
+                <MessageMeta name={message.role === "user" ? "You" : (message.authorName ?? displayedChannelTranscript.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
                   {#snippet avatar()}{@render messageAvatar(displayedChannelTranscript.agents.find(agent=>agent.id===message.agentId))}{/snippet}
                   {#if displayedChannelTranscript.confirmedDeliveryIds[message.id]}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </MessageMeta>
@@ -4447,11 +4468,8 @@
               {/each}
                 {#if !displayedChannelTranscript.messages.length && !displayedChannelTranscript.optimisticMessages.length}<div class="blank-conversation">
                   <MessageSquare size={24} />
-                  <h2>Start this channel</h2>
-                  <p>
-                    Pick the agents who should receive your message. Each gets an
-                    explicit linked task.
-                  </p>
+                  <h2>{projectBoardId(activeChannel.id) ? 'Start this project board' : 'Start this channel'}</h2>
+                  <p>{projectBoardId(activeChannel.id) ? 'Leave a coordination note. Project agents see recent notes on their next turn and can check for updates while working.' : 'Pick the agents who should receive your message. Each gets an explicit linked task.'}</p>
                 </div>{/if}
               {/snippet}
             </TranscriptVirtualList>
@@ -4461,15 +4479,15 @@
         </div>{/if}
         <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
         <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
-        {#if !composerExpanded}{@render slashMenu()}{/if}
+        {#if !composerExpanded && !projectBoardId(activeChannel.id)}{@render slashMenu()}{/if}
         <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded channel composer' : 'Channel composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
           {@render composerExpandButton()}
           {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
-          {#if composerExpanded}{@render slashMenu()}{/if}
-          <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-          {@render composerEditor('Message this channel… Use @ to mention an agent', true)}
+          {#if composerExpanded && !projectBoardId(activeChannel.id)}{@render slashMenu()}{/if}
+          {#if !projectBoardId(activeChannel.id)}<AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>{/if}
+          {@render composerEditor(projectBoardId(activeChannel.id) ? 'Write a project coordination note…' : 'Message this channel… Use @ to mention an agent', true)}
           <div class="composer-footer">
-            {@render attachmentTools()}
+            {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}
             <div class="recipient-picker">
               <span>Send to</span
               >{#each visibleAgents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
@@ -4479,15 +4497,15 @@
                   title={channelMentionIds.includes(agent.id) ? "Mentioned in this message. Remove the @mention to deselect." : `Send to ${agent.name}`}
                   onclick={() => toggleRecipient(agent.id)}>{agent.name}</button
                 >{/each}
-            </div>
+            </div>{:else}<p class="hint">Private project notes · no agent is woken by posting</p>{/if}
             {#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
           </div>
         </dialog>
       </section>
-      {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss channel members" onclick={()=>showDetail=false}></button>{/if}
-      <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail channel-members" class:closed={!showDetail} aria-label="Channel members">
+      {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label={projectBoardId(activeChannel.id) ? 'Dismiss project board details' : 'Dismiss channel members'} onclick={()=>showDetail=false}></button>{/if}
+      <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail channel-members" class:closed={!showDetail} aria-label={projectBoardId(activeChannel.id) ? 'Project board details' : 'Channel members'}>
         <SidebarResize side="right"/>
-        <ChannelMembers channel={activeChannel} agents={visibleAgents} hosts={snapshot.hosts} tasks={visibleTasks} {busy} onmembership={changeChannelMembership} onadmin={editActiveChannel} onconversation={configureChannelConversation} onstopconversation={stopChannel} onclose={()=>showDetail=false}/>
+        {#if projectBoardId(activeChannel.id)}<div class="board-detail"><h2>Project board</h2><p>Notes are visible to you and agents working on this project. Agents receive recent notes at turn start and can check again through Monitter MCP. Posts do not start a new agent turn.</p></div>{:else}<ChannelMembers channel={activeChannel} agents={visibleAgents} hosts={snapshot.hosts} tasks={visibleTasks} {busy} onmembership={changeChannelMembership} onadmin={editActiveChannel} onconversation={configureChannelConversation} onstopconversation={stopChannel} onclose={()=>showDetail=false}/>{/if}
       </aside>
       </section>
     {:else if startingTaskDraft}
@@ -4805,13 +4823,13 @@
           }}><Plus size={15} /></button
         >
       </div>
-      {#each sidebarSorted(snapshot?.channels ?? [],'channels') as channel}<button use:sidebarReorder={{group:'channels',id:channel.id,move:moveSidebar}}
+      {#each sidebarSorted(availableChannels,'channels') as channel}<button use:sidebarReorder={{group:'channels',id:channel.id,move:moveSidebar}}
           class:current={channel.id === selectedChannelId}
           class="channel-row"
           onclick={(event) => routeChannel(channel, event.metaKey || event.ctrlKey)}
           oncontextmenu={(event) => sidebarChannelContextMenu(event, channel)}
           ><Radio size={14} /><span>{channel.name}</span><small
-            >{channel.agentIds.length}</small
+            >{projectBoardId(channel.id) ? channel.messages.length : channel.agentIds.length}</small
           ></button
         >{/each}
     </nav>

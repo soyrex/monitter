@@ -455,6 +455,10 @@
           <div class="card-heading"><h2 id="messages-heading">Messages</h2><p>Choose the keyboard shortcut that sends a task or channel message.</p></div>
           <label class="switch-row"><span><strong>Enter to send</strong><small>{settings.sendWithEnter ? "Enter sends. Shift+Enter adds a new line." : "Cmd/Ctrl+Enter sends. Enter adds a new line."}</small></span><input type="checkbox" role="switch" aria-label="Enter to send" checked={settings.sendWithEnter ?? false} onchange={(event) => void save({ sendWithEnter: event.currentTarget.checked })} /></label>
         </section>
+        <section class="setting-card" aria-labelledby="project-board-heading">
+          <div class="card-heading"><h2 id="project-board-heading">Project boards</h2><p>Private coordination notes shown as #channels for each project.</p></div>
+          <label class="switch-row"><span><strong>Enable project boards</strong><small>Agents working in a project receive recent notes at turn start and can check for newer notes at meaningful checkpoints. Posting never wakes another agent. Turning this off hides boards but preserves their notes.</small></span><input type="checkbox" role="switch" aria-label="Enable project boards" checked={settings.projectBoardEnabled === true} onchange={(event) => void save({ projectBoardEnabled: event.currentTarget.checked })} /></label>
+        </section>
       </div>
     {/if}
     </div>

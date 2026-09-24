@@ -99,7 +99,12 @@ No fake conversations, progress, token counts, host connections or model replies
   discovery does not read credentials, log in, start a harness or query plan entitlements.
 - `save_project { project: Project }` -> Snapshot (empty id creates)
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
+- `post_project_board_note { projectId: string, text: string, requestId: string }` -> Snapshot.
+  Owner desktop/LAN only; the `requestId` deduplicates retries. Requires the opt-in
+  `settings.projectBoardEnabled` flag and an existing project. Notes are plain text,
+  at most 2,000 bytes, and never start an agent turn.
 - `set_task_project { taskId: string, projectId: string | null }` -> Snapshot
+
 - `create_task { input: CreateTaskInput }` -> Task (rejects the internal Monitter Admin agent as a chat recipient)
 - `plan_jev_route { agentId: string, prompt: string }` -> `JevRoutePlan` (native-owner only; requires an
   explicit non-internal harness opt-in and the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). It classifies a fresh prompt,
@@ -261,6 +266,32 @@ without changing the stored user message; this does not erase instructions alrea
 present in a native session's history. Codex receives required startup and prompted
 tool approval for managed servers, never the built-in collaboration allowlist.
 
+### Project coordination boards
+
+Project boards are private coordination feeds projected as `#Project Name` under
+Channels in the owner interface. Their records are not ordinary `Channel`
+messages and are not included in the shared-visitor chat projection. The
+persisted `Snapshot.projectBoardMessages` entries have a project ID, author,
+optional agent/task IDs, Unix-millisecond timestamp, and monotonically
+increasing per-project sequence. Turning the setting off hides boards and
+rejects reads/posts without deleting notes; deleting a project hides its board
+but preserves the locally stored notes for recovery. The paired mobile
+controller shows these channels read-only.
+
+The grant-scoped collaboration MCP adds `project_board_read {after_sequence?}`
+and `project_board_post {request_id, text}`. The broker supplies the caller's
+task; neither tool accepts a project ID. Calls require a running project task,
+collaboration-enabled agent, and the board toggle. A read without a cursor
+returns the latest 20 notes; a read with a cursor returns up to 50 newer notes
+and reports whether more remain. The harness puts up to 10 recent notes in
+every ordinary project turn prompt and instructs the agent to check again at
+meaningful checkpoints. Board content is untrusted context, not permission or
+a new user instruction. New project tasks with collaboration enabled also get
+an initial system instruction to use Monitter MCP as the first stop for board
+coordination, including an initial read and concise claims/updates. Existing
+tasks still receive the per-turn board context when the setting is enabled.
+Agents are not automatically woken by posts.
+
 ### Shared skill installation through the built-in MCP
 
 A running agent with collaboration enabled can discover this workflow through
@@ -296,6 +327,19 @@ configuration command is exposed.
 
 Saved instructions apply at the next harness launch. Existing resident sessions
 are not restarted or replayed; launch a new task/session to consume the skill.
+
+### Task-scoped work plans via the collaboration MCP
+
+The authenticated, active task may call `work_plan_start {request_id, title, items}`,
+`work_plan_update {plan_id, item_id, status, note?}`, `work_plan_list {}`, and
+`work_plan_close {plan_id, summary}`. The broker supplies the task identity;
+tool arguments cannot target another task. A task has at most one active plan
+and at most 64 retained plans. Each plan has 1–32 items. Start retries with the
+same request ID and payload return the existing plan. Updates are idempotent.
+Close requires every item to be `completed`, `blocked`, or `skipped`; it cannot
+silently discard `pending` or `in_progress` work. The durable `Snapshot.workPlans`
+projection uses camelCase fields and Unix millisecond timestamps. Plan history
+is removed when its task is permanently deleted, not when archived.
 
 ### Follow-up: managed MCP over SSH (not implemented)
 

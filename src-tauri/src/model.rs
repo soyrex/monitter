@@ -287,6 +287,32 @@ pub struct MailBatch {
     pub items: Vec<MailCard>,
 }
 
+/// A task-scoped checklist maintained by the injected collaboration MCP.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkPlan {
+    pub id: String,
+    pub task_id: String,
+    pub request_id: String,
+    pub title: String,
+    pub status: String,
+    pub items: Vec<WorkPlanItem>,
+    pub summary: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub closed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkPlanItem {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub note: Option<String>,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MailClassifierTrace {
@@ -836,6 +862,21 @@ pub struct ChannelMessage {
     pub created_at: i64,
     pub task_id: Option<String>,
 }
+/// Owner-visible project coordination note. Shared visitors receive a
+/// separate projection that does not contain this collection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectBoardMessage {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub author_name: String,
+    pub text: String,
+    pub request_id: Option<String>,
+    pub created_at: i64,
+    pub sequence: u64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Channel {
@@ -977,6 +1018,9 @@ pub struct InputOption {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Opt-in project coordination board. Off for existing installations.
+    #[serde(default)]
+    pub project_board_enabled: bool,
     #[serde(default)]
     pub user_name: String,
     #[serde(default = "default_terminal_font_size")]
@@ -1137,12 +1181,16 @@ pub struct Snapshot {
     /// this field explicitly; full bodies are never stored here.
     #[serde(default)]
     pub mail_batches: Vec<MailBatch>,
+    #[serde(default)]
+    pub work_plans: Vec<WorkPlan>,
     /// Event records are immutable after insertion. Sharing their allocation
     /// keeps a candidate Snapshot clone from duplicating every historical
     /// event on an ordinary streaming update; serde retains the same JSON
     /// array-of-event-records shape.
     pub events: Vec<Arc<RunEvent>>,
     pub channels: Vec<Channel>,
+    #[serde(default)]
+    pub project_board_messages: Vec<ProjectBoardMessage>,
     #[serde(default)]
     pub projects: Vec<Project>,
     pub settings: Settings,
@@ -1583,8 +1631,10 @@ pub fn default_snapshot() -> Snapshot {
         tasks: vec![],
         messages: vec![],
         mail_batches: vec![],
+        work_plans: vec![],
         events: vec![],
         channels: vec![],
+        project_board_messages: vec![],
         projects: vec![],
         collaborations: vec![],
         subagent_sessions: vec![],
@@ -1596,6 +1646,7 @@ pub fn default_snapshot() -> Snapshot {
         schedule_runs: vec![],
         pending_throwaway_task_ids: vec![],
         settings: Settings {
+            project_board_enabled: false,
             user_name: String::new(),
             terminal_font_size: default_terminal_font_size(),
             chat_font_size: default_chat_font_size(),

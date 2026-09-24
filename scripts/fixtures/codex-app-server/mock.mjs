@@ -167,7 +167,7 @@ rl.on('line', (line) => {
   if (request.method === 'thread/resume') {
     const config = request.params?.config || {};
     const enabled = config['mcp_servers.monitter.enabled_tools'];
-    const expectedTools = ['list_agents', 'delegate_task', 'send_message', 'get_task_result', 'wait_for_task', 'list_messages', 'cancel_delegation', 'terminal_run', 'skills_help', 'list_shared_skills', 'install_shared_skill'];
+    const expectedTools = ['list_agents', 'delegate_task', 'send_message', 'get_task_result', 'wait_for_task', 'list_messages', 'cancel_delegation', 'terminal_run', 'skills_help', 'list_shared_skills', 'install_shared_skill', 'mail_triage_help', 'present_mail_batch', 'present_mail_detail', 'list_schedules', 'save_schedule', 'delete_schedule', 'run_schedule_now', 'pause_schedule', 'resume_schedule', 'work_plan_start', 'work_plan_update', 'work_plan_list', 'work_plan_close', 'project_board_read', 'project_board_post'];
     if (request.params?.excludeTurns !== true || config['mcp_servers.monitter.required'] !== true || typeof config['mcp_servers.monitter.url'] !== 'string' || !config['mcp_servers.monitter.url'].startsWith('http://') || config['mcp_servers.monitter.bearer_token_env_var'] !== 'MONITTER_TOKEN' || config['mcp_servers.monitter.command'] !== undefined || config['mcp_servers.monitter.args'] !== undefined || JSON.stringify(enabled) !== JSON.stringify(expectedTools) || JSON.stringify(config).includes('fixture-token')) {
       return rpcError(request.id, -32602, 'fixture requires HTTP Monitter MCP config, env bearer token, and exact tool allowlist');
     }

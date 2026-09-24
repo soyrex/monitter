@@ -81,6 +81,7 @@ export interface MonitterBridge {
   deleteTask(id: string): Promise<Snapshot>;
   setTaskArchived(taskId: string, archived: boolean): Promise<Snapshot>;
   saveProject(project: Project): Promise<Snapshot>;
+  postProjectBoardNote(projectId: string, text: string, requestId: string): Promise<Snapshot>;
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | SendAccepted>;
@@ -269,6 +270,7 @@ const nativeBridge: MonitterBridge = {
   deleteTask: (id) => invoke<Snapshot>("delete_task", { id }),
   setTaskArchived: (taskId, archived) => invoke<Snapshot>("set_task_archived", {taskId, archived}),
   saveProject: project => invoke<Snapshot>("save_project", {project}),
+  postProjectBoardNote: (projectId, text, requestId) => invoke<Snapshot>('post_project_board_note', { projectId, text, requestId }),
   deleteProject: id => invoke<Snapshot>("delete_project", {id}),
   setTaskProject: (taskId, projectId) => invoke<Snapshot>("set_task_project", {taskId, projectId}),
   sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
@@ -378,6 +380,7 @@ const previewBridge: MonitterBridge = {
   deleteTask: () => desktopOnly(),
   setTaskArchived: () => desktopOnly(),
   saveProject: () => desktopOnly(),
+  postProjectBoardNote: () => desktopOnly(),
   deleteProject: () => desktopOnly(),
   setTaskProject: () => desktopOnly(),
   sendMessage: () => desktopOnly(),
@@ -466,6 +469,7 @@ export function getBridge(): MonitterBridge {
         test.invoke("delete_task", { id }) as Promise<Snapshot>,
       setTaskArchived: (taskId, archived) => test.invoke("set_task_archived", {taskId, archived}) as Promise<Snapshot>,
       saveProject: project => test.invoke("save_project", {project}) as Promise<Snapshot>,
+      postProjectBoardNote: (projectId, text, requestId) => test.invoke('post_project_board_note', { projectId, text, requestId }) as Promise<Snapshot>,
       deleteProject: id => test.invoke("delete_project", {id}) as Promise<Snapshot>,
       setTaskProject: (taskId, projectId) => test.invoke("set_task_project", {taskId, projectId}) as Promise<Snapshot>,
       sendMessage: (taskId, text, attachmentIds = []) =>

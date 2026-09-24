@@ -7,7 +7,7 @@ use crate::{
     create_task_in_data,
     model::{
         finalize_subagent_sessions, id, now, sync_collaboration_subagent_sessions, Agent,
-        Collaboration, CreateTaskInput, Message, RunEvent, Snapshot, Task,
+        Collaboration, CreateTaskInput, Message, RunEvent, Snapshot, Task, WorkPlan, WorkPlanItem,
     },
     AcceptedTurn, Service,
 };
@@ -94,6 +94,17 @@ impl Service {
             "resume_schedule" => {
                 self.resume_schedule_protocol(caller_task, &required_string(args, "id")?)
             }
+            "work_plan_start" => self.work_plan_start(caller_task, args),
+            "work_plan_update" => self.work_plan_update(caller_task, args),
+            "work_plan_list" => self.work_plan_list(caller_task),
+            "work_plan_close" => self.work_plan_close(caller_task, args),
+            "project_board_read" => self.project_board_read_protocol(
+                caller_task,
+                args.get("after_sequence").map(|value| value.as_u64().ok_or("after_sequence must be a nonnegative integer.")).transpose()?,
+            ),
+            "project_board_post" => self.project_board_post_protocol(
+                caller_task, &required_string(args, "text")?, &required_string(args, "request_id")?,
+            ),
             _ => Err("Unknown Monitter collaboration tool.".into()),
         }
     }
@@ -857,6 +868,89 @@ impl Service {
     }
 }
 
+impl Service {
+    fn work_plan_start(&self, task_id: &str, args: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        let request_id = required_string(args, "request_id")?;
+        let title = required_string(args, "title")?;
+        let items = args.get("items").and_then(Value::as_array).ok_or("items must be an array of titles.")?;
+        if request_id.len() > MAX_REQUEST_ID || title.len() > MAX_TITLE || items.is_empty() || items.len() > 32 {
+            return Err("Plan fields are empty or too large.".into());
+        }
+        let titles: Vec<String> = items.iter().map(|item| item.as_str().filter(|s| !s.trim().is_empty() && s.len() <= MAX_TITLE).map(str::to_string).ok_or("Each item must have a title of at most 240 bytes.")).collect::<Result<_, _>>()?;
+        self.mutate_data(Some(task_id.into()), |data| {
+            if let Some(existing) = data.snapshot.work_plans.iter().find(|p| p.task_id == task_id && p.request_id == request_id) {
+                if existing.title == title && existing.items.iter().map(|i| i.title.as_str()).eq(titles.iter().map(String::as_str)) {
+                    return Ok(json!({"plan": existing, "replayed": true}));
+                }
+                return Err("request_id already belongs to a different plan.".into());
+            }
+            if data.snapshot.work_plans.iter().any(|p| p.task_id == task_id && p.status == "active") {
+                return Err("This task already has an active plan; use work_plan_list.".into());
+            }
+            if data.snapshot.work_plans.iter().filter(|p| p.task_id == task_id).count() >= 64 {
+                return Err("This task's plan history is full; no plans were discarded.".into());
+            }
+            let time = now();
+            let plan = WorkPlan { id: id(), task_id: task_id.into(), request_id, title, status: "active".into(),
+                items: titles.into_iter().map(|title| WorkPlanItem { id: id(), title, status: "pending".into(), note: None, updated_at: time }).collect(),
+                summary: None, created_at: time, updated_at: time, closed_at: None };
+            data.snapshot.work_plans.push(plan.clone());
+            Ok(json!({"plan": plan, "replayed": false}))
+        })
+    }
+
+    fn work_plan_update(&self, task_id: &str, args: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        let plan_id = required_string(args, "plan_id")?;
+        let item_id = required_string(args, "item_id")?;
+        let status = required_string(args, "status")?;
+        if !matches!(status.as_str(), "pending" | "in_progress" | "completed" | "blocked" | "skipped") {
+            return Err("Invalid plan item status.".into());
+        }
+        let note = string_arg(args, "note")?.map(str::to_string);
+        if note.as_ref().is_some_and(|s| s.len() > 2000) { return Err("Plan item note is too long.".into()); }
+        self.mutate_data(Some(task_id.into()), |data| {
+            let plan = data.snapshot.work_plans.iter_mut().find(|p| p.id == plan_id && p.task_id == task_id).ok_or("Plan not found for this task.")?;
+            if plan.status != "active" { return Err("Plan is closed.".into()); }
+            let item = plan.items.iter_mut().find(|i| i.id == item_id).ok_or("Plan item not found.")?;
+            if item.status != status || item.note != note {
+                let time = now();
+                item.status = status;
+                item.note = note;
+                item.updated_at = time;
+                plan.updated_at = time;
+            }
+            Ok(json!({"plan": plan}))
+        })
+    }
+
+    fn work_plan_list(&self, task_id: &str) -> Result<Value, String> {
+        let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
+        let plans: Vec<_> = data.snapshot.work_plans.iter().rev().filter(|p| p.task_id == task_id).collect();
+        Ok(json!({"plans": plans}))
+    }
+
+    fn work_plan_close(&self, task_id: &str, args: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        let plan_id = required_string(args, "plan_id")?;
+        let summary = required_string(args, "summary")?;
+        if summary.len() > 2000 { return Err("Plan summary is too long.".into()); }
+        self.mutate_data(Some(task_id.into()), |data| {
+            let plan = data.snapshot.work_plans.iter_mut().find(|p| p.id == plan_id && p.task_id == task_id).ok_or("Plan not found for this task.")?;
+            if plan.status == "closed" {
+                return if plan.summary.as_deref() == Some(summary.as_str()) { Ok(json!({"plan": plan, "replayed": true})) } else { Err("Plan was already closed with a different summary.".into()) };
+            }
+            if plan.items.iter().any(|i| matches!(i.status.as_str(), "pending" | "in_progress")) {
+                return Err("Plan has pending or in-progress items; update them before closing.".into());
+            }
+            let time = now();
+            plan.status = "closed".into();
+            plan.summary = Some(summary);
+            plan.updated_at = time;
+            plan.closed_at = Some(time);
+            Ok(json!({"plan": plan, "replayed": false}))
+        })
+    }
+}
+
 fn fail_queued_delivery(snapshot: &mut Snapshot, index: usize, error: &str) {
     let item = snapshot.collaborations[index].clone();
     let time = now();
@@ -892,7 +986,10 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "send_message" => &["to_agent_id", "message", "request_id", "task_id"],
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
         "wait_for_task" => &["collaboration_id", "timeout_seconds"],
-        "list_messages" | "skills_help" | "list_shared_skills" | "mail_triage_help" => &[],
+        "list_messages" | "skills_help" | "list_shared_skills" | "mail_triage_help" | "work_plan_list" => &[],
+        "work_plan_start" => &["request_id", "title", "items"],
+        "work_plan_update" => &["plan_id", "item_id", "status", "note"],
+        "work_plan_close" => &["plan_id", "summary"],
         "install_shared_skill" => &["url", "name"],
         "terminal_run" => &["command", "cwd"],
         "present_mail_batch" => &["source", "account_label", "query_label", "sync_mode", "messages"],
@@ -912,6 +1009,8 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
             "enabled",
         ],
         "delete_schedule" | "run_schedule_now" | "pause_schedule" | "resume_schedule" => &["id"],
+        "project_board_read" => &["after_sequence"],
+        "project_board_post" => &["request_id", "text"],
         _ => return Err("Unknown Monitter collaboration tool.".into()),
     };
     if args.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -921,6 +1020,9 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         if !timeout.as_f64().is_some_and(f64::is_finite) {
             return Err("timeout_seconds must be a finite number.".into());
         }
+    }
+    if args.get("after_sequence").is_some_and(|value| value.as_u64().is_none()) {
+        return Err("after_sequence must be a nonnegative integer.".into());
     }
     Ok(())
 }
@@ -1199,6 +1301,33 @@ mod tests {
     }
     fn delegate_args(agent: &Agent, request: &str, body: &str) -> Value {
         json!({"to_agent_id":agent.id,"title":"Review this","message":body,"request_id":request})
+    }
+
+    #[test]
+    fn work_plan_is_durable_task_scoped_and_cannot_close_open_items() {
+        let (service, dir) = service("work-plan");
+        let caller = service.snapshot().unwrap().agents[0].clone();
+        let first_task = task(&service, &caller, "First", None, None);
+        let second_task = task(&service, &caller, "Second", None, None);
+        running(&service, &first_task.id);
+        running(&service, &second_task.id);
+        let start = json!({"request_id":"plan-1","title":"Implement","items":["Code","Test"]});
+        let first = service.protocol(&first_task.id, "work_plan_start", start.clone()).unwrap();
+        let plan_id = first["plan"]["id"].as_str().unwrap();
+        let item_id = first["plan"]["items"][0]["id"].as_str().unwrap();
+        assert_eq!(service.protocol(&first_task.id, "work_plan_start", start).unwrap()["replayed"], true);
+        assert!(service.protocol(&second_task.id, "work_plan_update", json!({"plan_id":plan_id,"item_id":item_id,"status":"completed"})).is_err());
+        assert!(service.protocol(&first_task.id, "work_plan_close", json!({"plan_id":plan_id,"summary":"Done"})).is_err());
+        for item in first["plan"]["items"].as_array().unwrap() {
+            service.protocol(&first_task.id, "work_plan_update", json!({"plan_id":plan_id,"item_id":item["id"],"status":"completed"})).unwrap();
+        }
+        service.protocol(&first_task.id, "work_plan_close", json!({"plan_id":plan_id,"summary":"Done"})).unwrap();
+        assert_eq!(service.protocol(&first_task.id, "work_plan_list", json!({})).unwrap()["plans"][0]["status"], "closed");
+        drop(service);
+        let reopened = Service::open(None, dir.clone()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().work_plans[0].id, plan_id);
+        drop(reopened);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
