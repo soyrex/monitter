@@ -49,7 +49,11 @@ const availableIdentities = execFileSync('/usr/bin/security', ['find-identity', 
   encoding: 'utf8',
 });
 const signIdentity = availableIdentities.includes(devIdentity) ? devIdentity : '-';
-execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', signIdentity, app], { stdio: 'inherit' });
+execFileSync('/usr/bin/codesign', [
+  '--force', '--deep', '--sign', signIdentity,
+  '--entitlements', join(root, 'src-tauri/Entitlements.plist'),
+  app,
+], { stdio: 'inherit' });
 execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], { stdio: 'inherit' });
 
 symlinkSync('/Applications', join(staging, 'Applications'));
