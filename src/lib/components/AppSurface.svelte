@@ -154,7 +154,8 @@
   import { projectBoardChannels, projectBoardId } from '$lib/project-board-channels';
   import UnifiedSubagentVisor from '$lib/components/UnifiedSubagentVisor.svelte';
   import UnifiedSubagentSidebar from '$lib/components/UnifiedSubagentSidebar.svelte';
-  import { activeUnifiedSubagent, unifiedSubagentsFromSnapshot, type UnifiedSubagent } from '$lib/unified-subagents';
+  import { activeUnifiedSubagent, unifiedSubagentInitials, unifiedSubagentsFromSnapshot, unifiedSubagentStatus, type UnifiedSubagent } from '$lib/unified-subagents';
+  import { sidebarChildAgents, sidebarRootTasks, type SidebarChildAgent } from '$lib/sidebar-child-agents';
   import ThinkingStatus from "$lib/components/ThinkingStatus.svelte";
   import StartingTaskPane from '$lib/components/StartingTaskPane.svelte';
   import UsageRings from '$lib/components/UsageRings.svelte';
@@ -616,6 +617,7 @@
     return () => { viewport.removeEventListener('change', update); stopScaleWatch(); };
   });
   let collapsedAgents = $state<Record<string, boolean>>({});
+  let collapsedTaskChildren = $state<Record<string, boolean>>({});
   let railAgentId = $state<string | null>(null);
   let railAnchor = $state<HTMLButtonElement>();
   let railProjectId = $state<string | null>(null);
@@ -1045,6 +1047,26 @@
     .map(session => `${session.id}:${session.status}`)
     .sort()
     .join('|'));
+  const sidebarChildren = $derived.by(() => {
+    subagentLifecycleRevision;
+    return snapshot ? sidebarChildAgents(snapshot, activityTasks) : new Map<string, SidebarChildAgent[]>();
+  });
+  function sidebarActiveChildren(taskId: string) {
+    const seen = new Set<string>();
+    const active: SidebarChildAgent[] = [];
+    const visit = (parentId: string, depth: number) => {
+      if (depth >= 6) return;
+      for (const child of sidebarChildren.get(parentId) ?? []) {
+        if (seen.has(child.id)) continue;
+        seen.add(child.id);
+        if (child.status === 'running' || child.status === 'queued') active.push(child);
+        if (child.task) visit(child.task.id, depth + 1);
+      }
+    };
+    visit(taskId, 0);
+    return active;
+  }
+  const sidebarRootChats = $derived(sidebarRootTasks(activityTasks));
   const taskSubagents = $derived.by(() => {
     subagentLifecycleRevision;
     return selectedTask && snapshot ? unifiedSubagentsFromSnapshot(snapshot, selectedTask.id) : [];
@@ -1071,6 +1093,21 @@
   function inspectSubagent(item: UnifiedSubagent) {
     selectedSubagentId = item.id;
     subagentVisorOpen = activeUnifiedSubagent(item);
+  }
+  export function showSubagent(taskId: string, subagentId: string) {
+    if (selectedTaskId !== taskId) {
+      const task = indexes?.taskById.get(taskId);
+      if (task) openTask(task);
+    }
+    showDetail = true;
+    detailTab = 'subagents';
+    // The task-change effect clears the prior selection. Apply the requested
+    // child after that effect has observed the newly selected parent task.
+    void tick().then(() => {
+      if (selectedTaskId !== taskId) return;
+      selectedSubagentId = subagentId;
+      subagentVisorOpen = activeTaskSubagentRecords.some(item => item.id === subagentId);
+    });
   }
   $effect(() => {
     const taskId = selectedTask?.id;
@@ -1168,6 +1205,18 @@
     const target: WorkspaceKey = sidebarView === 'standard' ? `agent:${task.agentId}` : sidebarView === 'projects' ? `project:${task.projectId ?? 'unassigned'}` : activeWorkspaceKey;
     if (target !== activeWorkspaceKey) void switchWorkspace(target).then(changed => { if (changed) routeTask(task, newSplit); });
     else routeTask(task, newSplit);
+  }
+  async function routeSidebarChild(parent: Task, child: SidebarChildAgent) {
+    if (child.task) { routeSidebarTask(child.task, false); return; }
+    const target: WorkspaceKey = sidebarView === 'standard' ? `agent:${parent.agentId}` : sidebarView === 'projects' ? `project:${parent.projectId ?? 'unassigned'}` : activeWorkspaceKey;
+    if (target !== activeWorkspaceKey && !await switchWorkspace(target)) return;
+    routeTask(parent);
+    await tick();
+    const owner = findPaneTabOwner(paneIds(layout), activePaneId, allTabs(), paneRefs,
+      tab => tab.kind === 'task' && tab.id === parent.id);
+    if (!child.sessionId) return;
+    if (owner && owner !== 'main') paneRefs[owner]?.showSubagent(parent.id, child.sessionId);
+    else showSubagent(parent.id, child.sessionId);
   }
   function sidebarTaskContextMenu(event: MouseEvent, task: Task) {
     // macOS reports Control-click as a context-menu gesture rather than a
@@ -2042,6 +2091,20 @@
       : mins < 60
         ? `${mins}m ago`
         : `${Math.round(mins / 60)}h ago`;
+  };
+  const activityAvatarFor = (agent: Agent | null | undefined) => {
+    const name = agent?.name?.trim() || 'Agent';
+    const provider = String(agent?.provider ?? '').toLowerCase();
+    const known = isMonaAgent(agent) ? { mark: 'M', tone: 'mona' }
+      : /open\s?code/i.test(name) ? { mark: 'OC', tone: 'opencode' }
+      : /claude/i.test(name) ? { mark: 'CL', tone: 'claude' }
+      : /codex/i.test(name) ? { mark: 'CX', tone: 'codex' }
+      : null;
+    if (known) return known;
+    const words = name.split(/[\s_-]+/).filter(Boolean);
+    const mark = (words.length > 1 ? words.slice(0, 2).map(word => word[0]).join('') : name.slice(0, 2)).toUpperCase();
+    const tone = provider === 'codex' ? 'codex' : provider === 'claude' ? 'claude' : 'default';
+    return { mark, tone };
   };
   const blankHost = (): Host => ({
     id: "",
@@ -4584,24 +4647,81 @@
   {/if}
 {/snippet}
 
+{#snippet sidebarChildNodes(parent: Task, depth = 0)}
+  {#if depth < 6}
+    {#each sidebarChildren.get(parent.id) ?? [] as child (child.id)}
+      <div class="sidebar-child-row" style={`--child-depth:${depth}`} data-sidebar-child-id={child.id} data-sidebar-parent-task-id={parent.id}>
+        <button class="sidebar-child-select" title={`${child.agentName} · ${child.title}`} aria-label={`${child.agentName}: ${child.title}, ${unifiedSubagentStatus(child.status)}`} onclick={() => void routeSidebarChild(parent, child)}>
+          <span class={`dot ${child.status === 'queued' ? 'running' : child.status}`}></span>
+          <span class="chat-copy"><span>{child.title}</span><span class="chat-meta">{child.agentName} · {unifiedSubagentStatus(child.status)}</span></span>
+        </button>
+      </div>
+      {#if child.task}{@render sidebarChildNodes(child.task, depth + 1)}{/if}
+    {/each}
+  {/if}
+{/snippet}
+
+{#snippet sidebarActiveChildNodes(parent: Task, children: SidebarChildAgent[])}
+  {#each children as child (child.id)}
+    <div class="sidebar-child-row activity-child-row" data-sidebar-child-id={child.id} data-sidebar-parent-task-id={child.parentTaskId}>
+      <button class="sidebar-child-select activity-child-select" class:selected={child.task ? child.task.id === (activePaneId === 'main' ? selectedTaskId : paneSelections[activePaneId]) : selectedSubagentId === child.sessionId && selectedTaskId === parent.id} title={`${child.agentName} · ${child.title}`} aria-label={`${child.agentName}: ${child.title}, ${unifiedSubagentStatus(child.status)}`} onclick={() => void routeSidebarChild(activityTasks.find(task => task.id === child.parentTaskId) ?? parent, child)}>
+        <span class="activity-child-mark" aria-hidden="true">{unifiedSubagentInitials(child.agentName)}</span>
+        <span class="activity-child-copy"><span class="activity-child-heading"><strong>{child.title}</strong><span class="activity-child-status"><i></i>{unifiedSubagentStatus(child.status)}</span></span><small>{child.agentName}</small></span>
+      </button>
+    </div>
+  {/each}
+{/snippet}
+
 {#snippet sidebarChat(task: Task, detail = false, recent = false)}
   {@const sortGroup=sidebarView==='activity'?'':sidebarView==='projects'?`project-chats:${task.projectId??'unassigned'}`:`agent-chats:${task.agentId}`}
   {@const agent = visibleAgents.find(item=>item.id===task.agentId)}
-  <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:recent class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
-    <button class="task-select" onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)} title={task.title}>
-      {#if detail}<span class="avatar small" title={agent?.name ?? 'Agent'} aria-label={agent?.name ?? 'Agent'}>{@render avatarVisual(agent, 12)}</span>{/if}
-      <span class={`dot ${task.status}`}></span><span class="chat-copy"><span>{task.title}</span>
-        {#if detail}<span class="chat-meta">{visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
-      </span>
-    </button>
-    <ObserverIndicator names={observedTaskIds.has(task.id) ? observerNames : []}/>
-    {#if task.status === 'running'}
+  {@const activityStyle = detail && sidebarView === 'activity'}
+  {@const groupedStyle = !sidebarCompressed && sidebarView !== 'activity'}
+  {@const cardStyle = activityStyle || groupedStyle}
+  {@const activityAvatar = activityAvatarFor(agent)}
+  {@const activityHost = activityStyle ? snapshot?.hosts.find(host => host.id === task.hostId) : null}
+  {@const children = sidebarChildren.get(task.id) ?? []}
+  {@const activeChildren = cardStyle ? sidebarActiveChildren(task.id) : []}
+  <div class="sidebar-task-branch" data-sidebar-task-id={task.id}>
+  <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:activity-task={activityStyle} class:grouped-task={groupedStyle} class:sidebar-card-task={cardStyle} class:recent class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
+    {#if cardStyle}
+      <button class="task-select activity-task-tile" aria-label={`Open chat ${task.title}`} title={task.title} onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)}></button>
+      <div class="activity-task-content">
+        <span class={`activity-avatar ${activityAvatar.tone}`} class:grouped-task-mark={groupedStyle} aria-hidden="true">{activityAvatar.mark}<span class={`activity-status-dot ${task.status}`}></span></span>
+        <span class="activity-task-copy">
+          <span class="activity-task-title">{task.title}</span>
+          <span class="chat-meta activity-task-meta">
+            {#if activityStyle || sidebarView === 'projects'}<span class="activity-agent-name">{agent?.name ?? 'Agent'}</span>
+            {:else}<span class="activity-agent-name">{task.status === 'running' ? 'Running' : task.status === 'completed' ? 'Finished' : task.status === 'error' ? 'Needs attention' : task.status === 'interrupted' ? 'Stopped' : 'Waiting'}</span>{/if}
+            {#if activeChildren.length}<button class="activity-subagents" aria-label={`${collapsedTaskChildren[task.id] ? 'Expand' : 'Collapse'} ${activeChildren.length} active subagents for ${task.title}`} aria-expanded={!collapsedTaskChildren[task.id]} aria-controls={`sidebar-children-${task.id}`} onclick={() => collapsedTaskChildren[task.id] = !collapsedTaskChildren[task.id]}><span aria-hidden="true" class="activity-subagents-sparkle">✦</span>{activeChildren.length}</button>{/if}
+            {#if activityHost?.kind === 'ssh'}<span class="activity-host">· {activityHost.name}</span>{/if}
+            <span class="activity-time">· {relative(task.updatedAt)}</span>
+          </span>
+        </span>
+      </div>
+    {:else}
+      <button class="task-select" onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)} title={task.title}>
+        {#if detail}<span class="avatar small" title={agent?.name ?? 'Agent'} aria-label={agent?.name ?? 'Agent'}>{@render avatarVisual(agent, 12)}</span>{/if}
+        <span class={`dot ${task.status}`}></span><span class="chat-copy"><span>{task.title}</span>
+          {#if detail}<span class="chat-meta">{agent?.name ?? 'Agent'} · {relative(task.updatedAt)}</span>{/if}
+        </span>
+      </button>
+      {#if children.length}<button class="sidebar-child-toggle" aria-label={`${collapsedTaskChildren[task.id] ? 'Expand' : 'Collapse'} subagents for ${task.title}`} aria-expanded={!collapsedTaskChildren[task.id]} aria-controls={`sidebar-children-${task.id}`} onclick={() => collapsedTaskChildren[task.id] = !collapsedTaskChildren[task.id]}><ChevronDown size={12} class={collapsedTaskChildren[task.id] ? 'collapsed' : ''}/></button>{/if}
+    {/if}
+    <ObserverIndicator names={observedTaskIds.has(task.id) ? observerNames : []} onactivate={cardStyle ? (event) => routeSidebarTask(task, event.metaKey || event.ctrlKey) : undefined}/>
+    {#if task.status === 'running' && !cardStyle}
       <small><AnimatedTitle text="live" active={true} activeTooltip="Live run" /></small>
     {:else}
       <div class="chat-actions">
         <button aria-label={`Archive chat ${task.title}`} title="Archive chat" disabled={busy} onclick={()=>archiveTask(task)}><Archive size={12}/></button>
       </div>
     {/if}
+  </div>
+  {#if cardStyle && activeChildren.length}
+    <div class="sidebar-child-group activity-child-group" id={`sidebar-children-${task.id}`} data-sidebar-children-for={task.id} hidden={collapsedTaskChildren[task.id]}>{@render sidebarActiveChildNodes(task, activeChildren)}</div>
+  {:else if !cardStyle && children.length}
+    <div class="sidebar-child-group" id={`sidebar-children-${task.id}`} data-sidebar-children-for={task.id} hidden={collapsedTaskChildren[task.id]}>{@render sidebarChildNodes(task)}</div>
+  {/if}
   </div>
 {/snippet}
 
@@ -5202,15 +5322,15 @@
       </div>{/if}
       <div class="sidebar-mode-content" use:motionView={{key:sidebarView,x:16*sidebarMotionDirection,y:0,duration:180,opacity:0.35}}>
       {#if sidebarView === 'standard'}
+      <p class="activity-heading">Agents</p>
       {#if visibleAgents.length}{#each sidebarSorted(visibleAgents,'agents') as agent}{@const agentTasks =
-            sidebarSorted(activeTasks.filter(
-              (task) => task.agentId === agent.id && !task.parentTaskId && !task.channelId,
-            ),`agent-chats:${agent.id}`)}
+            sidebarSorted(sidebarRootChats.filter(task => task.agentId === agent.id),`agent-chats:${agent.id}`)}
           {@const agentHost = snapshot?.hosts.find(host=>host.id===agent.hostId) ?? null}
           <section class="agent-group" class:has-chats={(agentTasks.length > 0 || (sidebarWorkspaceTabs[agent.id]?.length ?? 0) > 0) && !collapsedAgents[agent.id]}>
-            <div class="agent-row" use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
-              <button class="avatar agent-avatar-toggle" aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={event=>toggleSidebarGroup('agent',agent.id,event.currentTarget)}>
+            <div class="agent-row sidebar-parent-card" class:current={activeWorkspaceKey === `agent:${agent.id}` || selectedTask?.agentId === agent.id} use:sidebarReorder={{group:'agents',id:agent.id,move:moveSidebar}}>
+              <button class={`avatar agent-avatar-toggle activity-avatar ${activityAvatarFor(agent).tone}`} aria-label={`${collapsedAgents[agent.id] ? 'Expand' : 'Collapse'} chats for ${agent.name}`} aria-expanded={!collapsedAgents[agent.id]} aria-controls={`agent-chats-${agent.id}`} onclick={event=>toggleSidebarGroup('agent',agent.id,event.currentTarget)}>
                 {@render avatarVisual(agent, 14)}
+                <span class={`activity-status-dot ${agentTasks.some(task=>task.status==='running') ? 'running' : 'completed'}`}></span>
                 <span class="avatar-toggle-overlay" aria-hidden="true"><ChevronDown class="group-chevron" style={collapsedAgents[agent.id]?'transform:rotate(-90deg)':undefined} size={16}/></span>
               </button><button
                 class="agent-name"
@@ -5243,18 +5363,19 @@
           >
         </div>{/if}
       {:else if sidebarView === 'activity'}
-        <p class="view-hint">Running first, then most recent.</p>
-        <div class="activity-list">{#each activityTasks as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}</div>
+        <p class="activity-heading">Running first</p>
+        <div class="activity-list">{#each sidebarRootChats as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}</div>
       {:else}
+        <p class="activity-heading">Projects</p>
         {#each sidebarSorted(projects,'projects') as project (project.id)}
-          {@const projectTasks = sidebarSorted(activityTasks.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
+          {@const projectTasks = sidebarSorted(sidebarRootChats.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
           {@const ProjectIcon = projectIconComponent(project.icon)}
           <section class="project-group" aria-label={`Project ${project.name}`}>
-            <div use:sidebarReorder={{group:'projects',id:project.id,move:moveSidebar}} class="project-row" class:current={focusedProjectId === project.id || selectedTask?.projectId === project.id}>
+            <div use:sidebarReorder={{group:'projects',id:project.id,move:moveSidebar}} class="project-row sidebar-parent-card" class:current={focusedProjectId === project.id || selectedTask?.projectId === project.id}>
+              <button class="project-name" aria-label={`Open project ${project.name}`} onclick={()=>{void openProjectWorkspace(project);}}><span class="project-card-mark" style={`--project-colour:${project.color}`}><ProjectIcon size={16}/>{#if projectTasks.some(task=>task.status==='running')}<span class="activity-status-dot running"></span>{/if}</span><span class="sidebar-card-copy"><strong>{project.name}</strong><small>{projectTasks.length} {projectTasks.length === 1 ? 'chat' : 'chats'}</small></span>{#if approvalCount(`project:${project.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`project:${project.id}`)} pending approvals`}>{approvalCount(`project:${project.id}`)}</span>{/if}</button>
               <button class="folder-toggle" aria-label={`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} project ${project.name}`} aria-expanded={!collapsedProjects[project.id]} onclick={event=>toggleSidebarGroup('project',project.id,event.currentTarget)}>
                 <ChevronDown class="group-chevron" style={collapsedProjects[project.id]?'transform:rotate(-90deg)':undefined} size={13}/>
               </button>
-              <button class="project-name" aria-label={`Open project ${project.name}`} onclick={()=>{void openProjectWorkspace(project);}}><ProjectIcon size={14} style={`color:${project.color}`}/><span>{project.name}</span>{#if approvalCount(`project:${project.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`project:${project.id}`)} pending approvals`}>{approvalCount(`project:${project.id}`)}</span>{/if}<small>{projectTasks.length}</small></button>
               <button class="quiet" aria-label={`New chat in ${project.name}`} title="New chat" onclick={()=>routeProjectDraft(project.id)}><Plus size={14}/></button>
               <button class="quiet" aria-label={`Edit project ${project.name}`} title="Edit project" onclick={()=>editProject(project)}><MoreHorizontal size={14}/></button>
             </div>
@@ -5264,11 +5385,11 @@
           </section>
         {:else}<p class="view-hint">Group chats from any agent in a project.</p>{/each}
         <section class="project-group" aria-label="No project">
-          <button class="unassigned-folder" aria-expanded={!collapsedProjects.unassigned} onclick={event=>toggleSidebarGroup('project','unassigned',event.currentTarget)}>
-            <ChevronDown class="group-chevron" style={collapsedProjects.unassigned?'transform:rotate(-90deg)':undefined} size={13}/><Folder size={14}/><span>No project</span><small>{activityTasks.filter(task=>!task.projectId).length}</small>
+          <button class="unassigned-folder sidebar-parent-card" class:current={activeWorkspaceKey === 'project:unassigned' || (!!selectedTask && !selectedTask.projectId)} aria-expanded={!collapsedProjects.unassigned} onclick={event=>toggleSidebarGroup('project','unassigned',event.currentTarget)}>
+            <span class="project-card-mark"><Folder size={16}/></span><span class="sidebar-card-copy"><strong>No project</strong><small>{sidebarRootChats.filter(task=>!task.projectId).length} chats</small></span><ChevronDown class="group-chevron" style={collapsedProjects.unassigned?'transform:rotate(-90deg)':undefined} size={13}/>
           </button>
           {#if !collapsedProjects.unassigned}<div class="task-tree" use:motionView={{key:"unassigned",initial:motionReady,y:-4,duration:150}}>
-            {@render sidebarChats(sidebarSorted(activityTasks.filter(task=>!task.projectId),'project-chats:unassigned'), true, 'All chats are organised.')}
+            {@render sidebarChats(sidebarSorted(sidebarRootChats.filter(task=>!task.projectId),'project-chats:unassigned'), true, 'All chats are organised.')}
           </div>{/if}
         </section>
       {/if}
@@ -5316,12 +5437,12 @@
     </nav>{/if}{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
-      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}{@render sidebarWorkspacePanels(railAgent.id)}</div>
+      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(sidebarRootChats.filter(task=>task.agentId===railAgent.id),`agent-chats:${railAgent.id}`))}{@render sidebarWorkspacePanels(railAgent.id)}</div>
       <button class="rail-new-chat" aria-label={`New chat with ${railAgent.name}`} onclick={()=>routeDraft(railAgent!.id)}><Plus size={14}/>New chat</button>
     </div>{/if}
     {#if railProjectId && railProjectAnchor}<div class="rail-project-chats floating-panel" role="dialog" aria-label={`${railProjectId === 'unassigned' ? 'No project' : railProject?.name ?? 'Deleted project'} chats`} use:floating={{anchor:railProjectAnchor,side:'right'}}>
       <header><strong>{railProjectId === 'unassigned' ? 'No project' : railProject?.name ?? 'Deleted project'}</strong><button class="icon" aria-label="Close project chats" onclick={()=>railProjectId=null}><X size={14}/></button></header>
-      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(activityTasks.filter(task=>railProjectId === 'unassigned' ? !task.projectId : task.projectId === railProjectId),`project-chats:${railProjectId}`), true, railProjectId === 'unassigned' ? 'All chats are organised.' : 'No chats yet.')}</div>
+      <div class="rail-chat-list">{@render sidebarChats(sidebarSorted(sidebarRootChats.filter(task=>railProjectId === 'unassigned' ? !task.projectId : task.projectId === railProjectId),`project-chats:${railProjectId}`), true, railProjectId === 'unassigned' ? 'All chats are organised.' : 'No chats yet.')}</div>
       {#if railProject}<button class="rail-new-chat" aria-label={`New chat in ${railProject.name}`} onclick={()=>routeProjectDraft(railProject!.id)}><Plus size={14}/>New chat</button>{/if}
     </div>{/if}
     {#if sidebarCompressed}
@@ -6378,7 +6499,16 @@
     .sidebar-tab span { display:none; }
   }
   .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
-  .project-group { margin: 5px 0 12px; }
+  .activity-heading { margin:10px 8px 8px; color:var(--muted); font:600 calc(9.5px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.2em; text-transform:uppercase; }
+  .activity-list { display:grid; gap:6px; }
+  .sidebar-parent-card { --activity-row-surface:var(--sidebar); display:flex; align-items:center; gap:8px; min-height:58px; min-width:0; padding:6px 8px; border-radius:11px; }
+  .sidebar-parent-card:is(.current, :hover, :focus-within) { --activity-row-surface:color-mix(in srgb,var(--accent) 8%,var(--sidebar)); background:var(--activity-row-surface); }
+  .sidebar-parent-card:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .sidebar-card-copy { display:grid; flex:1; gap:2px; min-width:0; }
+  .sidebar-card-copy strong { min-width:0; overflow:hidden; color:var(--ink); font-size:calc(13px * var(--interface-font-ratio,1)); font-weight:600; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
+  .sidebar-card-copy small { min-width:0; overflow:hidden; margin:0; padding:0; color:var(--muted); font:calc(10px * var(--interface-font-ratio,1))/1.3 var(--interface-font,sans-serif); text-overflow:ellipsis; white-space:nowrap; }
+  .project-card-mark { position:relative; display:grid; place-items:center; flex:none; width:32px; height:32px; border-radius:9px; color:var(--project-colour,var(--muted)); background:color-mix(in srgb,var(--project-colour,var(--muted)) 16%,var(--sidebar)); }
+  .project-group { margin:0 0 8px; }
   .workspace-approval-list { display:grid; gap:4px; margin:2px 2px 13px; padding-bottom:11px; border-bottom:1px solid var(--line); }
   .workspace-approval { display:flex; align-items:center; gap:6px; min-width:0; padding:5px 4px; border:0; border-radius:5px; color:var(--ink); background:color-mix(in srgb,var(--accent) 8%,transparent); text-align:left; font-size:calc(10px * var(--interface-font-ratio, 1)); }
   .workspace-approval > span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -6386,17 +6516,16 @@
   .agent-name[aria-pressed="true"] { color:var(--accent-ink); }
   .rail-approvals { display:grid; gap:4px; }
   .rail-approvals .workspace-approval { display:grid; place-items:center; width:28px; height:22px; padding:0; }
-  .project-row { display: flex; align-items: center; gap: 1px; min-width: 0; border-radius: 5px; }
-  .project-row.current { background: var(--paper); }
-  .folder-toggle { display: grid; place-items: center; flex: none; width: 20px; height: 30px; color: var(--muted); }
-  .project-name { display: flex; align-items: center; flex: 1; min-width: 0; gap: 6px; padding: var(--density-sidebar-task-y) 0; text-align: left; font-size: calc(12px * var(--interface-font-ratio, 1)); }
-  .project-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-row { display:flex; align-items:center; gap:3px; min-width:0; }
+  .folder-toggle { display:grid; place-items:center; flex:none; width:21px; height:24px; padding:0; border-radius:5px; color:var(--muted); }
+  .folder-toggle:hover, .folder-toggle:focus-visible { background:var(--soft); color:var(--ink); }
+  .project-name { display:flex; align-items:center; flex:1; min-width:0; gap:9px; padding:0; text-align:left; }
   .project-name :global(svg) { flex: none; }
   .overview-head .eyebrow { display:flex; align-items:center; gap:6px; }
   .project-identity { display:grid; gap:8px; }.project-identity legend { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.project-icon-options,.project-colour-options { display:flex; flex-wrap:wrap; gap:7px; }.project-icon-options button { display:grid; place-items:center; width:34px; height:34px; border:1px solid var(--line); border-radius:7px; color:var(--project-colour); background:var(--panel); }.project-icon-options button.selected { border-color:var(--project-colour); background:color-mix(in srgb,var(--project-colour) 14%,var(--panel)); }.project-colour-options > button { width:24px; height:24px; padding:0; border:2px solid transparent; border-radius:50%; background:var(--project-colour); }.project-colour-options > button.selected { border-color:var(--ink); outline:2px solid var(--panel); outline-offset:-4px; }.project-custom-colour { position:relative; display:grid; place-items:center; width:25px; height:25px; overflow:hidden; border:1px solid var(--line); border-radius:50%; }.project-custom-colour span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }.project-custom-colour input { position:absolute; inset:-6px; width:38px; height:38px; padding:0; border:0; background:transparent; cursor:pointer; }
-  .project-name small, .unassigned-folder small { margin-left: auto; padding-right: 3px; font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); color: var(--muted); }
-  .project-row .quiet { flex: none; width: 21px; }
-  .unassigned-folder { display: flex; align-items: center; gap: 5px; width: 100%; padding: var(--density-sidebar-task-y) 3px; color: var(--muted); font-size: calc(11.5px * var(--interface-font-ratio, 1)); text-align: left; }
+  .project-row .quiet { flex:none; width:19px; height:24px; }
+  .unassigned-folder { display:flex; align-items:center; gap:9px; width:100%; color:var(--ink); text-align:left; }
+  .unassigned-folder > :global(svg:last-child) { flex:none; margin-left:auto; color:var(--muted); }
   .project-overview-actions { display: flex; flex-wrap: wrap; gap: 8px; }
   .project-folders { display: grid; gap: 10px; margin: 20px 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
   .project-folders dt { display: flex; align-items: center; gap: 5px; color: var(--muted); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
@@ -6518,14 +6647,43 @@
   .task-tree { margin-left:10px; border-left:1px solid var(--line); padding-left:7px; }
   .agent-group > .task-tree { margin:0; border:0; padding:0; }
   .agent-group.has-chats > .task-tree { padding-bottom: var(--density-sidebar-group-bottom); }
-  .agent-group > .task-tree > .task-row { position: relative; padding-left: calc(var(--thread-axis) - 3px); }
-  .agent-group > .task-tree > .task-row::before {
+  .sidebar-task-branch { position:relative; min-width:0; }
+  .agent-group > .task-tree > .sidebar-task-branch > .task-row { position: relative; padding-left: calc(var(--thread-axis) - 3px); }
+  .agent-group > .task-tree > .sidebar-task-branch > .task-row::before {
     content: ""; position: absolute; pointer-events: none;
     left: calc(var(--thread-axis) - .5px); width: 1px;
     top: 0; bottom: 0; background: var(--line);
   }
-  .agent-group > .task-tree > .task-row:last-child::before { bottom: 50%; }
+  .agent-group > .task-tree > .sidebar-task-branch:last-child > .task-row::before { bottom: 50%; }
   .agent-group > .task-tree .task-select > .dot { position: relative; z-index: 1; }
+  .side-scroll .agent-group > .agent-row { min-height:58px; padding:6px 8px; border-radius:11px; }
+  .side-scroll .agent-group .agent-avatar-toggle { width:32px; height:32px; overflow:visible; border-radius:9px; }
+  .side-scroll .agent-group .agent-avatar-toggle .model-avatar-mark { border-radius:inherit; color:inherit; background:transparent; }
+  .side-scroll .agent-group .agent-name b { font-size:calc(13px * var(--interface-font-ratio,1)); }
+  .side-scroll .agent-group .agent-name small { font:calc(10px * var(--interface-font-ratio,1))/1.3 var(--interface-font,sans-serif); }
+  .side-scroll .agent-group.has-chats > .agent-row::after,
+  .side-scroll .agent-group > .task-tree > .sidebar-task-branch > .task-row::before,
+  .side-scroll .agent-group > .task-tree > .recents-divider::before { display:none; }
+  .side-scroll .agent-group > .task-tree,
+  .side-scroll .project-group > .task-tree { display:grid; gap:3px; margin:2px 0 0 22px; padding:0; border:0; }
+  .side-scroll .agent-group > .task-tree[hidden] { display:none; }
+  .side-scroll .agent-group > .task-tree > .sidebar-task-branch > .task-row { padding-left:6px; }
+  .side-scroll .agent-group > .task-tree > .recents-divider { margin:8px 6px 4px; }
+  .side-scroll .agent-group > .task-tree > .recents-divider :global(svg) { position:static; transform:none; background:transparent; }
+  .sidebar-child-toggle { display:grid; place-items:center; flex:none; width:17px; height:20px; padding:0; color:var(--muted); border-radius:4px; }
+  .sidebar-child-toggle:hover, .sidebar-child-toggle:focus-visible { color:var(--ink); background:var(--soft); }
+  .sidebar-child-toggle :global(svg) { transition:transform var(--motion-navigation,180ms) ease; }
+  .sidebar-child-toggle :global(svg.collapsed) { transform:rotate(-90deg); }
+  .sidebar-child-group { position:relative; min-width:0; margin-left:25px; border-left:1px solid var(--line); }
+  .sidebar-child-group[hidden] { display:none; }
+  .sidebar-child-row { position:relative; min-width:0; padding-left:calc(10px + var(--child-depth) * 15px); }
+  .sidebar-child-row::before { content:""; position:absolute; left:0; top:50%; width:calc(9px + var(--child-depth) * 15px); height:1px; background:var(--line); pointer-events:none; }
+  .sidebar-child-select { display:flex; align-items:center; gap:7px; width:100%; min-width:0; padding:5px 7px; border-radius:5px; text-align:left; font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .sidebar-child-select:hover, .sidebar-child-select:focus-visible { background:var(--paper); }
+  .sidebar-child-select .chat-copy { min-width:0; }
+  .sidebar-child-select .chat-meta { font-size:calc(9px * var(--interface-font-ratio,1)); }
+  .sidebar-child-select > .dot { flex:none; }
+  @media(prefers-reduced-motion:reduce) { .sidebar-child-toggle :global(svg) { transition:none; } }
   .task-row,
   .channel-row {
     display: flex;
@@ -6543,6 +6701,80 @@
   .channel-row:hover {
     background: var(--paper);
   }
+  .activity-list .activity-task {
+    --activity-row-surface:var(--sidebar);
+    position:relative;
+    isolation:isolate;
+    min-height:58px;
+    gap:6px;
+    padding:6px 8px;
+    border-radius:11px;
+  }
+  .activity-list .activity-task:is(.current, :hover, :focus-within) {
+    --activity-row-surface:color-mix(in srgb,var(--accent) 8%,var(--sidebar));
+    background:var(--activity-row-surface);
+  }
+  .side-scroll .grouped-task { --activity-row-surface:var(--sidebar); position:relative; isolation:isolate; min-height:50px; gap:5px; padding:5px 6px; border-radius:9px; }
+  .side-scroll .grouped-task:is(.current, :hover, :focus-within) { --activity-row-surface:color-mix(in srgb,var(--accent) 8%,var(--sidebar)); background:var(--activity-row-surface); }
+  .grouped-task .activity-task-content { gap:9px; }
+  .grouped-task .activity-avatar { width:24px; height:24px; border-radius:7px; font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .grouped-task .activity-status-dot { right:-3px; bottom:-3px; width:8px; height:8px; border-width:1.5px; }
+  .grouped-task .activity-task-title { display:block; width:100%; overflow:hidden; color:var(--ink); font-size:calc(12px * var(--interface-font-ratio,1)); font-weight:550; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }
+  .grouped-task .activity-task-meta { display:flex; align-items:center; gap:4px; min-width:0; overflow:hidden; font-size:calc(10px * var(--interface-font-ratio,1)); line-height:1.25; white-space:nowrap; }
+  .activity-task-tile { position:absolute; z-index:0; inset:0; width:100%; height:100%; padding:0; border:0; border-radius:inherit; color:inherit; background:transparent; cursor:pointer; }
+  .activity-task-tile:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .sidebar-card-task:has(.activity-task-tile:focus-visible) { outline:2px solid var(--accent); outline-offset:2px; }
+  .activity-task-content { position:relative; z-index:1; display:flex; align-items:center; flex:1; gap:10px; min-width:0; pointer-events:none; }
+  .sidebar-card-task :global(.observer-indicator) { position:relative; z-index:2; }
+  .activity-task-copy { display:grid; flex:1; gap:2px; min-width:0; }
+  .activity-task .activity-task-title { display:block; width:100%; overflow:hidden; color:var(--ink); font-size:calc(13px * var(--interface-font-ratio,1)); font-weight:600; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
+  .activity-task .activity-task-meta { display:flex; align-items:center; gap:4px; min-width:0; overflow:hidden; font-size:calc(10px * var(--interface-font-ratio,1)); line-height:1.3; white-space:nowrap; }
+  .activity-agent-name, .activity-host { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .activity-time { flex:none; }
+  .activity-subagents { display:inline-flex; align-items:center; justify-content:center; gap:3px; flex:none; min-width:27px; height:19px; padding:0 6px; border:1px solid color-mix(in srgb,#48a4ff 45%,transparent); border-radius:999px; color:#0565b8; background:linear-gradient(135deg,color-mix(in srgb,#75b9ff 23%,transparent),color-mix(in srgb,#368fff 11%,transparent)); box-shadow:inset 0 1px 0 color-mix(in srgb,white 55%,transparent),0 0 8px color-mix(in srgb,#53a7ff 18%,transparent); font:700 calc(10px * var(--interface-font-ratio,1))/1 var(--mono); white-space:nowrap; cursor:pointer; pointer-events:auto; }
+  .activity-subagents:hover { border-color:#5cb1ff; background:color-mix(in srgb,#75b9ff 29%,transparent); }
+  .sidebar.sidebar-selected .activity-subagents:focus-visible { outline:2px solid #4c9feb; outline-offset:2px; }
+  .activity-subagents-sparkle { color:#2b9aff; font-size:10px; line-height:1; filter:drop-shadow(0 0 3px color-mix(in srgb,#4aa8ff 70%,transparent)); animation:activity-sparkle 2.8s ease-in-out infinite; }
+  @keyframes activity-sparkle { 0%,100% { opacity:.65; transform:scale(.88); } 50% { opacity:1; transform:scale(1.12); } }
+  @media (prefers-reduced-motion:reduce) { .activity-subagents-sparkle { animation:none; } }
+  :global([data-theme='dark']) .activity-subagents { color:#b6dbff; }
+  .side-scroll .activity-child-group { display:grid; gap:2px; margin:2px 0 3px 27px; border:0; }
+  .side-scroll .activity-child-group[hidden] { display:none; }
+  .side-scroll .activity-child-row { padding:0; }
+  .side-scroll .activity-child-row::before { display:none; }
+  .side-scroll .activity-child-select { gap:8px; padding:7px; border:1px solid transparent; border-radius:8px; color:var(--ink); background:transparent; font:inherit; }
+  .side-scroll .activity-child-select:hover { background:var(--soft); }
+  .side-scroll .activity-child-select.selected { border-color:color-mix(in srgb,var(--accent) 38%,var(--line)); background:color-mix(in srgb,var(--accent) 9%,var(--panel)); }
+  .sidebar.sidebar-selected .side-scroll .activity-child-select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .activity-child-mark { display:grid; place-items:center; flex:none; width:20px; height:20px; border-radius:6px; color:var(--on-accent); background:var(--accent); font:600 calc(9px * var(--interface-font-ratio,1))/1 var(--mono); }
+  .activity-child-copy { display:grid; flex:1; gap:2px; min-width:0; }
+  .activity-child-heading { display:flex; align-items:center; gap:7px; min-width:0; }
+  .activity-child-heading strong { min-width:0; overflow:hidden; font-size:calc(12px * var(--interface-font-ratio,1)); font-weight:550; text-overflow:ellipsis; white-space:nowrap; }
+  .activity-child-status { display:inline-flex; align-items:center; gap:4px; flex:none; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.03em; }
+  .activity-child-status i { width:5px; height:5px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 17%,transparent); }
+  .activity-child-copy small { overflow:hidden; color:var(--muted); font-size:calc(10px * var(--interface-font-ratio,1)); text-overflow:ellipsis; white-space:nowrap; }
+  @container (max-width:420px) { .activity-child-status { display:none; } }
+  .activity-avatar {
+    position:relative;
+    display:grid;
+    place-items:center;
+    flex:none;
+    width:32px;
+    height:32px;
+    border-radius:9px;
+    color:var(--ink);
+    background:var(--soft);
+    font:700 calc(15px * var(--interface-font-ratio,1)) var(--mono);
+    letter-spacing:-.05em;
+  }
+  .activity-avatar.mona { color:#073043; background:#20afd1; }
+  .activity-avatar.codex { color:#d6e1e4; background:#263840; }
+  .activity-avatar.claude { color:#f0b08d; background:#48342c; }
+  .activity-avatar.opencode { color:#b4c2ff; background:#282f57; }
+  .activity-status-dot { position:absolute; right:-4px; bottom:-4px; width:10px; height:10px; border:2px solid var(--activity-row-surface); border-radius:50%; background:#84969a; }
+  .activity-status-dot.running { background:#65d8a5; }
+  .activity-status-dot.error { background:#e88683; }
+  .activity-status-dot.interrupted { background:#d2ab75; }
   .task-select { display:flex; align-items:center; gap:7px; min-width:0; flex:1; padding:0; text-align:left; }
   .task-select > span:last-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .workspace-tab-icon { display:grid; place-items:center; flex:none; position:relative; z-index:1; color:var(--muted); background:var(--sidebar); }
@@ -6553,6 +6785,7 @@
   .chat-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-meta { font-size: calc(9.5px * var(--interface-font-ratio, 1)); color: var(--muted); }
   .chat-actions { display:flex; align-items:center; flex:none; gap:1px; opacity:0; pointer-events:none; }
+  .sidebar-card-task .chat-actions { position:relative; z-index:2; }
   .task-row:focus-within .chat-actions { opacity:1; pointer-events:auto; }
   @media (hover:hover) and (pointer:fine) { .task-row:hover .chat-actions { opacity:1; pointer-events:auto; } }
   .chat-actions button { display:grid; place-items:center; width:20px; height:22px; padding:0; color:var(--muted); border-radius:4px; }

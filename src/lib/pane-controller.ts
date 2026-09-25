@@ -18,6 +18,7 @@ export type PaneSurfaceHandle<State, Payload> = {
   newTerminal: () => Promise<void>;
   openEmptyTab: () => void;
   openTask: (task: Task, allowDuplicate?: boolean) => void;
+  showSubagent: (taskId: string, subagentId: string) => void;
   openChannel: (channel: Channel, allowDuplicate?: boolean) => void;
   openTaskComposer: (parentId?: string | null, agentId?: string | null, projectId?: string | null) => void;
   takeTab: (tab: PaneTabTransfer) => Payload | null;

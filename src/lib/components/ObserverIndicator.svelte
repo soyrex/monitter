@@ -3,7 +3,7 @@
   import { Eye } from '@lucide/svelte';
   import { floating } from '$lib/floating';
 
-  let { names }: { names: string[] } = $props();
+  let { names, onactivate }: { names: string[]; onactivate?: (event: MouseEvent) => void } = $props();
   const observers = $derived([...new Set(names.map(name => name.trim()).filter(Boolean))]);
   const tooltipId = $props.id();
   let anchor = $state<HTMLButtonElement>();
@@ -35,7 +35,7 @@
     <button bind:this={anchor} type="button" class="observer-eye" aria-label={`Observers: ${observers.join(', ')}`} aria-describedby={visible ? tooltipId : undefined}
       onpointerenter={enter} onpointerleave={leave}
       onfocus={()=>{focused=true;dismissed=false;}} onblur={()=>focused=false}
-      onclick={()=>dismissed=false} onkeydown={event=>{if(event.key==='Escape'){dismissed=true;event.stopPropagation();}}}>
+      onclick={event=>{dismissed=false;onactivate?.(event);}} onkeydown={event=>{if(event.key==='Escape'){dismissed=true;event.stopPropagation();}}}>
       <Eye size={15} aria-hidden="true"/>
       <span class="sparkle first" aria-hidden="true">✦</span>
       <span class="sparkle second" aria-hidden="true">✦</span>
