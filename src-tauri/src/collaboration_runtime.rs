@@ -170,9 +170,9 @@ impl Service {
                             "Jev Decisions is not enabled for this running agent task.".into()
                         );
                     }
-                    let (result, receipt) =
+                    let (result, receipt, card) =
                         crate::jev_decisions::evaluate(caller, tool, arguments)?;
-                    service.record_jev_decisions_receipt(&receipt);
+                    service.record_jev_decisions_receipt(&receipt, &card);
                     Ok(result)
                 },
             ))?);

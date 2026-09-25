@@ -95,8 +95,153 @@ fn compact_detail(event: &RunEvent) -> String {
         truncate_bytes(event.detail.lines().next().unwrap_or(""), MAX_ERROR_DETAIL)
     } else if event.kind == "tool" {
         compact_acp_activity_detail(&event.detail)
+    } else if event.kind == "jevDecision" {
+        compact_jev_decision_detail(&event.detail)
     } else {
         truncate_bytes(&event.detail, MAX_LIVE_DETAIL)
+    }
+}
+
+/// Keep Jev decision cards renderable in the 1 KiB live projection. The full
+/// locally stored event remains available from the on-demand detail endpoint.
+fn compact_jev_decision_detail(detail: &str) -> String {
+    let Ok(mut card) = serde_json::from_str::<Value>(detail) else {
+        return truncate_bytes(detail, MAX_LIVE_DETAIL);
+    };
+    let Some(object) = card.as_object_mut() else {
+        return truncate_bytes(detail, MAX_LIVE_DETAIL);
+    };
+    if let Some(question) = object
+        .get("question")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
+        object.insert(
+            "question".into(),
+            Value::String(truncate_bytes(&question, 220)),
+        );
+    }
+    let tool = object
+        .get("toolName")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let selected = object
+        .get("response")
+        .and_then(|response| response.get("candidateId"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if tool == "jev_choose" {
+        let mut kept_probability = None;
+        if let Some(response) = object.get_mut("response").and_then(Value::as_object_mut) {
+            if let Some(selected_id) = selected.as_deref() {
+                if let Some(probabilities) = response
+                    .get_mut("probabilities")
+                    .and_then(Value::as_object_mut)
+                {
+                    kept_probability = probabilities.get(selected_id).and_then(Value::as_f64);
+                    let mut compact = serde_json::Map::new();
+                    if let Some(value) = kept_probability {
+                        compact.insert(selected_id.to_string(), json!(value));
+                    }
+                    *probabilities = compact;
+                    if let Some(value) = kept_probability {
+                        response.insert("otherProbability".into(), json!((1.0 - value).max(0.0)));
+                    }
+                }
+            }
+        }
+        if let Some(labels) = object.get_mut("labels").and_then(Value::as_object_mut) {
+            let selected_label = selected.as_deref().and_then(|id| labels.get(id).cloned());
+            labels.clear();
+            if let (Some(id), Some(label)) = (selected.as_deref(), selected_label) {
+                labels.insert(
+                    id.to_string(),
+                    Value::String(truncate_bytes(label.as_str().unwrap_or(""), 100)),
+                );
+            }
+        }
+    } else if tool == "jev_assess" {
+        if let Some(labels) = object.get_mut("labels").and_then(Value::as_object_mut) {
+            for label in labels.values_mut() {
+                if let Some(text) = label.as_str() {
+                    *label = Value::String(truncate_bytes(text, 70));
+                }
+            }
+        }
+    }
+    object.insert("compact".into(), Value::Bool(true));
+    let fallback = {
+        let object = card.as_object().expect("decision card remains an object");
+        let mut response = serde_json::Map::new();
+        if let Some(source) = object.get("response").and_then(Value::as_object) {
+            for key in [
+                "status",
+                "kind",
+                "candidateId",
+                "confidence",
+                "probabilityYes",
+                "score",
+                "probabilities",
+                "otherProbability",
+            ] {
+                if let Some(value) = source.get(key) {
+                    response.insert(key.into(), value.clone());
+                }
+            }
+        }
+        let tool = object
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let selected = object
+            .get("response")
+            .and_then(|value| value.get("candidateId"))
+            .and_then(Value::as_str);
+        let mut labels = serde_json::Map::new();
+        if let Some(source_labels) = object.get("labels").and_then(Value::as_object) {
+            if tool == "jev_assess"
+                && object
+                    .get("response")
+                    .and_then(|value| value.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("score")
+            {
+                for (id, label) in source_labels.iter().take(6) {
+                    if let Some(label) = label.as_str() {
+                        labels.insert(id.clone(), Value::String(truncate_bytes(label, 52)));
+                    }
+                }
+            } else if let Some(id) = selected {
+                if let Some(label) = source_labels.get(id).and_then(Value::as_str) {
+                    labels.insert(id.to_string(), Value::String(truncate_bytes(label, 64)));
+                }
+            }
+        }
+        json!({
+            "compact": true,
+            "taskId": object.get("taskId"),
+            "toolName": truncate_bytes(tool, 40),
+            "question": object.get("question").and_then(Value::as_str).map(|value| truncate_bytes(value, 150)).unwrap_or_default(),
+            "labels": labels,
+            "response": response,
+            "provider": object.get("provider").and_then(Value::as_str).map(|value| truncate_bytes(value, 40)),
+            "model": object.get("model").and_then(Value::as_str).map(|value| truncate_bytes(value, 48)),
+            "latencyMs": object.get("latencyMs"),
+            "inputTokens": object.get("inputTokens"),
+            "outputTokens": object.get("outputTokens"),
+            "costUsd": object.get("costUsd"),
+            "createdAt": object.get("createdAt"),
+        })
+    };
+    let compact = card.to_string();
+    if compact.len() <= MAX_LIVE_DETAIL {
+        return compact;
+    }
+    let fallback = fallback.to_string();
+    if fallback.len() <= MAX_LIVE_DETAIL {
+        fallback
+    } else {
+        "{\"compact\":true,\"question\":\"Jev decision\",\"response\":{\"status\":\"ok\"}}".into()
     }
 }
 

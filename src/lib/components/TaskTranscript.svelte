@@ -29,6 +29,7 @@
   import MessagePane from '$lib/components/MessagePane.svelte';
   import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
   import RunActivity from '$lib/components/RunActivity.svelte';
+  import JevDecisionCard from '$lib/components/JevDecisionCard.svelte';
   import UnifiedSubagentItem from '$lib/components/UnifiedSubagentItem.svelte';
   import ThinkingStatus from '$lib/components/ThinkingStatus.svelte';
   import MessageMeta from '$lib/components/MessageMeta.svelte';
@@ -276,7 +277,10 @@
           {#if dateBreak !== null && dateBreak !== undefined}<ChatDateDivider at={dateBreak}/>{/if}
           {#if item.type === 'activity'}
             {@const inlineSubagent=subagentForEvents([item.value])}
-            {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} event={item.value} onloaddetail={onLoadFullEventDetail}/>{/if}
+            {#if item.value.kind === 'jevDecision'}<JevDecisionCard event={item.value} onloaddetail={onLoadFullEventDetail}/>
+            {:else if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>
+            {:else}<RunActivity active={active && !transcriptBuffer.held()} event={item.value} onloaddetail={onLoadFullEventDetail}/>
+            {/if}
           {:else if item.type === 'reasoning-group'}
             <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} running={displayTask.status === 'running' && item === displayItems.at(-1) && !display.hasPendingApprovals}>
               {#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}
