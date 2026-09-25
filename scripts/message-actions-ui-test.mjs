@@ -62,16 +62,18 @@ try {
   expect(hiddenActions.opacity).toBe('0');
   expect(hiddenActions.pointerEvents).toBe('none');
   expect(hiddenActions.width).toBeLessThan(1);
+  const hiddenTimestampOpacity = await answer.locator('time').evaluate(node => getComputedStyle(node).opacity);
+  expect(hiddenTimestampOpacity).toBe('1');
   await answer.locator('.message-bubble').hover();
   await expect.poll(() => answer.locator('.message-actions').evaluate(node => getComputedStyle(node).opacity)).toBe('1');
+  await expect.poll(() => answer.locator('time').evaluate(node => getComputedStyle(node).opacity)).toBe('0');
   const positions = await answer.evaluate(node => {
-    const author = node.querySelector('.message-author').getBoundingClientRect();
     const actions = node.querySelector('.message-actions').getBoundingClientRect();
     const time = node.querySelector('time').getBoundingClientRect();
-    return { authorRight:author.right, actionsLeft:actions.left, actionsRight:actions.right, timeLeft:time.left };
+    return { actionsLeft:actions.left, actionsRight:actions.right, timeLeft:time.left, timeRight:time.right };
   });
-  expect(positions.actionsLeft).toBeGreaterThanOrEqual(positions.authorRight);
-  expect(positions.timeLeft).toBeGreaterThan(positions.actionsRight);
+  expect(positions.actionsLeft).toBeLessThan(positions.timeRight);
+  expect(Math.abs(positions.actionsRight - positions.timeRight)).toBeLessThanOrEqual(2);
 
   await answer.getByRole('button', { name:'Copy message text' }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('First answer');
@@ -91,6 +93,17 @@ try {
   const history = await page.evaluate(taskId => window.__MONITTER_QA__.snapshot().messages.filter(message => message.taskId === taskId && ['user','assistant'].includes(message.role)).map(message => message.text), fork.id);
   expect(history).toEqual(['First request', 'First answer']);
   await expect(page.locator('.tabs').getByRole('button', { name:'Message actions · fork', exact:true })).toBeVisible();
+  await page.getByLabel('Task message', { exact:true }).fill('Sent tick position check');
+  await page.getByRole('button', { name:'Send task message' }).click();
+  const sentTick = page.locator('.message').filter({ hasText:'Sent tick position check' }).locator('.sent-check');
+  await expect(sentTick).toBeVisible();
+  const sentTickGeometry = await sentTick.evaluate(node => {
+    const tick = node.getBoundingClientRect(), bubble = node.closest('.message-bubble').getBoundingClientRect();
+    return { rightInset:bubble.right - tick.right, bottomInset:bubble.bottom - tick.bottom, transform:getComputedStyle(node).transform };
+  });
+  expect(Math.abs(sentTickGeometry.rightInset - 2)).toBeLessThanOrEqual(1);
+  expect(Math.abs(sentTickGeometry.bottomInset - 2)).toBeLessThanOrEqual(1);
+  expect(sentTickGeometry.transform).toContain('0.8');
   const bridgePage = await context.newPage();
   await bridgePage.goto('http://127.0.0.1:18422/monitter-app-ui/__monitter_dev__');
   const attachmentArgs = await bridgePage.evaluate(async () => {

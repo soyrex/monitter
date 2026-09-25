@@ -297,7 +297,7 @@
                 <div class="message-bubble">
                 <MessageMeta name={senderName(message) ?? (message.role==='user' ? 'You' : message.role==='assistant' ? (messageAgent?.name ?? (message.senderAgentId ? 'Previous agent' : displayAgent?.name ?? 'Agent')) : 'System')} createdAt={message.createdAt}>
                   {#snippet avatar()}{#if humanName}<span class="avatar message-avatar human-avatar" title={humanName}>{humanName.slice(0, 1).toUpperCase()}</span>{:else}{@render messageAvatar(messageAgent)}{/if}{/snippet}
-                  {#if steering}<span class="steering-status" data-steering-status={steering.status} role="status" aria-label={steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}>{steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}</span>{:else if optimistic}{@render deliveryStatus(optimistic)}{:else if confirmed}<span class="delivery-status" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
+                  {#if steering}<span class="steering-status" data-steering-status={steering.status} role="status" aria-label={steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}>{steering.status === 'sending' ? 'Steering' : steering.status === 'error' ? 'Needs attention' : 'Queued'}</span>{:else if optimistic}{@render deliveryStatus(optimistic)}{/if}
                   {#snippet actions()}{#if message.role === 'user' || message.role === 'assistant'}<span class="message-actions" aria-label="Message actions"><button type="button" title="Copy message text" aria-label="Copy message text" disabled={!message.text} onclick={() => onCopyMessage(message)}><Copy size={13}/></button><button type="button" title="Attach message to reply" aria-label="Attach message to reply" disabled={!message.text} onclick={() => onReplyMessage(message)}><Reply size={14}/></button><button type="button" title="Fork chat through this message" aria-label="Fork chat through this message" disabled={message.streamStatus === 'streaming'} onclick={() => onForkMessage(message)}><GitFork size={13}/></button></span>{/if}{/snippet}
                 </MessageMeta>
                 {#if message.role==='user' && message.id===displayLatestUserRequest?.id}<ExpandableUserRequest text={operatorMessageText(message.text)}/>
@@ -306,6 +306,7 @@
                 <AttachmentList attachments={message.attachments ?? []}/>
                 {#if steering?.attachmentIds.length}<small class="steering-attachments"><Paperclip size={11}/>{steering.attachmentIds.length} attachment{steering.attachmentIds.length === 1 ? '' : 's'}</small>{/if}
                 {#if message.streamStatus==='streaming'}<small class="delivery-status" role="status">Receiving…</small>{:else if message.streamStatus==='interrupted'}<small class="delivery-status">Partial reply · interrupted</small>{/if}
+                {#if confirmed}<span class="delivery-status sent-check" data-delivery-status="sent" role="status" aria-label="Sent" title="Sent"><Check size={13} aria-hidden="true"/></span>{/if}
                 </div>
                 {#if message.role==='assistant' && message.responseMetadata}<ResponseMetadata metadata={message.responseMetadata}/>{/if}
               </article>
@@ -366,8 +367,11 @@
   .task-menu { display:grid; grid-auto-rows:min-content; align-content:start; width:max-content; min-width:155px; max-width:min(240px,calc(100vw - 24px)); height:max-content; max-height:min(320px,calc(100vh - 24px)); overflow-y:auto; overflow-x:hidden; }
   .task-menu button { display:flex; width:100%; min-height:32px; height:auto; flex:none; align-self:stretch; box-sizing:border-box; gap:7px; align-items:center; padding:7px; text-align:left; }
   .message { max-width:100%; margin:12px 0; }
-  .message-actions { display:inline-flex; flex:none; align-items:center; gap:2px; max-width:0; overflow:hidden; color:var(--muted); opacity:0; pointer-events:none; transform:translateX(26px); transition:max-width .16s ease, opacity .12s ease, transform .16s ease; }
-  .message-bubble:hover .message-actions,.message-bubble:focus-within .message-actions { max-width:78px; opacity:1; pointer-events:auto; transform:translateX(0); }
+  .message-bubble { position:relative; }
+  .message-actions { position:absolute; z-index:1; right:0; display:inline-flex; align-items:center; gap:2px; color:var(--muted); opacity:0; pointer-events:none; transform:translateX(16px); transition:opacity .12s ease, transform .16s ease; }
+  .message-bubble:hover .message-actions,.message-bubble:focus-within .message-actions { opacity:1; pointer-events:auto; transform:translateX(0); }
+  .message-bubble :global(.message-meta time) { position:relative; z-index:2; transition:opacity .12s ease, transform .16s ease; }
+  .message-bubble:hover :global(.message-meta time),.message-bubble:focus-within :global(.message-meta time) { opacity:0; transform:translateX(8px); }
   .message-actions button { display:grid; place-items:center; width:23px; height:23px; padding:0; border:0; border-radius:5px; color:inherit; background:transparent; cursor:pointer; }
   .message-actions button:hover:not(:disabled),.message-actions button:focus-visible { color:var(--accent-ink,var(--accent)); background:var(--soft); }
   .message-actions button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
@@ -395,6 +399,7 @@
   .context-cleared-event time { flex:none; }
   .optimistic-message .message-bubble { border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); }
   .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
+  .delivery-status.sent-check { position:absolute; right:2px; bottom:2px; display:flex; width:13px; height:13px; align-items:center; justify-content:center; margin:0; transform:scale(.8); transform-origin:bottom right; }
   .steering-status { display:inline-flex; align-items:center; margin-left:auto; padding:2px 6px; border:1px solid color-mix(in srgb,var(--accent) 38%,var(--line)); border-radius:999px; color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,var(--panel)); font:600 calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
   .steering-status[data-steering-status="queued"] { color:var(--muted); border-color:var(--line); background:var(--panel); }
   .steering-status[data-steering-status="error"] { color:#bd655b; border-color:color-mix(in srgb,#bd655b 38%,var(--line)); background:color-mix(in srgb,#bd655b 7%,var(--panel)); }
@@ -411,7 +416,7 @@
   .blank-conversation :global(svg) { color:var(--accent); }
   .blank-conversation h2 { margin:10px 0 5px; color:var(--ink); font-size:calc(15px * var(--interface-font-ratio,1)); }
   .blank-conversation p { margin:0; font-size:calc(12.5px * var(--interface-font-ratio,1)); line-height:1.55; }
-  @media (hover:none),(pointer:coarse) { .task-title-edit { opacity:1; pointer-events:auto; } .message-actions { max-width:78px; opacity:1; pointer-events:auto; transform:none; } .approval-inline { min-height:44px; padding-block:8px; } }
+  @media (hover:none),(pointer:coarse) { .task-title-edit { opacity:1; pointer-events:auto; } .message-actions { position:static; opacity:1; pointer-events:auto; transform:none; } .message-bubble :global(.message-meta time) { opacity:1; transform:none; } .approval-inline { min-height:44px; padding-block:8px; } }
   @media (prefers-reduced-motion:reduce) { .message-actions { transition:none; } }
   @container workspace-pane (width < 1000px) { .conversation { --chat-side-padding:20px; } .conversation-head { padding-left:20px; padding-right:20px; } }
   @media (max-width:640px) { .conversation-head { padding:12px; gap:8px; } .conversation-head h1 { font-size:calc(18px * var(--interface-font-ratio,1)); } .task-actions { flex-wrap:wrap; } }
