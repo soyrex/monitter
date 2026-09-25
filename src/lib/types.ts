@@ -211,7 +211,7 @@ export interface SubagentTranscriptEntry {
   createdAt: number;
 }
 export interface RunEvent {
-  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent' | 'schedule';
+  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent' | 'schedule' | 'jevDecision';
   title: string; detail: string; createdAt: number;
 }
 /** A revision-aware, compact UI projection. A null snapshot means unchanged. */

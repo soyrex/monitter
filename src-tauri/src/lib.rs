@@ -2878,10 +2878,16 @@ impl Service {
     pub(crate) fn record_jev_decisions_receipt(
         &self,
         receipt: &jev_decisions::DecisionReceipt,
+        card: &jev_decisions::DecisionCardRecord,
     ) {
         let Ok(bytes) = serde_json::to_vec(receipt) else {
             return;
         };
+        // The local transcript gets only the bounded question, validated typed
+        // answer, and usage metadata; the request state and API credential stay out.
+        if let Ok(detail) = serde_json::to_string(card) {
+            self.record(&card.task_id, "jevDecision", "Jev decision", detail);
+        }
         if std::fs::create_dir_all(&self.router_trace_dir).is_err() {
             return;
         }

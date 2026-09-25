@@ -20,6 +20,7 @@ pub(crate) struct DecisionReceipt {
     pub latency_ms: Option<u128>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
     pub created_at: i64,
 }
 
@@ -38,6 +39,7 @@ impl DecisionReceipt {
             latency_ms: Some(evidence.latency_ms),
             input_tokens: evidence.input_tokens,
             output_tokens: evidence.output_tokens,
+            cost_usd: evidence.cost_usd,
             created_at: crate::model::now(),
         }
     }
@@ -51,7 +53,53 @@ impl DecisionReceipt {
             latency_ms: None,
             input_tokens: None,
             output_tokens: None,
+            cost_usd: None,
             created_at: crate::model::now(),
+        }
+    }
+}
+
+/// Bounded, state-free view of a Jev answer for the local transcript.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DecisionCardRecord {
+    pub task_id: String,
+    pub tool_name: String,
+    pub question: String,
+    /// Choice IDs or ordered score-level indices mapped to readable labels.
+    pub labels: BTreeMap<String, String>,
+    /// The validated typed answer. The original state and API credential are never included.
+    pub response: Value,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub latency_ms: Option<u128>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub created_at: i64,
+}
+
+impl DecisionCardRecord {
+    fn new(
+        receipt: &DecisionReceipt,
+        question: String,
+        labels: BTreeMap<String, String>,
+        response: Value,
+        provider: Option<String>,
+    ) -> Self {
+        Self {
+            task_id: receipt.task_id.clone(),
+            tool_name: receipt.tool_name.clone(),
+            question,
+            labels,
+            response,
+            provider,
+            model: receipt.model.clone(),
+            latency_ms: receipt.latency_ms,
+            input_tokens: receipt.input_tokens,
+            output_tokens: receipt.output_tokens,
+            cost_usd: receipt.cost_usd,
+            created_at: receipt.created_at,
         }
     }
 }
@@ -115,11 +163,17 @@ pub(crate) fn evaluate(
     task_id: &str,
     tool: &str,
     args: Value,
-) -> Result<(Value, DecisionReceipt), String> {
+) -> Result<(Value, DecisionReceipt, DecisionCardRecord), String> {
     match tool {
         "jev_choose" => {
             let input: ChooseInput = serde_json::from_value(args)
                 .map_err(|_| "Invalid Jev choice input.".to_string())?;
+            let question = input.question.clone();
+            let labels = input
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.id.clone(), candidate.label.clone()))
+                .collect();
             match choose_live(input) {
                 Ok((output, evidence)) => {
                     let outcome = if output.status == "abstain" {
@@ -128,31 +182,62 @@ pub(crate) fn evaluate(
                         "ok"
                     };
                     let receipt = DecisionReceipt::from_evidence(task_id, tool, outcome, &evidence);
-                    serde_json::to_value(output)
-                        .map(|value| (value, receipt))
-                        .map_err(|_| "Could not encode Jev choice result.".into())
+                    let response = serde_json::to_value(output)
+                        .map_err(|_| "Could not encode Jev choice result.".to_string())?;
+                    let card = DecisionCardRecord::new(
+                        &receipt,
+                        question,
+                        labels,
+                        response.clone(),
+                        Some(evidence.provider),
+                    );
+                    Ok((response, receipt, card))
                 }
-                Err(_) => Ok((
-                    unavailable_choose(),
-                    DecisionReceipt::unavailable(task_id, tool),
-                )),
+                Err(_) => {
+                    let response = unavailable_choose();
+                    let receipt = DecisionReceipt::unavailable(task_id, tool);
+                    let card =
+                        DecisionCardRecord::new(&receipt, question, labels, response.clone(), None);
+                    Ok((response, receipt, card))
+                }
             }
         }
         "jev_assess" => {
             let input: AssessInput = serde_json::from_value(args)
                 .map_err(|_| "Invalid Jev assessment input.".to_string())?;
             let kind = input.kind.clone();
+            let question = input.question.clone();
+            let labels = if kind == "score" {
+                input
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, level)| (index.to_string(), level.clone()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
             match assess_live(input) {
                 Ok((output, evidence)) => {
                     let receipt = DecisionReceipt::from_evidence(task_id, tool, "ok", &evidence);
-                    serde_json::to_value(output)
-                        .map(|value| (value, receipt))
-                        .map_err(|_| "Could not encode Jev assessment result.".into())
+                    let response = serde_json::to_value(output)
+                        .map_err(|_| "Could not encode Jev assessment result.".to_string())?;
+                    let card = DecisionCardRecord::new(
+                        &receipt,
+                        question,
+                        labels,
+                        response.clone(),
+                        Some(evidence.provider),
+                    );
+                    Ok((response, receipt, card))
                 }
-                Err(_) => Ok((
-                    unavailable_assess(&kind),
-                    DecisionReceipt::unavailable(task_id, tool),
-                )),
+                Err(_) => {
+                    let response = unavailable_assess(&kind);
+                    let receipt = DecisionReceipt::unavailable(task_id, tool);
+                    let card =
+                        DecisionCardRecord::new(&receipt, question, labels, response.clone(), None);
+                    Ok((response, receipt, card))
+                }
             }
         }
         _ => Err("Unknown Jev Decisions tool.".into()),

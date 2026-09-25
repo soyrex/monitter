@@ -931,6 +931,11 @@ RunEvent.kind additionally accepts `computer`, `goal`, and `log`. Computer detai
 `{id,phase:"started"|"completed",tool,summary}`. Only start records in the current user turn of a
 running owned task activate the compact panel. Matching completion or terminal state clears it;
 historical tool records cannot reactivate control. Stop cancels the task's owned process group.
+`jevDecision` records a bounded, state-free Jev decision card: the question, readable candidate or
+score-level labels, validated typed answer, confidence/probability distribution, and available
+provider/model, timestamp, latency, token, and cost metadata. It never stores the input state or
+API credential. The live projection keeps a compact parseable summary; the full record is available
+through the task-event detail endpoint.
 Codex `ContextCompaction` tool detail preserves its native `id` plus
 `monitterPhase:"started"|"completed"`. The UI may show a duration only for a matching pair;
 an interrupted or legacy lone record remains neutral rather than being described as completed.
