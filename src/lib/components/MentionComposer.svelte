@@ -7,7 +7,7 @@
 </script>
 <div class="mention-composer">
   <div class="mention-overlay" aria-hidden="true" style:width={width ? `${width}px` : undefined}><div class="mention-text" style:transform={`translate(${-scrollLeft}px, ${-scrollTop}px)`}>{#each parts as part}{#if part.agentId}<span class="mention-pill" data-agent-id={part.agentId}>{part.text}</span>{:else}{part.text}{/if}{/each}{value.endsWith('\n') ? '\n' : ''}</div></div>
-  <textarea bind:clientWidth={width} use:autoGrowTextarea={value} aria-label="Channel message" placeholder="Message this channel… Use @ to mention an agent" bind:value oninput={event=>oninput(event.currentTarget.value)} {onkeydown} onscroll={event=>{scrollTop=event.currentTarget.scrollTop;scrollLeft=event.currentTarget.scrollLeft;}}></textarea>
+  <textarea bind:clientWidth={width} use:autoGrowTextarea={value} rows="1" aria-label="Channel message" placeholder="Message this channel… Use @ to mention an agent" bind:value oninput={event=>oninput(event.currentTarget.value)} {onkeydown} onscroll={event=>{scrollTop=event.currentTarget.scrollTop;scrollLeft=event.currentTarget.scrollLeft;}}></textarea>
 </div>
 <style>
   .mention-composer { position:relative; min-width:0; }

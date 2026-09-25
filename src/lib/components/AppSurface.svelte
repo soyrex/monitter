@@ -4678,7 +4678,7 @@
   {:else if channel}
     <MentionComposer bind:value={composer} agents={channelMentionAgents} oninput={updateSlash} onkeydown={handleComposerKeydown}/>
   {:else}
-    <textarea bind:this={composerTextarea} bind:value={composer} use:autoGrowTextarea={composer} aria-label="Task message" {placeholder} oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
+    <textarea bind:this={composerTextarea} bind:value={composer} use:autoGrowTextarea={composer} rows="1" aria-label="Task message" {placeholder} oninput={(event)=>updateSlash(event.currentTarget.value)} onkeydown={handleComposerKeydown}></textarea>
   {/if}
 {/snippet}
 
