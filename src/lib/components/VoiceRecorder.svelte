@@ -157,7 +157,6 @@
     <span class="recording-status" role="status"><span class="spinner"><LoaderCircle size={14}/></span>Waiting for microphone…</span>
   {:else}
     <button type="button" class="control record" aria-label="Record voice message" title="Record voice message (up to 90 seconds)" disabled={disabled} onclick={start}><Mic size={16}/></button>
-    <span class="hint">Voice message</span>
   {/if}
   {#if error}<span class="error" role="alert">{error}</span>{/if}
 </div>
@@ -171,7 +170,7 @@
   .record{color:var(--accent-ink,var(--accent))}.stop{color:var(--danger,#c44)}.cancel{color:var(--muted)}
   .recording-status{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--ink)}
   .dot{width:7px;height:7px;border-radius:50%;background:var(--danger,#c44);animation:pulse 1s ease-in-out infinite}
-  .hint{white-space:nowrap}.error{max-width:min(320px,50vw);color:var(--danger,#b84c44);overflow-wrap:anywhere}
+  .error{max-width:min(320px,50vw);color:var(--danger,#b84c44);overflow-wrap:anywhere}
   .spinner{display:inline-flex;animation:spin 1s linear infinite}
   @keyframes pulse{50%{opacity:.35}}@keyframes spin{to{transform:rotate(360deg)}}
   @media(prefers-reduced-motion:reduce){.dot,.spinner{animation:none}}

@@ -48,7 +48,7 @@
     Clock,
     Check,
     ChartPie,
-    ArrowUp,
+    CornerDownLeft,
     ArrowRightLeft,
     GitFork,
     ArrowLeft,
@@ -509,6 +509,13 @@
     composerPending = $state<Record<string, boolean>>({}),
     taskTitle = $state("");
   let composerDialog: HTMLDialogElement | undefined;
+  let composerMultiline = $state(false);
+  // The expand control only appears once the inline input has grown past a couple of lines.
+  function watchComposerLines(node: HTMLElement) {
+    const observer = new ResizeObserver(() => { composerMultiline = node.offsetHeight > 56; });
+    observer.observe(node);
+    return { destroy() { observer.disconnect(); composerMultiline = false; } };
+  }
   function updateExpandedComposerBounds(node: HTMLDialogElement) {
     const workspace = node.closest<HTMLElement>('.workspace');
     if (!workspace || !node.classList.contains('expanded')) return;
@@ -4770,12 +4777,15 @@
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
 {/snippet}
 
-{#snippet voiceTools()}
+{#snippet voiceButton()}
   {#if nativeRuntime}
     {#key `${currentDraftKey() ?? ''}:${attachmentScope}`}
       <VoiceRecorder disabled={busy || filesBusy || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
     {/key}
   {/if}
+{/snippet}
+
+{#snippet voiceStatus()}
   {#if voiceProcessing[currentDraftKey() ?? '']}<small role="status">Transcribing voice…</small>{/if}
   {#if voiceErrors[currentDraftKey() ?? '']}<small class="error" role="alert">{voiceErrors[currentDraftKey() ?? '']}</small>{/if}
 {/snippet}
@@ -5097,13 +5107,18 @@
         <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
         {#if !composerExpanded && !projectBoardId(activeChannel.id)}{@render slashMenu()}{/if}
         <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded channel composer' : 'Channel composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
-          {@render composerExpandButton()}
           {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
           {#if composerExpanded && !projectBoardId(activeChannel.id)}{@render slashMenu()}{/if}
+          <div class="composer-box">
+          {#if composerExpanded || composerMultiline}{@render composerExpandButton()}{/if}
           {#if !projectBoardId(activeChannel.id)}<AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>{/if}
-          {@render composerEditor(projectBoardId(activeChannel.id) ? 'Write a project coordination note…' : 'Message this channel… Use @ to mention an agent', true)}
+          <div class="composer-input-row" use:watchComposerLines>
+            {@render composerEditor(projectBoardId(activeChannel.id) ? 'Write a project coordination note…' : 'Message this channel… Use @ to mention an agent', true)}
+            <div class="composer-actions">{#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}{#if !projectBoardId(activeChannel.id)}{@render voiceButton()}{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
+          </div>
+          </div>
           <div class="composer-footer">
-            {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}{@render voiceTools()}
+            {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}{@render voiceStatus()}
             <div class="recipient-picker">
               <span>Send to</span
               >{#each visibleAgents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
@@ -5114,7 +5129,6 @@
                   onclick={() => toggleRecipient(agent.id)}>{agent.name}</button
                 >{/each}
             </div>{:else}<p class="hint">Private project notes · no agent is woken by posting</p>{/if}
-            {#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
           </div>
         </dialog>
       </section>
@@ -5150,12 +5164,17 @@
           {/each}
           {#if !composerExpanded}{@render slashMenu()}{/if}
           <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer draft-composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded new chat composer' : 'New chat composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
-            {@render composerExpandButton()}
             {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
             {#if composerExpanded}{@render slashMenu()}{/if}
+            <div class="composer-box">
+            {#if composerExpanded || composerMultiline}{@render composerExpandButton()}{/if}
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-            {@render composerEditor('Describe what you want this agent to do…')}
-      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{@render voiceTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right">{#if taskFormAgent?.jevRouting && taskFormAgent.jevRouting !== 'off'}<span class="router-chip" title={taskFormAgent.jevRouting === 'safe_auto' ? 'Jev will safely apply a confidence-qualified model and reasoning mapping. Permissions stay unchanged.' : 'Jev will record a recommendation; your model selection stays unchanged.'}>Jev · {taskFormAgent.jevRouting === 'safe_auto' ? 'auto' : 'recommend'}</span>{/if}<ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
+            <div class="composer-input-row" use:watchComposerLines>
+              {@render composerEditor('Describe what you want this agent to do…')}
+              <div class="composer-actions">{@render voiceButton()}<button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
+            </div>
+            </div>
+      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right">{#if taskFormAgent?.jevRouting && taskFormAgent.jevRouting !== 'off'}<span class="router-chip" title={taskFormAgent.jevRouting === 'safe_auto' ? 'Jev will safely apply a confidence-qualified model and reasoning mapping. Permissions stay unchanged.' : 'Jev will record a recommendation; your model selection stays unchanged.'}>Jev · {taskFormAgent.jevRouting === 'safe_auto' ? 'auto' : 'recommend'}</span>{/if}<ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/></div></div>
           </dialog>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -5185,20 +5204,23 @@
           <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
           {#if !composerExpanded}{@render slashMenu()}{/if}
           <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded task composer' : 'Task composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
-            {@render composerExpandButton()}
             {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
             {#if composerExpanded}{@render slashMenu()}{/if}
+            <div class="composer-box">
+            {#if composerExpanded || composerMultiline}{@render composerExpandButton()}{/if}
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
-            {@render composerEditor(`Message ${selectedAgent?.name ?? 'agent'}…`)}
-            <div class="composer-footer">
-              <div class="composer-left">{@render attachmentTools()}{@render voiceTools()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
-              <div class="composer-right">
-                <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeModel}/>
-{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}
-                <button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button>
-              </div>
+            <div class="composer-input-row" use:watchComposerLines>
+              {@render composerEditor(`Message ${selectedAgent?.name ?? 'agent'}…`)}
+              <div class="composer-actions">{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}{@render voiceButton()}<button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
             </div>
             <ContextUsageBar usage={selectedTaskContextUsage}/>
+            </div>
+            <div class="composer-footer">
+              <div class="composer-left">{@render attachmentTools()}{@render voiceStatus()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
+              <div class="composer-right">
+                <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeModel}/>
+              </div>
+            </div>
           </dialog>
         {/snippet}
         {#snippet subagentDock()}
@@ -6358,12 +6380,14 @@
     overscroll-behavior: none;
     background: var(--paper);
   }
-  :global(*) { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent; }
+  :global(*) { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+  :global(*:hover) { scrollbar-color: color-mix(in srgb, #fff 10%, transparent) transparent; }
   :global(*::-webkit-scrollbar) { width:8px; height:8px; }
   :global(*::-webkit-scrollbar-track) { background:transparent; }
-  :global(*::-webkit-scrollbar-thumb) { min-height:28px; border:2px solid transparent; border-radius:999px; background:color-mix(in srgb, var(--muted) 42%, transparent); background-clip:padding-box; }
-  :global(*:hover::-webkit-scrollbar-thumb) { background:color-mix(in srgb, var(--muted) 68%, transparent); background-clip:padding-box; }
+  :global(*::-webkit-scrollbar-thumb) { min-height:28px; border:2px solid transparent; border-radius:999px; background:transparent; background-clip:padding-box; transition:background-color 180ms ease; }
+  :global(*:hover::-webkit-scrollbar-thumb) { background:color-mix(in srgb, #fff 10%, transparent); background-clip:padding-box; }
   :global(*::-webkit-scrollbar-corner) { background:transparent; }
+  @media (prefers-reduced-motion:reduce) { :global(*::-webkit-scrollbar-thumb) { transition:none; } }
   :global(button),
   :global(input),
   :global(textarea),
@@ -7458,7 +7482,6 @@
   .draft-intro > p:last-child { color: var(--muted); line-height: 1.6; }
   .draft-options { margin-bottom: 10px; }
   .draft-composer.composer { max-height: none; margin: var(--density-draft-composer-margin-top) 0 var(--density-composer-margin-bottom); }
-  .draft-composer.composer textarea { min-height:72px; }
   .draft-options label { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }
   .draft-select { appearance:none; -webkit-appearance:none; width:100%; padding:10px 34px 10px 11px; border:1px solid var(--line); border-radius:7px; color:var(--ink); background:var(--panel) linear-gradient(45deg,transparent 50%,var(--muted) 50%) calc(100% - 15px) 52% / 5px 5px no-repeat,linear-gradient(135deg,var(--muted) 50%,transparent 50%) calc(100% - 10px) 52% / 5px 5px no-repeat; font:inherit; }
   .task-workspace-editor { display:grid; gap:6px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.task-workspace-editor > span { display:flex; align-items:center; gap:6px; }.task-workspace-editor > div { display:flex; gap:6px; }.task-workspace-editor input { min-width:0; flex:1; padding:10px 11px; border:1px solid var(--line); border-radius:7px; outline:0; color:var(--ink); background:var(--panel); font:calc(12px * var(--interface-font-ratio, 1)) var(--mono); }.task-workspace-editor button { flex:none; }
@@ -7479,15 +7502,26 @@
     width: min(var(--chat-content-max-width), calc(100% - (2 * var(--density-composer-margin-inline))));
     box-sizing: border-box;
     margin: 0 auto var(--density-composer-margin-bottom);
-    padding: 11px 12px 9px;
+    padding: 0;
+    border: 0;
+    color: var(--ink);
+    background: transparent;
+  }
+  .composer-box {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 8px 8px 13px 14px;
     border: 1px solid var(--line);
     border-radius: 10px;
-    color: var(--ink);
     background: color-mix(in srgb, var(--panel) 80%, transparent);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
   }
+  .composer-box :global(.context-usage-bar) { border-radius: 0 0 9px 9px; background: color-mix(in srgb, var(--ink) 20%, transparent); }
+  .composer.expanded .composer-box { flex: 1; min-height: 0; background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
   .composer.expanded {
     position: fixed;
     inset: calc(var(--composer-pane-top) + 12px) auto auto calc(var(--composer-pane-left) + var(--density-composer-margin-inline));
@@ -7505,20 +7539,19 @@
   }
   .workspace:has(.composer.expanded)::after { content:''; position:absolute; z-index:999; inset:var(--pane-tabbar-height) 0 0; background:#0009; backdrop-filter:blur(5px); pointer-events:none; }
   .workspace:has(.composer.expanded) .draft-layout { mask-image:none; -webkit-mask-image:none; }
-  .composer-expand { position:absolute; top:7px; right:7px; z-index:2; display:grid; place-items:center; width:27px; height:27px; padding:0; border:1px solid transparent; border-radius:6px; color:var(--muted); background:transparent; cursor:pointer; }
+  .composer-expand { position:absolute; top:6px; right:8px; z-index:2; display:grid; place-items:center; width:27px; height:27px; padding:0; border:1px solid transparent; border-radius:6px; color:var(--muted); background:transparent; cursor:pointer; }
   .composer-expand:hover, .composer-expand:focus-visible { border-color:var(--line); color:var(--ink); background:var(--soft); }
-  .composer.expanded .composer-expand { top:9px; right:11px; }
   .composer-longform-hint { position:absolute; top:15px; left:18px; max-width:calc(100% - 60px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font:calc(10px * var(--interface-font-ratio,1)) var(--mono); }
   .longform-editor { flex:1; min-height:0; padding:4px 2px; overflow:auto; overscroll-behavior:contain; }
-  .composer.expanded .composer-footer { padding-top:8px; border-top:1px solid var(--line); }
+  .composer.expanded .composer-footer { padding-bottom:0; }
   .composer textarea {
     font-family: var(--chat-font, "IBM Plex Sans", system-ui, sans-serif);
     font-weight: var(--chat-font-weight, 400);
     display: block;
     width: 100%;
-    min-height: 52px;
+    min-height: 30px;
     box-sizing: border-box;
-    padding-right: 32px;
+    padding: 4px 0;
     resize: none;
     overflow: hidden;
     border: 0;
@@ -7538,9 +7571,22 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+    padding: 8px 6px 0;
     color: var(--muted);
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
+  .composer-input-row { display:flex; align-items:flex-end; gap:8px; min-width:0; }
+  .composer-input-row > :first-child { flex:1; min-width:0; }
+  .composer.expanded .composer-input-row { flex:1; min-height:0; }
+  .composer.expanded .composer-input-row > .longform-editor { align-self:stretch; }
+  .composer-input-row :global(.mention-composer textarea) { min-height:30px; }
+  .composer-input-row :global(.mention-composer textarea), .composer-input-row :global(.mention-composer .mention-text) { padding:4px 2px; }
+  .composer-actions { display:flex; align-items:center; gap:4px; flex:none; }
+  .composer-actions .composer-control { border-radius:7px; box-shadow:none; }
+  .composer-actions .primary.composer-control { border:1px solid var(--accent); color:var(--accent-ink,var(--accent)); background:transparent; }
+  .composer-actions .primary.composer-control:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 14%,transparent); }
+  .composer-actions .primary.composer-control:disabled { opacity:.45; }
+  .composer-actions :global(.voice-recorder .record) { border-color:transparent; background:transparent; }
   .composer-control { width: 30px; min-width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; border-radius: 50%; }
   .spin { animation: composer-spin .8s linear infinite; }
   @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
@@ -8074,8 +8120,8 @@
   @media (max-height: 500px) {
     .conversation-head { padding-top: 10px; padding-bottom: 10px; gap: 6px; }
     .task-heading { padding-top: 10px; }
-    .composer { padding: 7px; margin-bottom: 8px; }
-    .composer textarea { min-height: 36px; }
+    .composer { margin-bottom: 8px; }
+    .composer-box { padding: 6px 6px 11px 10px; }
   }
 
   .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
@@ -8236,7 +8282,7 @@
   .attachment-tools .icon { width: 24px; height: 24px; }
   .attachment-tools small { font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .attachment-input { display: none; }
-  .composer.drop-files { outline: 2px solid var(--accent); background: color-mix(in srgb,var(--accent) 8%,var(--panel)); }
+  .composer.drop-files .composer-box { outline: 2px solid var(--accent); background: color-mix(in srgb,var(--accent) 8%,var(--panel)); }
   .vim-commandbar { position: fixed; z-index: 80; left: 50%; bottom: 20px; width: min(540px,calc(100vw - 32px)); transform: translateX(-50%); padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--panel); box-shadow: 0 12px 30px #0004; }
   .vim-commandbar form { display: flex; align-items: center; gap: 6px; }
   .vim-commandbar label { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; color: var(--accent-ink); font: 600 calc(14px * var(--interface-font-ratio,1)) var(--mono); }
