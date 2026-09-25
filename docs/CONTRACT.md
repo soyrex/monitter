@@ -1347,10 +1347,9 @@ whisper-cpp`) and obtain the multilingual `ggml-base.bin` model from the
 place it at the default path below. Configure nonstandard locations with `MONITTER_WHISPER_CLI` and
 `MONITTER_WHISPER_MODEL`; defaults discover `whisper-cli` on PATH/Homebrew and look for
 `~/Library/Application Support/Monitter/whisper/models/ggml-base.bin` (or standard whisper.cpp
-model locations). Recording and transcription run locally; after the user sends the message,
-normal message delivery applies and the configured harness may read the attached WAV and
-transcript. The frontend stores the WAV as a regular attachment and retains the returned text in
-the message. Transcription accepts only bounded, valid PCM16 WAV input; temporary audio and output files are removed after
+model locations). Recording and transcription run locally. The frontend adds the returned text
+to the composer, and normal message delivery sends that text without attaching or retaining the WAV.
+Transcription accepts only bounded, valid PCM16 WAV input; temporary audio and output files are removed after
 the command. First-run Whisper startup can spend additional time compiling local Metal kernels;
 the native process has a five-minute hard timeout. Errors and process output never contain audio content. `read_attachment_audio
 { attachmentId }` returns `{ filename, mimeType, dataBase64 }` only for a registered WAV

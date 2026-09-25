@@ -1968,16 +1968,13 @@
     const key=currentDraftKey();
     if(!key || !nativeRuntime || voiceProcessing[key]) return;
     const targets=attachmentTargets(), scope=attachmentScope;
-    if(!targets.length) { voiceErrors[key]='Choose an agent to receive this recording.'; return; }
+    if(!targets.length) { voiceErrors[key]='Choose an agent to receive this voice message.'; return; }
     voiceProcessing[key]=true; voiceErrors[key]='';
     try {
-      if(!await attachFiles([file], {key,targets,scope})) throw new Error(error || 'Could not save the voice recording.');
-      let transcript='';
-      try { transcript=(await bridge.transcribeVoiceMessage(file.dataBase64)).text.trim(); }
-      catch(reason) { voiceErrors[key]=`Audio saved, but transcription failed: ${text(reason)}`; return; }
+      const transcript=(await bridge.transcribeVoiceMessage(file.dataBase64)).text.trim();
       // A pane switch must not lose the transcript. Keep it with the captured
       // composer, while refusing to apply it after that destination changes.
-      if(attachmentContexts[key]!==scope || (key===currentDraftKey() && scope!==attachmentScope)) return;
+      if(key===currentDraftKey() && scope!==attachmentScope) return;
       if(transcript) {
         const draftId=key.startsWith('draft:')?key.slice('draft:'.length):'';
         const previous=key===currentDraftKey()?composer:(sharedComposers.get(key)?.text ?? drafts[key] ?? (draftId ? taskDrafts[draftId]?.text : '') ?? '');
@@ -1990,7 +1987,7 @@
         }
         publishComposer(key,next);
       }
-    } catch(reason) { voiceErrors[key]=text(reason); }
+    } catch(reason) { voiceErrors[key]=`Could not transcribe the voice message: ${text(reason)}`; }
     finally { voiceProcessing[key]=false; }
   }
   export async function attachNativeFiles(paths:string[]):Promise<void> {await attachFiles(paths);}

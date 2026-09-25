@@ -150,7 +150,7 @@
 
 <div class="voice-recorder">
   {#if recording}
-    <span class="recording-status" role="status"><span class="dot"></span>Recording {timeLabel} / 1:30</span>
+    <span class="recording-status" role="status" aria-label={`Recording in progress, ${timeLabel} of 1:30`}><span class="dot" aria-hidden="true"></span><span aria-hidden="true">{timeLabel} / 1:30</span></span>
     <button type="button" class="control stop" aria-label="Stop recording" title="Stop recording" onclick={stop}><Square size={15} fill="currentColor"/></button>
     <button type="button" class="control cancel" aria-label="Cancel recording" title="Cancel recording" onclick={cancel}><X size={15}/></button>
   {:else if processing}
