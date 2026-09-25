@@ -7,12 +7,14 @@
     title,
     open = false,
     wide = false,
+    globalLayer = false,
     onclose,
     children,
   }: {
     title: string;
     open?: boolean;
     wide?: boolean;
+    globalLayer?: boolean;
     onclose: () => void;
     children: import("svelte").Snippet;
   } = $props();
@@ -24,6 +26,24 @@
   let lifecycle = 0;
   let animations: Animation[] = [];
   let focusedWhenClosing = false;
+
+  function escapeScrollContainers(node: HTMLElement, enabled: boolean) {
+    if (!enabled) return;
+    const shell = node.closest<HTMLElement>(".app-shell");
+    const parent = node.parentNode;
+    if (!shell || !parent || parent === shell) return;
+    const placeholder = document.createComment("modal-layer");
+    parent.insertBefore(placeholder, node);
+    shell.appendChild(node);
+    return {
+      destroy() {
+        if (placeholder.parentNode) {
+          placeholder.parentNode.insertBefore(node, placeholder);
+          placeholder.remove();
+        }
+      },
+    };
+  }
 
   function cancelAnimations() {
     for (const animation of animations) animation.cancel();
@@ -154,6 +174,7 @@
   <div
     class="backdrop"
     class:closing
+    use:escapeScrollContainers={globalLayer}
     role="presentation"
     onclick={(event) => event.currentTarget === event.target && requestClose()}
   >

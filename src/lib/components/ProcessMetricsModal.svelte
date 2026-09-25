@@ -176,7 +176,7 @@
   }
 </script>
 
-<Modal title="Resource usage" {open} {onclose} wide>
+<Modal title="Resource usage" {open} {onclose} wide globalLayer>
   <div class="resource-modal">
     {#if error}<p class="metrics-error" role="alert">{error}</p>{/if}
     {#if latest}
