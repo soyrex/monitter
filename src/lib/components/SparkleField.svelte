@@ -84,7 +84,8 @@
   .sparkle-field.mirror { transform:scaleY(-1); transform-origin:center; }
   :global([data-theme="dark"]) .sparkle-field { opacity:1; }
   @media (prefers-color-scheme:dark) { :global([data-theme="system"]) .sparkle-field { opacity:1; } }
-  .sparkle-glow { position:absolute; inset:0; background:linear-gradient(to top, color-mix(in srgb, var(--accent) 20%, transparent), transparent); }
+  .sparkle-glow { position:absolute; inset:0; background:linear-gradient(to top, color-mix(in srgb, var(--accent) 20%, transparent), transparent); animation:sparkle-glow-enter .85s cubic-bezier(.2,.6,.2,1) both; }
+  @keyframes sparkle-glow-enter { from { opacity:0; } to { opacity:1; } }
 
   .sparkle { position:absolute; line-height:1; color:var(--accent-ink); text-shadow:0 0 8px var(--accent); opacity:0; animation:sparkle-fade-up 3.4s ease-in infinite; }
   @keyframes sparkle-fade-up {
@@ -114,10 +115,12 @@
   :global([data-motion="off"]) .sparkle,
   :global([data-motion="off"]) .pulse-grid,
   :global([data-motion="off"]) .matrix-column { animation:none; }
+  :global([data-motion="off"]) .sparkle-glow { animation:none; }
   :global([data-motion="off"]) .sparkle { opacity:.55; transform:none; }
   :global([data-motion="off"]) .pulse-grid { opacity:.32; transform:none; filter:none; }
   :global([data-motion="off"]) .matrix-column { opacity:.38; transform:translateY(120%); }
   @media (prefers-reduced-motion:reduce) {
+    .sparkle-glow { animation:none; }
     .sparkle,.pulse-grid,.matrix-column { animation:none; }
     .sparkle { opacity:.55; transform:none; }
     .pulse-grid { opacity:.32; transform:none; filter:none; }
