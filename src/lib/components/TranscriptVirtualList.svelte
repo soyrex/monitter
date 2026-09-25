@@ -31,6 +31,7 @@
   let committingOptions = false;
   let canFlushMeasurements = false;
   let followCommitPending = false;
+  let pendingSmoothScroll = false;
   let firstCommitMarked = false;
   // Suppresses instant follow-snap while a reader-initiated smooth scroll is in
   // flight. Without this, virtualizer layout commits triggered by `setFollowing`
@@ -55,17 +56,20 @@
   // viewport glides to the bottom. The streaming/follow path stays instant so
   // live chats don't lag behind new tokens.
   function followCommittedLayout(options: { animate?: boolean } = {}) {
-    if (followCommitPending || !isFollowing()) return;
+    if (options.animate) pendingSmoothScroll = true;
+    if (followCommitPending || (!isFollowing() && !pendingSmoothScroll)) return;
     followCommitPending = true;
     void tick().then(() => {
       followCommitPending = false;
+      const animate = pendingSmoothScroll;
+      pendingSmoothScroll = false;
       const viewport = scrollParent;
       if (!isFollowing() || !viewport?.isConnected || viewport.clientHeight === 0) return;
       const finishProbe = perfGeometryStart('follow-layout');
       try {
         const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
         if (bottom - viewport.scrollTop <= 3) return;
-        if (options.animate && typeof viewport.scrollTo === 'function') {
+        if (animate && typeof viewport.scrollTo === 'function') {
           // Mark the jump as in flight so any virtualizer layout commits that
           // fire mid-animation do not snap-scrollTop back to the bottom and
           // collapse the smooth motion into an instant jump. The flag is

@@ -16,7 +16,7 @@
   let documentVisible = $state(true);
   let lastResetKey = $state<string | undefined>();
   let owner: TranscriptScrollOwner | undefined;
-  let pendingLatestRequest = false;
+  let pendingLatestRequest: { animate?: boolean } | null = null;
   let jumpRequest = 0;
   const jumpVisible = $derived(showJump || pendingUpdates);
 
@@ -24,8 +24,9 @@
     register(nextOwner) {
       owner = nextOwner;
       if (pendingLatestRequest) {
-        pendingLatestRequest = false;
-        void jumpToLatest();
+        const options = pendingLatestRequest;
+        pendingLatestRequest = null;
+        void jumpToLatest(options);
       }
       return () => { if (owner === nextOwner) owner = undefined; };
     },
@@ -50,7 +51,7 @@
   function detachFromLatest() {
     if (!viewport || !active) return;
     jumpRequest += 1;
-    pendingLatestRequest = false;
+    pendingLatestRequest = null;
     readerDetached = true;
     resumeFollowingUntil = 0;
     setFollowing(false);
@@ -119,13 +120,13 @@
     // Let the current transcript rows/footer enter TanStack's count and
     // measurement pipeline before asking it for the end offset.
     await tick();
-    if (request !== jumpRequest || readerDetached || !followingLatest) return;
+    if (request !== jumpRequest || readerDetached) return;
     // Issue the smooth scroll first, then enable follow mode. Once follow mode
     // is on, virtualizer layout commits call `followCommittedLayout` each tick
     // and would otherwise clamp scrollTop back to the bottom mid-animation,
     // collapsing the smooth jump into an instant snap.
     if (owner) owner.scrollToLatest(options);
-    else pendingLatestRequest = true;
+    else pendingLatestRequest = options;
     setFollowing(true);
   }
 
