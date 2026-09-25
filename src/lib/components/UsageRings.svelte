@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ChevronDown } from '@lucide/svelte';
+  import { ChevronDown, ChevronLeft, ChevronRight } from '@lucide/svelte';
   import { onMount, tick } from 'svelte';
   import ProviderIcon from './ProviderIcon.svelte';
 
@@ -262,6 +262,12 @@
   function showValue(data: UsageRingData | undefined): boolean {
     return (data?.status === 'ready' || data?.status === 'stale') && (data.active?.unlimited === true || percent(data.active?.usedPercent) !== null);
   }
+
+  function cycleAccount(providerId: string, accounts: { key: string }[], currentKey: string | undefined, delta: number) {
+    const index = accounts.findIndex(account => account.key === currentKey);
+    const next = accounts[(index + delta + accounts.length) % accounts.length];
+    selectedAccountKeys[providerId] = next.key;
+  }
 </script>
 
 <section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
@@ -314,9 +320,12 @@
             <span class="ring-value" aria-hidden="true">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</span>
           </div>
           {#if sourceData?.accounts && sourceData.accounts.length > 1}
-            <select class="account-select" aria-label={`${provider.label} account`} value={selectedAccount?.key} onchange={event => { selectedAccountKeys[provider.id] = event.currentTarget.value; }}>
-              {#each sourceData.accounts as account (account.key)}<option value={account.key}>{account.label}</option>{/each}
-            </select>
+            {@const accounts = sourceData.accounts}
+            <div class="account-cycle" role="group" aria-label={`${provider.label} account`}>
+              <button type="button" class="account-cycle-arrow" aria-label="Previous account" onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, -1)}><ChevronLeft size={12}/></button>
+              <span class="account-cycle-label">{selectedAccount?.label}</span>
+              <button type="button" class="account-cycle-arrow" aria-label="Next account" onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, 1)}><ChevronRight size={12}/></button>
+            </div>
           {/if}
           <div class="usage-copy">
             <div class="usage-heading">{#if !ringsOnly && !compact}<span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={12} /></span>{/if}<strong>{provider.label}{#if selectedAccount} · {selectedAccount.label}{/if}</strong><span class="usage-status">{status === 'ready' ? active?.label ?? stateLabel(data) : stateLabel(data)}</span></div>
@@ -382,7 +391,10 @@
 
 <style>
   .usage-rings { min-width:0; max-width:100%; overflow:hidden; color:var(--ink); border:1px solid var(--line); border-radius:8px; background:color-mix(in srgb,var(--panel) 34%,transparent); font-size:calc(11px * var(--interface-font-ratio,1)); }
-  .account-select { grid-column:1 / -1; grid-row:2; min-width:0; max-width:100%; margin:2px 0 4px; padding:2px 4px; border:1px solid var(--line); border-radius:4px; background:var(--panel); color:var(--muted); font:inherit; }
+  .account-cycle { display:flex; align-items:center; gap:2px; grid-column:1 / -1; grid-row:2; min-width:0; max-width:100%; margin:2px 0 4px; }
+  .account-cycle-arrow { display:grid; place-items:center; flex:none; width:16px; height:16px; border-radius:4px; color:var(--muted); }
+  .account-cycle-arrow:hover { color:var(--ink); background:var(--soft); }
+  .account-cycle-label { overflow:hidden; flex:1; min-width:0; text-align:center; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
   .usage-toggle { display:grid; grid-template-columns:minmax(0,1fr) auto 16px; align-items:center; width:100%; height:31px; padding:0 7px 0 10px; color:var(--muted); text-align:left; }
   .usage-toggle:hover { color:var(--ink); background:var(--soft); }
   .usage-toggle > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.09em; }
@@ -448,7 +460,7 @@
     .usage-detail-short,.usage-reset-short { display:inline; }
     .usage-reset { overflow:visible; text-overflow:clip; }
   }
-  .rings-only .account-select,.compact .account-select { grid-column:1; grid-row:3; width:100%; font-size:calc(9px * var(--interface-font-ratio,1)); }
+  .rings-only .account-cycle,.compact .account-cycle { grid-column:1; grid-row:3; width:100%; font-size:calc(9px * var(--interface-font-ratio,1)); }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly,.usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }
 </style>
