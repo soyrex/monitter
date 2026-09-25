@@ -27,10 +27,11 @@ assert.ok(adapter.includes("source: 'collaboration'") && adapter.includes('sessi
 for (const component of [visor, sidebar]) assert.ok(component.includes('UnifiedSubagentItem'), 'every surface shares one subagent item renderer');
 for (const label of ["queued: 'Starting'", "running: 'Working'", "completed: 'Done'", "error: 'Needs attention'"]) assert.ok(adapter.includes(label), `plain-language lifecycle label is present: ${label}`);
 assert.ok(sidebar.includes('Active <span>{active.length}</span>') && sidebar.includes('Recent <span>{recent.length}</span>'), 'right sidebar has explicit Active and Recent sections');
+assert.match(sidebar, /filter\(item => !activeUnifiedSubagent\(item\)\)[\s\S]*slice\(0, 3\)/, 'right sidebar keeps only three most recently updated inactive agents');
 assert.ok(sidebar.includes('No active subagents.') && sidebar.includes('No recent subagent work.'), 'sidebar empty states stay explicit');
 assert.ok(visor.includes('selected.transcript') && visor.includes('aria-live="polite"') && visor.includes('Waiting for transcript activity'), 'visor exposes a live running transcript');
 assert.ok(visor.includes('width:100%;max-width:none') && visor.includes('width:min(var(--chat-content-max-width,900px)'), 'the visor chrome reaches pane edges while inner controls stay aligned to chat width');
-assert.ok(visor.includes('<details class="tool-call">') && visor.includes('No additional details.'), 'tool calls are expandable transcript blocks');
+assert.ok(visor.includes('groupConversationActivity([], transcriptEvents, true)') && visor.includes('<RunActivity events={activity.values} processGroups={activity.groups} processTree/>'), 'tool calls use the shared expandable process tree');
 assert.ok(visor.includes('font-size:calc(10px * var(--chat-font-ratio,1))'), 'subagent chat messages are two pixels smaller than the previous 12px transcript');
 assert.ok(adapter.includes('taskTranscript(task, messages, events)') && adapter.includes("event.kind !== 'tool'"), 'routed subagent transcripts merge agent messages with tool activity');
 assert.ok(surface.includes('bridge.getSubagentTranscript') && adapter.includes('transcript:'), 'native and routed transcript sources are normalized');

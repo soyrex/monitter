@@ -10,7 +10,12 @@
   } = $props();
 
   const active = $derived(items.filter(activeUnifiedSubagent));
-  const recent = $derived(items.filter(item => !activeUnifiedSubagent(item)));
+  const recent = $derived(
+    items
+      .filter(item => !activeUnifiedSubagent(item))
+      .sort((a, b) => b.updatedAt - a.updatedAt || a.title.localeCompare(b.title))
+      .slice(0, 3)
+  );
 </script>
 
 <aside class="subagent-sidebar" aria-label={label}>
