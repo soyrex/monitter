@@ -57,6 +57,7 @@ import type {
   BrowserBounds,
   BrowserState,
   BrowserExtensionLoadResult,
+  VoiceTranscription,
 } from "./types";
 
 export interface MonitterBridge {
@@ -147,7 +148,9 @@ export interface MonitterBridge {
   previewTaskDeletion(taskId: string): Promise<TaskDeletionPreview>;
   deleteArchivedTask(taskId: string, removeNativeFiles: boolean): Promise<Snapshot>;
   storeAttachment(target: AttachmentTarget, file: AttachmentFileData, previewDataUrl?: string | null, sourceId?: string): Promise<Attachment>;
+  transcribeVoiceMessage(audioBase64: string): Promise<VoiceTranscription>;
   readAttachmentFile(sourcePath: string): Promise<AttachmentFileData>;
+  readAttachmentAudio(attachmentId: string): Promise<AttachmentFileData>;
   readAttachmentImage(attachmentId: string): Promise<AttachmentFileData>;
   onChanged(handler: () => void): Promise<UnlistenFn>;
 }
@@ -344,7 +347,9 @@ const nativeBridge: MonitterBridge = {
   previewTaskDeletion: taskId => invoke<TaskDeletionPreview>("preview_task_deletion", { taskId }),
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
   storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}),
+  transcribeVoiceMessage: audioBase64 => isLanBrowser() ? desktopOnly() : invoke<VoiceTranscription>('transcribe_voice_message', { audioBase64 }),
   readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
+  readAttachmentAudio: attachmentId => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>('read_attachment_audio', { attachmentId }),
   readAttachmentImage: attachmentId => invoke<AttachmentFileData>('read_attachment_image', {attachmentId}),
   onChanged: async (handler) => {
     changedSubscribers.add(handler);
@@ -466,7 +471,9 @@ const previewBridge: MonitterBridge = {
   previewTaskDeletion: () => desktopOnly(),
   deleteArchivedTask: () => desktopOnly(),
   storeAttachment: () => desktopOnly(),
+  transcribeVoiceMessage: () => desktopOnly(),
   readAttachmentFile: () => desktopOnly(),
+  readAttachmentAudio: () => desktopOnly(),
   readAttachmentImage: () => desktopOnly(),
   onChanged: async () => () => {},
 };
@@ -579,7 +586,9 @@ export function getBridge(): MonitterBridge {
       previewTaskDeletion: taskId => test.invoke("preview_task_deletion", {taskId}) as Promise<TaskDeletionPreview>,
       deleteArchivedTask: (taskId, removeNativeFiles) => test.invoke("delete_archived_task", {taskId, removeNativeFiles}) as Promise<Snapshot>,
       storeAttachment: (target, file, previewDataUrl = null, sourceId) => test.invoke("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}) as Promise<Attachment>,
+      transcribeVoiceMessage: audioBase64 => test.invoke('transcribe_voice_message', { audioBase64 }) as Promise<VoiceTranscription>,
       readAttachmentFile: sourcePath => test.invoke("read_attachment_file", {sourcePath}) as Promise<AttachmentFileData>,
+      readAttachmentAudio: attachmentId => test.invoke('read_attachment_audio', { attachmentId }) as Promise<AttachmentFileData>,
       readAttachmentImage: attachmentId => test.invoke('read_attachment_image', {attachmentId}) as Promise<AttachmentFileData>,
       onChanged: (handler) => test.listen("monitter:changed", handler),
     };

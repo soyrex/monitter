@@ -17,6 +17,7 @@
   import WorkspaceLoadingScreen from "./WorkspaceLoadingScreen.svelte";
   import MessageMeta from "./MessageMeta.svelte";
   import RichMarkdownComposer from './RichMarkdownComposer.svelte';
+  import VoiceRecorder from './VoiceRecorder.svelte';
   import ChatDateDivider from "./ChatDateDivider.svelte";
   import { chatDay } from '$lib/chat-dates';
   import { autoGrowTextarea } from '$lib/textarea-autogrow';
@@ -260,6 +261,7 @@
   let compactDetail = $state(false);
   let compactTabs = $state(false);
   let queuedAttachments=$state<Record<string,Attachment[]>>({}), attachmentContexts=$state<Record<string,string>>({}), pendingUploads=$state<Record<string,boolean>>({});
+  let voiceProcessing=$state<Record<string,boolean>>({}), voiceErrors=$state<Record<string,string>>({});
   let filePicker=$state<HTMLInputElement>();
   // Draft-form focus cascade: agent → project → composer textarea.
   type DraftPickerHandle = { focus: () => void; focusTrigger: () => void };
@@ -586,7 +588,7 @@
     optimisticOutboxRestored = true;
   });
   $effect(() => { optimisticMessages; if (optimisticOutboxRestored) persistOptimisticOutbox(); });
-  const canSend=$derived(Boolean(composer.trim() || currentAttachments.length) && !filesBusy);
+  const canSend=$derived(Boolean(composer.trim() || currentAttachments.length) && !filesBusy && !voiceProcessing[currentDraftKey() ?? '']);
   let scaleQueued = $state<number | null>(null);
   let slashOpen = $state(false), slashIndex = $state(0);
   let providerSlashCommands = $state<SlashCommand[]>([]);
@@ -1939,25 +1941,55 @@
     queuedAttachments[key]=(queuedAttachments[key]??[]).filter(other=>item?.sourceId?other.sourceId!==item.sourceId:other.id!==id);
   }
   function clearAttachments(key:string,ids:string[]) {queuedAttachments[key]=(queuedAttachments[key]??[]).filter(item=>!ids.includes(item.id)); publishComposer(key, currentDraftKey() === key ? composer : drafts[key] ?? sharedComposers.get(key)?.text ?? '');}
-  async function attachFiles(items:(File|string)[]) {
-    const key=currentDraftKey(), targets=attachmentTargets(), scope=attachmentScope;
-    if(!key || filesBusy || busy)return;
-    if(pane==='channel' && selectedChannelId && projectBoardId(selectedChannelId)) {error='Project board notes support text only.';return;}
-    if(!targets.length) {error='Choose an agent to receive these files.';return;}
+  async function attachFiles(items:(File|string|AttachmentFileData)[], captured?:{key:string;targets:{target:AttachmentTarget;scope:string}[];scope:string}):Promise<boolean> {
+    const key=captured?.key ?? currentDraftKey(), targets=captured?.targets ?? attachmentTargets(), scope=captured?.scope ?? attachmentScope;
+    if(!key || (pendingUploads[key] ?? false) || (!captured && busy))return false;
+    if(!captured && pane==='channel' && selectedChannelId && projectBoardId(selectedChannelId)) {error='Project board notes support text only.';return false;}
+    if(!targets.length) {error='Choose an agent to receive these files.';return false;}
     pendingUploads[key]=true;error='';
     try {
       for(const item of items) {
-        const file:AttachmentFileData=typeof item==='string'?await bridge.readAttachmentFile(item):await readBrowserFile(item);
-        const preview=await thumbnail(typeof item==='string'?nativeBlob(file):item), sourceId=localUuid();
+        const file:AttachmentFileData=typeof item==='string'?await bridge.readAttachmentFile(item):item instanceof File?await readBrowserFile(item):item;
+        const preview=file.mimeType.startsWith('image/') ? await thumbnail(item instanceof File ? item : nativeBlob(file)) : null, sourceId=localUuid();
         const uploaded:Attachment[]=[];
         for(const {target} of targets) uploaded.push(await bridge.storeAttachment(target,file,preview,sourceId));
         attachmentContexts[key]=scope;
         queuedAttachments[key]=[...(queuedAttachments[key]??[]),...uploaded];
       }
-    } catch(reason) {error=text(reason);}
+      return true;
+    } catch(reason) {error=text(reason);return false;}
     finally {pendingUploads[key]=false;}
   }
-  export function attachNativeFiles(paths:string[]) {return attachFiles(paths);}
+  async function processVoiceRecording(file:AttachmentFileData) {
+    const key=currentDraftKey();
+    if(!key || !nativeRuntime || voiceProcessing[key]) return;
+    const targets=attachmentTargets(), scope=attachmentScope;
+    if(!targets.length) { voiceErrors[key]='Choose an agent to receive this recording.'; return; }
+    voiceProcessing[key]=true; voiceErrors[key]='';
+    try {
+      if(!await attachFiles([file], {key,targets,scope})) throw new Error(error || 'Could not save the voice recording.');
+      let transcript='';
+      try { transcript=(await bridge.transcribeVoiceMessage(file.dataBase64)).text.trim(); }
+      catch(reason) { voiceErrors[key]=`Audio saved, but transcription failed: ${text(reason)}`; return; }
+      // A pane switch must not lose the transcript. Keep it with the captured
+      // composer, while refusing to apply it after that destination changes.
+      if(attachmentContexts[key]!==scope || (key===currentDraftKey() && scope!==attachmentScope)) return;
+      if(transcript) {
+        const draftId=key.startsWith('draft:')?key.slice('draft:'.length):'';
+        const previous=key===currentDraftKey()?composer:(sharedComposers.get(key)?.text ?? drafts[key] ?? (draftId ? taskDrafts[draftId]?.text : '') ?? '');
+        const next=previous ? `${previous.replace(/\s+$/, '')}\n\n${transcript}` : transcript;
+        drafts[key]=next;
+        if(key===currentDraftKey()) composer=next;
+        if(draftId) {
+          const draft=taskDrafts[draftId];
+          if(draft) taskDrafts[draftId]={...draft,text:next};
+        }
+        publishComposer(key,next);
+      }
+    } catch(reason) { voiceErrors[key]=text(reason); }
+    finally { voiceProcessing[key]=false; }
+  }
+  export async function attachNativeFiles(paths:string[]):Promise<void> {await attachFiles(paths);}
   function fileDrop(node:HTMLElement) {
     const over=(event:DragEvent)=>{if(event.dataTransfer?.types.includes('Files')){event.preventDefault();event.stopPropagation();node.classList.add('drop-files');}};
     const clear=()=>node.classList.remove('drop-files');
@@ -4740,6 +4772,16 @@
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
 {/snippet}
 
+{#snippet voiceTools()}
+  {#if nativeRuntime}
+    {#key `${currentDraftKey() ?? ''}:${attachmentScope}`}
+      <VoiceRecorder disabled={busy || filesBusy || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
+    {/key}
+  {/if}
+  {#if voiceProcessing[currentDraftKey() ?? '']}<small role="status">Transcribing voice…</small>{/if}
+  {#if voiceErrors[currentDraftKey() ?? '']}<small class="error" role="alert">{voiceErrors[currentDraftKey() ?? '']}</small>{/if}
+{/snippet}
+
 {#snippet avatarVisual(agent: Agent | null | undefined, size = 13)}
   {#if isMonaAgent(agent)}
     <span class="mona-avatar-mark" aria-hidden="true">M</span>
@@ -5063,7 +5105,7 @@
           {#if !projectBoardId(activeChannel.id)}<AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>{/if}
           {@render composerEditor(projectBoardId(activeChannel.id) ? 'Write a project coordination note…' : 'Message this channel… Use @ to mention an agent', true)}
           <div class="composer-footer">
-            {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}
+            {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}{@render voiceTools()}
             <div class="recipient-picker">
               <span>Send to</span
               >{#each visibleAgents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
@@ -5115,7 +5157,7 @@
             {#if composerExpanded}{@render slashMenu()}{/if}
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render composerEditor('Describe what you want this agent to do…')}
-      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right">{#if taskFormAgent?.jevRouting && taskFormAgent.jevRouting !== 'off'}<span class="router-chip" title={taskFormAgent.jevRouting === 'safe_auto' ? 'Jev will safely apply a confidence-qualified model and reasoning mapping. Permissions stay unchanged.' : 'Jev will record a recommendation; your model selection stays unchanged.'}>Jev · {taskFormAgent.jevRouting === 'safe_auto' ? 'auto' : 'recommend'}</span>{/if}<ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
+      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{@render voiceTools()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right">{#if taskFormAgent?.jevRouting && taskFormAgent.jevRouting !== 'off'}<span class="router-chip" title={taskFormAgent.jevRouting === 'safe_auto' ? 'Jev will safely apply a confidence-qualified model and reasoning mapping. Permissions stay unchanged.' : 'Jev will record a recommendation; your model selection stays unchanged.'}>Jev · {taskFormAgent.jevRouting === 'safe_auto' ? 'auto' : 'recommend'}</span>{/if}<ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/><button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<ArrowUp size={16}/>{/if}</button></div></div>
           </dialog>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -5151,7 +5193,7 @@
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             {@render composerEditor(`Message ${selectedAgent?.name ?? 'agent'}…`)}
             <div class="composer-footer">
-              <div class="composer-left">{@render attachmentTools()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
+              <div class="composer-left">{@render attachmentTools()}{@render voiceTools()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
               <div class="composer-right">
                 <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeModel}/>
 {#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}

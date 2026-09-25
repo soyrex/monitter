@@ -215,6 +215,36 @@ pub fn read_stored_image(
     })
 }
 
+/// Read a registered voice WAV for playback in the owner desktop renderer.
+/// The caller resolves the ID through the persisted attachment registry.
+pub fn read_stored_audio(
+    host: &Host,
+    cwd: &str,
+    attachment: &Attachment,
+) -> Result<ReadAttachmentFile, String> {
+    if attachment.size > 3 * 1024 * 1024 + 128 {
+        return Err("Voice audio exceeds the 90 second limit.".into());
+    }
+    if attachment.mime_type.trim().to_ascii_lowercase() != "audio/wav" {
+        return Err("Attachment is not a WAV voice message.".into());
+    }
+    let filename = safe_name(&attachment.name)?;
+    let bytes = match host.kind.as_str() {
+        "local" => read_local_stored_image(cwd, &attachment.path)?,
+        "ssh" => read_remote_stored_image(host, cwd, &attachment.path)?,
+        _ => return Err("Host kind must be local or ssh.".into()),
+    };
+    if bytes.len() > 3 * 1024 * 1024 + 128 {
+        return Err("Voice audio exceeds the 90 second limit.".into());
+    }
+    crate::voice::validate_wav(&bytes)?;
+    Ok(ReadAttachmentFile {
+        filename,
+        mime_type: "audio/wav".into(),
+        data_base64: encode_base64(&bytes),
+    })
+}
+
 fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")

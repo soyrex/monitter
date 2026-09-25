@@ -440,6 +440,7 @@ export interface Attachment {
 }
 export interface AttachmentTarget { taskId?: string; agentId?: string; projectId?: string | null; }
 export interface AttachmentFileData { filename: string; mimeType: string; dataBase64: string; }
+export interface VoiceTranscription { text: string; }
 export interface GitFileStatus {
   path: string;
   originalPath: string | null;
