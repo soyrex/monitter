@@ -1049,7 +1049,34 @@ fn run(
         return;
     }
     control.set_mcp_fingerprint(extensions.mcp_fingerprint());
-    let initial_prompt = initial_prompt.map(|prompt| extensions.prompt(&prompt));
+    let jev_decisions_grant = match if initial_prompt.is_some() {
+        service.jev_decisions_grant(&task_id)
+    } else {
+        service.existing_jev_decisions_grant(&task_id)
+    } {
+        Ok(grant) => grant,
+        Err(error) => {
+            fail(&service, &task_id, &control, error);
+            return;
+        }
+    };
+    if host.kind == "ssh" && jev_decisions_grant.is_some() {
+        fail(
+            &service,
+            &task_id,
+            &control,
+            "Jev Decisions MCP is not supported for SSH ACP sessions until a dedicated secure tunnel is available.",
+        );
+        return;
+    }
+    let initial_prompt = initial_prompt.map(|prompt| {
+        let prompt = extensions.prompt(&prompt);
+        if jev_decisions_grant.is_some() {
+            runner::with_jev_decisions_guidance(&prompt)
+        } else {
+            prompt
+        }
+    });
     let grant = match if initial_prompt.is_some() {
         service.collaboration_grant(&task_id)
     } else {
@@ -1082,7 +1109,10 @@ fn run(
         }
         grant
     });
-    let mut mcp_servers = crate::acp_collaboration::mcp_servers(session_grant.as_ref());
+    let mut mcp_servers = crate::acp_collaboration::mcp_servers_with_jev(
+        session_grant.as_ref(),
+        jev_decisions_grant.as_ref(),
+    );
     let managed_mcp = match extensions.acp_servers() {
         Ok(Value::Array(servers)) => servers,
         Ok(_) => Vec::new(),

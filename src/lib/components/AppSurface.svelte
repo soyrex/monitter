@@ -5908,6 +5908,20 @@
           </div>
         {/if}
       </details>
+      {#if !draft.internal}
+        {@const jevDecisionsHost = snapshot?.hosts.find(host => host.id === draft.hostId)}
+        {@const jevDecisionsSupported = jevDecisionsHost?.kind === 'local' && ['codex', 'claude', 'acp'].includes(draft.provider)}
+        <details class="agent-jev-decisions" open={draft.jevDecisionsEnabled === true}>
+          <summary>Jev Decisions add-on <span class="optional">Optional</span></summary>
+          <p>Provides separate <code>jev_choose</code> and <code>jev_assess</code> MCP tools for bounded choices and assessments, with guidance to treat their results as recommendations rather than authority. It requires <code>TYPESAFE_API_KEY</code> saved in Settings → Environment &amp; Secrets and applies to new sessions after saving. It does not grant or change agent permissions.</p>
+          <p class="hint">Supported for local Codex, Claude, and ACP agents. Existing sessions keep their current tool configuration.</p>
+          <label class="check-row">
+            <input type="checkbox" role="switch" checked={draft.jevDecisionsEnabled === true} disabled={!jevDecisionsSupported || busy} onchange={(event) => { draft.jevDecisionsEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} />
+            Enable Jev Decisions for this agent
+          </label>
+          {#if !jevDecisionsSupported}<p class="hint">Choose a supported local Codex, Claude, or ACP agent to enable this add-on.</p>{/if}
+        </details>
+      {/if}
       <details class="agent-advanced" open={showAdvancedDefault}>
         <summary><span><strong>Advanced</strong><small>Executable, arguments and presets. Most agents don\u2019t need this.</small></span></summary>
         {#if draft.provider === 'acp'}

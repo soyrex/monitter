@@ -5,18 +5,34 @@
 //! diagnostic.
 
 use crate::collaboration_transport::SessionGrant;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(crate) fn mcp_servers(grant: Option<&SessionGrant>) -> Value {
-    match grant {
-        Some(grant) => json!([{
+    mcp_servers_with_jev(grant, None)
+}
+
+pub(crate) fn mcp_servers_with_jev(
+    grant: Option<&SessionGrant>,
+    jev_decisions: Option<&SessionGrant>,
+) -> Value {
+    let mut servers = Vec::new();
+    if let Some(grant) = grant {
+        servers.push(json!({
             "type": "http",
             "name": "monitter",
             "url": grant.endpoint,
             "headers": [{"name": "Authorization", "value": format!("Bearer {}", grant.token)}]
-        }]),
-        None => json!([]),
+        }));
     }
+    if let Some(grant) = jev_decisions {
+        servers.push(json!({
+            "type": "http",
+            "name": "jev_decisions",
+            "url": grant.endpoint,
+            "headers": [{"name": "Authorization", "value": format!("Bearer {}", grant.token)}]
+        }));
+    }
+    Value::Array(servers)
 }
 
 #[cfg(test)]
@@ -46,5 +62,27 @@ mod tests {
             Some("Bearer private-token")
         );
         assert!(!servers.to_string().contains("command"));
+    }
+
+    #[test]
+    fn jev_decisions_is_a_distinct_http_server_with_its_own_bearer_grant() {
+        let collaboration = SessionGrant {
+            endpoint: "http://127.0.0.1:4444/mcp".into(),
+            token: "collaboration-token".into(),
+        };
+        let jev = SessionGrant {
+            endpoint: "http://127.0.0.1:4555/mcp".into(),
+            token: "jev-token".into(),
+        };
+        let servers = mcp_servers_with_jev(Some(&collaboration), Some(&jev));
+        assert_eq!(servers[0]["name"], "monitter");
+        assert_eq!(servers[0]["url"], collaboration.endpoint);
+        assert_eq!(
+            servers[0]["headers"][0]["value"],
+            "Bearer collaboration-token"
+        );
+        assert_eq!(servers[1]["name"], "jev_decisions");
+        assert_eq!(servers[1]["url"], jev.endpoint);
+        assert_eq!(servers[1]["headers"][0]["value"], "Bearer jev-token");
     }
 }

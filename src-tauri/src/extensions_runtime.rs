@@ -116,11 +116,11 @@ impl RuntimeExtensions {
         }
         for server in &mut self.servers {
             validate_id(&server.id)?;
-            if server.id == "monitter" {
-                return Err(
-                    "Managed MCP server id 'monitter' is reserved for Monitter collaboration."
-                        .into(),
-                );
+            if matches!(server.id.as_str(), "monitter" | "jev_decisions") {
+                return Err(format!(
+                    "Managed MCP server id '{}' is reserved for Monitter.",
+                    server.id
+                ));
             }
             match server.transport {
                 McpTransport::Stdio if server.command.trim().is_empty() => {
@@ -382,6 +382,22 @@ mod tests {
             .validate_for("opencode", "local")
             .unwrap_err()
             .contains("OpenCode"));
+    }
+
+    #[test]
+    fn jev_decisions_server_identity_is_reserved_for_the_scoped_service() {
+        let mut managed = server(vec!["a".into()]);
+        managed.id = "jev_decisions".into();
+        let config = ExtensionConfig {
+            revision: None,
+            mcp_servers: vec![managed],
+            skills: vec![],
+        };
+        let mut runtime = RuntimeExtensions::for_agent(&config, "a");
+        assert!(runtime
+            .validate_for("codex", "local")
+            .unwrap_err()
+            .contains("jev_decisions"));
     }
 
     #[test]

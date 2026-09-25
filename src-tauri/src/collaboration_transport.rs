@@ -1,5 +1,5 @@
 //! Loopback-only, stateless Streamable HTTP transport for collaboration MCP.
-use crate::collaboration_mcp;
+use crate::{collaboration_mcp, jev_decisions_mcp};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -31,13 +31,24 @@ pub struct Broker {
     running: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
 }
+#[derive(Clone, Copy)]
+enum Catalogue {
+    Collaboration,
+    JevDecisions,
+}
 impl Broker {
     pub fn start(handler: Arc<Handler>) -> Result<Self, String> {
+        Self::start_with_catalogue(handler, Catalogue::Collaboration)
+    }
+    pub(crate) fn start_jev_decisions(handler: Arc<Handler>) -> Result<Self, String> {
+        Self::start_with_catalogue(handler, Catalogue::JevDecisions)
+    }
+    fn start_with_catalogue(handler: Arc<Handler>, catalogue: Catalogue) -> Result<Self, String> {
         let socket = TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| format!("Could not bind collaboration loopback broker: {e}"))?;
+            .map_err(|e| format!("Could not bind loopback MCP broker: {e}"))?;
         socket
             .set_nonblocking(true)
-            .map_err(|e| format!("Could not configure collaboration broker: {e}"))?;
+            .map_err(|e| format!("Could not configure loopback MCP broker: {e}"))?;
         let endpoint = format!(
             "http://{}/mcp",
             socket.local_addr().map_err(|e| e.to_string())?
@@ -71,7 +82,7 @@ impl Broker {
                             let handler = handler.clone();
                             let active = a.clone();
                             thread::spawn(move || {
-                                serve(stream, grants, handler);
+                                serve(stream, grants, handler, catalogue);
                                 active.fetch_sub(1, Ordering::Release);
                             });
                         }
@@ -82,7 +93,7 @@ impl Broker {
                     }
                 }
             })
-            .map_err(|e| format!("Could not start collaboration broker: {e}"))?;
+            .map_err(|e| format!("Could not start loopback MCP broker: {e}"))?;
         Ok(Self {
             endpoint,
             grants,
@@ -135,7 +146,12 @@ struct Request {
     body: Vec<u8>,
     protocol_version: Option<String>,
 }
-fn serve(mut s: TcpStream, grants: Arc<Mutex<HashMap<String, String>>>, handler: Arc<Handler>) {
+fn serve(
+    mut s: TcpStream,
+    grants: Arc<Mutex<HashMap<String, String>>>,
+    handler: Arc<Handler>,
+    catalogue: Catalogue,
+) {
     let _ = s.set_read_timeout(Some(IO_TIMEOUT));
     let _ = s.set_write_timeout(Some(IO_TIMEOUT));
     let req = match read_request(&mut s) {
@@ -161,11 +177,11 @@ fn serve(mut s: TcpStream, grants: Arc<Mutex<HashMap<String, String>>>, handler:
         );
         return;
     }
-    if req
-        .protocol_version
-        .as_deref()
-        .is_some_and(|version| !collaboration_mcp::supported_protocol_version(version))
-    {
+    let supports_version = |version: &str| match catalogue {
+        Catalogue::Collaboration => collaboration_mcp::supported_protocol_version(version),
+        Catalogue::JevDecisions => jev_decisions_mcp::supported_protocol_version(version),
+    };
+    if req.protocol_version.as_deref().is_some_and(|version| !supports_version(version)) {
         let _ = write_response(
             s,
             400,
@@ -195,10 +211,10 @@ fn serve(mut s: TcpStream, grants: Arc<Mutex<HashMap<String, String>>>, handler:
                 json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request."}}),
             )
         } else {
-            let replies: Vec<Value> = batch
-                .iter()
-                .filter_map(|v| collaboration_mcp::dispatch(&task, &*handler, v.clone()))
-                .collect();
+            let replies: Vec<Value> = batch.iter().filter_map(|v| match catalogue {
+                Catalogue::Collaboration => collaboration_mcp::dispatch(&task, &*handler, v.clone()),
+                Catalogue::JevDecisions => jev_decisions_mcp::dispatch(&task, &*handler, v.clone()),
+            }).collect();
             if replies.is_empty() {
                 None
             } else {
@@ -206,7 +222,10 @@ fn serve(mut s: TcpStream, grants: Arc<Mutex<HashMap<String, String>>>, handler:
             }
         }
     } else {
-        collaboration_mcp::dispatch(&task, &*handler, parsed)
+        match catalogue {
+            Catalogue::Collaboration => collaboration_mcp::dispatch(&task, &*handler, parsed),
+            Catalogue::JevDecisions => jev_decisions_mcp::dispatch(&task, &*handler, parsed),
+        }
     };
     let _ = write_response(s, if out.is_some() { 200 } else { 202 }, out);
 }

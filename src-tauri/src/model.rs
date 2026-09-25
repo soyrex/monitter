@@ -145,6 +145,10 @@ pub struct Agent {
     /// Operator-owned tier mapping; Jev cannot invent provider model IDs.
     #[serde(default)]
     pub jev_model_tiers: JevModelTiers,
+    /// Attach the separate read-only Jev Decisions MCP service to new turns.
+    /// Older persisted agents remain opted out.
+    #[serde(default)]
+    pub jev_decisions_enabled: bool,
     /// ACP is intentionally an explicit launcher rather than a growing list
     /// of provider-specific executable fields. It is copied into new tasks.
     #[serde(default)]
@@ -1649,6 +1653,7 @@ pub fn default_snapshot() -> Snapshot {
             collaboration_enabled: true,
             jev_routing: JevRoutingMode::Off,
             jev_model_tiers: JevModelTiers::default(),
+            jev_decisions_enabled: false,
             acp: None,
             internal: false,
         }],
@@ -2097,6 +2102,12 @@ mod task_migration_tests {
         assert_eq!(agent.codex_home, None);
         assert_eq!(agent.jev_routing, JevRoutingMode::Off);
         assert_eq!(agent.jev_model_tiers, JevModelTiers::default());
+        assert!(!agent.jev_decisions_enabled);
+        let mut opted_in = agent.clone();
+        opted_in.jev_decisions_enabled = true;
+        let value = serde_json::to_value(&opted_in).unwrap();
+        assert_eq!(value["jevDecisionsEnabled"], true);
+        assert_eq!(serde_json::from_value::<Agent>(value).unwrap().jev_decisions_enabled, true);
         assert_eq!(task.codex_home, None);
     }
 
