@@ -5176,7 +5176,7 @@
               <div class="composer-actions">{@render voiceButton()}<button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
             </div>
             </div>
-      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right">{#if taskFormAgent?.jevRouting && taskFormAgent.jevRouting !== 'off'}<span class="router-chip" title={taskFormAgent.jevRouting === 'safe_auto' ? 'Jev will safely apply a confidence-qualified model and reasoning mapping. Permissions stay unchanged.' : 'Jev will record a recommendation; your model selection stays unchanged.'}>Jev · {taskFormAgent.jevRouting === 'safe_auto' ? 'auto' : 'recommend'}</span>{/if}<ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} onchange={changeModel}/></div></div>
+      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} jevMode={taskFormAgent?.jevRouting ?? 'off'} onchange={changeModel}/></div></div>
           </dialog>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -5220,7 +5220,7 @@
             <div class="composer-footer">
               <div class="composer-left">{@render attachmentTools()}{@render voiceStatus()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
               <div class="composer-right">
-                <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeModel}/>
+                <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} jevMode={selectedAgent?.jevRouting ?? 'off'} onchange={changeModel}/>
               </div>
             </div>
           </dialog>
@@ -8306,7 +8306,6 @@
   .compact-detail .run-detail { grid-column: 1 / -1; grid-row: 2 / 3; width: min(max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
-  .router-chip { flex:0 0 auto; padding:4px 7px; border:1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius:999px; color:var(--accent-ink); background:color-mix(in srgb, var(--accent) 10%, transparent); font-size:calc(10px * var(--interface-font-ratio, 1)); white-space:nowrap; }
   .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
