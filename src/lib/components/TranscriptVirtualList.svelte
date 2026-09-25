@@ -32,6 +32,13 @@
   let canFlushMeasurements = false;
   let followCommitPending = false;
   let firstCommitMarked = false;
+  // Suppresses instant follow-snap while a reader-initiated smooth scroll is in
+  // flight. Without this, virtualizer layout commits triggered by `setFollowing`
+  // re-clamp `scrollTop` each frame and visually turn the jump into an instant
+  // snap. Cleared on the viewport's native `scrollend` (or after a generous
+  // fallback timeout in case the event never fires — e.g. when already at bottom).
+  let smoothScrollInFlight = false;
+  let smoothScrollWatchdog: ReturnType<typeof setTimeout> | null = null;
   // A transcript may stay mounted while its owning chat changes. Keep a
   // stable row key from the current transcript so streaming appends and
   // prepended history retain their measurements, while a replacement chat
@@ -59,8 +66,25 @@
         const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
         if (bottom - viewport.scrollTop <= 3) return;
         if (options.animate && typeof viewport.scrollTo === 'function') {
+          // Mark the jump as in flight so any virtualizer layout commits that
+          // fire mid-animation do not snap-scrollTop back to the bottom and
+          // collapse the smooth motion into an instant jump. The flag is
+          // cleared on the native scrollend (or the watchdog timeout below).
+          smoothScrollInFlight = true;
+          if (smoothScrollWatchdog) clearTimeout(smoothScrollWatchdog);
+          smoothScrollWatchdog = setTimeout(() => {
+            smoothScrollInFlight = false;
+            smoothScrollWatchdog = null;
+          }, 1500);
+          viewport.addEventListener('scrollend', () => {
+            smoothScrollInFlight = false;
+            if (smoothScrollWatchdog) {
+              clearTimeout(smoothScrollWatchdog);
+              smoothScrollWatchdog = null;
+            }
+          }, { once: true });
           viewport.scrollTo({ top: bottom, behavior: 'smooth' });
-        } else {
+        } else if (!smoothScrollInFlight) {
           viewport.scrollTop = bottom;
         }
       } finally { finishProbe?.(); }

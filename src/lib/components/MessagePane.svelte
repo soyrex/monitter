@@ -114,15 +114,19 @@
 
   async function jumpToLatest(options: { animate?: boolean } = {}) {
     readerDetached = false;
-    setFollowing(true);
     showJump = false;
     const request = ++jumpRequest;
     // Let the current transcript rows/footer enter TanStack's count and
     // measurement pipeline before asking it for the end offset.
     await tick();
     if (request !== jumpRequest || readerDetached || !followingLatest) return;
+    // Issue the smooth scroll first, then enable follow mode. Once follow mode
+    // is on, virtualizer layout commits call `followCommittedLayout` each tick
+    // and would otherwise clamp scrollTop back to the bottom mid-animation,
+    // collapsing the smooth jump into an instant snap.
     if (owner) owner.scrollToLatest(options);
     else pendingLatestRequest = true;
+    setFollowing(true);
   }
 
   function handleScroll() {
