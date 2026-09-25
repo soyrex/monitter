@@ -56,8 +56,10 @@
     usage = {},
     compact = false,
     expanded = $bindable(true),
+    simple = false,
+    showHeader = true,
     class: className = '',
-  }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; class?: string } = $props();
+  }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; simple?: boolean; showHeader?: boolean; class?: string } = $props();
   let showAbsoluteResets = $state(false);
   let currentTime = $state(Date.now());
   let ringsOnly = $state(false);
@@ -75,9 +77,9 @@
    * the labels to fit a short sidebar.
    */
   $effect(() => {
-    usage; compact; expanded; layoutPhase; pane;
-    ringsOnly = !compact && expanded && (layoutPhase === 1 || layoutPhase === 3);
-    if (compact || !expanded || !pane || layoutPhase !== null) { horizontal = false; return; }
+    usage; compact; expanded; simple; layoutPhase; pane;
+    ringsOnly = !simple && !compact && expanded && (layoutPhase === 1 || layoutPhase === 3);
+    if (simple || compact || !expanded || !pane || layoutPhase !== null) { horizontal = false; return; }
     let cancelled = false;
     async function measure() {
       horizontal = false;
@@ -95,18 +97,22 @@
 
   onMount(() => {
     try {
-      const stored = localStorage.getItem(storageKey);
-      const parsed = stored ? JSON.parse(stored) : null;
-      if (parsed?.version === 2 && [0, 1, 2, 3].includes(parsed.phase)) {
-        layoutPhase = parsed.phase;
-        expanded = layoutPhase !== 0;
+      if (simple) {
+        expanded = true;
       } else {
-        const legacy = localStorage.getItem(legacyStorageKey);
-        if (legacy === 'true' || legacy === 'false') {
-          // Preserve the previous visible state once, then make it deterministic.
-          layoutPhase = legacy === 'true' ? (window.outerHeight < 1200 ? 1 : 2) : 0;
+        const stored = localStorage.getItem(storageKey);
+        const parsed = stored ? JSON.parse(stored) : null;
+        if (parsed?.version === 2 && [0, 1, 2, 3].includes(parsed.phase)) {
+          layoutPhase = parsed.phase;
           expanded = layoutPhase !== 0;
-          persistLayoutPhase();
+        } else {
+          const legacy = localStorage.getItem(legacyStorageKey);
+          if (legacy === 'true' || legacy === 'false') {
+            // Preserve the previous visible state once, then make it deterministic.
+            layoutPhase = legacy === 'true' ? (window.outerHeight < 1200 ? 1 : 2) : 0;
+            expanded = layoutPhase !== 0;
+            persistLayoutPhase();
+          }
         }
       }
     } catch { /* Keep the expanded default when local storage is unavailable. */ }
@@ -224,6 +230,14 @@
     return 'Reset time unavailable';
   }
 
+  function resetSummary(window: UsageRingWindow | null | undefined): string {
+    const timestamp = resetTimestamp(window);
+    if (timestamp !== null) return `resets ${relativeReset(timestamp).value}`;
+    const label = window?.resetLabel?.trim();
+    if (label) return `resets ${label.replace(/^resets?(?:\s+in)?\s*/i, '')}`;
+    return 'reset unavailable';
+  }
+
   function toggleResetDisplay(): void {
     showAbsoluteResets = !showAbsoluteResets;
   }
@@ -270,15 +284,15 @@
   }
 </script>
 
-<section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
-  {#if !compact}
+<section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class:simple class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
+  {#if !compact && showHeader}
     <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" aria-label={toggleAction()} title={toggleAction()} onclick={toggle}>
       <span>MODEL USAGE</span>
       <small>{providers.length} PROVIDERS</small>
       <ChevronDown class="usage-chevron" size={13} aria-hidden="true" />
     </button>
   {/if}
-  {#if expanded || compact}
+  {#if expanded || compact || simple}
     <div class="usage-body" id="sidebar-usage-body">
       {#each providers as provider (provider.id)}
         {@const sourceData = usage[provider.id]}
@@ -290,6 +304,7 @@
         {@const hasValue = showValue(data)}
         <article
           class="usage-provider"
+          class:has-accounts={Boolean(sourceData?.accounts && sourceData.accounts.length > 1)}
           class:loading={status === 'loading'}
           class:unavailable={status === 'unavailable' || status === 'error' || !hasValue}
           class:stale={status === 'stale'}
@@ -307,7 +322,7 @@
                 stroke-dasharray="100"
                 stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
               />
-              {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
+              {#if !simple && weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
                 <circle
                   class="ring-weekly"
                   cx="20" cy="20" r="11.5"
@@ -319,6 +334,26 @@
             </svg>
             <span class="ring-value" aria-hidden="true">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</span>
           </div>
+          {#if simple}
+            <div class="usage-simple-copy">
+              <div class="usage-simple-heading">
+                <strong>{provider.label}{#if selectedAccount} · {selectedAccount.label}{/if}</strong>
+                {#if status !== 'ready'}<span class="usage-status">{stateLabel(data)}</span>{/if}
+              </div>
+              <span class="usage-simple-detail">
+                {#if hasValue}
+                  {percentText(active?.usedPercent, active?.unlimited)}
+                  {#if !active?.unlimited}<span aria-hidden="true"> · </span>{resetSummary(active)}{/if}
+                {:else}{data?.message?.trim() || stateLabel(data)}{/if}
+              </span>
+            </div>
+            {#if sourceData?.accounts && sourceData.accounts.length > 1}
+              <div class="account-cycle simple-account-cycle" role="group" aria-label={`${provider.label} account`}>
+                <button type="button" class="account-cycle-arrow" aria-label="Previous account" onclick={() => cycleAccount(provider.id, sourceData.accounts, selectedAccount?.key, -1)}><ChevronLeft size={12}/></button>
+                <button type="button" class="account-cycle-arrow" aria-label="Next account" onclick={() => cycleAccount(provider.id, sourceData.accounts, selectedAccount?.key, 1)}><ChevronRight size={12}/></button>
+              </div>
+            {/if}
+          {:else}
           {#if sourceData?.accounts && sourceData.accounts.length > 1}
             {@const accounts = sourceData.accounts}
             <div class="account-cycle" role="group" aria-label={`${provider.label} account`}>
@@ -383,6 +418,7 @@
 
           </div>
           <small class="usage-ring-label">{#if ringsOnly}<span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={11} /></span>{/if}<span class="usage-label-text">{provider.label}</span></small>
+          {/if}
         </article>
       {/each}
     </div>
@@ -430,6 +466,20 @@
   .usage-weekly span { overflow:hidden; text-overflow:ellipsis; }
   .usage-weekly span:last-child { color:var(--muted); }
   .usage-message { display:block; overflow:hidden; text-overflow:ellipsis; }
+  .simple .usage-body { gap:2px; padding:5px 8px; }
+  .simple .usage-provider { grid-template-columns:34px minmax(0,1fr) auto; gap:9px; min-height:46px; padding:4px 5px; border-radius:7px; }
+  .simple .usage-provider:hover { background:color-mix(in srgb,var(--accent) 5%,transparent); }
+  .simple .usage-ring-wrap,.simple .usage-ring { width:32px; height:32px; }
+  .simple .ring-value { display:none; }
+  .usage-simple-copy { display:grid; gap:1px; min-width:0; }
+  .usage-simple-heading { display:flex; align-items:center; gap:6px; min-width:0; }
+  .usage-simple-heading strong { overflow:hidden; color:var(--ink); font-size:calc(12px * var(--interface-font-ratio,1)); font-weight:550; text-overflow:ellipsis; white-space:nowrap; }
+  .usage-simple-heading .usage-status { flex:none; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); }
+  .stale .usage-simple-heading .usage-status { color:color-mix(in srgb,var(--accent) 68%,var(--muted)); }
+  .error .usage-simple-heading .usage-status { color:#c35b5b; }
+  .usage-simple-detail { overflow:hidden; color:var(--muted); font:calc(10.5px * var(--interface-font-ratio,1)) var(--mono); text-overflow:ellipsis; white-space:nowrap; }
+  .simple-account-cycle { grid-column:auto; grid-row:auto; gap:0; margin:0; }
+  .simple-account-cycle .account-cycle-arrow { width:15px; height:20px; }
   .unavailable .ring-active { stroke:var(--muted); stroke-dasharray:2 4; opacity:.42; }
   .unavailable .ring-value { color:var(--muted); }
   .loading .ring-active { stroke-dasharray:4 4; animation:usage-ring-spin 1.15s linear infinite; }

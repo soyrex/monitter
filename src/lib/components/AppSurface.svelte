@@ -75,7 +75,6 @@
     MoveDiagonal,
     Maximize2,
     Minimize2,
-    Network,
     PanelRight,
     Paperclip,
     Pencil,
@@ -84,7 +83,6 @@
     Radio,
     Save,
     Settings2,
-    Share2,
     Square,
     Terminal,
     SquareTerminal,
@@ -596,8 +594,7 @@
   let slashCommandTask = '', slashCommandRevision = 0;
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
-  let clockExpanded = $state(true);
-  let usageExpanded = $state(true);
+  let statisticsExpanded = $state(false);
   let mobileSidebar = $state(false);
   const desktopInterfaceScale = interfaceScaleStore('desktop');
   const mobileInterfaceScale = interfaceScaleStore('mobile');
@@ -5344,7 +5341,7 @@
   <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
   {#if !embedded}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the sidebar delegates arrow navigation among its focusable controls) -->
-  <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:clock-expanded={clockExpanded && !sidebarCompressed} class:usage-expanded={usageExpanded || sidebarCompressed} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
+  <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:statistics-expanded={statisticsExpanded && !sidebarCompressed} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null;railProjectId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
@@ -5489,22 +5486,22 @@
       {#if railProject}<button class="rail-new-chat" aria-label={`New chat in ${railProject.name}`} onclick={()=>routeProjectDraft(railProject!.id)}><Plus size={14}/>New chat</button>{/if}
     </div>{/if}
     {#if sidebarCompressed}
-      <div class="sidebar-usage compact">
-        <button class="icon compact-usage-control" aria-label="Open provider usage" title="Open provider usage" onclick={() => { sidebarCollapsed = false; usageExpanded = true; }}><ChartPie size={16}/></button>
+      <div class="sidebar-statistics-compact">
+        <button class="icon compact-usage-control" aria-label="Open Statistics" title="Open Statistics" onclick={() => { sidebarCollapsed = false; statisticsExpanded = true; }}><ChartPie size={16}/></button>
       </div>
     {:else}
-      <div class="sidebar-usage"><UsageRings usage={sidebarUsage} bind:expanded={usageExpanded}/></div>
-      <SidebarClock bind:expanded={clockExpanded}/>
+      <section class="sidebar-statistics" class:expanded={statisticsExpanded} aria-label="Statistics">
+        <button class="statistics-toggle" type="button" aria-expanded={statisticsExpanded} aria-controls="sidebar-statistics-body" onclick={()=>statisticsExpanded=!statisticsExpanded}>
+          <span>STATISTICS</span><ChevronDown class="statistics-chevron" size={13} aria-hidden="true" />
+        </button>
+        <div class="statistics-body" id="sidebar-statistics-body" inert={!statisticsExpanded}>
+          <div class="statistics-content">
+            <UsageRings usage={sidebarUsage} expanded={true} simple={true} showHeader={false}/>
+            <SidebarClock expanded={statisticsExpanded} panel={true}/>
+          </div>
+        </div>
+      </section>
     {/if}
-    <footer class="sidebar-footer" aria-label="Workspace controls">
-      <button class="icon" aria-label="Preferences" title="Preferences" onclick={()=>routeSettings()}><Settings2 size={16}/></button>
-      {#if !sidebarCompressed}
-        <button class="icon" aria-label="Hosts" title="Hosts" onclick={()=>modal='hosts'}><Network size={16}/></button>
-        <button class="icon" aria-label="Agents" title="Agents" onclick={()=>{directoryQuery='';agentRoute={kind:'directory'};routeSettings('agents');}}><Bot size={16}/></button>
-        <button class="icon" aria-label="Archived chats" title="Archived chats" onclick={()=>modal='archived'}><Archive size={16}/></button>
-        {#if !isLanBrowser()}<button class="icon" aria-label="Share workspace" title="Share workspace" onclick={()=>{workspaceShareTaskId.set(null);workspaceShareOpen.set(true);}}><Share2 size={16}/></button>{/if}
-      {/if}
-    </footer>
   </aside>{/if}
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
     <PaneGrid {layout} activePaneId={sidebarSelected?'sidebar':activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragStart={()=>browserDragActive=true} onPointerDragEnd={()=>{browserDragActive=false;pointerTabDrag=null}} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} showActivePaneBorder={snapshot?.settings.showActivePaneBorder ?? true} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>{activePaneId=id;sidebarSelected=false}} onresize={resizeSplit} ondropTab={dropTab}>
@@ -6277,7 +6274,6 @@
     --density-sidebar-task-y: 6px;
     --density-sidebar-group-top: 2px;
     --density-sidebar-group-bottom: 4px;
-    --density-sidebar-footer-height: 44px;
     --density-pane-header-y: 8px;
     --density-header-avatar-size: 30px;
     --density-detail-tabs-height: 32px;
@@ -6303,7 +6299,6 @@
     --density-sidebar-task-y: 3px;
     --density-sidebar-group-top: 1px;
     --density-sidebar-group-bottom: 2px;
-    --density-sidebar-footer-height: 40px;
     --density-pane-header-y: 5px;
     --density-header-avatar-size: 26px;
     --density-detail-tabs-height: 28px;
@@ -6323,7 +6318,6 @@
     --density-sidebar-task-y: 9px;
     --density-sidebar-group-top: 4px;
     --density-sidebar-group-bottom: 6px;
-    --density-sidebar-footer-height: 52px;
     --density-pane-header-y: 11px;
     --density-header-avatar-size: 34px;
     --density-detail-tabs-height: 38px;
@@ -6517,19 +6511,25 @@
     overscroll-behavior: contain;
     padding: var(--density-sidebar-scroll-y) 8px;
   }
-  .sidebar-usage {
-    position:absolute;
-    right:0;
-    bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-footer-safe-area, 0px));
-    left:0;
-    z-index:4;
-    min-width:0;
-    background:color-mix(in srgb,var(--sidebar) 94%,transparent);
-    backdrop-filter:blur(12px);
-    -webkit-backdrop-filter:blur(12px);
+  .sidebar-statistics {
+    position:absolute; right:0; bottom:var(--sidebar-footer-safe-area,0px); left:0; z-index:4;
+    min-width:0; overflow:hidden; border-top:1px solid var(--line);
+    background:color-mix(in srgb,var(--sidebar) 96%,transparent);
+    backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
   }
-  .sidebar-usage :global(.usage-rings) { border-right:0; border-left:0; border-radius:0; background:transparent; }
-  .sidebar-usage.compact { display:grid; place-items:center; width:100%; border-top:1px solid var(--line); }
+  .statistics-toggle { display:grid; grid-template-columns:minmax(0,1fr) 16px; align-items:center; gap:7px; width:100%; height:33px; padding:0 10px 0 13px; color:var(--muted); text-align:left; }
+  .statistics-toggle:hover { color:var(--ink); background:var(--soft); }
+  .statistics-toggle > span { overflow:hidden; color:var(--ink); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:650; letter-spacing:.11em; text-overflow:ellipsis; white-space:nowrap; }
+  .statistics-toggle :global(.statistics-chevron) { justify-self:end; transform:rotate(180deg); transition:transform 180ms ease; }
+  .sidebar-statistics.expanded .statistics-toggle :global(.statistics-chevron) { transform:rotate(0); }
+  .statistics-body { max-height:0; overflow:hidden; transition:max-height 240ms cubic-bezier(.2,.7,.2,1); }
+  .sidebar-statistics.expanded .statistics-body { max-height:min(380px,56vh); overflow-y:auto; overscroll-behavior:contain; }
+  .statistics-content { display:grid; gap:3px; min-height:0; padding:5px 0 2px; }
+  .statistics-content :global(.usage-rings) { border:0; border-radius:0; background:transparent; }
+  .sidebar-statistics-compact { position:absolute; right:0; bottom:var(--sidebar-footer-safe-area,0px); left:0; z-index:4; display:grid; place-items:center; height:41px; border-top:1px solid var(--line); background:var(--sidebar); }
+  .sidebar-statistics-compact .compact-usage-control { width:100%; height:40px; border-radius:0; color:var(--muted); }
+  .sidebar-statistics-compact .compact-usage-control:hover { color:var(--ink); background:var(--soft); }
+  @media (prefers-reduced-motion:reduce) { .statistics-body,.statistics-toggle :global(.statistics-chevron) { transition:none; } }
   .brand-actions { display:flex; flex:none; align-items:center; gap:2px; margin-left:auto; }
   .brand-action { color:var(--muted); }
   .brand-action:disabled { opacity:.45; }
@@ -6932,7 +6932,6 @@
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-layout) { padding:8px 12px; align-content:start; mask-image:none; -webkit-mask-image:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-content > :not(.composer)) { display:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-composer.composer) { width:100%; margin:0; }
-  .mobile-navigation .sidebar-footer { bottom:env(safe-area-inset-bottom,0px); }
   @media (prefers-reduced-motion:reduce) {
     .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid { transition:none; }
   }
@@ -6988,16 +6987,12 @@
     flex-shrink: 0;
     padding-bottom: var(--density-tabbar-inset);
   }
-  .sidebar-footer { position:absolute; bottom:0; left:0; right:0; z-index:3; display:flex; justify-content:space-around; align-items:center; height:var(--density-sidebar-footer-height); padding:4px 10px; box-sizing:border-box; border-top:1px solid var(--line); background:var(--sidebar); }
-  .sidebar { --sidebar-clock-height:32px; --sidebar-usage-height:33px; }
-  .sidebar.clock-expanded { --sidebar-clock-height:109px; }
-  .sidebar.usage-expanded { --sidebar-usage-height:254px; }
-  .sidebar.sidebar-compressed { --sidebar-clock-height:0px; --sidebar-usage-height:41px; }
-  .sidebar .side-scroll { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-usage-height) + 12px); }
-  .sidebar .agent-rail { padding-bottom:calc(var(--density-sidebar-footer-height) + var(--sidebar-clock-height) + var(--sidebar-usage-height) + 12px); }
+  .sidebar { --sidebar-statistics-height:33px; }
+  .sidebar.statistics-expanded { --sidebar-statistics-height:min(413px, calc(56vh + 33px)); }
+  .sidebar.sidebar-compressed { --sidebar-statistics-height:41px; }
+  .sidebar .side-scroll { padding-bottom:calc(var(--sidebar-statistics-height) + var(--sidebar-footer-safe-area,0px) + 12px); }
+  .sidebar .agent-rail { padding-bottom:calc(var(--sidebar-statistics-height) + var(--sidebar-footer-safe-area,0px) + 12px); }
   .mobile-navigation { --sidebar-footer-safe-area:env(safe-area-inset-bottom,0px); }
-  .mobile-navigation .sidebar-footer > .icon { width:44px; height:44px; }
-  .sidebar-collapsed .sidebar-footer { height:var(--density-sidebar-footer-height); padding:4px; }
   .new-task,
   .primary {
     display: inline-flex;

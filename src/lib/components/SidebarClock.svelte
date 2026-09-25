@@ -5,7 +5,7 @@
   import type { ProcessMetricsSample } from '$lib/types';
   import ProcessMetricsModal from './ProcessMetricsModal.svelte';
 
-  let { expanded = $bindable(true), compact = false } = $props<{ expanded?: boolean; compact?: boolean }>();
+  let { expanded = $bindable(true), compact = false, panel = false } = $props<{ expanded?: boolean; compact?: boolean; panel?: boolean }>();
 
   const ticks = Array.from({ length: 12 });
   const historyLimit = 30;
@@ -126,8 +126,10 @@
 
   onMount(() => {
     try {
-      const stored = localStorage.getItem(storageKey);
-      if (stored === 'true' || stored === 'false') expanded = stored === 'true';
+      if (!panel) {
+        const stored = localStorage.getItem(storageKey);
+        if (stored === 'true' || stored === 'false') expanded = stored === 'true';
+      }
     } catch { /* Keep the expanded default when local storage is unavailable. */ }
 
     void updateMetrics();
@@ -146,13 +148,13 @@
   }
 </script>
 
-<section class="sidebar-clock-widget" class:expanded class:compact aria-label="Clock and Monitter usage widget">
+<section class="sidebar-clock-widget" class:expanded class:compact class:panel aria-label="Clock and Monitter usage widget">
   {#if compact}
     <div class="compact-time" title={`Local time in ${timezone}`}>
       <span>{timezone.toUpperCase()}</span>
       <time datetime={now.toISOString()}>{shortTime}</time>
     </div>
-  {:else}
+  {:else if !panel}
     <button class="widget-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-clock-body" onclick={toggle}>
       <span title={`Local timezone: ${timezone}`}>LOCAL TIME · {timezone.toUpperCase()}</span>
       <time datetime={now.toISOString()}>{shortTime}</time>
@@ -171,6 +173,7 @@
         <line class="second-hand" x1="30" y1="34" x2="30" y2="9" transform={`rotate(${secondAngle} 30 30)`} />
         <circle class="clock-pin" cx="30" cy="30" r="2" />
       </svg>
+      {#if panel}<div class="statistics-clock-copy"><time datetime={now.toISOString()}>{shortTime}</time><span>{timezone.toUpperCase()}</span></div>{/if}
       <button type="button" class="process-metrics" aria-label="Open Monitter and harness resource usage" title={metricsError || 'Open Monitter, CLI and ACP harness resource usage'} onclick={()=>metricsModalOpen=true}>
         {#if metricsError}
           <span class="metrics-error">METRICS<br />UNAVAILABLE</span>
@@ -200,7 +203,7 @@
   .sidebar-clock-widget {
     position: absolute;
     right: 0;
-    bottom: calc(var(--density-sidebar-footer-height) + var(--sidebar-footer-safe-area, 0px));
+    bottom: calc(var(--sidebar-footer-safe-area, 0px));
     left: 0;
     z-index: 4;
     overflow: hidden;
@@ -239,6 +242,12 @@
     padding: 7px 13px 10px;
     border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
   }
+  .sidebar-clock-widget.panel { position:relative; inset:auto; z-index:auto; overflow:visible; border:0; border-radius:0; background:transparent; backdrop-filter:none; -webkit-backdrop-filter:none; }
+  .panel .widget-body { gap:8px; height:76px; padding:7px 12px 9px; border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
+  .panel .clock-face { width:42px; height:42px; }
+  .statistics-clock-copy { display:grid; flex:none; gap:3px; color:var(--muted); text-align:center; }
+  .statistics-clock-copy time { color:var(--ink); font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
+  .statistics-clock-copy span { font-size:calc(8px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.05em; }
   .clock-face { flex: none; color: var(--ink); }
   .clock-rim { fill: color-mix(in srgb, var(--panel) 72%, transparent); stroke: var(--line); stroke-width: 1; }
   .clock-face line { stroke: var(--muted); stroke-linecap: round; stroke-width: 1; }
@@ -249,16 +258,16 @@
   .clock-pin { fill: var(--accent); stroke: var(--panel); stroke-width: 1; }
   .process-metrics { display:grid; flex:1; min-width:0; align-self:stretch; align-content:center; gap:7px; padding:5px 7px; border-radius:7px; text-align:left; }
   .process-metrics:hover { background:var(--soft); }
-  .metric-row { --metric-color:var(--muted); display:grid; grid-template-columns:minmax(34px,1fr) auto minmax(48px,auto); align-items:center; gap:8px; min-width:0; }
+  .metric-row { --metric-color:var(--muted); display:grid; grid-template-columns:36px minmax(0,1fr) minmax(45px,auto); grid-template-areas:"label spark value"; align-items:center; gap:7px; min-width:0; }
   .metric-row.level-low { --metric-color:#45ad78; }
   .metric-row.level-medium { --metric-color:#d4ad2f; }
   .metric-row.level-high { --metric-color:#e48632; }
   .metric-row.level-critical { --metric-color:#df5656; }
-  .sparkline { width:100%; height:18px; overflow:visible; color:var(--metric-color); }
+  .sparkline { grid-area:spark; width:100%; height:14px; overflow:visible; color:var(--metric-color); }
   .sparkline line { stroke:color-mix(in srgb,var(--line) 72%,transparent); stroke-width:1; vector-effect:non-scaling-stroke; }
   .sparkline polyline { fill:none; stroke:currentColor; stroke-linecap:round; stroke-linejoin:round; stroke-width:1.6; vector-effect:non-scaling-stroke; }
-  .process-metrics span { color:var(--muted); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.08em; }
-  .process-metrics strong { overflow:hidden; color:var(--metric-color); text-align:right; text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
+  .process-metrics span { grid-area:label; color:var(--muted); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.08em; }
+  .process-metrics strong { grid-area:value; overflow:hidden; color:var(--metric-color); text-align:right; text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
   .process-metrics .metrics-error { color:var(--muted); line-height:1.45; }
   .compact.sidebar-clock-widget { bottom:calc(180px + var(--sidebar-footer-safe-area,0px)); }
   .compact-time { display:grid; place-items:center; gap:1px; height:29px; box-sizing:border-box; padding:3px 2px; color:var(--muted); border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
