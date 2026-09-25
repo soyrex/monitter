@@ -26,10 +26,6 @@
   const hourAngle = $derived(((now.getHours() % 12) + now.getMinutes() / 60) * 30);
   const minuteAngle = $derived((now.getMinutes() + now.getSeconds() / 60) * 6);
   const secondAngle = $derived(now.getSeconds() * 6);
-  const shortTime = $derived(new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(now));
   const timezone = $derived(new Intl.DateTimeFormat(undefined, {
     timeZoneName: 'short',
   }).formatToParts(now).find(part => part.type === 'timeZoneName')?.value ?? 'LOCAL');
@@ -151,12 +147,10 @@
   {#if compact}
     <div class="compact-time" title={`Local time in ${timezone}`}>
       <span>{timezone.toUpperCase()}</span>
-      <time datetime={now.toISOString()}>{shortTime}</time>
     </div>
   {:else if !panel}
     <button class="widget-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-clock-body" onclick={toggle}>
       <span title={`Local timezone: ${timezone}`}>LOCAL TIME · {timezone.toUpperCase()}</span>
-      <time datetime={now.toISOString()}>{shortTime}</time>
       <ChevronDown class="widget-chevron" size={13} aria-hidden="true" />
     </button>
   {/if}
@@ -172,7 +166,6 @@
         <line class="second-hand" x1="30" y1="34" x2="30" y2="9" transform={`rotate(${secondAngle} 30 30)`} />
         <circle class="clock-pin" cx="30" cy="30" r="2" />
       </svg>
-      {#if panel}<div class="statistics-clock-copy"><time datetime={now.toISOString()}>{shortTime}</time><span>{timezone.toUpperCase()}</span></div>{/if}
       <button type="button" class="process-metrics" aria-label="Open Monitter and harness resource usage" title={metricsError || 'Open Monitter, CLI and ACP harness resource usage'} onclick={()=>metricsModalOpen=true}>
         {#if metricsError}
           <span class="metrics-error">METRICS<br />UNAVAILABLE</span>
@@ -213,7 +206,7 @@
   }
   .widget-toggle {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto 16px;
+    grid-template-columns: minmax(0, 1fr) 16px;
     align-items: center;
     width: 100%;
     height: 31px;
@@ -230,7 +223,6 @@
     font-weight: 600;
     letter-spacing: .09em;
   }
-  .widget-toggle time { font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
   .widget-toggle :global(.widget-chevron) { justify-self: end; transform: rotate(180deg); transition: transform 150ms ease-out; }
   .expanded .widget-toggle :global(.widget-chevron) { transform: rotate(0); }
   .widget-body {
@@ -244,9 +236,6 @@
   .sidebar-clock-widget.panel { position:relative; inset:auto; z-index:auto; overflow:visible; border:0; border-radius:0; background:transparent; backdrop-filter:none; -webkit-backdrop-filter:none; }
   .panel .widget-body { gap:8px; height:76px; padding:7px 12px 9px; border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
   .panel .clock-face { width:42px; height:42px; }
-  .statistics-clock-copy { display:grid; flex:none; gap:3px; color:var(--muted); text-align:center; }
-  .statistics-clock-copy time { color:var(--ink); font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
-  .statistics-clock-copy span { font-size:calc(8px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.05em; }
   .clock-face { flex: none; color: var(--ink); }
   .clock-rim { fill: color-mix(in srgb, var(--panel) 72%, transparent); stroke: var(--line); stroke-width: 1; }
   .clock-face line { stroke: var(--muted); stroke-linecap: round; stroke-width: 1; }
@@ -265,13 +254,12 @@
   .sparkline { grid-area:spark; width:100%; height:14px; overflow:visible; color:var(--metric-color); }
   .sparkline line { stroke:color-mix(in srgb,var(--line) 72%,transparent); stroke-width:1; vector-effect:non-scaling-stroke; }
   .sparkline polyline { fill:none; stroke:currentColor; stroke-linecap:round; stroke-linejoin:round; stroke-width:1.6; vector-effect:non-scaling-stroke; }
-  .process-metrics span { grid-area:label; color:var(--muted); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.08em; }
-  .process-metrics strong { grid-area:value; overflow:hidden; color:var(--metric-color); text-align:right; text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
+  .metric-row > span { grid-area:label; color:var(--muted); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:600; letter-spacing:.08em; }
+  .metric-row > strong { grid-area:value; overflow:hidden; color:var(--metric-color); text-align:right; text-overflow:ellipsis; white-space:nowrap; font:500 calc(11px * var(--interface-font-ratio,1)) var(--mono); }
   .process-metrics .metrics-error { color:var(--muted); line-height:1.45; }
   .compact.sidebar-clock-widget { bottom:calc(180px + var(--sidebar-footer-safe-area,0px)); }
   .compact-time { display:grid; place-items:center; gap:1px; height:29px; box-sizing:border-box; padding:3px 2px; color:var(--muted); border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
   .compact-time span { overflow:hidden; max-width:100%; font-size:7px; font-weight:600; letter-spacing:.04em; text-overflow:ellipsis; white-space:nowrap; }
-  .compact-time time { font:500 8px var(--mono); }
   .compact .widget-body { display:grid; justify-items:center; gap:4px; height:108px; padding:5px 4px 7px; }
   .compact .clock-face { width:38px; height:38px; }
   .compact .process-metrics { align-self:auto; width:38px; max-width:100%; gap:4px; padding:0; border-radius:0; }
