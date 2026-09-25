@@ -5,7 +5,7 @@
   import type { ProcessMetricsSample } from '$lib/types';
   import ProcessMetricsModal from './ProcessMetricsModal.svelte';
 
-  let { expanded = $bindable(true), compact = false, panel = false } = $props<{ expanded?: boolean; compact?: boolean; panel?: boolean }>();
+  let { expanded = $bindable(true), compact = false, panel = false, metricsModalOpen = $bindable(false) } = $props<{ expanded?: boolean; compact?: boolean; panel?: boolean; metricsModalOpen?: boolean }>();
 
   const ticks = Array.from({ length: 12 });
   const historyLimit = 30;
@@ -16,7 +16,6 @@
   let now = $state(new Date());
   let metrics = $state<ProcessMetricsSample | null>(null);
   let metricSamples = $state<ProcessMetricsSample[]>([]);
-  let metricsModalOpen = $state(false);
   let previousMetrics: ProcessMetricsSample | null = null;
   let cpuPercent = $state<number | null>(null);
   let cpuHistory = $state<number[]>([]);

@@ -600,6 +600,7 @@
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
   let statisticsExpanded = $state(false);
+  let statisticsModalOpen = $state(false);
   let mobileSidebar = $state(false);
   const desktopInterfaceScale = interfaceScaleStore('desktop');
   const mobileInterfaceScale = interfaceScaleStore('mobile');
@@ -5520,14 +5521,14 @@
         <button class="icon compact-usage-control" aria-label="Open Statistics" title="Open Statistics" onclick={() => { sidebarCollapsed = false; statisticsExpanded = true; }}><ChartPie size={16}/></button>
       </div>
     {:else}
-      <section class="sidebar-statistics" class:expanded={statisticsExpanded} aria-label="Statistics">
-        <button class="statistics-toggle" type="button" aria-expanded={statisticsExpanded} aria-controls="sidebar-statistics-body" onclick={()=>statisticsExpanded=!statisticsExpanded}>
+      <section class="sidebar-statistics" class:expanded={statisticsExpanded} aria-label="Statistics" onclick={(event)=>{const target=event.target as HTMLElement;if(target.closest('button,a,input,select,textarea,[role="button"]'))return;statisticsModalOpen=true}}>
+        <button class="statistics-toggle" type="button" aria-expanded={statisticsExpanded} aria-controls="sidebar-statistics-body" onclick={()=>{statisticsExpanded=!statisticsExpanded;statisticsModalOpen=true}}>
           <span>STATISTICS</span><ChevronDown class="statistics-chevron" size={13} aria-hidden="true" />
         </button>
         <div class="statistics-body" id="sidebar-statistics-body" inert={!statisticsExpanded}>
           <div class="statistics-content">
             <UsageRings usage={sidebarUsage} expanded={true} simple={true} showHeader={false}/>
-            <SidebarClock expanded={statisticsExpanded} panel={true}/>
+            <SidebarClock expanded={statisticsExpanded} panel={true} bind:metricsModalOpen={statisticsModalOpen}/>
           </div>
         </div>
       </section>
