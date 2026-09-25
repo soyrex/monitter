@@ -98,6 +98,7 @@ mod ssh_app_server_tests;
 mod store;
 mod terminal;
 mod usage_quota;
+mod voice;
 
 use admin_turn_broker::{spawn_admin_turn_watchdog, AdminTurnBroker, AdminTurnReply};
 use model::*;
@@ -2973,6 +2974,24 @@ impl Service {
             (stored, host)
         };
         attachments::read_stored_image(&host, &stored.cwd, &stored.attachment)
+    }
+
+    fn read_attachment_audio(
+        &self,
+        attachment_id: &str,
+    ) -> Result<attachments::ReadAttachmentFile, String> {
+        let (stored, host) = {
+            let data = self.data.lock().map_err(|_| "Monitter state lock failed.")?;
+            let stored = data.attachments.get(attachment_id).cloned()
+                .ok_or("Attachment was not found.")?;
+            let host = data.snapshot.tasks.iter()
+                .filter(|task| task.host_id == stored.host_id && task.cwd == stored.cwd)
+                .find_map(|task| data.task_hosts.get(&task.id).cloned())
+                .or_else(|| data.snapshot.hosts.iter().find(|host| host.id == stored.host_id).cloned())
+                .ok_or("Attachment host was not found.")?;
+            (stored, host)
+        };
+        attachments::read_stored_audio(&host, &stored.cwd, &stored.attachment)
     }
 
     fn reserve_run(&self, task_id: &str) -> Result<Arc<runner::RunControl>, String> {
@@ -6760,6 +6779,13 @@ async fn read_attachment_file(
 }
 
 #[tauri::command]
+async fn transcribe_voice_message(audio_base64: String) -> Result<voice::VoiceTranscript, String> {
+    tauri::async_runtime::spawn_blocking(move || voice::transcribe(audio_base64))
+        .await
+        .map_err(|_| "Voice transcription worker failed.".to_string())?
+}
+
+#[tauri::command]
 async fn read_attachment_image(
     state: State<'_, AppState>,
     attachment_id: String,
@@ -6768,6 +6794,17 @@ async fn read_attachment_image(
     tauri::async_runtime::spawn_blocking(move || service.read_attachment_image(&attachment_id))
         .await
         .map_err(|error| format!("Attachment image worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn read_attachment_audio(
+    state: State<'_, AppState>,
+    attachment_id: String,
+) -> Result<attachments::ReadAttachmentFile, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.read_attachment_audio(&attachment_id))
+        .await
+        .map_err(|_| "Attachment audio worker failed.".to_string())?
 }
 
 #[tauri::command]
@@ -8999,7 +9036,9 @@ pub fn run() {
             resolve_input,
             finish_quit,
             read_attachment_file,
+            transcribe_voice_message,
             read_attachment_image,
+            read_attachment_audio,
             store_attachment,
             save_host,
             delete_host,

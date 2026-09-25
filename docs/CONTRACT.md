@@ -1337,6 +1337,28 @@ The reader is available to native and authenticated LAN clients, not visitors. I
 caller-supplied path, enforces the saved attachment folder and 20 MiB limit, and allows only
 PNG/JPEG/WebP/GIF raster images. Missing or unsafe originals produce a visible error rather than
 an enlarged thumbnail. Original bytes load on demand, not with transcript history.
+
+Voice messages are recorded by the owner desktop as 16 kHz mono PCM16 WAV, with a maximum
+duration of 90 seconds. `transcribe_voice_message { audioBase64: string }` returns
+`{ text: string }` and invokes the locally installed whisper.cpp `whisper-cli` with a local
+model with automatic language detection. Install whisper.cpp with Homebrew (`brew install
+whisper-cpp`) and obtain the multilingual `ggml-base.bin` model from the
+[whisper.cpp model repository](https://github.com/ggml-org/whisper.cpp/tree/master/models), then
+place it at the default path below. Configure nonstandard locations with `MONITTER_WHISPER_CLI` and
+`MONITTER_WHISPER_MODEL`; defaults discover `whisper-cli` on PATH/Homebrew and look for
+`~/Library/Application Support/Monitter/whisper/models/ggml-base.bin` (or standard whisper.cpp
+model locations). Recording and transcription run locally; after the user sends the message,
+normal message delivery applies and the configured harness may read the attached WAV and
+transcript. The frontend stores the WAV as a regular attachment and retains the returned text in
+the message. Transcription accepts only bounded, valid PCM16 WAV input; temporary audio and output files are removed after
+the command. First-run Whisper startup can spend additional time compiling local Metal kernels;
+the native process has a five-minute hard timeout. Errors and process output never contain audio content. `read_attachment_audio
+{ attachmentId }` returns `{ filename, mimeType, dataBase64 }` only for a registered WAV
+attachment, validating its MIME type, WAV format, and duration. Both voice commands are owner
+desktop-only and are absent from LAN, mobile, and shared visitor dispatch; audio is loaded on
+demand for playback rather than placed in image previews. The macOS bundle declares the
+microphone purpose string and audio-input hardened-runtime entitlement required for recording.
+Setup and privacy details are in `docs/VOICE_MESSAGES.md`.
 Codex receives original attachment paths in its text prompt, not inline image input or thumbnails;
 the agent must open the file. This does not guarantee provider-internal full-resolution processing.
 

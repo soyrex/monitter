@@ -1,14 +1,36 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { getBridge } from '$lib/bridge';
+  import { isLanBrowser } from '$lib/lan';
   import {FileText,FileCode,FileArchive,FileImage,FileAudio,FileVideo,X} from '@lucide/svelte';
   import type {Attachment} from '$lib/types';
   import ImageLightbox from './ImageLightbox.svelte';
   let {attachments=[],onremove}:{attachments?:Attachment[];onremove?:(id:string)=>void}=$props();
   let lightbox=$state<{src:string;alt:string;title:string}|null>(null), lightboxOpener=$state<HTMLElement|null>(null);
   let loadingId = $state<string|null>(null), loadError = $state('');
+  let audio = $state<{ id: string; url: string } | null>(null);
+  let audioLoadingId = $state<string | null>(null);
+  let audioError = $state('');
   let request = 0;
-  onDestroy(() => { request++; });
+  let audioRequest = 0;
+  onDestroy(() => { request++; audioRequest++; if (audio) URL.revokeObjectURL(audio.url); });
+  async function openAudio(attachment: Attachment) {
+    const issued = ++audioRequest;
+    audioError = '';
+    if (audio) { URL.revokeObjectURL(audio.url); audio = null; }
+    audioLoadingId = attachment.id;
+    try {
+      const file = await getBridge().readAttachmentAudio(attachment.id);
+      if (file.mimeType !== 'audio/wav' || !/^[a-zA-Z0-9+/]+={0,2}$/.test(file.dataBase64) || file.dataBase64.length > 28 * 1024 * 1024)
+        throw new Error('The audio response is invalid.');
+      const bytes = Uint8Array.from(atob(file.dataBase64), character => character.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+      if (issued === audioRequest) audio = { id: attachment.id, url };
+      else URL.revokeObjectURL(url);
+    } catch (reason) {
+      if (issued === audioRequest) audioError = `Could not load audio: ${reason instanceof Error ? reason.message : String(reason)}`;
+    } finally { if (issued === audioRequest) audioLoadingId = null; }
+  }
   async function openImage(attachment: Attachment, opener: HTMLElement) {
     const issued = ++request;
     lightboxOpener = opener; lightbox = null; loadError = ''; loadingId = attachment.id;
@@ -35,17 +57,22 @@
   {#each unique as attachment (attachment.id)}{@const Icon=icon(attachment)}
     {@const image=preview(attachment)}
     <div class:message-image={!onremove && !!image} class="attachment" title={`${attachment.name}\n${attachment.path}`}>
-      {#if image || attachment.mimeType.startsWith('image/')}<button class="image-preview" disabled={loadingId===attachment.id} aria-label={`View full-size ${attachment.name}`} onclick={event=>openImage(attachment,event.currentTarget)}>{#if image}<img src={image} alt={`Preview of ${attachment.name}`}/>{:else}<span class="file-icon"><Icon size={23}/></span>{/if}</button>{:else}<span class="file-icon"><Icon size={23}/></span>{/if}
-      <span class="file-info"><b>{attachment.name}</b><small>{size(attachment.size)}</small></span>
+      {#if image || attachment.mimeType.startsWith('image/')}<button class="image-preview" disabled={loadingId===attachment.id} aria-label={`View full-size ${attachment.name}`} onclick={event=>openImage(attachment,event.currentTarget)}>{#if image}<img src={image} alt={`Preview of ${attachment.name}`}/>{:else}<span class="file-icon"><Icon size={23}/></span>{/if}</button>{:else if attachment.mimeType === 'audio/wav' && !isLanBrowser()}<button class="audio-open" disabled={audioLoadingId===attachment.id} aria-label={`Load audio ${attachment.name}`} onclick={()=>openAudio(attachment)}><Icon size={23}/></button>{:else}<span class="file-icon"><Icon size={23}/></span>{/if}
+      <span class="file-info"><b>{attachment.name}</b><small>{size(attachment.size)}</small>{#if audio?.id === attachment.id}<audio controls src={audio.url} aria-label={`Play ${attachment.name}`}></audio>{/if}</span>
       {#if onremove}<button class="remove" aria-label={`Remove attachment ${attachment.name}`} onclick={()=>onremove?.(attachment.id)}><X size={13}/></button>{/if}
     </div>
   {/each}
 </div>{/if}
 {#if loadingId}<p role="status">Loading original image…</p>{/if}
 {#if loadError}<p class="image-load-error" role="alert">{loadError}</p>{/if}
+{#if audioLoadingId}<p role="status">Loading audio…</p>{/if}
+{#if audioError}<p class="image-load-error" role="alert">{audioError}</p>{/if}
 <ImageLightbox bind:image={lightbox} returnFocus={lightboxOpener}/>
 <style>
   .image-load-error { color:var(--danger,#b84c44); font-size:12px; }
+  .audio-open { display:grid;place-items:center;width:34px;height:42px;padding:0;border:0;border-radius:5px;color:var(--muted);background:var(--soft);cursor:pointer; }
+  .audio-open:hover, .audio-open:focus-visible { color:var(--ink);outline:2px solid var(--accent);outline-offset:2px; }
+  .file-info audio { display:block;max-width:220px;width:100%;height:32px;margin-top:4px; }
   .attachments{display:flex;gap:8px;flex-wrap:wrap;min-width:0;margin:8px 0}.attachment{position:relative;display:flex;align-items:center;gap:8px;max-width:100%;min-width:0;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
   .image-preview{display:block;max-width:100%;padding:0;border:0;border-radius:5px;background:var(--soft);cursor:zoom-in}.image-preview:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.attachment img{display:block;max-width:56px;max-height:46px;width:auto;height:auto;border-radius:4px;object-fit:contain}.file-icon{display:grid;place-items:center;width:34px;height:42px;color:var(--muted)}.file-info{display:grid;gap:3px;min-width:0}.file-info b{font-size:calc(11px * var(--interface-font-ratio, 1));max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}.file-info small{color:var(--muted);font:calc(9px * var(--interface-font-ratio, 1)) var(--mono)}.remove{display:grid;place-items:center;width:22px;height:24px;padding:0;border-radius:5px;color:var(--muted)}.remove:hover{background:var(--soft);color:var(--ink)}
   .attachment.message-image{display:grid;grid-template-columns:minmax(0,1fr);width:min(300px,100%);padding:8px}.attachment.message-image .image-preview{max-width:300px;width:auto}.attachment.message-image img{display:block;max-width:min(300px,100%);max-height:none;width:auto;height:auto;border-radius:5px;object-fit:contain}.attachment.message-image .file-info{grid-template-columns:minmax(0,1fr) auto;align-items:baseline}.attachment.message-image .file-info small{grid-column:2}.attachment.message-image .file-info b{max-width:none}

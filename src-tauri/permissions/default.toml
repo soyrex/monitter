@@ -11,7 +11,7 @@ commands.allow = [
   "list_environment_secrets", "set_environment_secret", "delete_environment_secret",
   "get_ui_snapshot", "get_task_events", "get_usage_overview", "get_task_event_detail", "read_markdown_file",
   "get_lan_server_info", "resolve_approval", "revoke_approval_rule", "resolve_input",
-  "finish_quit", "read_attachment_file", "read_attachment_image", "store_attachment", "save_host", "delete_host",
+  "finish_quit", "read_attachment_file", "read_attachment_image", "read_attachment_audio", "store_attachment", "save_host", "delete_host",
   "probe_host", "list_codex_accounts", "discover_acp_agents", "verify_acp_agent", "save_agent", "delete_agent",
   "create_task", "handoff_task", "fork_task", "choose_local_folder", "save_project", "delete_project", "post_project_board_note", "set_task_project",
   "rename_task", "autoname", "delete_task", "preview_task_deletion", "delete_archived_task",
@@ -24,7 +24,8 @@ commands.allow = [
   "get_task_git_diff", "open_terminal", "list_terminals", "write_terminal", "resize_terminal",
   "read_terminal", "close_terminal",
   "list_schedules", "save_schedule", "delete_schedule", "run_schedule_now", "pause_schedule", "resume_schedule",
-  "browser_open", "browser_set_layout", "browser_navigate", "browser_back", "browser_forward", "browser_reload", "browser_close", "browser_get_state", "browser_load_unpacked_extension"
+  "browser_open", "browser_set_layout", "browser_navigate", "browser_back", "browser_forward", "browser_reload", "browser_close", "browser_get_state", "browser_load_unpacked_extension",
+  "transcribe_voice_message"
 ]
 
 [[permission]]
