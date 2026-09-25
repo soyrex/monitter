@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
-  import { RefreshCw, FileText } from '@lucide/svelte';
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import FileText from "@lucide/svelte/icons/file-text";
   import { getBridge } from '$lib/bridge';
   import { observeGit, refreshGit } from '$lib/git-detector';
   import type { GitDiffScope, TaskGitDiff, TaskGitStatus } from '$lib/types';

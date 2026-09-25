@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { Mic, Square, X, LoaderCircle } from '@lucide/svelte';
+  import Mic from "@lucide/svelte/icons/mic";
+  import Square from "@lucide/svelte/icons/square";
+  import X from "@lucide/svelte/icons/x";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import { audioBufferToWav16k } from '$lib/voice-wav';
 
   type RecordedFile = { filename: string; mimeType: string; dataBase64: string };

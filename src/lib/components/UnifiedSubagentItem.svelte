@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { CircleAlert, CircleCheck, CirclePause, CircleStop } from '@lucide/svelte';
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
+  import CirclePause from "@lucide/svelte/icons/circle-pause";
+  import CircleStop from "@lucide/svelte/icons/circle-stop";
   import { activeUnifiedSubagent, unifiedSubagentStatus, type UnifiedSubagent } from '$lib/unified-subagents';
 
   let {

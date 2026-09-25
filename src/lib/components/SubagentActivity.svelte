@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { Bot, CircleCheck, CircleStop, Play, Send } from '@lucide/svelte';
+  import Bot from "@lucide/svelte/icons/bot";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
+  import CircleStop from "@lucide/svelte/icons/circle-stop";
+  import Play from "@lucide/svelte/icons/play";
+  import Send from "@lucide/svelte/icons/send";
   import type { Agent, Collaboration } from '$lib/types';
   let { collaboration, agent, eventTitle = '', steered = false, onclick }: { collaboration: Collaboration; agent?: Agent; eventTitle?: string; steered?: boolean; onclick?: () => void } = $props();
   const name = $derived(agent?.name ?? 'Subagent');

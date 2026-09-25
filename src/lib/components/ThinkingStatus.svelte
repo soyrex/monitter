@@ -2,7 +2,7 @@
   import { motionView } from '$lib/motion';
   import { untrack, type Snippet } from 'svelte';
   import { observeActivityClock } from '$lib/activity-clock';
-  import { Brain } from '@lucide/svelte';
+  import Brain from "@lucide/svelte/icons/brain";
   import AnimatedTitle from './AnimatedTitle.svelte';
 
   let { avatar, running = false, starting = false, startedAt, active = true }: {

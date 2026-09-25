@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Info } from '@lucide/svelte';
+  import Info from "@lucide/svelte/icons/info";
   import type { AssistantResponseMetadata } from '$lib/types';
 
   let { metadata }: { metadata: AssistantResponseMetadata } = $props();

@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { Plus, Search, RefreshCw, X, Plug, Check } from '@lucide/svelte';
+  import Plus from "@lucide/svelte/icons/plus";
+  import Search from "@lucide/svelte/icons/search";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import X from "@lucide/svelte/icons/x";
+  import Plug from "@lucide/svelte/icons/plug";
+  import Check from "@lucide/svelte/icons/check";
   import { getBridge } from '../bridge';
   import type { AcpCandidate, AcpLaunch, AcpProbeResult } from '../types';
 

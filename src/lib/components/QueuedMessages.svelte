@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { Clock3, LoaderCircle, X, Paperclip, Pencil } from '@lucide/svelte';
+  import Clock3 from "@lucide/svelte/icons/clock-3";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import X from "@lucide/svelte/icons/x";
+  import Paperclip from "@lucide/svelte/icons/paperclip";
+  import Pencil from "@lucide/svelte/icons/pencil";
   import type { QueuedMessage, Agent, Task } from '$lib/types';
   let {messages,agents,tasks,busy=false,onremove,onedit}: {messages:QueuedMessage[];agents:Agent[];tasks:Task[];busy?:boolean;onremove:(id:string)=>void;onedit:(id:string,text:string)=>Promise<boolean>}=$props();
   let editingId = $state<string|null>(null), draft = $state(''), saving = $state(false);

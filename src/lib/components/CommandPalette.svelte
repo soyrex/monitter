@@ -1,6 +1,30 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from "svelte";
-  import { Archive, Bot, Brain, Columns2, Command, CornerDownLeft, Folder, Grid2X2, MessageSquare, Monitor, Moon, MousePointer2, PanelRight, Radio, Search, Settings2, Sparkles, Square, SquareTerminal, Sun, Users, Wrench, X, ZoomIn, ZoomOut } from "@lucide/svelte";
+  import Archive from "@lucide/svelte/icons/archive";
+  import Bot from "@lucide/svelte/icons/bot";
+  import Brain from "@lucide/svelte/icons/brain";
+  import Columns2 from "@lucide/svelte/icons/columns-2";
+  import Command from "@lucide/svelte/icons/command";
+  import CornerDownLeft from "@lucide/svelte/icons/corner-down-left";
+  import Folder from "@lucide/svelte/icons/folder";
+  import Grid2X2 from "@lucide/svelte/icons/grid-2-x-2";
+  import MessageSquare from "@lucide/svelte/icons/message-square";
+  import Monitor from "@lucide/svelte/icons/monitor";
+  import Moon from "@lucide/svelte/icons/moon";
+  import MousePointer2 from "@lucide/svelte/icons/mouse-pointer-2";
+  import PanelRight from "@lucide/svelte/icons/panel-right";
+  import Radio from "@lucide/svelte/icons/radio";
+  import Search from "@lucide/svelte/icons/search";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import Sparkles from "@lucide/svelte/icons/sparkles";
+  import Square from "@lucide/svelte/icons/square";
+  import SquareTerminal from "@lucide/svelte/icons/square-terminal";
+  import Sun from "@lucide/svelte/icons/sun";
+  import Users from "@lucide/svelte/icons/users";
+  import Wrench from "@lucide/svelte/icons/wrench";
+  import X from "@lucide/svelte/icons/x";
+  import ZoomIn from "@lucide/svelte/icons/zoom-in";
+  import ZoomOut from "@lucide/svelte/icons/zoom-out";
   import { animateMotion } from "$lib/motion";
   import { activeModal } from "$lib/active-modal";
 

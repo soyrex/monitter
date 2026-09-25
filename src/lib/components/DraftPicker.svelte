@@ -1,5 +1,8 @@
 <script lang="ts" generics="T extends { id: string }">
-  import { Check, ChevronDown, Search, X } from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import Search from "@lucide/svelte/icons/search";
+  import X from "@lucide/svelte/icons/x";
   import { tick } from 'svelte';
   import { floating } from '$lib/floating';
 

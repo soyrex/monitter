@@ -1,6 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { ArrowRight, ChevronLeft, ChevronRight, Globe, Puzzle, RefreshCw, X } from '@lucide/svelte';
+  import ArrowRight from "@lucide/svelte/icons/arrow-right";
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Globe from "@lucide/svelte/icons/globe";
+  import Puzzle from "@lucide/svelte/icons/puzzle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import X from "@lucide/svelte/icons/x";
   import type { BrowserExtensionLoadResult } from '$lib/types';
 
   export type BrowserTabMetadata = { id: string; url: string; title: string; unloaded: boolean };

@@ -2,7 +2,13 @@
   import { onDestroy } from 'svelte';
   import { getBridge } from '$lib/bridge';
   import { isLanBrowser } from '$lib/lan';
-  import {FileText,FileCode,FileArchive,FileImage,FileAudio,FileVideo,X} from '@lucide/svelte';
+  import FileText from "@lucide/svelte/icons/file-text";
+  import FileCode from "@lucide/svelte/icons/file-code";
+  import FileArchive from "@lucide/svelte/icons/file-archive";
+  import FileImage from "@lucide/svelte/icons/file-image";
+  import FileAudio from "@lucide/svelte/icons/file-audio";
+  import FileVideo from "@lucide/svelte/icons/file-video";
+  import X from "@lucide/svelte/icons/x";
   import type {Attachment} from '$lib/types';
   import ImageLightbox from './ImageLightbox.svelte';
   let {attachments=[],onremove}:{attachments?:Attachment[];onremove?:(id:string)=>void}=$props();

@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { Bot, Code, Monitor, Network, Terminal, Wrench } from '@lucide/svelte';
+  import Bot from "@lucide/svelte/icons/bot";
+  import Code from "@lucide/svelte/icons/code";
+  import Monitor from "@lucide/svelte/icons/monitor";
+  import Network from "@lucide/svelte/icons/network";
+  import Terminal from "@lucide/svelte/icons/terminal";
+  import Wrench from "@lucide/svelte/icons/wrench";
   import Modal from './Modal.svelte';
   import type { ProcessMetricsProcess, ProcessMetricsSample } from '$lib/types';
 

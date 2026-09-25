@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { Eye } from '@lucide/svelte';
+  import Eye from "@lucide/svelte/icons/eye";
   import { floating } from '$lib/floating';
 
   let { names, onactivate }: { names: string[]; onactivate?: (event: MouseEvent) => void } = $props();

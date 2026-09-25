@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { ArrowLeft, ExternalLink, Info, LoaderCircle, Mail, ShieldCheck, X } from '@lucide/svelte';
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
+  import Info from "@lucide/svelte/icons/info";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Mail from "@lucide/svelte/icons/mail";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import X from "@lucide/svelte/icons/x";
   import { getBridge } from '$lib/bridge';
   import { floating } from '$lib/floating';
   import type { MailBatch, MailCard, MailDetail } from '$lib/types';

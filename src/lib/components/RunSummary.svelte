@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { ChevronRight, GitBranch, Play, SquareTerminal } from '@lucide/svelte';
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import Play from "@lucide/svelte/icons/play";
+  import SquareTerminal from "@lucide/svelte/icons/square-terminal";
   import type { Task, TaskGitStatus, TerminalSession, WorkPlan } from '$lib/types';
   import WorkPlanPanel from '$lib/components/WorkPlanPanel.svelte';
   let { task, gitStatus = null, tasks = [], terminalSessions = [], workPlans, onOpenGit }: { task: Task; gitStatus?: TaskGitStatus | null; tasks?: Task[]; terminalSessions?: TerminalSession[]; workPlans?: WorkPlan[]; onOpenGit?: () => void } = $props();

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { ArchiveX, ShieldCheck } from '@lucide/svelte';
+  import ArchiveX from "@lucide/svelte/icons/archive-x";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import QRCode from 'qrcode';
   import { getBridge } from '$lib/bridge';
   import { createResumableDesktopSession, type ResumableDesktopSession } from '$lib/controller/resumable-session';

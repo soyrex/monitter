@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { activeModal } from '$lib/active-modal';
-  import { X } from '@lucide/svelte';
+  import X from "@lucide/svelte/icons/x";
 
   let { image = $bindable<{ src: string; alt: string; title?: string } | null>(null), returnFocus = null }: {
     image?: { src: string; alt: string; title?: string } | null;

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import {Check, CircleAlert, X} from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import X from "@lucide/svelte/icons/x";
   let {message,blocking=false,ondismiss}: {message:string;blocking?:boolean;ondismiss:()=>void}=$props();
   let hovered=$state(false),focused=$state(false),fading=$state(false);
   $effect(()=>{

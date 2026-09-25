@@ -1,5 +1,9 @@
 <script lang="ts">
-  import {Check,ChevronDown,LoaderCircle,Shield,X} from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Shield from "@lucide/svelte/icons/shield";
+  import X from "@lucide/svelte/icons/x";
   import {floating} from '$lib/floating';
   import type {Provider,Sandbox} from '$lib/types';
   import {

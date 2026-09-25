@@ -1,5 +1,11 @@
 <script lang="ts">
-  import {Brain,Check,ChevronDown,LoaderCircle,RefreshCw,X,Zap} from '@lucide/svelte';
+  import Brain from "@lucide/svelte/icons/brain";
+  import Check from "@lucide/svelte/icons/check";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import X from "@lucide/svelte/icons/x";
+  import Zap from "@lucide/svelte/icons/zap";
   import {getBridge} from '$lib/bridge';
   import {floating} from '$lib/floating';
   import type {ModelCatalog,ModelSettings,ModelTarget,HarnessModel} from '$lib/types';

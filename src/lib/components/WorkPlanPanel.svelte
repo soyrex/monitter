@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { Check, Circle, CircleDot, ListChecks, Minus, OctagonAlert } from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import Circle from "@lucide/svelte/icons/circle";
+  import CircleDot from "@lucide/svelte/icons/circle-dot";
+  import ListChecks from "@lucide/svelte/icons/list-checks";
+  import Minus from "@lucide/svelte/icons/minus";
+  import OctagonAlert from "@lucide/svelte/icons/octagon-alert";
   import type { WorkPlan, WorkPlanItem } from '$lib/types';
 
   let { plans }: { plans: WorkPlan[] } = $props();

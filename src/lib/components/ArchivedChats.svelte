@@ -1,5 +1,7 @@
 <script lang="ts">
- import {ArchiveRestore,Search,Trash2} from '@lucide/svelte'; import Modal from './Modal.svelte'; import type {Snapshot,Task} from '$lib/types';
+ import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
+ import Search from "@lucide/svelte/icons/search";
+ import Trash2 from "@lucide/svelte/icons/trash-2"; import Modal from './Modal.svelte'; import type {Snapshot,Task} from '$lib/types';
  type Preview={supported:boolean;reason:string;files:string[]};
  let {snapshot,open=false,onclose,onRestore,onDelete,previewDeletion}:{snapshot:Snapshot;open?:boolean;onclose:()=>void;onRestore:(id:string)=>void|Promise<void>;onDelete:(task:Task,removeNative:boolean)=>void|Promise<void>;previewDeletion:(id:string)=>Promise<Preview>}=$props();
  let query=$state(''),pending=$state<Task|null>(null),preview=$state<Preview|null>(null),previewLoading=$state(false),removeNative=$state(false),busy=$state(false),error=$state(''),generation=0;

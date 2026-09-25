@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { ChevronDown, ChevronLeft, ChevronRight } from '@lucide/svelte';
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import { onMount, tick } from 'svelte';
   import ProviderIcon from './ProviderIcon.svelte';
 
@@ -348,9 +350,10 @@
               </span>
             </div>
             {#if sourceData?.accounts && sourceData.accounts.length > 1}
+              {@const accounts = sourceData.accounts}
               <div class="account-cycle simple-account-cycle" role="group" aria-label={`${provider.label} account`}>
-                <button type="button" class="account-cycle-arrow" aria-label="Previous account" onclick={() => cycleAccount(provider.id, sourceData.accounts, selectedAccount?.key, -1)}><ChevronLeft size={12}/></button>
-                <button type="button" class="account-cycle-arrow" aria-label="Next account" onclick={() => cycleAccount(provider.id, sourceData.accounts, selectedAccount?.key, 1)}><ChevronRight size={12}/></button>
+                <button type="button" class="account-cycle-arrow" aria-label="Previous account" onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, -1)}><ChevronLeft size={12}/></button>
+                <button type="button" class="account-cycle-arrow" aria-label="Next account" onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, 1)}><ChevronRight size={12}/></button>
               </div>
             {/if}
           {:else}

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { LoaderCircle } from '@lucide/svelte';
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import type { Attachment } from '$lib/types';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import AttachmentList from '$lib/components/AttachmentList.svelte';

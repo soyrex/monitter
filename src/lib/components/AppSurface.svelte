@@ -16,7 +16,7 @@
   import AnimatedTitle from "./AnimatedTitle.svelte";
   import WorkspaceLoadingScreen from "./WorkspaceLoadingScreen.svelte";
   import MessageMeta from "./MessageMeta.svelte";
-  import RichMarkdownComposer from './RichMarkdownComposer.svelte';
+  import RichMarkdownComposer from './LazyRichMarkdownComposer.svelte';
   import VoiceRecorder from './VoiceRecorder.svelte';
   import ChatDateDivider from "./ChatDateDivider.svelte";
   import { chatDay } from '$lib/chat-dates';
@@ -41,55 +41,53 @@
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import {
-    Bot,
-    Archive,
-    Activity,
-    Clock,
-    Check,
-    ChartPie,
-    CornerDownLeft,
-    ArrowRightLeft,
-    GitFork,
-    ArrowLeft,
-    Search,
-    ChevronDown,
-    ChevronRight,
-    Cloud,
-    Command,
-    Folder,
-    FileText,
-    Code,
-    Rocket,
-    Globe,
-    Palette,
-    Database,
-    Wrench,
-    Layers,
-    Briefcase,
-    HardDrive,
-    LoaderCircle,
-    MessageSquare,
-    MessageSquarePlus,
-    MoreHorizontal,
-    MoveDiagonal,
-    Maximize2,
-    Minimize2,
-    PanelRight,
-    Paperclip,
-    Pencil,
-    Play,
-    Plus,
-    Radio,
-    Save,
-    Settings2,
-    Square,
-    Terminal,
-    SquareTerminal,
-    Trash2,
-    Wifi,
-    X,
-  } from "@lucide/svelte";
+  import Bot from "@lucide/svelte/icons/bot";
+  import Archive from "@lucide/svelte/icons/archive";
+  import Activity from "@lucide/svelte/icons/activity";
+  import Clock from "@lucide/svelte/icons/clock";
+  import Check from "@lucide/svelte/icons/check";
+  import ChartPie from "@lucide/svelte/icons/chart-pie";
+  import CornerDownLeft from "@lucide/svelte/icons/corner-down-left";
+  import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
+  import GitFork from "@lucide/svelte/icons/git-fork";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import Search from "@lucide/svelte/icons/search";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Cloud from "@lucide/svelte/icons/cloud";
+  import Command from "@lucide/svelte/icons/command";
+  import Folder from "@lucide/svelte/icons/folder";
+  import FileText from "@lucide/svelte/icons/file-text";
+  import Code from "@lucide/svelte/icons/code";
+  import Rocket from "@lucide/svelte/icons/rocket";
+  import Globe from "@lucide/svelte/icons/globe";
+  import Palette from "@lucide/svelte/icons/palette";
+  import Database from "@lucide/svelte/icons/database";
+  import Wrench from "@lucide/svelte/icons/wrench";
+  import Layers from "@lucide/svelte/icons/layers";
+  import Briefcase from "@lucide/svelte/icons/briefcase";
+  import HardDrive from "@lucide/svelte/icons/hard-drive";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import MessageSquare from "@lucide/svelte/icons/message-square";
+  import MessageSquarePlus from "@lucide/svelte/icons/message-square-plus";
+  import MoreHorizontal from "@lucide/svelte/icons/more-horizontal";
+  import MoveDiagonal from "@lucide/svelte/icons/move-diagonal";
+  import Maximize2 from "@lucide/svelte/icons/maximize-2";
+  import Minimize2 from "@lucide/svelte/icons/minimize-2";
+  import PanelRight from "@lucide/svelte/icons/panel-right";
+  import Paperclip from "@lucide/svelte/icons/paperclip";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Play from "@lucide/svelte/icons/play";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Radio from "@lucide/svelte/icons/radio";
+  import Save from "@lucide/svelte/icons/save";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import Square from "@lucide/svelte/icons/square";
+  import Terminal from "@lucide/svelte/icons/terminal";
+  import SquareTerminal from "@lucide/svelte/icons/square-terminal";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Wifi from "@lucide/svelte/icons/wifi";
+  import X from "@lucide/svelte/icons/x";
   import type {
     Agent,
     Collaboration,
@@ -6562,7 +6560,7 @@
   .sidebar-tab-entry { display:flex; flex:1; align-self:flex-end; align-items:stretch; min-width:0; margin-bottom:-1px; border:1px solid transparent; border-bottom:0; border-radius:6px 6px 0 0; }
   .sidebar-tab { display:flex; flex:1; align-items:center; justify-content:center; gap:3px; min-width:0; min-height:25px; padding:0 3px; border:0; border-radius:5px 5px 0 0; color:var(--muted); font:calc(9px * var(--interface-font-ratio, 1)) var(--mono); letter-spacing:.08em; text-transform:uppercase; }
   .sidebar-tab :global(svg) { flex:none; }
-  .sidebar-tab span { flex:none; max-width:calc(100% - 15px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sidebar-tab > span { flex:none; max-width:calc(100% - 15px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   @media (hover:hover) and (pointer:fine) { .sidebar-tab:hover { background:var(--soft); color:var(--ink); } }
   .sidebar-tab-entry.active { position:relative; z-index:1; color:var(--ink); border-color:var(--line); background:var(--sidebar); }
   .sidebar-tab-entry.active .sidebar-tab { color:var(--ink); }
@@ -6579,7 +6577,7 @@
   }
   @container sidebar (max-width: 230px) {
     .sidebar-tab { gap:0; }
-    .sidebar-tab span { display:none; }
+    .sidebar-tab > span { display:none; }
   }
   .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
   .activity-heading { margin:10px 8px 8px; color:var(--muted); font:600 calc(9.5px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.2em; text-transform:uppercase; }
@@ -6605,7 +6603,7 @@
   .project-name { display:flex; align-items:center; flex:1; min-width:0; gap:9px; padding:0; text-align:left; }
   .project-name :global(svg) { flex: none; }
   .overview-head .eyebrow { display:flex; align-items:center; gap:6px; }
-  .project-identity { display:grid; gap:8px; }.project-identity legend { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.project-icon-options,.project-colour-options { display:flex; flex-wrap:wrap; gap:7px; }.project-icon-options button { display:grid; place-items:center; width:34px; height:34px; border:1px solid var(--line); border-radius:7px; color:var(--project-colour); background:var(--panel); }.project-icon-options button.selected { border-color:var(--project-colour); background:color-mix(in srgb,var(--project-colour) 14%,var(--panel)); }.project-colour-options > button { width:24px; height:24px; padding:0; border:2px solid transparent; border-radius:50%; background:var(--project-colour); }.project-colour-options > button.selected { border-color:var(--ink); outline:2px solid var(--panel); outline-offset:-4px; }.project-custom-colour { position:relative; display:grid; place-items:center; width:25px; height:25px; overflow:hidden; border:1px solid var(--line); border-radius:50%; }.project-custom-colour span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }.project-custom-colour input { position:absolute; inset:-6px; width:38px; height:38px; padding:0; border:0; background:transparent; cursor:pointer; }
+  .project-identity { display:grid; gap:8px; }.project-identity legend { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); }.project-icon-options,.project-colour-options { display:flex; flex-wrap:wrap; gap:7px; }.project-icon-options > button { display:grid; place-items:center; width:34px; height:34px; border:1px solid var(--line); border-radius:7px; color:var(--project-colour); background:var(--panel); }.project-icon-options > button.selected { border-color:var(--project-colour); background:color-mix(in srgb,var(--project-colour) 14%,var(--panel)); }.project-colour-options > button { width:24px; height:24px; padding:0; border:2px solid transparent; border-radius:50%; background:var(--project-colour); }.project-colour-options > button.selected { border-color:var(--ink); outline:2px solid var(--panel); outline-offset:-4px; }.project-custom-colour { position:relative; display:grid; place-items:center; width:25px; height:25px; overflow:hidden; border:1px solid var(--line); border-radius:50%; }.project-custom-colour > span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }.project-custom-colour input { position:absolute; inset:-6px; width:38px; height:38px; padding:0; border:0; background:transparent; cursor:pointer; }
   .project-row .quiet { flex:none; width:19px; height:24px; }
   .unassigned-folder { display:flex; align-items:center; gap:9px; width:100%; color:var(--ink); text-align:left; }
   .unassigned-folder > :global(svg:last-child) { flex:none; margin-left:auto; color:var(--muted); }
@@ -6629,14 +6627,14 @@
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
     letter-spacing: 0.1em;
   }
-  .section-label button {
+  .section-label > button {
     display: grid;
     place-items: center;
     width: 22px;
     height: 22px;
     border-radius: 4px;
   }
-  .section-label button:hover {
+  .section-label > button:hover {
     background: var(--soft);
   }
   .agent-group {

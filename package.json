@@ -4,6 +4,7 @@
   "description": "Your agents, together. Native local and SSH agent workspace.",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/patch-svelte-compiler.mjs",
     "build:share": "vite build --config share-web/vite.config.mjs",
     "dev": "vite dev",
     "dev:web": "vite dev --mode monitter-web",
@@ -38,7 +39,8 @@
     "build:ios:web": "sh mobile-ios/build.sh",
     "test:mobile": "node scripts/mobile-ui-test.mjs",
     "package:relay": "node scripts/package-relay.mjs",
-    "test:android-bundle": "node scripts/android-bundle-test.mjs"
+    "test:android-bundle": "node scripts/android-bundle-test.mjs",
+    "test:svelte-compiler-cache": "node scripts/patch-svelte-compiler.test.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -68,7 +70,7 @@
     "@tauri-apps/cli": "^2",
     "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.1",
-    "svelte": "^5.56.3",
+    "svelte": "5.57.0",
     "svelte-check": "^4.6.0",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"

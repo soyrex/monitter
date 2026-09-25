@@ -1,7 +1,10 @@
 <script lang="ts">
   import { activeModal } from "$lib/active-modal";
   import { onDestroy, untrack } from 'svelte';
-  import { Check, Copy, Link2, X } from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import Copy from "@lucide/svelte/icons/copy";
+  import Link2 from "@lucide/svelte/icons/link-2";
+  import X from "@lucide/svelte/icons/x";
   import QRCode from 'qrcode';
   import { getBridge } from '$lib/bridge';
   import { createDesktopSession } from '$lib/controller/remote-client';

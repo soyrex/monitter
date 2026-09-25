@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { Goal as GoalIcon, Monitor, Square, Trash2 } from '@lucide/svelte';
+  import GoalIcon from "@lucide/svelte/icons/goal";
+  import Monitor from "@lucide/svelte/icons/monitor";
+  import Square from "@lucide/svelte/icons/square";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
   import type { Goal, ComputerActivity } from '$lib/types';
   let { goal, goalNote = "", docked = false, tools, onstop, onclear, clearing = false, clearError = "", disabled = false }: {
     goal: Goal | null; goalNote?: string; docked?: boolean; tools: ComputerActivity[]; onstop: () => unknown; onclear: () => unknown; clearing?: boolean; clearError?: string; disabled?: boolean;

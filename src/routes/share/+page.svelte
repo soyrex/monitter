@@ -1,6 +1,15 @@
 <script lang="ts">
 import { onMount, tick } from 'svelte';
-import { Paperclip, ArrowUp, Shield, Brain, Zap, X, PanelLeft, Info, LoaderCircle, Image } from '@lucide/svelte';
+import Paperclip from "@lucide/svelte/icons/paperclip";
+import ArrowUp from "@lucide/svelte/icons/arrow-up";
+import Shield from "@lucide/svelte/icons/shield";
+import Brain from "@lucide/svelte/icons/brain";
+import Zap from "@lucide/svelte/icons/zap";
+import X from "@lucide/svelte/icons/x";
+import PanelLeft from "@lucide/svelte/icons/panel-left";
+import Info from "@lucide/svelte/icons/info";
+import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+import Image from "@lucide/svelte/icons/image";
 import ContextUsageBar from '$lib/components/ContextUsageBar.svelte';
 import type { ComposerContextUsage } from '$lib/context-usage-data';
 import ImageLightbox from '$lib/components/ImageLightbox.svelte';

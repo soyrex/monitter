@@ -1,6 +1,17 @@
 <script lang="ts">
   import { rangeFill } from '$lib/range-fill';
-  import { Bot, Check, ChevronDown, KeyRound, LoaderCircle, MessageSquare, Palette, ShieldCheck, Smartphone, Type, UserRound, Blocks } from "@lucide/svelte";
+  import Bot from "@lucide/svelte/icons/bot";
+  import Check from "@lucide/svelte/icons/check";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import KeyRound from "@lucide/svelte/icons/key-round";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import MessageSquare from "@lucide/svelte/icons/message-square";
+  import Palette from "@lucide/svelte/icons/palette";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import Smartphone from "@lucide/svelte/icons/smartphone";
+  import Type from "@lucide/svelte/icons/type";
+  import UserRound from "@lucide/svelte/icons/user-round";
+  import Blocks from "@lucide/svelte/icons/blocks";
   import type { Agent, ApprovalRule, Host, Settings, SystemFontFamily } from "$lib/types";
   import { getBridge } from '$lib/bridge';
   import { surfaceTint, setSurfaceTint, DEFAULT_SURFACE_TINT } from '$lib/surface-tint';

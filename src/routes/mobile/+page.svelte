@@ -1,6 +1,21 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { ArrowLeft, ArrowUp, Archive, Bot, ChevronDown, ChevronRight, CircleStop, Folder, LayoutList, ListFilter, MessageCircle, Monitor, QrCode, RefreshCw, Square, Unplug } from '@lucide/svelte';
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import ArrowUp from "@lucide/svelte/icons/arrow-up";
+  import Archive from "@lucide/svelte/icons/archive";
+  import Bot from "@lucide/svelte/icons/bot";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import CircleStop from "@lucide/svelte/icons/circle-stop";
+  import Folder from "@lucide/svelte/icons/folder";
+  import LayoutList from "@lucide/svelte/icons/layout-list";
+  import ListFilter from "@lucide/svelte/icons/list-filter";
+  import MessageCircle from "@lucide/svelte/icons/message-circle";
+  import Monitor from "@lucide/svelte/icons/monitor";
+  import QrCode from "@lucide/svelte/icons/qr-code";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Square from "@lucide/svelte/icons/square";
+  import Unplug from "@lucide/svelte/icons/unplug";
   import type { SidebarView, Snapshot, Task, TerminalSession } from '$lib/types';
   import { generatePairingKeyPair } from '$lib/controller/secure-session';
   import { createResumableMobileSession, type ResumableMobileSession } from '$lib/controller/resumable-session';

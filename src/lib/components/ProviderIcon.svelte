@@ -13,7 +13,7 @@
   import kimi from '@lobehub/icons-static-svg/icons/kimi-color.svg?raw';
   import mistral from '@lobehub/icons-static-svg/icons/mistral-color.svg?raw';
   import qwen from '@lobehub/icons-static-svg/icons/qwen-color.svg?raw';
-  import { Bot } from '@lucide/svelte';
+  import Bot from "@lucide/svelte/icons/bot";
 
   export type ProviderIconId = Provider | 'minimax' | 'opencode-go';
   type IconProps = { provider: ProviderIconId; model?: string; size?: number; class?: string; title?: string };

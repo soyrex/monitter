@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Command, LoaderCircle } from '@lucide/svelte';
+  import Command from "@lucide/svelte/icons/command";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import ProviderIcon from './ProviderIcon.svelte';
   import type { SlashCommand } from '$lib/types';
 

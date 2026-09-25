@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { LoaderCircle, X } from '@lucide/svelte';
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import X from "@lucide/svelte/icons/x";
   import UnifiedSubagentItem from './UnifiedSubagentItem.svelte';
   import RunActivity from './RunActivity.svelte';
   import { groupConversationActivity } from '$lib/activity-grouping';

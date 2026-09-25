@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from "svelte";
-  import { X } from "@lucide/svelte";
+  import X from "@lucide/svelte/icons/x";
   import { animateMotion } from "$lib/motion";
   import { activeModal } from "$lib/active-modal";
   let {

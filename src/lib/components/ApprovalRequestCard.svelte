@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { AlertTriangle, Check, ShieldAlert, X } from '@lucide/svelte';
+  import AlertTriangle from "@lucide/svelte/icons/alert-triangle";
+  import Check from "@lucide/svelte/icons/check";
+  import ShieldAlert from "@lucide/svelte/icons/shield-alert";
+  import X from "@lucide/svelte/icons/x";
   import type { ApprovalDecision, ApprovalRequest } from '$lib/types';
   import HarnessInput from './HarnessInput.svelte';
 

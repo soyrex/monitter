@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { Check, ChevronLeft, ChevronRight, ShieldAlert, X } from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import ShieldAlert from "@lucide/svelte/icons/shield-alert";
+  import X from "@lucide/svelte/icons/x";
   import type { ApprovalDecision, ApprovalRequest } from '$lib/types';
   import HarnessInput from './HarnessInput.svelte';
 

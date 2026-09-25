@@ -1,5 +1,9 @@
 <script lang="ts">
-  import { UserMinus, Plus, Settings2, X, Square } from '@lucide/svelte';
+  import UserMinus from "@lucide/svelte/icons/user-minus";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import X from "@lucide/svelte/icons/x";
+  import Square from "@lucide/svelte/icons/square";
   import type { Channel, Agent, Host, Task } from '$lib/types';
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   let {channel,agents,hosts,tasks,busy=false,onmembership,onadmin,onclose,onconversation,onstopconversation}: {channel:Channel;agents:Agent[];hosts:Host[];tasks:Task[];busy?:boolean;onmembership:(id:string,member:boolean)=>void;onadmin:()=>void;onclose:()=>void;onconversation:(enabled:boolean,turnLimit:number)=>void;onstopconversation:()=>void}=$props();

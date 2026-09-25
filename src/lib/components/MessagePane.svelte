@@ -1,7 +1,7 @@
 <script lang="ts">
   import { messageArrival } from '$lib/navigation-motion';
   import { onMount, tick, type Snippet } from 'svelte';
-  import { ArrowDown } from '@lucide/svelte';
+  import ArrowDown from "@lucide/svelte/icons/arrow-down";
   import { provideTranscriptScrollController, type TranscriptScrollOwner } from '$lib/transcript-scroll-owner';
 
   let { resetKey, children, header, stickyRequest = false, active = true, thinking = false, pendingUpdates = false, onfollowchange }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean; thinking?: boolean; pendingUpdates?: boolean; onfollowchange?: (following: boolean) => void } = $props();

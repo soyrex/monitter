@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Check, FileUp, Plus, Trash2 } from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import FileUp from "@lucide/svelte/icons/file-up";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
   import { getBridge } from '$lib/bridge';
   import type { Agent, ExtensionConfig, ManagedSkill, McpServerConfig } from '$lib/types';
   import { isLanBrowser } from '$lib/lan';

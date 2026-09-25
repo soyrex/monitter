@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { LoaderCircle, RotateCcw, ShieldCheck } from '@lucide/svelte';
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import type { Agent, ApprovalRule, Host } from '$lib/types';
 
   let { rules, agents, hosts, agentId, hostId, cwd, onrevoke, revokingId = null, compact = false }: {

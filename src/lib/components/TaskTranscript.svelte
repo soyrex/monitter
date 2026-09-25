@@ -1,6 +1,19 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
-  import { ArrowRightLeft, Check, CircleStop, Copy, GitFork, Inbox, Maximize2, MessageSquare, MoreHorizontal, Paperclip, Pencil, Reply, Share2, Terminal } from '@lucide/svelte';
+  import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
+  import Check from "@lucide/svelte/icons/check";
+  import CircleStop from "@lucide/svelte/icons/circle-stop";
+  import Copy from "@lucide/svelte/icons/copy";
+  import GitFork from "@lucide/svelte/icons/git-fork";
+  import Inbox from "@lucide/svelte/icons/inbox";
+  import Maximize2 from "@lucide/svelte/icons/maximize-2";
+  import MessageSquare from "@lucide/svelte/icons/message-square";
+  import MoreHorizontal from "@lucide/svelte/icons/more-horizontal";
+  import Paperclip from "@lucide/svelte/icons/paperclip";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Reply from "@lucide/svelte/icons/reply";
+  import Share2 from "@lucide/svelte/icons/share-2";
+  import Terminal from "@lucide/svelte/icons/terminal";
   import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, QueuedMessage, RunEvent, Snapshot, Task } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';

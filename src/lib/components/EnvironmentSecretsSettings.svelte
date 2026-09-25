@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Check, Eye, EyeOff, KeyRound, LoaderCircle, Pencil, Plus, Trash2, X } from '@lucide/svelte';
+  import Check from "@lucide/svelte/icons/check";
+  import Eye from "@lucide/svelte/icons/eye";
+  import EyeOff from "@lucide/svelte/icons/eye-off";
+  import KeyRound from "@lucide/svelte/icons/key-round";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import X from "@lucide/svelte/icons/x";
   import { getBridge } from '$lib/bridge';
   import { isLanBrowser } from '$lib/lan';
   import type { EnvironmentSecretMetadata, EnvironmentSecretsConfig } from '$lib/types';
