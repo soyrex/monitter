@@ -1179,7 +1179,7 @@ fn has_any(text: &str, terms: &[&str]) -> bool {
     terms.iter().any(|term| text.contains(term))
 }
 
-fn contains_sensitive_signal(text: &str) -> bool {
+pub(crate) fn contains_sensitive_signal(text: &str) -> bool {
     has_any(
         text,
         &[

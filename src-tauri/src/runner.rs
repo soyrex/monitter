@@ -183,6 +183,14 @@ fn claude_tool_names() -> String {
         .join(",")
 }
 
+pub(crate) fn with_jev_decisions_guidance(prompt: &str) -> String {
+    format!(
+        "Jev Decisions tool guidance (advisory only):\n{}\n\nUser request:\n{}",
+        crate::jev_decisions_mcp::INSTRUCTIONS,
+        prompt
+    )
+}
+
 fn claude_mcp_config(endpoint: &str) -> String {
     serde_json::json!({
         "mcpServers": {
@@ -196,6 +204,16 @@ fn claude_mcp_config(endpoint: &str) -> String {
         }
     })
     .to_string()
+}
+
+fn jev_decisions_claude_mcp_server(endpoint: &str) -> Value {
+    serde_json::json!({
+        "type": "http",
+        "url": endpoint,
+        "headers": {
+            "Authorization": "Bearer ${MONITTER_JEV_DECISIONS_TOKEN}"
+        }
+    })
 }
 
 fn merge_opencode_mcp_config(existing: Option<&str>, endpoint: &str) -> Result<String, String> {
@@ -231,6 +249,14 @@ fn merge_opencode_mcp_config(existing: Option<&str>, endpoint: &str) -> Result<S
 }
 
 fn codex_args(task: &Task, collaboration_endpoint: Option<&str>) -> Vec<String> {
+    codex_args_with_jev(task, collaboration_endpoint, None)
+}
+
+fn codex_args_with_jev(
+    task: &Task,
+    collaboration_endpoint: Option<&str>,
+    jev_decisions_endpoint: Option<&str>,
+) -> Vec<String> {
     // These are exec options and must precede the optional resume subcommand.
     let mut args = vec!["exec".into()];
     if task.sandbox == "yolo" {
@@ -282,6 +308,19 @@ fn codex_args(task: &Task, collaboration_endpoint: Option<&str>) -> Vec<String> 
             "mcp_servers.monitter.default_tools_approval_mode=\"approve\"".into(),
             "-c".into(),
             "mcp_servers.monitter.tools.install_shared_skill.approval_mode=\"prompt\"".into(),
+        ]);
+    }
+    if let Some(endpoint) = jev_decisions_endpoint {
+        args.extend([
+            "-c".into(),
+            format!("mcp_servers.jev_decisions.url={endpoint:?}"),
+            "-c".into(),
+            "mcp_servers.jev_decisions.bearer_token_env_var=\"MONITTER_JEV_DECISIONS_TOKEN\""
+                .into(),
+            "-c".into(),
+            "mcp_servers.jev_decisions.required=true".into(),
+            "-c".into(),
+            "mcp_servers.jev_decisions.enabled_tools=[\"jev_choose\",\"jev_assess\"]".into(),
         ]);
     }
     if let Some(native) = &task.native_session_id {
@@ -650,6 +689,24 @@ fn build_command_with_options(
     collaboration: Option<&SessionGrant>,
     claude_mcp_config_path: Option<&std::path::Path>,
 ) -> Result<Command, String> {
+    build_command_with_jev_options(host, task, collaboration, None, claude_mcp_config_path)
+}
+
+fn build_command_with_jev_options(
+    host: &Host,
+    task: &Task,
+    collaboration: Option<&SessionGrant>,
+    jev_decisions: Option<&SessionGrant>,
+    claude_mcp_config_path: Option<&std::path::Path>,
+) -> Result<Command, String> {
+    if jev_decisions.is_some() && host.kind != "local" {
+        return Err("Jev Decisions MCP is not supported on SSH hosts until a dedicated secure tunnel is available.".into());
+    }
+    if jev_decisions.is_some() && !matches!(task.provider.as_str(), "codex" | "claude") {
+        return Err(
+            "Jev Decisions MCP is only supported by local Codex, Claude, or ACP sessions.".into(),
+        );
+    }
     if !valid_sandbox_for_provider(&task.provider, &task.sandbox) {
         return Err("Task has an invalid provider sandbox setting.".into());
     }
@@ -672,7 +729,11 @@ fn build_command_with_options(
         None
     };
     let args = match task.provider.as_str() {
-        "codex" => codex_args(task, collaboration.map(|grant| grant.endpoint.as_str())),
+        "codex" => codex_args_with_jev(
+            task,
+            collaboration.map(|grant| grant.endpoint.as_str()),
+            jev_decisions.map(|grant| grant.endpoint.as_str()),
+        ),
         "claude" => {
             let mut args = adapters::claude::args(task);
             if let Some(path) = claude_mcp_config_path {
@@ -749,6 +810,10 @@ fn build_command_with_options(
                     local_opencode_config.as_deref().unwrap_or_default(),
                 );
             }
+        }
+        if let Some(grant) = jev_decisions {
+            command.env("MONITTER_JEV_DECISIONS_ENDPOINT", &grant.endpoint);
+            command.env("MONITTER_JEV_DECISIONS_TOKEN", &grant.token);
         }
     }
     command
@@ -3513,6 +3578,7 @@ pub(crate) struct SpawnedAppServer {
     pub child: Child,
     /// The collaboration MCP URL as seen by the resident app-server.
     pub collaboration_endpoint: Option<String>,
+    pub jev_decisions_endpoint: Option<String>,
     pub stderr: Option<ChildStderr>,
     pub cwd: String,
     /// SSH diagnostics emitted before the authenticated remote bootstrap is
@@ -3779,13 +3845,35 @@ pub(crate) fn spawn_codex_app_server(
     control: &RunControl,
     environment_secrets: Option<&crate::environment_secrets::EnvironmentSecretsStore>,
 ) -> Result<SpawnedAppServer, String> {
+    spawn_codex_app_server_with_jev_decisions(
+        host,
+        task,
+        collaboration,
+        None,
+        control,
+        environment_secrets,
+    )
+}
+
+pub(crate) fn spawn_codex_app_server_with_jev_decisions(
+    host: &Host,
+    task: &Task,
+    collaboration: Option<(&str, &str)>,
+    jev_decisions: Option<(&str, &str)>,
+    control: &RunControl,
+    environment_secrets: Option<&crate::environment_secrets::EnvironmentSecretsStore>,
+) -> Result<SpawnedAppServer, String> {
     if task.provider != "codex" {
         return Err("Codex app-server requires a Codex task.".into());
+    }
+    if host.kind == "ssh" && jev_decisions.is_some() {
+        return Err("Jev Decisions MCP is not supported for SSH Codex sessions until a dedicated secure tunnel is available.".into());
     }
     if task.cwd.trim().is_empty() {
         return Err("Task folder cannot be empty.".into());
     }
     let mut collaboration_endpoint = None;
+    let mut jev_decisions_endpoint = None;
     let mut ssh_bootstrap: Option<(Option<String>, Option<String>)> = None;
     let mut command = if host.kind == "local" {
         let executable = resolve_local(&host.codex_path)?;
@@ -3796,6 +3884,9 @@ pub(crate) fn spawn_codex_app_server(
         crate::codex_accounts::configure_command(&mut command, task.codex_home.as_deref())?;
         if let Some((endpoint, _)) = collaboration {
             collaboration_endpoint = Some(endpoint.to_owned());
+        }
+        if let Some((endpoint, _)) = jev_decisions {
+            jev_decisions_endpoint = Some(endpoint.to_owned());
         }
         command
     } else if host.kind == "ssh" {
@@ -3836,6 +3927,9 @@ pub(crate) fn spawn_codex_app_server(
         }
         if let Some(environment_secrets) = environment_secrets {
             environment_secrets.apply_to_command(&mut command)?;
+        }
+        if let Some((_, token)) = jev_decisions {
+            command.env("MONITTER_JEV_DECISIONS_TOKEN", token);
         }
     }
     command
@@ -3885,6 +3979,7 @@ pub(crate) fn spawn_codex_app_server(
     Ok(SpawnedAppServer {
         child,
         collaboration_endpoint,
+        jev_decisions_endpoint,
         stderr,
         cwd,
         startup_diagnostics,
@@ -4232,8 +4327,29 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             service.finish(&task_id, "error", Some(error));
             return;
         }
+        let jev_decisions_grant = match service.jev_decisions_grant(&task_id) {
+            Ok(grant) => grant,
+            Err(error) => {
+                service.finish(&task_id, "error", Some(error));
+                return;
+            }
+        };
+        if jev_decisions_grant.is_some() && (host.kind != "local" || task.provider != "claude") {
+            let reason = if host.kind != "local" {
+                "Jev Decisions MCP is not supported on SSH hosts until a dedicated secure tunnel is available."
+            } else {
+                "Jev Decisions MCP is not supported by this provider. Select local Codex, Claude, or ACP."
+            };
+            service.finish(&task_id, "error", Some(reason.into()));
+            return;
+        }
         control.set_mcp_fingerprint(extensions.mcp_fingerprint());
         let prompt = extensions.prompt(&prompt);
+        let prompt = if jev_decisions_grant.is_some() {
+            with_jev_decisions_guidance(&prompt)
+        } else {
+            prompt
+        };
         if task.provider == "claude" && host.kind != "local" {
             service.finish(
                 &task_id,
@@ -4323,6 +4439,17 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                     target.insert("monitter".into(), builtin);
                 }
             }
+            if let Some(grant) = jev_decisions_grant.as_ref() {
+                if let Some(servers) = claude_config_value
+                    .pointer_mut("/mcpServers")
+                    .and_then(Value::as_object_mut)
+                {
+                    servers.insert(
+                        "jev_decisions".into(),
+                        jev_decisions_claude_mcp_server(&grant.endpoint),
+                    );
+                }
+            }
         }
         let claude_config = if task.provider == "claude"
             && claude_config_value["mcpServers"]
@@ -4339,10 +4466,11 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         } else {
             None
         };
-        let mut command = match build_command_with_options(
+        let mut command = match build_command_with_jev_options(
             &host,
             &task,
             grant_for_command,
+            jev_decisions_grant.as_ref(),
             claude_config.as_ref().map(|file| file.path()),
         ) {
             Ok(command) => command,
@@ -5515,6 +5643,29 @@ for line in sys.stdin.buffer:
     }
 
     #[test]
+    fn codex_jev_decisions_uses_a_separate_server_and_secret_environment_key() {
+        let args = codex_args_with_jev(
+            &task(None, ""),
+            Some("http://127.0.0.1:4444/mcp"),
+            Some("http://127.0.0.1:4555/mcp"),
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("mcp_servers.monitter.url"));
+        assert!(joined.contains("mcp_servers.jev_decisions.url"));
+        assert!(joined.contains("MONITTER_JEV_DECISIONS_TOKEN"));
+        assert!(joined.contains("jev_choose") && joined.contains("jev_assess"));
+        assert!(!joined.contains("private-token"));
+    }
+
+    #[test]
+    fn jev_decisions_guidance_preserves_the_user_request() {
+        let request = "Keep this exact request.";
+        let guided = with_jev_decisions_guidance(request);
+        assert!(guided.contains(crate::jev_decisions_mcp::INSTRUCTIONS));
+        assert!(guided.ends_with(request));
+    }
+
+    #[test]
     fn local_collaboration_credentials_are_environment_only() {
         let mut host = host("local");
         host.codex_path = std::env::current_exe().unwrap().display().to_string();
@@ -5577,6 +5728,18 @@ for line in sys.stdin.buffer:
         assert_eq!(args[allowed + 1], claude_tool_names());
         assert!(!args.iter().any(|arg| arg == "--strict-mcp-config"));
         assert!(!args.iter().any(|arg| arg.contains("not-in-argv")));
+    }
+
+    #[test]
+    fn claude_jev_config_uses_its_distinct_server_and_environment_token() {
+        let server = jev_decisions_claude_mcp_server("http://127.0.0.1:4555/mcp");
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "http://127.0.0.1:4555/mcp");
+        assert_eq!(
+            server["headers"]["Authorization"],
+            "Bearer ${MONITTER_JEV_DECISIONS_TOKEN}"
+        );
+        assert!(!server.to_string().contains("private-token"));
     }
 
     #[test]

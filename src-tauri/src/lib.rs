@@ -45,6 +45,8 @@ mod collaboration_client_tests;
 mod collaboration_mcp;
 mod collaboration_runtime;
 mod collaboration_transport;
+mod jev_decisions;
+mod jev_decisions_mcp;
 mod deletion;
 mod dev_ui;
 mod environment_secrets;
@@ -103,7 +105,7 @@ use runner::Parsed;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{mpsc, Arc, Mutex},
@@ -376,6 +378,8 @@ pub(crate) struct Service {
     collaboration: Mutex<Option<collaboration_transport::Broker>>,
     collaboration_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     collaboration_started: std::sync::atomic::AtomicBool,
+    jev_decisions_broker: Mutex<Option<collaboration_transport::Broker>>,
+    jev_decisions_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     stopping: std::sync::atomic::AtomicBool,
     idle_collector_started: std::sync::atomic::AtomicBool,
     scheduler_started: std::sync::atomic::AtomicBool,
@@ -633,6 +637,7 @@ fn ensure_internal_admin(snapshot: &mut Snapshot) -> InternalAdminState {
             collaboration_enabled: false,
             jev_routing: model::JevRoutingMode::Off,
             jev_model_tiers: model::JevModelTiers::default(),
+            jev_decisions_enabled: false,
             acp: None,
             internal: true,
             codex_home: None,
@@ -689,6 +694,8 @@ impl Service {
             collaboration: Mutex::new(None),
             collaboration_grants: Mutex::new(HashMap::new()),
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
+            jev_decisions_broker: Mutex::new(None),
+            jev_decisions_grants: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             idle_collector_started: std::sync::atomic::AtomicBool::new(false),
             scheduler_started: std::sync::atomic::AtomicBool::new(false),
@@ -2833,6 +2840,64 @@ impl Service {
         Ok((task, host))
     }
 
+    pub(crate) fn jev_decisions_opted_in_running(&self, task_id: &str) -> Result<bool, String> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        let Some(task) = data.snapshot.tasks.iter().find(|task| task.id == task_id) else {
+            return Ok(false);
+        };
+        if task.status != "running" {
+            return Ok(false);
+        }
+        let enabled = data
+            .snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.id == task.agent_id)
+            .is_some_and(|agent| !agent.internal && agent.jev_decisions_enabled);
+        if !enabled {
+            return Ok(false);
+        }
+        let provider_supported = matches!(task.provider.as_str(), "codex" | "claude" | "acp");
+        let host_local = data
+            .task_hosts
+            .get(task_id)
+            .is_some_and(|host| host.kind == "local");
+        if !provider_supported || !host_local {
+            return Err(format!(
+                "Jev Decisions opt-in is not supported for provider '{}' on this host. Use local Codex, Claude, or ACP.",
+                task.provider
+            ));
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn record_jev_decisions_receipt(
+        &self,
+        receipt: &jev_decisions::DecisionReceipt,
+    ) {
+        let Ok(bytes) = serde_json::to_vec(receipt) else {
+            return;
+        };
+        if std::fs::create_dir_all(&self.router_trace_dir).is_err() {
+            return;
+        }
+        let path = self
+            .router_trace_dir
+            .join(format!("decision-{}.json", model::id()));
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        if let Ok(mut file) = options.open(path) {
+            let _ = file.write_all(&bytes);
+        }
+    }
+
     fn store_attachment(
         &self,
         target: attachments::AttachmentTarget,
@@ -2988,6 +3053,7 @@ impl Service {
 
     fn release_run(&self, task_id: &str) {
         self.revoke_collaboration_grant(task_id);
+        self.revoke_jev_decisions_grant(task_id);
         if let Ok(mut runs) = self.runs.lock() {
             runs.tasks.remove(task_id);
             runs.native_sessions.retain(|_, owner| owner != task_id);
@@ -5839,6 +5905,12 @@ impl Service {
             .store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut broker) = self.collaboration.lock() {
             broker.take();
+        }
+        if let Ok(mut broker) = self.jev_decisions_broker.lock() {
+            broker.take();
+        }
+        if let Ok(mut grants) = self.jev_decisions_grants.lock() {
+            grants.clear();
         }
         self.admin_turn_broker.reset();
         let controls = self

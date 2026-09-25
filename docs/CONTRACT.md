@@ -168,6 +168,25 @@ No fake conversations, progress, token counts, host connections or model replies
   and bounded reason. The command records a fingerprinted audit trace without raw query/catalogue text and never
   executes a control. The UI must revalidate the candidate against its current enabled catalogue and require a
   second explicit selection before dispatch. LAN, mobile, and shared callers cannot invoke this command.
+- `Agent.jevDecisionsEnabled?: boolean` opts a non-internal agent into Jev Decisions. Missing and false are
+  disabled. This is separate from `jevRouting` and does not alter task routing. For an opted-in agent, the
+  supported local harness adapter exposes a dedicated Jev MCP endpoint to that harness with the separate
+  `jev_choose` and `jev_assess` tools and their decision guidance. The endpoint is local to the desktop runtime;
+  its transport address is runtime-managed and is not a stable public URL. The add-on requires the native
+  Keychain-backed `TYPESAFE_API_KEY` (`JEV_API_KEY` remains a legacy alias). It is delivered at the next
+  newly launched session; saving the setting does not restart or reconfigure an existing session. It is available only to
+  local Codex, Claude, and ACP harnesses. SSH and unsupported harness adapters do not receive it. The internal
+  Monitter Admin agent is excluded. Jev tools may return bounded typed decisions and assessments only: they do
+  not execute tools, create tasks, inspect files, modify data, change model routing, grant permissions, approve
+  requests, or expand the harness's or Monitter's authority. Credentials and the endpoint are not exposed to
+  LAN/controller/visitor clients or persisted in snapshots or workspace exports.
+  The separate loopback broker issues a bearer grant for one running task and revokes it when that run ends.
+  `jev_choose` accepts a state of at most 16 KiB, one question, and 2–16 distinct candidate IDs including
+  `abstain`; it returns the selected ID, typed probabilities and confidence, or a fixed unavailable result.
+  `jev_assess` accepts the same bounded state and one Noul yes/no question or a Score with 2–6 ordered levels;
+  it returns typed probability or score data. Each call is advisory and the agent must recheck current evidence
+  before using a result. Invalid or failed model answers never become tool authority. Best-effort local receipts
+  record task ID, tool, outcome, model, latency, and token counts without state, question or candidate text.
 - `request_mail_detail { taskId: string, mailId: string }` -> `{ status: "ready" | "pending" }`.
   Native-owner only and deliberately absent from LAN/controller/visitor dispatch. The card must be a
   durable Gmail card in that exact task. A cache miss creates a five-minute, one-card grant and sends

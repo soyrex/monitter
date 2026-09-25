@@ -98,6 +98,8 @@ export interface Agent {
   collaborationEnabled: boolean;
   jevRouting?: JevRoutingMode;
   jevModelTiers?: JevModelTiers;
+  /** Adds Jev's separate decision MCP tools to supported local harness launches. */
+  jevDecisionsEnabled?: boolean;
   /** Internal agents are configurable in Settings but hidden from conversation surfaces. */
   internal?: boolean;
 }

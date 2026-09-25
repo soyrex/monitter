@@ -153,7 +153,6 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         return;
     }
     control.set_mcp_fingerprint(extensions.mcp_fingerprint());
-    let prompt = extensions.prompt(&prompt);
     let grant = match service.collaboration_grant(&task_id) {
         Ok(value) => value,
         Err(error) => {
@@ -161,16 +160,43 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             return;
         }
     };
+    let jev_decisions_grant = match service.jev_decisions_grant(&task_id) {
+        Ok(value) => value,
+        Err(error) => {
+            service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
+            return;
+        }
+    };
+    if host.kind == "ssh" && jev_decisions_grant.is_some() {
+        service.complete_app_server_turn(
+            &task_id,
+            &control,
+            None,
+            "error",
+            Some("Jev Decisions MCP is not supported for SSH Codex sessions until a dedicated secure tunnel is available.".into()),
+        );
+        return;
+    }
+    let prompt = extensions.prompt(&prompt);
+    let prompt = if jev_decisions_grant.is_some() {
+        crate::runner::with_jev_decisions_guidance(&prompt)
+    } else {
+        prompt
+    };
     let SpawnedAppServer {
         mut child,
         collaboration_endpoint,
+        jev_decisions_endpoint,
         stderr,
         cwd,
         startup_diagnostics,
-    } = match crate::runner::spawn_codex_app_server(
+    } = match crate::runner::spawn_codex_app_server_with_jev_decisions(
         &host,
         &task,
         grant
+            .as_ref()
+            .map(|grant| (grant.endpoint.as_str(), grant.token.as_str())),
+        jev_decisions_grant
             .as_ref()
             .map(|grant| (grant.endpoint.as_str(), grant.token.as_str())),
         &control,
@@ -515,7 +541,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     .and_then(|_| {
                         send(
                             &control,
-                            thread_request(&task, collaboration_endpoint.as_deref(), &extensions),
+                            thread_request(&task, collaboration_endpoint.as_deref(), jev_decisions_endpoint.as_deref(), &extensions),
                         )
                     })
                     .is_err()
@@ -1718,6 +1744,7 @@ fn turn_request(thread_id: &str, prompt: &str, task: &Task) -> Value {
 fn thread_request(
     task: &Task,
     collaboration_endpoint: Option<&str>,
+    jev_decisions_endpoint: Option<&str>,
     extensions: &crate::extensions_runtime::RuntimeExtensions,
 ) -> Value {
     let sandbox = if task.sandbox == "yolo" {
@@ -1751,6 +1778,19 @@ fn thread_request(
             "mcp_servers.monitter.enabled_tools": crate::collaboration_mcp::tool_names(),
             "mcp_servers.monitter.tools.install_shared_skill.approval_mode":"prompt"
         }).as_object().cloned().unwrap_or_default());
+    }
+    if let Some(endpoint) = jev_decisions_endpoint {
+        config.extend(
+            json!({
+                "mcp_servers.jev_decisions.url": endpoint,
+                "mcp_servers.jev_decisions.bearer_token_env_var": "MONITTER_JEV_DECISIONS_TOKEN",
+                "mcp_servers.jev_decisions.required": true,
+                "mcp_servers.jev_decisions.enabled_tools": ["jev_choose", "jev_assess"]
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
     }
     if !config.is_empty() {
         params["config"] = Value::Object(config);
@@ -1905,6 +1945,7 @@ mod tests {
         let request = thread_request(
             &task,
             None,
+            None,
             &crate::extensions_runtime::RuntimeExtensions::default(),
         );
         assert_eq!(request["method"], "thread/resume");
@@ -1912,6 +1953,7 @@ mod tests {
         let with_mcp = thread_request(
             &task,
             Some("http://127.0.0.1:4444/mcp"),
+            Some("http://127.0.0.1:4555/mcp"),
             &crate::extensions_runtime::RuntimeExtensions::default(),
         );
         let config = &with_mcp["params"]["config"];
@@ -1928,6 +1970,18 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("install_shared_skill")));
+        assert_eq!(
+            config["mcp_servers.jev_decisions.url"],
+            "http://127.0.0.1:4555/mcp"
+        );
+        assert_eq!(
+            config["mcp_servers.jev_decisions.bearer_token_env_var"],
+            "MONITTER_JEV_DECISIONS_TOKEN"
+        );
+        assert_eq!(
+            config["mcp_servers.jev_decisions.enabled_tools"],
+            json!(["jev_choose", "jev_assess"])
+        );
     }
 
     #[test]
