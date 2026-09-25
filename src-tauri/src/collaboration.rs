@@ -1517,6 +1517,7 @@ mod tests {
                         host_id: host.id.clone(),
                         cwd: "/project-folder".into(),
                     }],
+                    board_guidance_text: None,
                 });
                 Ok(())
             })

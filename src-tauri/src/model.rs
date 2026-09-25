@@ -1025,6 +1025,9 @@ pub struct Settings {
     /// Opt-in project coordination board. Off for existing installations.
     #[serde(default)]
     pub project_board_enabled: bool,
+    /// Optional default guidance supplied to agents about project-board coordination.
+    #[serde(default)]
+    pub board_guidance_text: Option<String>,
     #[serde(default)]
     pub user_name: String,
     #[serde(default = "default_terminal_font_size")]
@@ -1152,6 +1155,9 @@ pub struct Project {
     pub color: String,
     #[serde(default)]
     pub workspaces: Vec<ProjectWorkspace>,
+    /// Optional project-specific board guidance; empty values inherit Settings.
+    #[serde(default)]
+    pub board_guidance_text: Option<String>,
 }
 
 fn default_project_icon() -> String {
@@ -1676,6 +1682,7 @@ pub fn default_snapshot() -> Snapshot {
         pending_throwaway_task_ids: vec![],
         settings: Settings {
             project_board_enabled: false,
+            board_guidance_text: None,
             user_name: String::new(),
             terminal_font_size: default_terminal_font_size(),
             chat_font_size: default_chat_font_size(),
@@ -1740,6 +1747,7 @@ mod tests {
             serde_json::from_str(r##"{"accent":"#3f9d6a","theme":"system"}"##).unwrap();
 
         assert!(settings.user_name.is_empty());
+        assert_eq!(settings.board_guidance_text, None);
         assert_eq!(settings.interface_scale, 125);
         assert_eq!(settings.window_surface, "opaque");
         assert_eq!(settings.chat_line_height, 1.65);
@@ -1763,6 +1771,7 @@ mod tests {
         let value = serde_json::to_value(default_snapshot().settings).unwrap();
 
         assert_eq!(value["userName"], "");
+        assert_eq!(value["boardGuidanceText"], serde_json::Value::Null);
         assert_eq!(value["interfaceScale"], 125);
         assert_eq!(value["windowSurface"], "opaque");
         assert_eq!(value["chatLineHeight"], 1.65);
@@ -2117,6 +2126,7 @@ mod task_migration_tests {
             serde_json::from_str(r##"{"id":"p","name":"Project","description":""}"##).unwrap();
         assert_eq!(project.icon, "folder");
         assert_eq!(project.color, "#3f9d6a");
+        assert_eq!(project.board_guidance_text, None);
     }
 
     #[test]
@@ -2133,6 +2143,7 @@ mod task_migration_tests {
                 host_id: snapshot.hosts[0].id.clone(),
                 cwd: "/workspace".into(),
             }],
+            board_guidance_text: Some("Coordinate through the board.".into()),
         });
         snapshot.tasks.push(task_from_agent(
             &snapshot.agents[0],
@@ -2153,6 +2164,7 @@ mod task_migration_tests {
             value["projects"][0]["workspaces"][0]["hostId"],
             snapshot.hosts[0].id
         );
+        assert_eq!(value["projects"][0]["boardGuidanceText"], "Coordinate through the board.");
         assert_eq!(value["tasks"][0]["projectId"], "project-1");
         let restored: Snapshot = serde_json::from_value(value).unwrap();
         assert_eq!(restored, snapshot);

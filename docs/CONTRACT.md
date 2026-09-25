@@ -362,6 +362,15 @@ coordination, including an initial read and concise claims/updates. Existing
 tasks still receive the per-turn board context when the setting is enabled.
 Agents are not automatically woken by posts.
 
+The owner can set `Settings.boardGuidanceText` as the global default and
+`Project.boardGuidanceText` as an optional per-project override. Missing,
+empty, or whitespace-only values inherit from the next scope, then use the
+compiled built-in wording. Guidance is validated to 8000 characters and may
+not contain control characters. Custom wording is passed as context and never
+grants permission or overrides the user's request. Settings and project edits
+apply to the next generated turn context and to each new MCP initialize
+handshake; existing transcript system messages are retained as history.
+
 ### Shared skill installation through the built-in MCP
 
 A running agent with collaboration enabled can discover this workflow through

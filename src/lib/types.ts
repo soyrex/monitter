@@ -79,6 +79,8 @@ export type SidebarView = 'standard' | 'activity' | 'projects';
 export interface Project {
   id: string; name: string; description: string; icon: string; color: string;
   workspaces: { hostId: string; cwd: string }[];
+  /** Optional project-specific override for project-board coordination guidance. */
+  boardGuidanceText?: string | null;
 }
 export interface Host {
   id: string; name: string; kind: 'local' | 'ssh'; address: string;
@@ -272,6 +274,8 @@ export interface InteractionInput {
 export interface Settings {
   /** Opt-in private coordination board for project tasks. */
   projectBoardEnabled?: boolean;
+  /** Global fallback for editable project-board coordination guidance. */
+  boardGuidanceText?: string | null;
   /** Optional user identity supplied to agents for chats started after saving. */
   userName?: string;
   shortcutMode?: 'standard' | 'vim';

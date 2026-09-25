@@ -118,6 +118,7 @@
   let saveError = $state("");
   let userNameError = $state("");
   let savedAt = $state(0);
+  let boardGuidanceDraft = $state("");
   let remoteControlHost = $state<HTMLDivElement | null>(null);
   const systemFontsByMonospace = $derived([...systemFonts].sort((left, right) => Number(right.monospace) - Number(left.monospace) || left.family.localeCompare(right.family)));
   const textFontChoices = $derived(uniqueFontChoices(defaultTextFonts, systemFonts));
@@ -131,6 +132,8 @@
       .then((families) => { systemFonts = families; })
       .catch((reason) => { systemFontError = reason instanceof Error ? reason.message : String(reason); });
   });
+
+  $effect(() => { boardGuidanceDraft = settings.boardGuidanceText ?? ""; });
 
   // Register only the visible Remote-control category. The route-root controller
   // remains mounted when this target changes, so remembered phones keep reconnecting.
@@ -525,6 +528,8 @@
         <section class="setting-card" aria-labelledby="project-board-heading">
           <div class="card-heading"><h2 id="project-board-heading">Project boards</h2><p>Private coordination notes shown as #channels for each project.</p></div>
           <label class="switch-row"><span><strong>Enable project boards</strong><small>Agents working in a project receive recent notes at turn start and can check for newer notes at meaningful checkpoints. Posting never wakes another agent. Turning this off hides boards but preserves their notes.</small></span><input type="checkbox" role="switch" aria-label="Enable project boards" checked={settings.projectBoardEnabled === true} onchange={(event) => void save({ projectBoardEnabled: event.currentTarget.checked })} /></label>
+          <label><strong>Default agent guidance</strong><textarea bind:value={boardGuidanceDraft} maxlength="8000" rows="6" aria-label="Default project-board guidance" placeholder="Use the board when work could affect coordination with other agents…"></textarea><small>{Array.from(boardGuidanceDraft).length}/8000 characters. Project-specific guidance overrides this; blank uses Monitter's built-in wording. Guidance is context and does not grant permission.</small></label>
+          <div class="setting-actions"><button class="secondary" type="button" disabled={pending > 0} onclick={() => { boardGuidanceDraft = ""; void save({ boardGuidanceText: null }); }}>Reset to built-in wording</button><button class="primary" type="button" disabled={pending > 0 || Array.from(boardGuidanceDraft).length > 8000} onclick={() => void save({ boardGuidanceText: boardGuidanceDraft.trim() ? boardGuidanceDraft : null })}>Save guidance</button></div>
         </section>
       </div>
     {/if}

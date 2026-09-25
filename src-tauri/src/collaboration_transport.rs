@@ -20,6 +20,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(20);
 const MAX_BATCH: usize = 32;
 pub type Handler = dyn Fn(&str, &str, Value) -> Result<Value, String> + Send + Sync + 'static;
+pub type GuidanceProvider = dyn Fn(&str) -> String + Send + Sync + 'static;
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionGrant {
     pub endpoint: String,
@@ -38,12 +39,15 @@ enum Catalogue {
 }
 impl Broker {
     pub fn start(handler: Arc<Handler>) -> Result<Self, String> {
-        Self::start_with_catalogue(handler, Catalogue::Collaboration)
+        Self::start_with_guidance(handler, Arc::new(|_| collaboration_mcp::BOARD_INSTRUCTIONS.to_string()))
+    }
+    pub(crate) fn start_with_guidance(handler: Arc<Handler>, guidance: Arc<GuidanceProvider>) -> Result<Self, String> {
+        Self::start_with_catalogue(handler, Catalogue::Collaboration, Some(guidance))
     }
     pub(crate) fn start_jev_decisions(handler: Arc<Handler>) -> Result<Self, String> {
-        Self::start_with_catalogue(handler, Catalogue::JevDecisions)
+        Self::start_with_catalogue(handler, Catalogue::JevDecisions, None)
     }
-    fn start_with_catalogue(handler: Arc<Handler>, catalogue: Catalogue) -> Result<Self, String> {
+    fn start_with_catalogue(handler: Arc<Handler>, catalogue: Catalogue, guidance: Option<Arc<GuidanceProvider>>) -> Result<Self, String> {
         let socket = TcpListener::bind("127.0.0.1:0")
             .map_err(|e| format!("Could not bind loopback MCP broker: {e}"))?;
         socket
@@ -59,6 +63,7 @@ impl Broker {
         let g = grants.clone();
         let r = running.clone();
         let a = active.clone();
+        let guidance = guidance.unwrap_or_else(|| Arc::new(|_| String::new()));
         let listener = thread::Builder::new()
             .name("monitter-collaboration-mcp".into())
             .spawn(move || {
@@ -80,9 +85,10 @@ impl Broker {
                             }
                             let grants = g.clone();
                             let handler = handler.clone();
+                            let guidance = guidance.clone();
                             let active = a.clone();
                             thread::spawn(move || {
-                                serve(stream, grants, handler, catalogue);
+                                serve(stream, grants, handler, guidance, catalogue);
                                 active.fetch_sub(1, Ordering::Release);
                             });
                         }
@@ -150,6 +156,7 @@ fn serve(
     mut s: TcpStream,
     grants: Arc<Mutex<HashMap<String, String>>>,
     handler: Arc<Handler>,
+    guidance: Arc<GuidanceProvider>,
     catalogue: Catalogue,
 ) {
     let _ = s.set_read_timeout(Some(IO_TIMEOUT));
@@ -212,7 +219,10 @@ fn serve(
             )
         } else {
             let replies: Vec<Value> = batch.iter().filter_map(|v| match catalogue {
-                Catalogue::Collaboration => collaboration_mcp::dispatch(&task, &*handler, v.clone()),
+                Catalogue::Collaboration => {
+                    let board_guidance = if v.get("method").and_then(Value::as_str) == Some("initialize") { guidance(&task) } else { String::new() };
+                    collaboration_mcp::dispatch_with_guidance(&task, &*handler, v.clone(), &board_guidance)
+                }
                 Catalogue::JevDecisions => jev_decisions_mcp::dispatch(&task, &*handler, v.clone()),
             }).collect();
             if replies.is_empty() {
@@ -223,7 +233,10 @@ fn serve(
         }
     } else {
         match catalogue {
-            Catalogue::Collaboration => collaboration_mcp::dispatch(&task, &*handler, parsed),
+            Catalogue::Collaboration => {
+                let board_guidance = if parsed.get("method").and_then(Value::as_str) == Some("initialize") { guidance(&task) } else { String::new() };
+                collaboration_mcp::dispatch_with_guidance(&task, &*handler, parsed, &board_guidance)
+            }
             Catalogue::JevDecisions => jev_decisions_mcp::dispatch(&task, &*handler, parsed),
         }
     };

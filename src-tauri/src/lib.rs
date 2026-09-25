@@ -6363,7 +6363,7 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     let mut instructions = agent_instructions(&agent, &state.settings.user_name);
     if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
         instructions.push_str("\n\n");
-        instructions.push_str(board_instructions);
+        instructions.push_str(&board_instructions);
     }
     if !instructions.trim().is_empty() {
         state.messages.push(Message {
@@ -7185,6 +7185,7 @@ fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String
     if project.name.trim().is_empty() {
         return Err("Project name is required.".into());
     }
+    validate_board_guidance_text(&project.board_guidance_text, "Project")?;
     if !matches!(
         project.icon.as_str(),
         "folder"
@@ -7645,6 +7646,7 @@ async fn edit_queued_message(
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), String> {
+    validate_board_guidance_text(&settings.board_guidance_text, "Default")?;
     if settings.user_name.chars().count() > 80 || settings.user_name.chars().any(char::is_control) {
         return Err("Your name must be at most 80 characters without control characters.".into());
     }
@@ -7727,6 +7729,18 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
         "sparkles" | "grid" | "matrix"
     ) {
         return Err("Activity animation must be sparkles, grid, or matrix.".into());
+    }
+    Ok(())
+}
+
+fn validate_board_guidance_text(text: &Option<String>, scope: &str) -> Result<(), String> {
+    if let Some(text) = text {
+        if text.chars().count() > 8000 {
+            return Err(format!("{scope} project-board guidance must be at most 8000 characters."));
+        }
+        if text.chars().any(char::is_control) {
+            return Err(format!("{scope} project-board guidance cannot contain control characters."));
+        }
     }
     Ok(())
 }
@@ -8043,7 +8057,7 @@ fn send_channel_message_accepted(
                 let mut instructions = agent_instructions(&agent, &state.settings.user_name);
                 if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
                     instructions.push_str("\n\n");
-                    instructions.push_str(board_instructions);
+                    instructions.push_str(&board_instructions);
                 }
                 if !instructions.trim().is_empty() {
                     state.messages.push(Message { stream_status: None, phase: None, response_metadata: None,
@@ -9454,6 +9468,15 @@ name@rafa.test",
     }
 
     #[test]
+    fn board_guidance_validation_bounds_global_and_project_overrides() {
+        assert!(validate_board_guidance_text(&Some("Valid guidance".into()), "Default").is_ok());
+        assert!(validate_board_guidance_text(&Some(" ".into()), "Project").is_ok());
+        assert!(validate_board_guidance_text(&Some("x".repeat(8000)), "Default").is_ok());
+        assert!(validate_board_guidance_text(&Some("x".repeat(8001)), "Default").is_err());
+        assert!(validate_board_guidance_text(&Some("line\nbreak".into()), "Project").is_err());
+    }
+
+    #[test]
     fn line_height_settings_validate_bounds() {
         let mut settings = default_snapshot().settings;
         settings.chat_line_height = 1.0;
@@ -10581,6 +10604,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                 host_id: host_id.into(),
                 cwd: cwd.into(),
             }],
+            board_guidance_text: None,
         }
     }
 
@@ -12013,6 +12037,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                         host_id: host_id.clone(),
                         cwd: "/project-workspace".into(),
                     }],
+                    board_guidance_text: None,
                 });
                 Ok(())
             })

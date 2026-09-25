@@ -3631,6 +3631,7 @@
   function editProject(project?: Project) {
     projectDraft = {
       id: project?.id ?? '', name: project?.name ?? '', description: project?.description ?? '', icon: project?.icon ?? 'folder', color: project?.color ?? '#3f9d6a',
+      boardGuidanceText: project?.boardGuidanceText ?? null,
       workspaces: (snapshot?.hosts ?? []).map(host => ({hostId: host.id, cwd: project?.workspaces.find(workspace=>workspace.hostId===host.id)?.cwd ?? ''})),
     };
     modal = 'project';
@@ -3638,7 +3639,7 @@
   async function saveProject() {
     if (!projectDraft) return;
     const previousIds = new Set(projects.map(project=>project.id));
-    const draft = {...projectDraft, name:projectDraft.name.trim(), workspaces:projectDraft.workspaces.filter(workspace=>workspace.cwd.trim()).map(workspace=>({...workspace,cwd:workspace.cwd.trim()}))};
+    const draft = {...projectDraft, name:projectDraft.name.trim(), boardGuidanceText:projectDraft.boardGuidanceText?.trim() ? projectDraft.boardGuidanceText : null, workspaces:projectDraft.workspaces.filter(workspace=>workspace.cwd.trim()).map(workspace=>({...workspace,cwd:workspace.cwd.trim()}))};
     const result = await run(()=>bridge.saveProject(draft), 'Project saved.');
     if (result) {
       modal = null;
@@ -5484,6 +5485,8 @@
   {#if projectDraft}<form class="form" onsubmit={event=>{event.preventDefault();void saveProject();}}>
     <label>Name<input data-autofocus required bind:value={projectDraft.name} placeholder="Project name" /></label>
     <label>Description<input bind:value={projectDraft.description} placeholder="What you're working on together" /></label>
+    <label>Project-specific agent guidance<textarea maxlength="8000" rows="5" aria-label="Project-specific agent guidance" bind:value={projectDraft.boardGuidanceText} placeholder="Leave blank to use the default guidance."></textarea></label>
+    <p class="modal-copy">{Array.from(projectDraft.boardGuidanceText ?? '').length}/8000 characters. This replaces the default for this project. Blank inherits Settings, then Monitter's built-in wording. Guidance is context and does not grant permission.</p>
     <fieldset class="project-identity"><legend>Project icon</legend><div class="project-icon-options">{#each projectIcons as option}{@const Icon = option.icon}<button type="button" class:selected={projectDraft.icon===option.id} aria-label={option.label} title={option.label} style={`--project-colour:${projectDraft.color}`} onclick={()=>projectDraft={...projectDraft!,icon:option.id}}><Icon size={17}/></button>{/each}</div></fieldset>
     <fieldset class="project-identity"><legend>Icon colour</legend><div class="project-colour-options">{#each projectColours as colour}<button type="button" class:selected={projectDraft.color===colour} aria-label={`Use ${colour}`} style={`--project-colour:${colour}`} onclick={()=>projectDraft={...projectDraft!,color:colour}}></button>{/each}<label class="project-custom-colour"><span>Custom colour</span><input type="color" aria-label="Custom project icon colour" value={projectDraft.color} onchange={event=>projectDraft={...projectDraft!,color:event.currentTarget.value}}/></label></div></fieldset>
     <div class="project-workspaces"><h3>Working folders <span class="optional">Optional</span></h3>
@@ -5495,7 +5498,7 @@
     <footer>
       {#if projectDraft.id}<button type="button" class="danger-text" disabled={busy} onclick={()=>modal='deleteProject'}><Trash2 size={15}/>Delete project</button>{/if}
       <span></span><button type="button" class="secondary" onclick={()=>modal=null}>Cancel</button>
-      <button class="primary" disabled={busy || !projectDraft.name.trim()}><Save size={15}/>Save project</button>
+      <button class="primary" disabled={busy || !projectDraft.name.trim() || Array.from(projectDraft.boardGuidanceText ?? '').length > 8000}><Save size={15}/>Save project</button>
     </footer>
   </form>{/if}
 </Modal>

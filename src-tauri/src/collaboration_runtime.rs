@@ -10,6 +10,23 @@ use std::{
 };
 
 impl Service {
+    fn board_guidance_for_task(&self, task_id: &str) -> Result<String, String> {
+        let snapshot = self.snapshot()?;
+        let task = snapshot.tasks.iter().find(|task| task.id == task_id);
+        let project_id = task.and_then(|task| task.project_id.as_deref());
+        if snapshot.settings.project_board_enabled
+            && project_id.is_some_and(|id| snapshot.projects.iter().any(|project| project.id == id))
+        {
+            Ok(crate::project_board::effective_guidance(
+                &snapshot,
+                project_id,
+                crate::collaboration_mcp::BOARD_INSTRUCTIONS,
+            ))
+        } else {
+            Ok(crate::collaboration_mcp::BOARD_INSTRUCTIONS.to_string())
+        }
+    }
+
     pub(crate) fn initialize_collaboration(self: &Arc<Self>) -> Result<(), String> {
         if self.stopping.load(Ordering::Acquire) {
             return Err("Monitter is shutting down.".into());
@@ -21,13 +38,20 @@ impl Service {
                 .map_err(|_| "Collaboration broker lock failed.")?;
             if broker.is_none() {
                 let service = Arc::downgrade(self);
-                *broker = Some(Broker::start(Arc::new(move |caller, tool, arguments| {
+                let guidance_service = Arc::downgrade(self);
+                let guidance = Arc::new(move |caller: &str| {
+                    guidance_service
+                        .upgrade()
+                        .and_then(|service| service.board_guidance_for_task(caller).ok())
+                        .unwrap_or_else(|| crate::collaboration_mcp::BOARD_INSTRUCTIONS.to_string())
+                });
+                *broker = Some(Broker::start_with_guidance(Arc::new(move |caller, tool, arguments| {
                     let service = service.upgrade().ok_or("Monitter has closed.")?;
                     if service.stopping.load(Ordering::Acquire) {
                         return Err("Monitter is shutting down.".into());
                     }
                     service.protocol(caller, tool, arguments)
-                }))?);
+                }), guidance)?);
             }
         }
         if !self.collaboration_started.swap(true, Ordering::AcqRel) {
