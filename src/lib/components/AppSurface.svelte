@@ -1071,6 +1071,8 @@
     return active;
   }
   const sidebarRootChats = $derived(sidebarRootTasks(activityTasks));
+  const sidebarRunningChats = $derived(sidebarRootChats.filter(task => task.status === 'running'));
+  const sidebarRecentChats = $derived(sidebarRootChats.filter(task => task.status !== 'running'));
   const taskSubagents = $derived.by(() => {
     subagentLifecycleRevision;
     return selectedTask && snapshot ? unifiedSubagentsFromSnapshot(snapshot, selectedTask.id) : [];
@@ -4686,9 +4688,11 @@
   {#if depth < 6}
     {#each sidebarChildren.get(parent.id) ?? [] as child (child.id)}
       <div class="sidebar-child-row" style={`--child-depth:${depth}`} data-sidebar-child-id={child.id} data-sidebar-parent-task-id={parent.id}>
-        <button class="sidebar-child-select" title={`${child.agentName} · ${child.title}`} aria-label={`${child.agentName}: ${child.title}, ${unifiedSubagentStatus(child.status)}`} onclick={() => void routeSidebarChild(parent, child)}>
+        <button class="sidebar-child-select" class:sidebar-running-child={child.status === 'running'} title={`${child.agentName} · ${child.title}`} aria-label={`${child.agentName}: ${child.title}, ${unifiedSubagentStatus(child.status)}`} onclick={() => void routeSidebarChild(parent, child)}>
+          {#if child.status === 'running'}<SparkleField active compact contained animation="sparkles" />{/if}
           <span class={`dot ${child.status === 'queued' ? 'running' : child.status}`}></span>
           <span class="chat-copy"><span>{child.title}</span><span class="chat-meta">{child.agentName} · {unifiedSubagentStatus(child.status)}</span></span>
+          {#if child.status === 'running'}<span class="sidebar-live-spinner" aria-hidden="true"><LoaderCircle size={14}/></span>{/if}
         </button>
       </div>
       {#if child.task}{@render sidebarChildNodes(child.task, depth + 1)}{/if}
@@ -4699,9 +4703,11 @@
 {#snippet sidebarActiveChildNodes(parent: Task, children: SidebarChildAgent[])}
   {#each children as child (child.id)}
     <div class="sidebar-child-row activity-child-row" data-sidebar-child-id={child.id} data-sidebar-parent-task-id={child.parentTaskId}>
-      <button class="sidebar-child-select activity-child-select" class:selected={child.task ? child.task.id === (activePaneId === 'main' ? selectedTaskId : paneSelections[activePaneId]) : selectedSubagentId === child.sessionId && selectedTaskId === parent.id} title={`${child.agentName} · ${child.title}`} aria-label={`${child.agentName}: ${child.title}, ${unifiedSubagentStatus(child.status)}`} onclick={() => void routeSidebarChild(activityTasks.find(task => task.id === child.parentTaskId) ?? parent, child)}>
+      <button class="sidebar-child-select activity-child-select" class:sidebar-running-child={child.status === 'running'} class:selected={child.task ? child.task.id === (activePaneId === 'main' ? selectedTaskId : paneSelections[activePaneId]) : selectedSubagentId === child.sessionId && selectedTaskId === parent.id} title={`${child.agentName} · ${child.title}`} aria-label={`${child.agentName}: ${child.title}, ${unifiedSubagentStatus(child.status)}`} onclick={() => void routeSidebarChild(activityTasks.find(task => task.id === child.parentTaskId) ?? parent, child)}>
+        {#if child.status === 'running'}<SparkleField active compact contained animation="sparkles" />{/if}
         <span class="activity-child-mark" aria-hidden="true">{unifiedSubagentInitials(child.agentName)}</span>
         <span class="activity-child-copy"><span class="activity-child-heading"><strong>{child.title}</strong><span class="activity-child-status"><i></i>{unifiedSubagentStatus(child.status)}</span></span><small>{child.agentName}</small></span>
+        {#if child.status === 'running'}<span class="sidebar-live-spinner" aria-hidden="true"><LoaderCircle size={14}/></span>{/if}
       </button>
     </div>
   {/each}
@@ -4719,6 +4725,7 @@
   {@const activeChildren = cardStyle ? sidebarActiveChildren(task.id) : []}
   <div class="sidebar-task-branch" data-sidebar-task-id={task.id}>
   <div use:sidebarReorder={{group:sortGroup,id:task.id,move:moveSidebar}} class="task-row" class:activity-task={activityStyle} class:grouped-task={groupedStyle} class:sidebar-card-task={cardStyle} class:recent class:current={task.id === (activePaneId==='main'?selectedTaskId:paneSelections[activePaneId])} data-task-id={task.id}>
+    {#if task.status === 'running'}<SparkleField active compact contained animation="sparkles" />{/if}
     {#if cardStyle}
       <button class="task-select activity-task-tile" aria-label={`Open chat ${task.title}`} title={task.title} onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)}></button>
       <div class="activity-task-content">
@@ -4744,13 +4751,12 @@
       {#if children.length}<button class="sidebar-child-toggle" aria-label={`${collapsedTaskChildren[task.id] ? 'Expand' : 'Collapse'} subagents for ${task.title}`} aria-expanded={!collapsedTaskChildren[task.id]} aria-controls={`sidebar-children-${task.id}`} onclick={() => collapsedTaskChildren[task.id] = !collapsedTaskChildren[task.id]}><ChevronDown size={12} class={collapsedTaskChildren[task.id] ? 'collapsed' : ''}/></button>{/if}
     {/if}
     <ObserverIndicator names={observedTaskIds.has(task.id) ? observerNames : []} onactivate={cardStyle ? (event) => routeSidebarTask(task, event.metaKey || event.ctrlKey) : undefined}/>
-    {#if task.status === 'running' && !cardStyle}
-      <small><AnimatedTitle text="live" active={true} activeTooltip="Live run" /></small>
-    {:else}
+    {#if task.status !== 'running' || cardStyle}
       <div class="chat-actions">
         <button aria-label={`Archive chat ${task.title}`} title="Archive chat" disabled={busy} onclick={()=>archiveTask(task)}><Archive size={12}/></button>
       </div>
     {/if}
+    {#if task.status === 'running'}<span class="sidebar-live-spinner" role="img" aria-label="Running"><LoaderCircle size={15}/></span>{/if}
   </div>
   {#if cardStyle && activeChildren.length}
     <div class="sidebar-child-group activity-child-group" id={`sidebar-children-${task.id}`} data-sidebar-children-for={task.id} hidden={collapsedTaskChildren[task.id]}>{@render sidebarActiveChildNodes(task, activeChildren)}</div>
@@ -5423,8 +5429,15 @@
           >
         </div>{/if}
       {:else if sidebarView === 'activity'}
-        <p class="activity-heading">Running first</p>
-        <div class="activity-list">{#each sidebarRootChats as task (task.id)}{@render sidebarChat(task,true)}{:else}<p class="empty-tree">No chats yet</p>{/each}</div>
+        {#if sidebarRunningChats.length}
+          <p class="activity-heading">Running</p>
+          <div class="activity-list">{#each sidebarRunningChats as task (task.id)}{@render sidebarChat(task,true)}{/each}</div>
+        {/if}
+        {#if sidebarRecentChats.length}
+          <p class="activity-heading activity-recent-heading">Recent</p>
+          <div class="activity-list">{#each sidebarRecentChats as task (task.id)}{@render sidebarChat(task,true)}{/each}</div>
+        {/if}
+        {#if !sidebarRootChats.length}<p class="empty-tree">No chats yet</p>{/if}
       {:else}
         <p class="activity-heading">Projects</p>
         {#each sidebarSorted(projects,'projects') as project (project.id)}
@@ -6591,6 +6604,7 @@
   }
   .view-hint { margin: 5px 7px 10px; color: var(--muted); font-size: calc(10px * var(--interface-font-ratio, 1)); line-height: 1.5; }
   .activity-heading { margin:10px 8px 8px; color:var(--muted); font:600 calc(9.5px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.2em; text-transform:uppercase; }
+  .activity-recent-heading { margin-top:18px; }
   .activity-list { display:grid; gap:6px; }
   .sidebar-parent-card { --activity-row-surface:var(--sidebar); display:flex; align-items:center; gap:8px; min-height:58px; min-width:0; padding:6px 8px; border-radius:11px; }
   .sidebar-parent-card:is(.current, :hover, :focus-within) { --activity-row-surface:color-mix(in srgb,var(--accent) 8%,var(--sidebar)); background:var(--activity-row-surface); }
@@ -6770,6 +6784,8 @@
   .sidebar-child-row { position:relative; min-width:0; padding-left:calc(10px + var(--child-depth) * 15px); }
   .sidebar-child-row::before { content:""; position:absolute; left:0; top:50%; width:calc(9px + var(--child-depth) * 15px); height:1px; background:var(--line); pointer-events:none; }
   .sidebar-child-select { display:flex; align-items:center; gap:7px; width:100%; min-width:0; padding:5px 7px; border-radius:5px; text-align:left; font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .sidebar-running-child { position:relative; isolation:isolate; }
+  .sidebar-running-child > :is(.dot,.chat-copy,.activity-child-mark,.activity-child-copy,.sidebar-live-spinner) { position:relative; z-index:1; }
   .sidebar-child-select:hover, .sidebar-child-select:focus-visible { background:var(--paper); }
   .sidebar-child-select .chat-copy { min-width:0; }
   .sidebar-child-select .chat-meta { font-size:calc(9px * var(--interface-font-ratio,1)); }
@@ -6787,6 +6803,13 @@
     text-align: left;
     font-size: calc(11.5px * var(--interface-font-ratio, 1));
   }
+  .task-row { position:relative; isolation:isolate; }
+  .task-row:not(.sidebar-card-task) > .task-select { position:relative; z-index:1; }
+  .sidebar-live-spinner { position:relative; z-index:2; display:grid; place-items:center; flex:none; width:18px; height:18px; margin-left:auto; color:var(--accent); filter:drop-shadow(0 0 4px color-mix(in srgb,var(--accent) 55%,transparent)); pointer-events:none; }
+  .sidebar-live-spinner :global(svg) { animation:sidebar-running-spin 1.15s linear infinite; }
+  @keyframes sidebar-running-spin { to { transform:rotate(360deg); } }
+  :global([data-motion="off"]) .sidebar-live-spinner :global(svg) { animation:none; }
+  @media (prefers-reduced-motion:reduce) { .sidebar-live-spinner :global(svg) { animation:none; } }
   .task-row:hover,
   .task-row.current,
   .channel-row:hover {
@@ -6863,7 +6886,11 @@
   .activity-avatar.claude { color:#f0b08d; background:#48342c; }
   .activity-avatar.opencode { color:#b4c2ff; background:#282f57; }
   .activity-status-dot { position:absolute; right:-4px; bottom:-4px; width:10px; height:10px; border:2px solid var(--activity-row-surface); border-radius:50%; background:#84969a; }
-  .activity-status-dot.running { background:#65d8a5; }
+  .activity-status-dot.running { background:radial-gradient(circle at 35% 25%,color-mix(in srgb,white 78%,var(--accent)),var(--accent) 65%); box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 25%,transparent),0 0 8px color-mix(in srgb,var(--accent) 70%,transparent); animation:sidebar-running-glow 2.4s ease-in-out infinite; }
+  .activity-status-dot.running::after { content:'✦'; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); color:white; font:7px/1 sans-serif; text-shadow:0 0 3px white; }
+  @keyframes sidebar-running-glow { 50% { box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 32%,transparent),0 0 12px var(--accent); } }
+  :global([data-motion="off"]) .activity-status-dot.running { animation:none; }
+  @media (prefers-reduced-motion:reduce) { .activity-status-dot.running { animation:none; } }
   .activity-status-dot.error { background:#e88683; }
   .activity-status-dot.interrupted { background:#d2ab75; }
   .task-select { display:flex; align-items:center; gap:7px; min-width:0; flex:1; padding:0; text-align:left; }
@@ -6881,8 +6908,6 @@
   @media (hover:hover) and (pointer:fine) { .task-row:hover .chat-actions { opacity:1; pointer-events:auto; } }
   .chat-actions button { display:grid; place-items:center; width:20px; height:22px; padding:0; color:var(--muted); border-radius:4px; }
   .chat-actions button:hover { background:var(--soft); color:var(--ink); }
-  .task-row small { display:none; }
-  .task-row:has(.dot.running) small { display:block; }
   .agent-chats { margin-top:24px; display:grid; gap:6px; }
   .channel-row span {
     overflow: hidden;

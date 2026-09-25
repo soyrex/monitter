@@ -5,12 +5,14 @@
     active = false,
     mirror = false,
     contained = false,
+    compact = false,
     pane = false,
     animation = 'sparkles',
   }: {
     active?: boolean;
     mirror?: boolean;
     contained?: boolean;
+    compact?: boolean;
     pane?: boolean;
     animation?: ActivityAnimation;
   } = $props();
@@ -38,6 +40,13 @@
     { x: 68, y: 120, size: '7px', delay: 1.6 },
     { x: 45, y: 195, size: '9px', delay: 4.8 },
   ];
+  const compactSparkles = [
+    { x: 8, y: 24, size: '7px', delay: 0 },
+    { x: 31, y: 66, size: '6px', delay: .8 },
+    { x: 56, y: 18, size: '8px', delay: 1.5 },
+    { x: 79, y: 72, size: '6px', delay: 2.2 },
+    { x: 94, y: 29, size: '7px', delay: 2.9 },
+  ];
   const matrixColumns = Array.from({ length: 15 }, (_, column) => ({
     x: 3 + column * 6.75,
     delay: -((column * .41) % 3.6),
@@ -60,10 +69,10 @@
   });
 </script>
 
-{#if active}<div class="sparkle-field" class:mirror class:contained class:pane data-effect={animation} aria-hidden="true">
+{#if active}<div class="sparkle-field" class:mirror class:contained class:compact class:pane data-effect={animation} aria-hidden="true">
   <div class="sparkle-glow"></div>
   {#if animation === 'sparkles'}
-    {#each sparkles as sparkle}<span class="sparkle" style:left={`${sparkle.x}%`} style:bottom={`${sparkle.y}px`} style:font-size={sparkle.size} style:animation-delay={`${sparkle.delay}s`}>✦</span>{/each}
+    {#each compact ? compactSparkles : sparkles as sparkle}<span class="sparkle" style:left={`${sparkle.x}%`} style:bottom={compact ? `${sparkle.y}%` : `${sparkle.y}px`} style:font-size={sparkle.size} style:animation-delay={`${sparkle.delay}s`}>✦</span>{/each}
   {:else if animation === 'grid'}
     <div class="pulse-grid"></div>
   {:else}
@@ -80,6 +89,8 @@
 <style>
   .sparkle-field { position:absolute; left:0; right:0; top:-80px; bottom:0; overflow:hidden; pointer-events:none; z-index:0; opacity:.5; }
   .sparkle-field.contained { inset:0; }
+  .sparkle-field.compact { opacity:.65; }
+  .sparkle-field.compact .sparkle-glow { background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--accent) 12%,transparent),transparent); }
   .sparkle-field.pane { top:auto; height:40%; }
   .sparkle-field.mirror { transform:scaleY(-1); transform-origin:center; }
   :global([data-theme="dark"]) .sparkle-field { opacity:1; }

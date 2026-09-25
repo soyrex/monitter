@@ -31,6 +31,7 @@ try {
     snapshot.projects = [{ id: 'fixture-project', name: 'Fixture project', description: '', icon: 'folder', color: '#397e61', workspaces: [] }];
     snapshot.tasks = [
       { ...task('parent', 'atlas', 'Parent task', null, 'running'), projectId: 'fixture-project' },
+      task('recent', 'atlas', 'Recent task', null, 'completed'),
       task('delegated', 'reviewer', 'Delegated review', 'parent', 'running'),
       task('nested', 'reviewer', 'Nested direct task', 'delegated', 'completed'),
     ];
@@ -126,11 +127,20 @@ try {
   expect(projectCardGeometry.mark).toBe('32px');
 
   await sidebar.getByRole('tab', { name: 'Activity view' }).click();
-  await expect(sidebar.getByText('Running first', { exact: true })).toBeVisible();
+  await expect(sidebar.getByText('Running', { exact: true })).toBeVisible();
+  await expect(sidebar.getByText('Recent', { exact: true })).toBeVisible();
+  const activitySections = sidebar.locator('.side-scroll .activity-list');
+  await expect(activitySections).toHaveCount(2);
+  await expect(activitySections.first().locator(':scope > .sidebar-task-branch')).toHaveCount(1);
+  await expect(activitySections.first().locator(':scope > .sidebar-task-branch').first()).toHaveAttribute('data-sidebar-task-id', 'parent');
+  await expect(activitySections.last().locator(':scope > .sidebar-task-branch').first()).toHaveAttribute('data-sidebar-task-id', 'recent');
   const activityParent = sidebar.locator('.activity-list .sidebar-task-branch[data-sidebar-task-id="parent"] > .activity-task');
   await expect(activityParent).toBeVisible();
   await expect(activityParent.locator('.activity-avatar')).toHaveText('AT');
   await expect(activityParent.locator('.activity-status-dot.running')).toBeVisible();
+  await expect(activityParent.locator('.sidebar-live-spinner')).toBeVisible();
+  await expect(activityParent.locator('.sparkle-field.compact .sparkle')).toHaveCount(5);
+  await expect(activitySections.last().locator('.sidebar-live-spinner, .sparkle-field')).toHaveCount(0);
   await expect(activityParent.locator('.activity-task-title')).toHaveText('Parent task');
   await expect(activityParent.locator('.chat-meta')).toContainText('Atlas');
   const subagentsPill = activityParent.locator('.activity-subagents');
@@ -159,6 +169,7 @@ try {
   await expect(sidebar.locator('.activity-list [data-sidebar-child-id="task:nested"]')).toHaveCount(0);
   await expect(activityNative.locator('.activity-child-mark')).toHaveText('NC');
   await expect(activityNative.locator('.activity-child-copy small')).toHaveText('Native Check');
+  await expect(activityNative.locator('.sidebar-live-spinner')).toBeVisible();
   await expect(activityNative.locator('.activity-child-status')).toHaveText('Working');
   const childStyle = await activityNative.locator('.activity-child-select').evaluate(element => ({
     radius: getComputedStyle(element).borderRadius,
