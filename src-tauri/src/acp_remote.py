@@ -6,6 +6,7 @@ Only the child process group created here is eligible for cleanup.
 import json
 import os
 import queue
+import select
 import shutil
 import signal
 import subprocess
@@ -18,6 +19,18 @@ process = None
 stopping = False
 stop_requested = threading.Event()
 chunks = queue.Queue(maxsize=64)  # <=512 KiB, independent of child's stdin pace
+workers = []
+
+
+def signal_owned_group(sig):
+    try:
+        os.killpg(process.pid, sig)
+    except PermissionError:
+        # macOS can report EPERM while the exited leader is still a zombie.
+        # Reap only our child, then retry against any surviving descendants.
+        if process.poll() is None:
+            raise
+        os.killpg(process.pid, sig)
 
 
 def stop_owned():
@@ -29,13 +42,13 @@ def stop_owned():
         signal.signal(sig, signal.SIG_IGN)
     for sig, seconds in ((signal.SIGINT, 0.5), (signal.SIGTERM, 0.5), (signal.SIGKILL, 0)):
         try:
-            os.killpg(process.pid, sig)
+            signal_owned_group(sig)
         except ProcessLookupError:
             return
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             try:
-                os.killpg(process.pid, 0)
+                signal_owned_group(0)
             except ProcessLookupError:
                 return
             time.sleep(0.025)
@@ -47,8 +60,11 @@ def on_signal(signum, _frame):
 
 def read_input():
     try:
-        while True:
-            chunk = sys.stdin.buffer.read1(8192)
+        while not stop_requested.is_set():
+            if not select.select([sys.stdin.fileno()], [], [], 0.05)[0]:
+                continue
+            # No buffered I/O locks may be held by a worker at interpreter exit.
+            chunk = os.read(sys.stdin.fileno(), 8192)
             if not chunk:
                 return
             # A blocked child must not stop disconnect cleanup indefinitely.
@@ -66,8 +82,9 @@ def write_input():
                 chunk = chunks.get(timeout=0.1)
             except queue.Empty:
                 continue
-            process.stdin.write(chunk)
-            process.stdin.flush()
+            pending = memoryview(chunk)
+            while pending and not stop_requested.is_set():
+                pending = pending[os.write(process.stdin.fileno(), pending):]
     except (BrokenPipeError, OSError):
         stop_requested.set()
 
@@ -104,9 +121,11 @@ try:
     print(json.dumps({"jsonrpc": "2.0", "method": READY, "params": {"cwd": cwd}}), flush=True)
     process = subprocess.Popen([program, *sys.argv[3:]], cwd=cwd,
                                stdin=subprocess.PIPE, stdout=sys.stdout.buffer,
-                               stderr=sys.stderr.buffer, start_new_session=True)
-    threading.Thread(target=read_input, daemon=True).start()
-    threading.Thread(target=write_input, daemon=True).start()
+                               stderr=sys.stderr.buffer, start_new_session=True, bufsize=0)
+    for target in (read_input, write_input):
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        workers.append(worker)
     while process.poll() is None and not stop_requested.wait(0.05):
         pass
     code = process.poll()
@@ -115,10 +134,13 @@ except (ValueError, OSError) as error:
     print("ERROR: ACP SSH bootstrap failed (" + type(error).__name__ + "). Check Python, executable and folder.", file=sys.stderr)
     code = 1
 finally:
+    stop_requested.set()
     stop_owned()
     if process is not None:
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
+    for worker in workers:
+        worker.join(timeout=0.2)
 sys.exit(code if isinstance(code, int) and code >= 0 else 1)
