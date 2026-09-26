@@ -170,6 +170,11 @@ No fake conversations, progress, token counts, host connections or model replies
   idempotent `jevDecision` card to that task. The card shows the selected or recommended model tier,
   reasoning level, lowest routing confidence, application outcome, and available Jev cost/timing
   metadata. It contains no raw prompt or credential. Existing chats are not automatically rerouted.
+  For ACP safe-auto routing, a mapped model is first recorded as `modelStatus:"pending"`;
+  the card reports `applied` only after the live session acknowledges the exact model option, or
+  `already_current` when that option is active. Unsupported, rejected, and unconfirmed outcomes
+  are shown without claiming the model was applied. Direct harness selection is recorded as
+  `modelStatus:"selected"`; older route records without this field retain their historical display.
   For a new ACP chat in safe-auto mode, a qualifying Jev reasoning level remains pending until
   the live session advertises a `thought_level` select control. Monitter requests only the exact
   advertised level through `session/set_config_option` after any model selection and before the
@@ -968,7 +973,9 @@ through the task-event detail endpoint.
 The same event kind also displays a new-chat `jev_route` record sourced from the native route trace.
 Its confidence is the lowest of Jev's five routing judgments, so its compact bar is a confidence
 indicator rather than a choice distribution. It distinguishes a model selected for the chat from a
-recommendation that left the harness default in place; permission signals remain advisory.
+Jev-only recommendation; permission signals remain advisory.
+The ACP route receipt also distinguishes a requested model from an acknowledged model change,
+an already active model, and unsupported, rejected, or unconfirmed model requests.
 Codex `ContextCompaction` tool detail preserves its native `id` plus
 `monitterPhase:"started"|"completed"`. The UI may show a duration only for a matching pair;
 an interrupted or legacy lone record remains neutral rather than being described as completed.

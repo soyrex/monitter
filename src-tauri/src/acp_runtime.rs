@@ -387,6 +387,8 @@ fn fail(
     detail: impl Into<String>,
 ) {
     control.clear_acp_turn_reservation();
+    let _ = service.set_jev_route_model_status(task_id, "unconfirmed");
+    let _ = service.set_jev_route_reasoning_status(task_id, "unconfirmed", None);
     let detail = detail.into();
     if !service.complete_app_server_turn(task_id, control, None, "error", Some(detail.clone())) {
         // Recovery starts from a completed/interrupted durable turn, so its
@@ -1431,9 +1433,6 @@ fn run(
             last_reasoning_flush = Instant::now();
         }
         if phase != "idle" && Instant::now() >= phase_deadline {
-            if phase == "session/reasoning" {
-                let _ = service.set_jev_route_reasoning_status(&task_id, "unconfirmed", None);
-            }
             fail(
                 &service,
                 &task_id,
@@ -1627,6 +1626,11 @@ fn run(
             }
         }
         if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+            if value.get("id").and_then(Value::as_i64) == Some(MODEL_CONFIG_ID)
+                && phase == "session/model"
+            {
+                let _ = service.set_jev_route_model_status(&task_id, "rejected");
+            }
             if value.get("id").and_then(Value::as_i64) == Some(REASONING_CONFIG_ID)
                 && phase == "session/reasoning"
             {
@@ -1869,6 +1873,7 @@ fn run(
                     ) {
                         Ok(request) => request,
                         Err(error) => {
+                            let _ = service.set_jev_route_model_status(&task_id, "unsupported");
                             fail(&service, &task_id, &control, error);
                             return;
                         }
@@ -1884,6 +1889,12 @@ fn run(
                         phase = "session/model";
                         phase_deadline = Instant::now() + SESSION_TIMEOUT;
                         continue;
+                    }
+                    if let Err(error) =
+                        service.set_jev_route_model_status(&task_id, "already_current")
+                    {
+                        fail(&service, &task_id, &control, error);
+                        return;
                     }
                 }
                 let Some(prompt) = initial_prompt.as_deref() else {
@@ -1961,6 +1972,7 @@ fn run(
                     ) {
                         Ok(request) => request,
                         Err(error) => {
+                            let _ = service.set_jev_route_model_status(&task_id, "unsupported");
                             fail(&service, &task_id, &control, error);
                             return;
                         }
@@ -1976,6 +1988,12 @@ fn run(
                         phase = "session/model";
                         phase_deadline = Instant::now() + SESSION_TIMEOUT;
                         continue;
+                    }
+                    if let Err(error) =
+                        service.set_jev_route_model_status(&task_id, "already_current")
+                    {
+                        fail(&service, &task_id, &control, error);
+                        return;
                     }
                 }
                 let Some(prompt) = initial_prompt.as_deref() else {
@@ -2013,6 +2031,10 @@ fn run(
                         &control,
                         "ACP model response was out of order.",
                     );
+                    return;
+                }
+                if let Err(error) = service.set_jev_route_model_status(&task_id, "applied") {
+                    fail(&service, &task_id, &control, error);
                     return;
                 }
                 if let Some(options) = value.pointer("/result/configOptions") {

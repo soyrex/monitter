@@ -4419,7 +4419,16 @@ impl Service {
                 .and_then(|settings| settings.reasoning_effort.as_deref());
             let auto_eligible = agent.jev_routing == model::JevRoutingMode::SafeAuto
                 && plan.decision.confidence >= 0.5;
-            let reasoning_status = if applied_effort.is_some() {
+            let model_status = if !auto_eligible || !applied {
+                "recommended"
+            } else if auto_eligible && task.provider == "acp" {
+                "pending"
+            } else {
+                "selected"
+            };
+            let reasoning_status = if !auto_eligible {
+                "recommended"
+            } else if applied_effort.is_some() {
                 "selected"
             } else if auto_eligible && task.provider == "acp" {
                 "pending"
@@ -4432,7 +4441,11 @@ impl Service {
                 .map_err(|_| "Jev route tier could not be recorded.".to_string())?;
             let tier_label = tier.as_str().unwrap_or("model").replace('_', " ");
             let selected_model: String = task.model.chars().take(100).collect();
-            let outcome = if model_changed {
+            let outcome = if model_status == "recommended" {
+                format!("{tier_label} · Jev recommendation only")
+            } else if model_status == "pending" {
+                format!("{tier_label} · {selected_model} requested · checking harness")
+            } else if model_changed {
                 format!("{tier_label} · {selected_model} selected")
             } else if applied {
                 match applied_effort {
@@ -4462,8 +4475,9 @@ impl Service {
                     "executionMode": plan.decision.execution_mode,
                     "permissionTier": plan.decision.permission_tier,
                     "selectedModel": selected_model,
-                    "applied": applied,
+                    "applied": model_status == "selected",
                     "modelChanged": model_changed,
+                    "modelStatus": model_status,
                     "appliedReasoning": applied_effort,
                     "reasoningStatus": reasoning_status,
                     "autoEligible": auto_eligible,
@@ -4485,6 +4499,55 @@ impl Service {
                 detail: detail.into(),
                 created_at,
             }));
+            Ok(())
+        })
+    }
+
+    /// Update a pending ACP model request only after the live session confirms
+    /// or rejects it. The planned model and Jev judgment remain unchanged.
+    pub(crate) fn set_jev_route_model_status(
+        &self,
+        task_id: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        if !matches!(
+            status,
+            "applied" | "already_current" | "unsupported" | "rejected" | "unconfirmed"
+        ) {
+            return Err("Invalid Jev model status.".into());
+        }
+        self.mutate(Some(task_id.into()), |state| {
+            let Some((index, mut detail)) = state.events.iter().enumerate().rev().find_map(
+                |(index, event)| {
+                    if event.task_id != task_id || event.kind != "jevDecision" {
+                        return None;
+                    }
+                    let detail: serde_json::Value = serde_json::from_str(&event.detail).ok()?;
+                    (detail["toolName"] == "jev_route"
+                        && detail["response"]["modelStatus"] == "pending")
+                        .then_some((index, detail))
+                },
+            ) else {
+                return Ok(());
+            };
+            let response = &mut detail["response"];
+            let tier = response["modelTier"].as_str().unwrap_or("model").replace('_', " ");
+            let model = response["selectedModel"].as_str().unwrap_or("model");
+            let changed = response["modelChanged"] == true;
+            let outcome = match status {
+                "applied" => format!("{tier} · {model} applied by harness"),
+                "already_current" if changed => format!("{tier} · {model} already active"),
+                "already_current" => format!("{tier} · default model already active"),
+                "unsupported" => format!("{tier} · {model} unavailable to harness"),
+                "rejected" => format!("{tier} · {model} rejected by harness"),
+                _ => format!("{tier} · {model} response unconfirmed"),
+            };
+            response["modelStatus"] = serde_json::json!(status);
+            response["applied"] = serde_json::json!(matches!(status, "applied" | "already_current"));
+            response["outcome"] = serde_json::json!(outcome);
+            let mut updated = (*state.events[index]).clone();
+            updated.detail = detail.to_string().into();
+            state.events[index] = Arc::new(updated);
             Ok(())
         })
     }

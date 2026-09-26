@@ -121,6 +121,20 @@
       default: return `${level} reasoning recommended`;
     }
   }
+  function routeModelOutcome(): string {
+    const model = routeText('selectedModel');
+    switch (response?.modelStatus) {
+      case 'selected': return `${model} selected for this chat`;
+      case 'applied': return `${model} applied by the harness`;
+      case 'already_current': return `${model} already active`;
+      case 'pending': return `${model} requested · checking harness`;
+      case 'unsupported': return `${model} unavailable to the harness`;
+      case 'rejected': return `${model} rejected by the harness`;
+      case 'unconfirmed': return `${model} · harness response unconfirmed`;
+      case 'recommended': return 'Jev recommendation only';
+      default: return response?.applied !== true ? 'Default kept' : response.modelChanged === true ? 'Selected for this chat' : 'Default model kept';
+    }
+  }
   function routePermissionSignal(): string {
     switch (response?.permissionTier) {
       case 'human_review_required': return 'Consequential action';
@@ -193,7 +207,7 @@
           <div><dt>Model tier</dt><dd>{routeText('modelTier')}</dd></div>
           <div><dt>Reasoning</dt><dd>{routeText('reasoningLevel')}</dd></div>
           <div><dt>Chat model</dt><dd>{routeText('selectedModel')}</dd></div>
-          <div><dt>Model selection</dt><dd>{response.applied !== true ? 'Default kept' : response.modelChanged === true ? 'Selected for this chat' : 'Default model kept'}</dd></div>
+          <div><dt>Model selection</dt><dd>{routeModelOutcome()}</dd></div>
           <div><dt>Reasoning outcome</dt><dd>{routeReasoningOutcome()}</dd></div>
           <div><dt>Task kind</dt><dd>{routeText('taskKind')}</dd></div>
           <div><dt>Permission signal</dt><dd>{routePermissionSignal()} · advisory only; existing approvals apply</dd></div>

@@ -189,6 +189,7 @@ fn compact_jev_decision_detail(detail: &str) -> String {
                 "selectedModel",
                 "applied",
                 "modelChanged",
+                "modelStatus",
                 "appliedReasoning",
                 "reasoningStatus",
                 "autoEligible",

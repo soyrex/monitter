@@ -54,9 +54,9 @@ const routerTrace=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
  if(frame.method==='initialize') { const recovery=process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}; const http=process.argv[2]==='managed-no-http'?{}:{mcpCapabilities:{http:true}}; const steer=process.argv[2]==='mcode-steer'?{'minimax-code/extensions':{version:1,methods:['mcode/session/steer']}}:['mona-steer','mona-steer-retry'].includes(process.argv[2])?{'mona/extensions':{version:1,methods:['mona/session/steer']}}:null; reply(frame.id,{protocolVersion:1,agentCapabilities:{...recovery,...http},...(steer?{_meta:steer}:{})}); }
- else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; const thought=process.argv[2]==='thought-delayed'||process.argv[2]==='thought-reject'?{sessionId:'fixture-session',configOptions:[{id:'effort',name:'Effort',category:'thought_level',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'low',name:'Low'}]}]}:null; const stale=process.argv[2]==='model-thought-stale'?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]},{id:'effort',name:'Effort',category:'thought_level',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'low',name:'Low'}]}]}:null; reply(frame.id,stale??thought??mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
+ else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; const thought=process.argv[2]==='thought-delayed'||process.argv[2]==='thought-reject'?{sessionId:'fixture-session',configOptions:[{id:'effort',name:'Effort',category:'thought_level',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'low',name:'Low'}]}]}:null; const stale=process.argv[2]==='model-thought-stale'?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]},{id:'effort',name:'Effort',category:'thought_level',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'low',name:'Low'}]}]}:null; reply(frame.id,stale??thought??mcode??(['model','model-delayed','model-reject'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
- else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'||process.argv[2]==='thought-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else if(process.argv[2]==='thought-reject'){ reject(frame.id,-32602,'unsupported choice'); } else reply(frame.id,{}); }
+ else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'||process.argv[2]==='thought-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else if(['thought-reject','model-reject'].includes(process.argv[2])){ reject(frame.id,-32602,'unsupported choice'); } else reply(frame.id,{}); }
  else if(frame.method==='session/prompt' && process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); messageDone(); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); }
  else if(frame.method==='session/prompt' && process.argv[2]==='text-done-fails'){ updateAnonymous('finished progress'); messageDone(); updateAnonymous('unfinished progress'); reject(frame.id,-32603,'transient provider connection failure'); }
  else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['thought-delayed','thought-reject','model-thought-stale'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-received\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['mcode-steer','mona-steer','mona-steer-retry'].includes(process.argv[2])){ globalThis.activePromptId=frame.id; if(process.argv[3]) fs.appendFileSync(process.argv[3],`prompt-active:${frame.id}\n`); } else if(['permission','permission-no-allow'].includes(process.argv[2])){ const options=process.argv[2]==='permission-no-allow'?[{kind:'reject_once',optionId:'opaque-reject'}]:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]; console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
@@ -1025,6 +1025,7 @@ fn resident_model_acknowledgement_precedes_each_prompt() {
             sandbox: None,
         })
         .unwrap();
+    add_pending_model_receipt(&fixture, &task.id, "other/model");
     let first = fixture
         .accept_send(task.id.clone(), "first".into(), vec![])
         .unwrap()
@@ -1036,6 +1037,7 @@ fn resident_model_acknowledgement_precedes_each_prompt() {
             .find(|t| t.id == task.id)
             .is_some_and(|t| t.status == "completed")
     });
+    assert_eq!(receipt_model_status(&fixture, &task.id), "applied");
     let second = fixture
         .accept_send(task.id.clone(), "second".into(), vec![])
         .unwrap()
@@ -1087,6 +1089,97 @@ fn add_pending_reasoning_receipt(fixture: &Fixture, task_id: &str) {
         }));
         Ok(())
     }).unwrap();
+}
+
+fn add_pending_model_receipt(fixture: &Fixture, task_id: &str, model: &str) {
+    fixture.mutate(Some(task_id.into()), |snapshot| {
+        snapshot.events.push(Arc::new(crate::model::RunEvent {
+            id: crate::id(),
+            task_id: task_id.into(),
+            kind: "jevDecision".into(),
+            title: "Jev route".into(),
+            detail: serde_json::json!({
+                "toolName":"jev_route",
+                "response":{"modelTier":"frontier","selectedModel":model,"modelChanged":true,
+                    "modelStatus":"pending","applied":false,
+                    "outcome":format!("frontier · {model} requested · checking harness")}
+            }).to_string().into(),
+            created_at: crate::now(),
+        }));
+        Ok(())
+    }).unwrap();
+}
+
+fn receipt_model_status(fixture: &Fixture, task_id: &str) -> String {
+    let snapshot = fixture.snapshot().unwrap();
+    let event = snapshot.events.iter().find(|event| event.task_id == task_id && event.kind == "jevDecision").unwrap();
+    let detail: serde_json::Value = serde_json::from_str(&event.detail).unwrap();
+    detail["response"]["modelStatus"].as_str().unwrap().into()
+}
+
+#[test]
+fn jev_acp_model_rejection_does_not_claim_application() {
+    let fixture = fixture_with_args("model-reject", vec!["model-reject".into()]);
+    fixture.mutate(None, |snapshot| {
+        snapshot.agents[0].model = "other/model".into();
+        Ok(())
+    }).unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture.create_task(CreateTaskInput {
+        agent_id: agent.id, title: "Rejected model".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    add_pending_model_receipt(&fixture, &task.id, "other/model");
+    let accepted = fixture.accept_send(task.id.clone(), "first".into(), vec![]).unwrap().unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| snapshot.tasks.iter().find(|item| item.id == task.id).is_some_and(|item| item.status == "error"));
+    assert_eq!(receipt_model_status(&fixture, &task.id), "rejected");
+    let snapshot = fixture.snapshot().unwrap();
+    let event = snapshot.events.iter().find(|event| event.task_id == task.id && event.kind == "jevDecision").unwrap();
+    let detail: serde_json::Value = serde_json::from_str(&event.detail).unwrap();
+    assert_eq!(detail["response"]["applied"], false);
+    assert!(detail["response"]["outcome"].as_str().unwrap().contains("rejected"));
+}
+
+#[test]
+fn jev_acp_model_missing_from_session_is_not_marked_applied() {
+    let fixture = fixture_with_args("model-missing", vec!["model".into()]);
+    fixture.mutate(None, |snapshot| {
+        snapshot.agents[0].model = "not-advertised".into();
+        Ok(())
+    }).unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture.create_task(CreateTaskInput {
+        agent_id: agent.id, title: "Unknown model".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    add_pending_model_receipt(&fixture, &task.id, "not-advertised");
+    let accepted = fixture.accept_send(task.id.clone(), "first".into(), vec![]).unwrap().unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| snapshot.tasks.iter().find(|item| item.id == task.id).is_some_and(|item| item.status == "error"));
+    assert_eq!(receipt_model_status(&fixture, &task.id), "unsupported");
+}
+
+#[test]
+fn jev_acp_model_already_current_is_recorded_separately() {
+    let fixture = fixture_with_args("model-current", vec!["model".into()]);
+    fixture.mutate(None, |snapshot| {
+        snapshot.agents[0].model = "default".into();
+        Ok(())
+    }).unwrap();
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture.create_task(CreateTaskInput {
+        agent_id: agent.id, title: "Current model".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    add_pending_model_receipt(&fixture, &task.id, "default");
+    let accepted = fixture.accept_send(task.id.clone(), "first".into(), vec![]).unwrap().unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| snapshot.tasks.iter().find(|item| item.id == task.id).is_some_and(|item| item.status == "completed"));
+    assert_eq!(receipt_model_status(&fixture, &task.id), "already_current");
 }
 
 fn receipt_reasoning_status(fixture: &Fixture, task_id: &str) -> String {
