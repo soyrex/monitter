@@ -321,6 +321,7 @@ if (process.argv.includes('--write')) {
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(generatedPath, generated);
 } else {
+  if (JSON.stringify(oldManifest) !== JSON.stringify(manifest)) fail('manifest is stale; run node scripts/command-contract.mjs --write and review the contract diff');
   compareSource(manifest, inventory, sourceCommands);
   if (readFileSync(generatedPath, 'utf8') !== generated) fail('generated TypeScript is stale; run node scripts/command-contract.mjs --write');
   console.log(`Command contract covers ${Object.keys(manifest.commands).length} native commands (${inventory.lan.length} LAN commands).`);

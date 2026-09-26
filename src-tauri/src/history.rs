@@ -339,6 +339,11 @@ impl<T: HistoryRecord> History<T> {
 
     /// Clone of the persistent ordered index list; iterate it in reverse for
     /// newest-first scoped paging without scanning other scopes.
+    pub fn scope_ids(&self) -> Vec<String> {
+        self.ensure_indexes();
+        self.scopes.lock().expect("history scope index poisoned").keys().cloned().collect()
+    }
+
     pub fn scope_indices(&self, scope: &str) -> Vector<usize> {
         self.ensure_indexes();
         self.scopes

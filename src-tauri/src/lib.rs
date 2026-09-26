@@ -699,9 +699,10 @@ struct CommandCapabilities {
     commands: Vec<String>,
 }
 
-fn command_contract() -> Result<serde_json::Value, String> {
-    serde_json::from_str(include_str!("../../command-contract.json"))
-        .map_err(|_| "The generated command contract is invalid.".to_string())
+fn command_contract() -> Result<&'static serde_json::Value, String> {
+    static CONTRACT: std::sync::OnceLock<Result<serde_json::Value, String>> = std::sync::OnceLock::new();
+    CONTRACT.get_or_init(|| serde_json::from_str(include_str!("../../command-contract.json"))
+        .map_err(|_| "The generated command contract is invalid.".to_string())).as_ref().map_err(Clone::clone)
 }
 
 fn command_available_on_surface(command: &str, surface: &str) -> Result<bool, String> {

@@ -7,7 +7,7 @@
 use crate::model::{RunEvent, Snapshot};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 pub const MAX_LIVE_EVENTS_PER_TASK: usize = 60;
 pub const MAX_LIVE_EVENTS: usize = 300;
@@ -354,24 +354,6 @@ pub(crate) fn compact_event(event: &RunEvent) -> RunEvent {
 /// All non-event state is preserved. Events are chronological, with at most
 /// the newest useful activity per task and no unbounded diagnostic detail.
 pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
-    let mut retained = HashMap::<&str, usize>::new();
-    let mut newest_first = Vec::new();
-    for event in snapshot.events.iter().rev() {
-        // Assistant content is already represented by messages. Provider logs
-        // and streamed output belong in the explicit diagnostic timeline.
-        if matches!(event.kind.as_str(), "log" | "output") {
-            continue;
-        }
-        let count = retained.entry(&event.task_id).or_default();
-        if *count < MAX_LIVE_EVENTS_PER_TASK && newest_first.len() < MAX_LIVE_EVENTS {
-            *count += 1;
-            newest_first.push(compact_event(event));
-            if newest_first.len() == MAX_LIVE_EVENTS {
-                break;
-            }
-        }
-    }
-    newest_first.reverse();
     Snapshot {
         hosts: snapshot.hosts.clone(),
         agents: snapshot.agents.clone(),
@@ -379,7 +361,7 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         messages: snapshot.messages.clone(),
         mail_batches: snapshot.mail_batches.clone(),
         work_plans: snapshot.work_plans.clone(),
-        events: newest_first.into_iter().map(Arc::new).collect(),
+        events: crate::ui_sync::compact_events(snapshot),
         channels: snapshot.channels.clone(),
         project_board_messages: snapshot.project_board_messages.clone(),
         projects: snapshot.projects.clone(),

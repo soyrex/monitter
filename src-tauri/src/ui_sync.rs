@@ -241,13 +241,27 @@ pub fn message_changes(before: &Snapshot, after: &Snapshot) -> Option<(Vec<Messa
 pub fn projection(snapshot: &Snapshot, include_messages: bool) -> Snapshot {
     let mut output = snapshot.clone();
     let mut messages = Vec::new();
-    let mut events = Vec::new();
     for task in &snapshot.tasks {
         if include_messages {
             let positions = snapshot.messages.scope_indices(&task.id);
             messages.extend(positions.iter().rev().take(LIVE_MESSAGES_PER_TASK).copied());
         }
-        let positions = snapshot.events.scope_indices(&task.id);
+    }
+    messages.sort_unstable();
+    output.messages = messages
+        .into_iter()
+        .map(|index| snapshot.messages[index].clone())
+        .collect();
+    output.events = compact_events(snapshot);
+    output
+}
+
+pub fn compact_events(
+    snapshot: &Snapshot,
+) -> crate::history::History<std::sync::Arc<crate::model::RunEvent>> {
+    let mut events = Vec::new();
+    for task_id in snapshot.events.scope_ids() {
+        let positions = snapshot.events.scope_indices(&task_id);
         events.extend(
             positions
                 .iter()
@@ -258,20 +272,14 @@ pub fn projection(snapshot: &Snapshot, include_messages: bool) -> Snapshot {
                 .copied(),
         );
     }
-    messages.sort_unstable();
     events.sort_unstable();
     let start = events
         .len()
         .saturating_sub(crate::lan_sync::MAX_LIVE_EVENTS);
-    output.messages = messages
-        .into_iter()
-        .map(|index| snapshot.messages[index].clone())
-        .collect();
-    output.events = events[start..]
+    events[start..]
         .iter()
         .map(|index| std::sync::Arc::new(crate::lan_sync::compact_event(&snapshot.events[*index])))
-        .collect();
-    output
+        .collect()
 }
 
 pub fn message_page(
