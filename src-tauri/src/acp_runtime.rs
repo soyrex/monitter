@@ -481,17 +481,26 @@ fn send(control: &RunControl, value: Value) -> Result<(), String> {
     control.send_control(&value.to_string())
 }
 
-fn send_permission_response(
+fn send_protocol_response(
     service: &Arc<Service>,
     task_id: &str,
     control: &Arc<RunControl>,
+    turn_id: &str,
     value: Value,
 ) {
     if let Err(error) = send(control, value) {
-        let detail = format!("ACP permission response was not delivered: {error}");
-        service.record(task_id, "error", "ACP permission delivery failed", detail.clone());
-        service.complete_app_server_turn(task_id, control, None, "error", Some(detail));
-        control.cancel();
+        if !control.matches_app_server_turn(turn_id) {
+            eprintln!("ACP reply delivery failed after its turn fence changed: {error}");
+            return;
+        }
+        let detail = format!("ACP protocol response was not delivered: {error}");
+        let _ = service.complete_app_server_turn(
+            task_id,
+            control,
+            Some(turn_id),
+            "error",
+            Some(detail),
+        );
     }
 }
 
@@ -796,10 +805,11 @@ fn handle_permission_request(
     // Validate the opaque one-time options before showing a control. Invalid
     // or perpetual-only requests are cancelled rather than broadened.
     if acp_protocol::permission_outcome(&params, false).is_err() {
-        send_permission_response(
+        send_protocol_response(
             &service,
             &task_id,
             &control,
+            &turn,
             acp_protocol::response(id, acp_protocol::cancelled_permission()),
         );
         return;
@@ -828,7 +838,13 @@ fn handle_permission_request(
                 acp_protocol::cancelled_permission()
             }
         };
-        send_permission_response(&service, &task_id, &control, acp_protocol::response(id, outcome));
+        send_protocol_response(
+            &service,
+            &task_id,
+            &control,
+            &turn,
+            acp_protocol::response(id, outcome),
+        );
         return;
     }
     if pending
@@ -837,10 +853,11 @@ fn handle_permission_request(
         })
         .is_err()
     {
-        send_permission_response(
+        send_protocol_response(
             &service,
             &task_id,
             &control,
+            &turn,
             acp_protocol::error_response(id, -32000, "Too many pending ACP permission requests."),
         );
         return;
@@ -906,7 +923,13 @@ fn handle_permission_request(
                 .unwrap_or_else(|_| acp_protocol::cancelled_permission()),
             Err(_) => acp_protocol::cancelled_permission(),
         };
-        send_permission_response(&service, &task_id, &control, acp_protocol::response(id, outcome));
+        send_protocol_response(
+            &service,
+            &task_id,
+            &control,
+            &turn,
+            acp_protocol::response(id, outcome),
+        );
         control.acp_permission_wait_finished();
     });
 }
@@ -1314,19 +1337,34 @@ fn run(
         return;
     };
     let stderr = child.stderr.take();
-    if let Err((mut child, _)) = control.install(child, None) {
-        runner::terminate_bounded(&mut child);
+    if let Err(error) = control.install(child, None) {
         if let Some(remote) = remote_collaboration.take() {
             runner::abort_remote_collaboration(remote);
         }
-        let _ = service.complete_app_server_turn(&task_id, &control, None, "interrupted", None);
+        let _ = service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
         return;
     }
     if let Some(remote) = remote_collaboration.take() {
         runner::attach_remote_collaboration(remote, &control);
     }
     control.mark_acp_transport();
-    control.set_acp_control(OutboundWriter::spawn(stdin));
+    let writer = match OutboundWriter::spawn(stdin) {
+        Ok(writer) => writer,
+        Err(error) => {
+            let _ = service.complete_app_server_turn(
+                &task_id,
+                &control,
+                None,
+                "error",
+                Some(error),
+            );
+            return;
+        }
+    };
+    if let Err(error) = control.set_acp_control(writer) {
+        let _ = service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
+        return;
+    }
     control.mark_resident();
     if let Some(stderr) = stderr {
         let service = service.clone();
@@ -1537,8 +1575,11 @@ fn run(
                     || !control.matches_app_server_turn(&turn)
                     || !seen_permission_ids.insert(id_key)
                 {
-                    let _ = send(
+                    send_protocol_response(
+                        &service,
+                        &task_id,
                         &control,
+                        &turn,
                         acp_protocol::error_response(
                             value["id"].clone(),
                             -32600,
@@ -1558,8 +1599,11 @@ fn run(
                     );
                 }
             } else {
-                let _ = send(
+                send_protocol_response(
+                    &service,
+                    &task_id,
                     &control,
+                    &turn,
                     acp_protocol::error_response(
                         value["id"].clone(),
                         -32601,

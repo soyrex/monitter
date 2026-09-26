@@ -14,19 +14,38 @@ pipe write, Monitter cannot know whether the provider received the response.
 If an approval response cannot be confirmed, Monitter records a visible error
 and terminalizes the active turn.
 
-Each frame is limited to 1 MiB. The ordinary queue accepts at most 64 frames and
-2 MiB of queued frame bytes. A separate control queue accepts at most four
-frames (4 MiB maximum) and takes priority over queued ordinary traffic. The
-writer always processes one frame at a time, so provider protocol order is
-preserved within each queue and cancellation can overtake frames that have not
-started writing.
+Each outbound frame is limited to 32 MiB. This allows a JSON frame to carry a
+stored attachment up to the existing 20 MiB upload limit when represented as
+base64 (about 26.7 MiB) plus protocol text. Current Monitter user prompts append
+attachment host paths rather than embedding image bytes; generated inline
+images are capped at 512 KiB and attach to assistant output. The separate 2 MiB
+ACP and Codex app-server limits apply to inbound line readers and are not used
+as the outbound cap. Oversized outbound frames fail before queue admission.
+
+The ordinary queue accepts at most 64 frames. All queued normal and control
+frames share a 64 MiB byte budget; the control queue accepts at most four
+frames and takes priority over queued ordinary traffic. The writer always
+processes one frame at a time, so provider protocol order is preserved within
+each queue and cancellation can overtake frames that have not started writing.
 
 The writer thread may be blocked inside an operating-system pipe write. Closing
 the mailbox never joins or waits for that thread. Stop enqueues a best-effort
 priority interrupt, closes further admission, and signals the owned child
-process; process teardown breaks a blocked pipe write. Callers waiting for
-delivery have a bounded timeout. A timeout is an unknown delivery result, so
-callers fail visibly instead of replaying the frame.
+process; process teardown breaks a blocked pipe write. Dropping the final
+writer handle also closes admission, while dropping an earlier clone leaves
+the shared writer alive.
+
+Callers waiting for delivery have a bounded timeout. If a frame has not started
+writing, Monitter removes it from the queue. If the writer already took it,
+the delivery result is unknown: it may still arrive after the timeout.
+Monitter never retries that frame. It terminalizes only the exact run and turn
+that requested the reply, so a late failure cannot change a later resident
+turn.
+
+Writer-thread startup failures propagate to harness setup and terminate the
+child instead of leaving an interactive process without an owner. Reply errors
+whose request has no current run/turn fence are logged without changing task
+state.
 
 ## Provider boundaries
 
@@ -56,6 +75,6 @@ rustc --edition=2021 --test src-tauri/src/outbound_transport.rs -o /tmp/monitter
 ```
 
 The tests cover one-time flushed delivery, bounded frame validation, priority
-ordering, and a Stop path that closes admission promptly while a fake pipe
-writer is blocked. The broader Rust suite also exercises resident Codex turns,
+ordering, clone lifetime, and a fake subprocess whose unread stdin blocks until
+process teardown. The broader Rust suite also exercises resident Codex turns,
 ACP steering, approval lifecycle, and process teardown.

@@ -233,9 +233,8 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         );
         return;
     };
-    if let Err((mut child, _)) = control.install(child, Some(stdin)) {
-        super::runner::terminate_bounded(&mut child);
-        service.complete_app_server_turn(&task_id, &control, None, "interrupted", None);
+    if let Err(error) = control.install(child, Some(stdin)) {
+        service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
         return;
     }
     control.mark_resident();
@@ -793,9 +792,21 @@ fn handle_server_request(
         return;
     }
     let params = request.get("params").unwrap_or(&Value::Null);
+    let response_turn_id = params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let response_thread_id = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
     if params.to_string().len() > 64 * 1024 {
-        let _ = send(
+        send_protocol_response(
+            &service,
+            &task_id,
             &control,
+            response_thread_id,
+            response_turn_id,
             json!({"id":request["id"],"error":{"code":-32602,"message":"Codex request is too large."}}),
         );
         return;
@@ -805,8 +816,12 @@ fn handle_server_request(
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
     else {
-        let _ = send(
+        send_protocol_response(
+            &service,
+            &task_id,
             &control,
+            response_thread_id,
+            None,
             json!({"id":request["id"],"error":{"code":-32602,"message":"Codex request omitted a turn ID."}}),
         );
         return;
@@ -816,15 +831,23 @@ fn handle_server_request(
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
     else {
-        let _ = send(
+        send_protocol_response(
+            &service,
+            &task_id,
             &control,
+            response_thread_id,
+            response_turn_id,
             json!({"id":request["id"],"error":{"code":-32602,"message":"Codex request omitted a thread ID."}}),
         );
         return;
     };
     if !control.app_server_turn_is_current(thread_id, turn_id) {
-        let _ = send(
+        send_protocol_response(
+            &service,
+            &task_id,
             &control,
+            Some(thread_id),
+            Some(turn_id),
             json!({"id":request["id"],"error":{"code":-32000,"message":"Codex request is no longer current."}}),
         );
         return;
@@ -836,8 +859,12 @@ fn handle_server_request(
         .to_string();
     let accepted = accept_received_request(&lifecycle, &rpc_id);
     if !accepted {
-        let _ = send(
+        send_protocol_response(
+            &service,
+            &task_id,
             &control,
+            Some(thread_id),
+            Some(turn_id),
             json!({"id":request["id"],"error":{"code":-32000,"message":"Duplicate or excessive Codex request."}}),
         );
         return;
@@ -845,8 +872,12 @@ fn handle_server_request(
     if outstanding.fetch_add(1, Ordering::SeqCst) >= MAX_SERVER_REQUESTS {
         outstanding.fetch_sub(1, Ordering::SeqCst);
         let _ = finish_request(&lifecycle, &rpc_id);
-        let _ = send(
+        send_protocol_response(
+            &service,
+            &task_id,
             &control,
+            Some(thread_id),
+            Some(turn_id),
             json!({"id":request["id"],"error":{"code":-32000,"message":"Too many outstanding Codex requests."}}),
         );
         return;
@@ -862,9 +893,21 @@ fn handle_server_request(
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let response_turn_id = params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let response_thread_id = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
         if params.to_string().len() > 64 * 1024 {
-            let _ = send(
+            send_protocol_response(
+                &service,
+                &task_id,
                 &control,
+                response_thread_id,
+                response_turn_id,
                 json!({"id":id,"error":{"code":-32602,"message":"Codex request is too large."}}),
             );
             return;
@@ -874,8 +917,12 @@ fn handle_server_request(
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         else {
-            let _ = send(
+            send_protocol_response(
+                &service,
+                &task_id,
                 &control,
+                response_thread_id,
+                None,
                 json!({"id":id,"error":{"code":-32602,"message":"Codex request omitted a turn ID."}}),
             );
             return;
@@ -885,15 +932,23 @@ fn handle_server_request(
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         else {
-            let _ = send(
+            send_protocol_response(
+                &service,
+                &task_id,
                 &control,
+                response_thread_id,
+                response_turn_id,
                 json!({"id":id,"error":{"code":-32602,"message":"Codex request omitted a thread ID."}}),
             );
             return;
         };
         if !control.app_server_turn_is_current(thread_id, turn_id) {
-            let _ = send(
+            send_protocol_response(
+                &service,
+                &task_id,
                 &control,
+                Some(thread_id),
+                Some(turn_id),
                 json!({"id":id,"error":{"code":-32000,"message":"Codex request is no longer current."}}),
             );
             return;
@@ -910,8 +965,12 @@ fn handle_server_request(
             })
             .unwrap_or(false);
         if !is_new {
-            let _ = send(
+            send_protocol_response(
+                &service,
+                &task_id,
                 &control,
+                Some(thread_id),
+                Some(turn_id),
                 json!({"id":id,"error":{"code":-32000,"message":"Duplicate or excessive Codex request."}}),
             );
             return;
@@ -961,8 +1020,12 @@ fn handle_server_request(
                 })
                 .collect::<Vec<_>>();
             if questions.is_empty() || questions.len() > 8 {
-                let _ = send(
+                send_protocol_response(
+                    &service,
+                    &task_id,
                     &control,
+                    Some(thread_id),
+                    Some(turn_id),
                     json!({"id":id,"error":{"code":-32602,"message":"Unsupported Codex input request."}}),
                 );
                 let _ = finish_request(&lifecycle, &rpc_id);
@@ -1000,10 +1063,12 @@ fn handle_server_request(
                 Ok(response) => {
                     let response_live = finish_request(&lifecycle, &rpc_id);
                     if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-                        send_approval_response(
+                        send_protocol_response(
                             &service,
                             &task_id,
                             &control,
+                            Some(thread_id),
+                            Some(turn_id),
                             json!({"id":id,"result":response}),
                         );
                     }
@@ -1011,10 +1076,12 @@ fn handle_server_request(
                 Err(error) => {
                     let response_live = finish_request(&lifecycle, &rpc_id);
                     if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-                        send_approval_response(
+                        send_protocol_response(
                             &service,
                             &task_id,
                             &control,
+                            Some(thread_id),
+                            Some(turn_id),
                             json!({"id":id,"error":{"code":-32000,"message":error}}),
                         );
                     }
@@ -1043,8 +1110,12 @@ fn handle_server_request(
                 _ => None,
             };
             let Some(interaction) = interaction else {
-                let _ = send(
+                send_protocol_response(
+                    &service,
+                    &task_id,
                     &control,
+                    Some(thread_id),
+                    Some(turn_id),
                     json!({"id":id,"result":{"action":"decline","content":null,"_meta":null}}),
                 );
                 let _ = finish_request(&lifecycle, &rpc_id);
@@ -1087,10 +1158,12 @@ fn handle_server_request(
             };
             let response_live = finish_request(&lifecycle, &rpc_id);
             if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-                send_approval_response(
+                send_protocol_response(
                     &service,
                     &task_id,
                     &control,
+                    Some(thread_id),
+                    Some(turn_id),
                     json!({"id":id,"result":result}),
                 );
             }
@@ -1141,8 +1214,12 @@ fn handle_server_request(
                     .map(|_| params.clone()),
             ),
             _ => {
-                let _ = send(
+                send_protocol_response(
+                    &service,
+                    &task_id,
                     &control,
+                    Some(thread_id),
+                    Some(turn_id),
                     json!({"id":id,"error":{"code":-32601,"message":"Monitter does not support this interactive Codex request."}}),
                 );
                 let _ = finish_request(&lifecycle, &rpc_id);
@@ -1166,8 +1243,12 @@ fn handle_server_request(
         ) {
             Ok(request) => request,
             Err(error) => {
-                let _ = send(
+                send_protocol_response(
+                    &service,
+                    &task_id,
                     &control,
+                    Some(thread_id),
+                    Some(turn_id),
                     json!({"id":id,"error":{"code":-32000,"message":error}}),
                 );
                 let _ = finish_request(&lifecycle, &rpc_id);
@@ -1198,10 +1279,12 @@ fn handle_server_request(
         };
         let response_live = finish_request(&lifecycle, &rpc_id);
         if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-            send_approval_response(
+            send_protocol_response(
                 &service,
                 &task_id,
                 &control,
+                Some(thread_id),
+                Some(turn_id),
                 json!({"id":id,"result":result}),
             );
         }
@@ -1732,17 +1815,29 @@ fn send(control: &RunControl, value: Value) -> Result<(), String> {
     control.send_control(&value.to_string())
 }
 
-fn send_approval_response(
+fn send_protocol_response(
     service: &Arc<Service>,
     task_id: &str,
     control: &Arc<RunControl>,
+    thread_id: Option<&str>,
+    turn_id: Option<&str>,
     value: Value,
 ) {
     if let Err(error) = send(control, value) {
-        let detail = format!("Codex approval response was not delivered: {error}");
-        service.record(task_id, "error", "Codex approval delivery failed", detail.clone());
-        service.complete_app_server_turn(task_id, control, None, "error", Some(detail));
-        control.cancel();
+        if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
+            if control.app_server_turn_is_current(thread_id, turn_id) {
+                let detail = format!("Codex protocol response was not delivered: {error}");
+                let _ = service.complete_app_server_turn(
+                    task_id,
+                    control,
+                    Some(turn_id),
+                    "error",
+                    Some(detail),
+                );
+                return;
+            }
+        }
+        eprintln!("Codex app-server reply delivery failed without a current turn fence: {error}");
     }
 }
 fn initialize() -> Value {

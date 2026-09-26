@@ -73,9 +73,8 @@ fn live_ssh_codex_app_server_handshake() {
             let _ = std::io::copy(&mut stderr.take(64 * 1024), &mut std::io::sink());
         });
     }
-    if let Err((mut child, _)) = control.install(child, Some(stdin)) {
-        runner::terminate_bounded(&mut child);
-        panic!("Could not own the SSH child");
+    if let Err(error) = control.install(child, Some(stdin)) {
+        panic!("Could not own the SSH child: {error}");
     }
     let (tx, rx) = mpsc::sync_channel(1);
     thread::spawn(move || {

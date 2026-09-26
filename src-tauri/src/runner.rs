@@ -3001,10 +3001,13 @@ impl RunControl {
         self.acp_transport.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn set_acp_control(&self, writer: OutboundWriter) {
-        if let Ok(mut slot) = self.acp_control.lock() {
-            *slot = Some(writer);
-        }
+    pub(crate) fn set_acp_control(&self, writer: OutboundWriter) -> Result<(), String> {
+        let mut slot = self
+            .acp_control
+            .lock()
+            .map_err(|_| "ACP control queue unavailable.".to_string())?;
+        *slot = Some(writer);
+        Ok(())
     }
 
     pub(crate) fn set_app_server_thread(&self, thread_id: String) {
@@ -3246,21 +3249,37 @@ impl RunControl {
 
     pub(crate) fn install(
         &self,
-        child: Child,
+        mut child: Child,
         control_stdin: Option<ChildStdin>,
-    ) -> Result<(), (Child, Option<ChildStdin>)> {
+    ) -> Result<(), String> {
         let mut slot = match self.child.lock() {
             Ok(slot) => slot,
-            Err(_) => return Err((child, control_stdin)),
+            Err(_) => {
+                terminate_bounded(&mut child);
+                return Err("Codex child lock failed while installing stdin writer.".into());
+            }
         };
         let mut stdin_slot = match self.control_stdin.lock() {
             Ok(slot) => slot,
-            Err(_) => return Err((child, control_stdin)),
+            Err(_) => {
+                drop(slot);
+                terminate_bounded(&mut child);
+                return Err("Provider control lock failed while installing stdin writer.".into());
+            }
+        };
+        let outbound = match control_stdin.map(OutboundWriter::spawn).transpose() {
+            Ok(outbound) => outbound,
+            Err(error) => {
+                drop(stdin_slot);
+                drop(slot);
+                terminate_bounded(&mut child);
+                return Err(error);
+            }
         };
         self.owned_process_group
             .store(child.id() as i32, Ordering::SeqCst);
         *slot = Some(child);
-        *stdin_slot = control_stdin.map(OutboundWriter::spawn);
+        *stdin_slot = outbound;
         drop(stdin_slot);
         drop(slot);
         if self.cancelled.load(Ordering::SeqCst) {
@@ -4580,10 +4599,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             attach_remote_collaboration(remote, &control);
         }
 
-        if let Err((mut child, _stdin)) = control.install(child, control_stdin) {
-            terminate_bounded(&mut child);
+        if let Err(error) = control.install(child, control_stdin) {
             control.cleanup_auxiliary();
-            service.finish(&task_id, "interrupted", None);
+            service.finish(&task_id, "error", Some(error));
             return;
         }
         if task.provider == "claude" {
@@ -5044,7 +5062,9 @@ for line in sys.stdin.buffer:
         }));
         let captured = Arc::new(Mutex::new(Vec::new()));
         control.mark_acp_transport();
-        control.set_acp_control(OutboundWriter::spawn(SharedWriter(captured.clone())));
+        control
+            .set_acp_control(OutboundWriter::spawn(SharedWriter(captured.clone())).unwrap())
+            .unwrap();
         control
             .send_acp_steer("change course", "queued-follow-up".into())
             .unwrap();
