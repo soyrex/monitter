@@ -148,6 +148,10 @@ impl OutboundWriter {
                 if self.cancel_if_queued(delivery.ticket) {
                     Err("Provider control frame timed out and was removed before writing.".into())
                 } else {
+                    // Delivery is ambiguous after dequeue. Poison the writer
+                    // so no later turn can queue behind a blocked or partial
+                    // write; the process owner must retire this transport.
+                    self.close();
                     Err("Provider control frame timed out with delivery still unknown.".into())
                 }
             }
@@ -402,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_of_inflight_frame_is_ambiguous_and_never_retried() {
+    fn unknown_timeout_closes_admission_and_never_retries() {
         let writer = GateWriter::default();
         let observed = Arc::clone(&writer.state);
         observed.0.lock().unwrap().blocked = true;
@@ -417,16 +421,15 @@ mod tests {
         }
         assert_eq!(transport.shared.writing.load(Ordering::Acquire), 1);
         assert!(pending.join().unwrap().unwrap_err().contains("unknown"));
+        assert!(transport.enqueue("next turn", Priority::Normal).is_err());
         let (lock, changed) = &*observed;
         lock.lock().unwrap().blocked = false;
         changed.notify_all();
-        let barrier = transport.enqueue("barrier", Priority::Normal).unwrap();
-        barrier
-            .receiver
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-            .unwrap();
-        assert_eq!(observed.0.lock().unwrap().bytes, b"approval\nbarrier\n");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while transport.shared.writing.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(observed.0.lock().unwrap().bytes, b"approval\n");
         transport.close();
     }
 
@@ -565,27 +568,53 @@ mod tests {
             .unwrap();
         assert_eq!(ready.trim(), "ready");
 
-        let transport = OutboundWriter::spawn(child.stdin.take().unwrap()).unwrap();
+        struct DropSignalWriter {
+            stdin: std::process::ChildStdin,
+            dropped: Option<mpsc::Sender<()>>,
+        }
+        impl Write for DropSignalWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.stdin.write(bytes)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.stdin.flush()
+            }
+        }
+        impl Drop for DropSignalWriter {
+            fn drop(&mut self) {
+                if let Some(sender) = self.dropped.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let (writer_dropped, dropped_rx) = mpsc::channel();
+        let transport = OutboundWriter::spawn(DropSignalWriter {
+            stdin: child.stdin.take().unwrap(),
+            dropped: Some(writer_dropped),
+        })
+        .unwrap();
         let writer = transport.clone();
         let frame = "x".repeat(MAX_FRAME_BYTES);
         let pending =
-            thread::spawn(move || writer.send(&frame, Priority::Normal, Duration::from_secs(5)));
+            thread::spawn(move || writer.send(&frame, Priority::Normal, Duration::from_millis(50)));
         let deadline = Instant::now() + Duration::from_secs(1);
         while transport.shared.writing.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
             thread::yield_now();
         }
         assert_eq!(transport.shared.writing.load(Ordering::Acquire), 1);
-        thread::sleep(Duration::from_millis(50));
-        transport.close();
-        assert!(
-            !pending.is_finished(),
-            "close must not wait for or fake completion of the pipe write"
-        );
+        assert!(pending
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .contains("delivery still unknown"));
+        assert!(transport
+            .send("later turn", Priority::Normal, Duration::from_millis(1))
+            .is_err());
         let started = Instant::now();
         child.kill().unwrap();
         let _ = child.wait().unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(pending.join().unwrap().is_err());
+        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(transport);
     }
 }

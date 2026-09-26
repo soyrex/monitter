@@ -39,8 +39,9 @@ Callers waiting for delivery have a bounded timeout. If a frame has not started
 writing, Monitter removes it from the queue. If the writer already took it,
 the delivery result is unknown: it may still arrive after the timeout.
 Monitter never retries that frame. It terminalizes only the exact run and turn
-that requested the reply, so a late failure cannot change a later resident
-turn.
+that requested the reply and retires that process owner, so the poisoned writer
+cannot be reused by a later resident turn and a late failure cannot change a
+different turn.
 
 Writer-thread startup failures propagate to harness setup and terminate the
 child instead of leaving an interactive process without an owner. Reply errors

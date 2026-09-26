@@ -670,6 +670,38 @@ impl Service {
         status: &str,
         error: Option<String>,
     ) -> bool {
+        self.complete_app_server_turn_inner(task_id, control, turn_id, status, error, false)
+    }
+
+    pub(crate) fn fail_app_server_turn_and_retire(
+        self: &Arc<Self>,
+        task_id: &str,
+        control: &Arc<RunControl>,
+        turn_id: &str,
+        error: String,
+    ) -> bool {
+        self.complete_app_server_turn_inner(
+            task_id,
+            control,
+            Some(turn_id),
+            "error",
+            Some(error),
+            true,
+        )
+    }
+
+    fn complete_app_server_turn_inner(
+        self: &Arc<Self>,
+        task_id: &str,
+        control: &Arc<RunControl>,
+        turn_id: Option<&str>,
+        status: &str,
+        error: Option<String>,
+        retire_transport: bool,
+    ) -> bool {
+        if retire_transport && turn_id.is_none() {
+            return false;
+        }
         if control.is_planned_retirement() {
             return false;
         }
@@ -692,6 +724,11 @@ impl Service {
             };
             if self
                 .app_server_mutate(task_id, control, turn_id, |data, _| {
+                    if retire_transport
+                        && !control.reserve_cancellation_for_app_server_turn(turn_id.unwrap())
+                    {
+                        return Err("Resident turn changed before transport retirement.".into());
+                    }
                     let task = data
                         .snapshot
                         .tasks
@@ -705,7 +742,13 @@ impl Service {
                 })
                 .is_err()
             {
+                if retire_transport && control.is_cancelled() {
+                    control.cancel();
+                }
                 return false;
+            }
+            if retire_transport {
+                control.cancel();
             }
             self.app_server_message_ids
                 .lock()
@@ -725,6 +768,11 @@ impl Service {
         self.mark_usage_final(task_id);
         let result =
             self.app_server_mutate(task_id, control, turn_id, |data, _| {
+                if retire_transport
+                    && !control.reserve_cancellation_for_app_server_turn(turn_id.unwrap())
+                {
+                    return Err("Resident turn changed before transport retirement.".into());
+                }
                 let task = data
                     .snapshot
                     .tasks
@@ -793,8 +841,14 @@ impl Service {
                 Ok((expired, routes))
             });
         let Ok((expired, routes)) = result else {
+            if retire_transport && control.is_cancelled() {
+                control.cancel();
+            }
             return false;
         };
+        if retire_transport {
+            control.cancel();
+        }
         self.mark_runtime_idle_if_current(task_id, control);
         for request in expired {
             self.notify_approval_waiters(&request, Err("Codex turn ended.".into()));

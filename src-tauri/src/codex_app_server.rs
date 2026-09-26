@@ -1823,21 +1823,20 @@ fn send_protocol_response(
     turn_id: Option<&str>,
     value: Value,
 ) {
-    if let Err(error) = send(control, value) {
-        if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
-            if control.app_server_turn_is_current(thread_id, turn_id) {
-                let detail = format!("Codex protocol response was not delivered: {error}");
-                let _ = service.complete_app_server_turn(
-                    task_id,
-                    control,
-                    Some(turn_id),
-                    "error",
-                    Some(detail),
-                );
-                return;
-            }
+    if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
+        if !control.app_server_turn_is_current(thread_id, turn_id) {
+            eprintln!("Codex app-server reply skipped because its turn fence changed.");
+            return;
         }
-        eprintln!("Codex app-server reply delivery failed without a current turn fence: {error}");
+        if let Err(error) = send(control, value) {
+            let detail = format!("Codex protocol response was not delivered: {error}");
+            let _ = service.fail_app_server_turn_and_retire(task_id, control, turn_id, detail);
+        }
+    } else if let Err(error) = send(control, value) {
+        // Malformed-request errors without a complete turn identity, like
+        // initialization failures, remain best-effort protocol replies and
+        // cannot mutate or retire a resident owner.
+        eprintln!("Codex app-server error reply failed without a turn fence: {error}");
     }
 }
 fn initialize() -> Value {

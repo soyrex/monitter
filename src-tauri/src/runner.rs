@@ -3070,6 +3070,21 @@ impl RunControl {
             && !self.is_cancelled()
     }
 
+    /// Atomically fences this owner against reuse, but only while the exact
+    /// resident turn still owns it. Call before clearing the turn in a service
+    /// mutation, then perform process I/O through `cancel` after releasing the
+    /// service locks.
+    pub(crate) fn reserve_cancellation_for_app_server_turn(&self, turn_id: &str) -> bool {
+        let Ok(current) = self.app_server_turn.lock() else {
+            return false;
+        };
+        if current.as_deref() != Some(turn_id) || self.is_cancelled() {
+            return false;
+        }
+        self.reserve_cancellation();
+        true
+    }
+
     pub(crate) fn current_app_server_turn(&self) -> Option<String> {
         self.app_server_turn
             .lock()

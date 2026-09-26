@@ -488,19 +488,13 @@ fn send_protocol_response(
     turn_id: &str,
     value: Value,
 ) {
+    if !control.matches_app_server_turn(turn_id) {
+        eprintln!("ACP reply skipped because its turn fence changed before delivery.");
+        return;
+    }
     if let Err(error) = send(control, value) {
-        if !control.matches_app_server_turn(turn_id) {
-            eprintln!("ACP reply delivery failed after its turn fence changed: {error}");
-            return;
-        }
         let detail = format!("ACP protocol response was not delivered: {error}");
-        let _ = service.complete_app_server_turn(
-            task_id,
-            control,
-            Some(turn_id),
-            "error",
-            Some(detail),
-        );
+        let _ = service.fail_app_server_turn_and_retire(task_id, control, turn_id, detail);
     }
 }
 
