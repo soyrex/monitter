@@ -10,7 +10,7 @@ type UsageRingData = {
   updatedAt?: number | null;
   accounts?: UsageRingAccount[];
 };
-type UsageRingProvider = 'codex' | 'claude' | 'minimax' | 'opencode-go';
+type UsageRingProvider = 'codex' | 'claude' | 'gemini' | 'minimax' | 'opencode-go';
 type UsageRingMap = Record<UsageRingProvider, UsageRingData>;
 
 const providerSources = (overview: UsageOverview | null, provider: UsageRingProvider) =>
@@ -82,6 +82,7 @@ export function usageRingMap(
   return {
     codex: sourceFor('codex'),
     claude: sourceFor('claude'),
+    gemini: sourceFor('gemini'),
     minimax: sourceFor('minimax'),
     'opencode-go': sourceFor('opencode-go'),
   };

@@ -15,10 +15,10 @@
   import qwen from '@lobehub/icons-static-svg/icons/qwen-color.svg?raw';
   import Bot from "@lucide/svelte/icons/bot";
 
-  export type ProviderIconId = Provider | 'minimax' | 'opencode-go';
+  export type ProviderIconId = Provider | 'gemini' | 'minimax' | 'opencode-go';
   type IconProps = { provider: ProviderIconId; model?: string; size?: number; class?: string; title?: string };
 
-  const icons: Partial<Record<ProviderIconId, string>> = { codex, claude, minimax, opencode, hermes, 'opencode-go': opencode };
+  const icons: Partial<Record<ProviderIconId, string>> = { codex, claude, gemini, minimax, opencode, hermes, 'opencode-go': opencode };
   let { provider, model, size = 16, class: className = '', title }: IconProps = $props();
   function modelIcon(value: string | undefined): string | null {
     const name = value?.toLowerCase() ?? '';

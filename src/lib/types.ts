@@ -1,5 +1,5 @@
 export type Provider = 'codex' | 'claude' | 'opencode' | 'hermes' | 'acp';
-export type UsageProvider = Provider | 'minimax' | 'opencode-go';
+export type UsageProvider = Provider | 'gemini' | 'minimax' | 'opencode-go';
 export type UsageRefreshPolicy = 'cache-only' | 'if-stale' | 'refresh';
 export interface AllowanceWindow {
   key: string; label: string; metric: 'requests' | 'tokens' | 'spend' | 'combined' | 'unknown';

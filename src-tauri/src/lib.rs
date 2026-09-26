@@ -4009,7 +4009,7 @@ impl Service {
             });
         if policy == "refresh" || (policy == "if-stale" && stale) {
             if let Some(host) = local_host.as_ref() {
-                let mut sources = ["claude", "minimax", "opencode-go"]
+                let mut sources = ["claude", "gemini", "minimax", "opencode-go"]
                     .into_iter()
                     .map(|provider| usage_quota::refresh_provider_quota(host, provider))
                     .collect::<Vec<_>>();

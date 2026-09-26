@@ -10,7 +10,7 @@
    * responsible for fetching/mapping provider payloads; this component never
    * calls the native bridge and deliberately renders absent values as unknown.
    */
-  export type UsageRingProvider = 'codex' | 'claude' | 'minimax' | 'opencode-go';
+  export type UsageRingProvider = 'codex' | 'claude' | 'gemini' | 'minimax' | 'opencode-go';
   export type UsageRingStatus = 'ready' | 'loading' | 'unavailable' | 'error' | 'stale';
 
   export interface UsageRingWindow {
@@ -46,6 +46,7 @@
   const providers: readonly ProviderDefinition[] = [
     { id: 'codex', label: 'Codex', mark: 'C' },
     { id: 'claude', label: 'Claude', mark: 'Cl' },
+    { id: 'gemini', label: 'Gemini', mark: 'G' },
     { id: 'minimax', label: 'MiniMax', mark: 'M' },
     { id: 'opencode-go', label: 'OpenCode Go', mark: 'Go' },
   ];
@@ -500,7 +501,7 @@
   .compact .usage-copy { display:none; }
   .compact .usage-provider:hover { border-color:color-mix(in srgb,var(--accent) 22%,transparent); }
   .usage-ring-label { display:none; }
-  .rings-only .usage-body { grid-template-columns:repeat(4,minmax(0,1fr)); justify-items:center; gap:0; padding:6px 4px; }
+  .rings-only .usage-body { grid-template-columns:repeat(5,minmax(0,1fr)); justify-items:center; gap:0; padding:6px 4px; }
   .rings-only .usage-provider { grid-template-columns:1fr; grid-template-rows:auto auto; justify-items:center; gap:2px; padding:3px 0; border:0; }
   .rings-only .usage-provider:hover { border-color:transparent; }
   .rings-only .usage-copy { display:none; }

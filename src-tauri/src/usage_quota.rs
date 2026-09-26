@@ -21,6 +21,7 @@ use std::{
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const AGY_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 // The verified local command itself is quick, but a cold Claude CLI can take
 // longer than the other quota clients to initialise its Node runtime.
 const CLAUDE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,8 +32,8 @@ const STALE_AFTER_MS: i64 = 60_000;
 /// host.  The returned source intentionally carries failures rather than
 /// returning raw CLI/protocol errors, as those errors can contain account data.
 ///
-/// Supported provider names are `codex`, `claude`, `minimax` (with `mmx`
-/// accepted as an alias), and `opencode-go`.
+/// Supported provider names are `codex`, `claude`, `gemini`, `minimax` (with
+/// `mmx` accepted as an alias), and `opencode-go`.
 pub(crate) fn refresh_provider_quota(host: &Host, provider: &str) -> SubscriptionUsageSource {
     let attempted_at = now();
     let provider = provider.trim().to_ascii_lowercase();
@@ -54,6 +55,7 @@ pub(crate) fn refresh_provider_quota(host: &Host, provider: &str) -> Subscriptio
     match provider.as_str() {
         "codex" => refresh_codex(host, attempted_at, None),
         "claude" => refresh_claude(host, attempted_at),
+        "gemini" => refresh_gemini(host, attempted_at),
         "minimax" | "mmx" => refresh_minimax(host, attempted_at),
         "opencode-go" => refresh_opencode_go(host, attempted_at),
         _ => source(
@@ -66,6 +68,61 @@ pub(crate) fn refresh_provider_quota(host: &Host, provider: &str) -> Subscriptio
             vec![],
             vec![],
             None,
+        ),
+    }
+}
+
+/// AGY's `/usage` command is local and returns account quota rows without a
+/// model prompt. Keep this a separate bounded argv invocation and retain only
+/// the Gemini Models weekly and five-hour allowances.
+fn refresh_gemini(host: &Host, attempted_at: i64) -> SubscriptionUsageSource {
+    let executable = match resolve_local_provider("agy", "") {
+        Ok(path) => path,
+        Err(_) => {
+            return probe_error(
+                "gemini",
+                host,
+                "agy -p /usage",
+                attempted_at,
+                "Gemini quota probe requires the local AGY CLI.",
+            )
+        }
+    };
+    let mut command = Command::new(executable);
+    command.args(agy_usage_args());
+    configure(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            return probe_error(
+                "gemini",
+                host,
+                "agy -p /usage",
+                attempted_at,
+                "Could not start the Gemini quota probe.",
+            )
+        }
+    };
+    let result = read_all_bounded_with_timeout(&mut child, AGY_PROBE_TIMEOUT)
+        .and_then(|bytes| std::str::from_utf8(&bytes).map_err(|_| ()))
+        .and_then(normalize_agy_gemini_usage);
+    stop_child(&mut child);
+    match result {
+        Ok(windows) => success(
+            "gemini",
+            host,
+            "agy -p /usage",
+            attempted_at,
+            Some("AGY Gemini Models".into()),
+            windows,
+            vec![],
+        ),
+        Err(_) => probe_error(
+            "gemini",
+            host,
+            "agy -p /usage",
+            attempted_at,
+            "Gemini quota is unavailable from the local AGY usage command.",
         ),
     }
 }
@@ -351,6 +408,10 @@ fn claude_usage_args() -> [&'static str; 4] {
     ["-p", "/usage", "--output-format", "json"]
 }
 
+fn agy_usage_args() -> [&'static str; 2] {
+    ["-p", "/usage"]
+}
+
 fn opencode_go_args() -> [&'static str; 3] {
     ["provider-quota", "opencode-go", "--json"]
 }
@@ -578,6 +639,53 @@ fn normalize_claude_usage(value: Value, attempted_at: i64) -> Result<Vec<Allowan
             attempted_at,
         )?,
     ])
+}
+
+fn normalize_agy_gemini_usage(output: &str) -> Result<Vec<AllowanceWindow>, ()> {
+    let mut five_hour = None;
+    let mut weekly = None;
+    for line in output.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let parsed = match fields.as_slice() {
+            ["Gemini", "Models", "Weekly", "Limit", "Remaining", percent, resets_at] => {
+                Some(("weekly", "Week", percent, resets_at))
+            }
+            ["Gemini", "Models", "Five", "Hour", "Limit", "Remaining", percent, resets_at] => {
+                Some(("five_hour", "Five Hour", percent, resets_at))
+            }
+            _ => None,
+        };
+        let Some((key, label, percent, resets_at)) = parsed else {
+            continue;
+        };
+        let remaining = percent
+            .strip_suffix('%')
+            .ok_or(())?
+            .parse::<f64>()
+            .map_err(|_| ())?;
+        if !(0.0..=100.0).contains(&remaining) {
+            return Err(());
+        }
+        let resets_at = chrono::DateTime::parse_from_rfc3339(resets_at)
+            .map(|timestamp| timestamp.timestamp_millis())
+            .map_err(|_| ())?;
+        let window = AllowanceWindow {
+            key: key.into(),
+            label: label.into(),
+            metric: "combined".into(),
+            used_percent: Some(100.0 - remaining),
+            used: None,
+            limit: None,
+            unit: "unknown".into(),
+            resets_at: Some(resets_at),
+        };
+        match key {
+            "five_hour" if five_hour.is_none() => five_hour = Some(window),
+            "weekly" if weekly.is_none() => weekly = Some(window),
+            _ => return Err(()),
+        }
+    }
+    Ok(vec![five_hour.ok_or(())?, weekly.ok_or(())?])
 }
 
 /// Exactly two compiled, multiline expressions track the provider's two

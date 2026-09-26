@@ -125,6 +125,12 @@ pub fn resolve_local_provider(provider: &str, configured: &str) -> Result<PathBu
             PathBuf::from("/opt/homebrew/bin/claude"),
             PathBuf::from("/usr/local/bin/claude"),
         ],
+        "agy" => vec![
+            home.join(".local/bin/agy"),
+            home.join(".npm-global/bin/agy"),
+            PathBuf::from("/opt/homebrew/bin/agy"),
+            PathBuf::from("/usr/local/bin/agy"),
+        ],
         "hermes" => vec![
             home.join(".local/bin/hermes"),
             home.join(".npm-global/bin/hermes"),
