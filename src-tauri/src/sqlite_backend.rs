@@ -1844,6 +1844,119 @@ mod tests {
     }
 
     #[test]
+    fn legacy_channel_payload_identity_mismatch_rolls_back_migration() {
+        let (directory, path) = temp_path("channel-identity-migration");
+        let database = Database::create(&path).unwrap();
+        let mut snapshot = default_snapshot();
+        snapshot.channels = vec![
+            channel("first", vec![channel_message("a", "A", 1)]),
+            channel("second", vec![channel_message("b", "B", 2)]),
+        ];
+        database.replace_all(state(&snapshot), &[], None).unwrap();
+        let forged_second = channel("first", vec![channel_message("b", "B", 2)]);
+        {
+            let connection = database.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE entities SET payload=?1 WHERE collection='channels' AND id='second'",
+                    [serde_json::to_string(&forged_second).unwrap()],
+                )
+                .unwrap();
+            for channel_id in ["first", "second"] {
+                connection
+                    .execute(
+                        "DELETE FROM entities WHERE collection=?1",
+                        [channel_message_collection(channel_id)],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute("UPDATE meta SET value='1' WHERE key='schema_version'", [])
+                .unwrap();
+        }
+        drop(database);
+
+        assert!(Database::open(&path).is_err());
+        let raw = Connection::open(&path).unwrap();
+        let version: String = raw
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "1");
+        let normalized_rows: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE collection GLOB 'channel_messages:*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(normalized_rows, 0);
+        let second_payload: String = raw
+            .query_row(
+                "SELECT payload FROM entities WHERE collection='channels' AND id='second'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Channel>(&second_payload).unwrap(),
+            forged_second
+        );
+        drop(raw);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn normalized_channel_reads_reject_embedded_and_orphan_messages() {
+        let (directory, path) = temp_path("channel-v2-corruption");
+        let database = Database::create(&path).unwrap();
+        let mut snapshot = default_snapshot();
+        snapshot.channels = vec![channel(
+            "embedded",
+            vec![channel_message("inside", "legacy content", 1)],
+        )];
+        database.replace_all(state(&snapshot), &[], None).unwrap();
+        {
+            let connection = database.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE entities SET payload=?1 WHERE collection='channels' AND id='embedded'",
+                    [serde_json::to_string(&snapshot.channels[0]).unwrap()],
+                )
+                .unwrap();
+        }
+        assert!(database.read_snapshot().is_err());
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+
+        let (directory, path) = temp_path("channel-v2-orphan");
+        let database = Database::create(&path).unwrap();
+        database
+            .replace_all(state(&default_snapshot()), &[], None)
+            .unwrap();
+        let orphan = channel_message("orphan", "no channel", 1);
+        {
+            let connection = database.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO entities(collection,id,position,payload) VALUES(?1,?2,0,?3)",
+                    params![
+                        channel_message_collection("missing"),
+                        orphan.id,
+                        serde_json::to_string(&orphan).unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+        assert!(database.read_snapshot().is_err());
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn channel_point_edit_truncate_reorder_delete_and_recreate_are_durable() {
         let (directory, path) = temp_path("channel-edits");
         let database = Database::create(&path).unwrap();
