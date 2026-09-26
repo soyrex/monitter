@@ -3432,12 +3432,17 @@
             if (selected) {
               const effort = routeAgent.provider === 'acp' || !selected.reasoningEfforts.some(option => option.id === decision.reasoning_level) ? null : decision.reasoning_level;
               modelSettings = { model: selected.id, reasoningEffort: effort, fastMode: null };
-              routingNotice = withReviewNotice(`Jev applied ${label} with ${selected.name} (${Math.round(decision.confidence * 100)}% confidence).`);
+              const reasoningNotice = effort
+                ? `${decision.reasoning_level} reasoning selected.`
+                : routeAgent.provider === 'acp'
+                  ? `${decision.reasoning_level} reasoning will be checked against this ACP session's advertised options.`
+                  : `${decision.reasoning_level} reasoning is unavailable for this model; its default was kept.`;
+              routingNotice = withReviewNotice(`Jev selected ${selected.name} for its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence). ${reasoningNotice}`);
             } else {
-              routingNotice = withReviewNotice(`Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default was kept.`);
+              routingNotice = withReviewNotice(`Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default model was kept.${routeAgent.provider === 'acp' ? ' Its reasoning choice will be checked against the ACP session.' : ''}`);
             }
           } else {
-            routingNotice = withReviewNotice(`Jev recommends ${label}; this harness has no mapped model for that tier.`);
+            routingNotice = withReviewNotice(`Jev recommends ${label}; this harness has no mapped model for that tier. ${routeAgent.provider === 'acp' ? 'Its reasoning choice will be checked against the ACP session.' : 'The harness default was kept.'}`);
           }
         } else {
           routingNotice = withReviewNotice(`Jev recommends ${label} (${Math.round(decision.confidence * 100)}% confidence). Your model selection was kept.`);

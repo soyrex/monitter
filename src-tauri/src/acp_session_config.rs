@@ -1,7 +1,7 @@
 //! Generic, data-driven ACP session selectors. Nothing here guesses model names
 //! or permission semantics from an agent brand or an option's display label.
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,6 +221,63 @@ pub fn configured_model_request(
     Err("This ACP agent did not advertise model selection. Clear the configured model to use its default.".into())
 }
 
+/// Resolve a requested reasoning effort against the current session advertisement.
+/// Pass the latest `configOptions` response after changing models, since the
+/// agent may advertise different thought levels for each model.
+#[derive(Debug)]
+pub enum ThoughtLevelConfiguration {
+    Unsupported(String),
+    AlreadyCurrent {
+        applied_value: String,
+    },
+    Request {
+        method: &'static str,
+        params: Value,
+        applied_value: String,
+    },
+}
+
+pub fn configured_thought_level_request(
+    session_result: &Value,
+    session_id: &str,
+    reasoning_effort: &str,
+) -> Result<ThoughtLevelConfiguration, String> {
+    if !matches!(reasoning_effort, "low" | "medium" | "high" | "xhigh") {
+        return Err("ACP reasoning effort must be low, medium, high, or xhigh.".into());
+    }
+    let options = parse_options(&session_result["configOptions"])?;
+    let mut thought_levels = options
+        .iter()
+        .filter(|option| option.category.as_deref() == Some("thought_level"));
+    let Some(option) = thought_levels.next() else {
+        return Ok(ThoughtLevelConfiguration::Unsupported(
+            "This ACP session did not advertise a thought_level select control.".into(),
+        ));
+    };
+    if thought_levels.next().is_some() {
+        return Err("This ACP session advertised multiple thought_level controls.".into());
+    }
+    if !option
+        .options
+        .iter()
+        .any(|choice| choice.value == reasoning_effort)
+    {
+        return Ok(ThoughtLevelConfiguration::Unsupported(format!(
+            "This ACP session did not advertise reasoning effort {reasoning_effort}."
+        )));
+    }
+    let applied_value = reasoning_effort.to_owned();
+    if option.current_value == reasoning_effort {
+        return Ok(ThoughtLevelConfiguration::AlreadyCurrent { applied_value });
+    }
+    let params = selection_params(&options, session_id, &option.id, reasoning_effort)?;
+    Ok(ThoughtLevelConfiguration::Request {
+        method: "session/set_config_option",
+        params,
+        applied_value,
+    })
+}
+
 /// ACP owns permission semantics. YOLO prefers the live session's exact
 /// full-access mode and otherwise permits only advertised one-time approvals;
 /// Monitter never guesses from an agent name or selects durable authority.
@@ -295,8 +352,7 @@ mod tests {
             Some("Provider group")
         );
         assert_eq!(
-            selection_params(&parsed, "session", "opaque-model-id", "other/model").unwrap()
-                ["configId"],
+            selection_params(&parsed, "session", "opaque-model-id", "other/model").unwrap()["configId"],
             "opaque-model-id"
         );
         assert!(selection_params(&parsed, "session", "opaque-model-id", "invented").is_err());
@@ -304,13 +360,17 @@ mod tests {
     #[test]
     fn configured_models_use_advertised_ids_only() {
         let result = json!({"configOptions":options()});
-        assert!(configured_model_request(&json!({}), "s", "")
-            .unwrap()
-            .is_none());
+        assert!(
+            configured_model_request(&json!({}), "s", "")
+                .unwrap()
+                .is_none()
+        );
         assert!(configured_model_request(&json!({}), "s", "model").is_err());
-        assert!(configured_model_request(&result, "s", "default")
-            .unwrap()
-            .is_none());
+        assert!(
+            configured_model_request(&result, "s", "default")
+                .unwrap()
+                .is_none()
+        );
         let (method, params) = configured_model_request(&result, "s", "other/model")
             .unwrap()
             .unwrap();

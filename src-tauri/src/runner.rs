@@ -2891,6 +2891,13 @@ impl RunControl {
         }
     }
 
+    pub(crate) fn acp_session_config_snapshot(&self) -> Result<Value, String> {
+        self.acp_session_result
+            .lock()
+            .map(|result| result.clone().unwrap_or(Value::Null))
+            .map_err(|_| "ACP session configuration lock failed.".to_string())
+    }
+
     /// Recognize only reviewed, versioned ACP steering extensions. Treat
     /// malformed or unknown metadata as unsupported rather than widening
     /// generic ACP behavior.

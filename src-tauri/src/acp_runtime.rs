@@ -29,6 +29,7 @@ const SESSION_ID: i64 = 2;
 const FIRST_PROMPT_ID: i64 = 3;
 const MODEL_CONFIG_ID: i64 = 4;
 const PERMISSION_CONFIG_ID: i64 = 5;
+const REASONING_CONFIG_ID: i64 = 6;
 // OpenCode may initialize its configured providers/plugins before answering
 // ACP initialize (the installed CLI takes >20 seconds on a cold launch).
 // Keep a fixed deadline, without mistaking healthy cold startup for failure.
@@ -286,7 +287,10 @@ mod tests {
         assert_eq!(metadata.model, "MiniMax-M2.7");
         assert_eq!(metadata.input_tokens, 120);
         assert_eq!(metadata.output_tokens, 45);
-        assert_eq!(metadata.jev_rationale.as_deref(), Some("The task benefits from a longer reasoning budget."));
+        assert_eq!(
+            metadata.jev_rationale.as_deref(),
+            Some("The task benefits from a longer reasoning budget.")
+        );
         assert_eq!(metadata.requested_model.as_deref(), Some("gpt-6-astra"));
         assert_eq!(metadata.confidence, Some(0.92));
         assert_eq!(metadata.route_applied, Some(true));
@@ -297,16 +301,23 @@ mod tests {
 
     #[test]
     fn mona_prompt_result_rejects_partial_or_oversized_metadata() {
-        assert!(normalized_mona_response_metadata(&json!({
-            "model": "mona", "usage": {"inputTokens": 1}
-        }))
-        .is_err());
-        assert!(normalized_mona_response_metadata(&json!({
-            "model": "mona", "usage": {"inputTokens": 1, "outputTokens": 1},
-            "routing": {"rationale": "x".repeat(MAX_RESPONSE_METADATA_RATIONALE_BYTES + 1)}
-        }))
-        .is_err());
-        assert_eq!(normalized_mona_response_metadata(&json!({"stopReason": "end_turn"})).unwrap(), None);
+        assert!(
+            normalized_mona_response_metadata(&json!({
+                "model": "mona", "usage": {"inputTokens": 1}
+            }))
+            .is_err()
+        );
+        assert!(
+            normalized_mona_response_metadata(&json!({
+                "model": "mona", "usage": {"inputTokens": 1, "outputTokens": 1},
+                "routing": {"rationale": "x".repeat(MAX_RESPONSE_METADATA_RATIONALE_BYTES + 1)}
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            normalized_mona_response_metadata(&json!({"stopReason": "end_turn"})).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -465,6 +476,70 @@ fn recover_transport(
 
 fn send(control: &RunControl, value: Value) -> Result<(), String> {
     control.send_control(&value.to_string())
+}
+
+/// Jev's reasoning choice is optional. Apply only an exact level advertised
+/// by this live ACP session; unsupported or malformed controls keep the
+/// harness default and update the route receipt accordingly.
+fn request_jev_reasoning_if_supported(
+    service: &Service,
+    task_id: &str,
+    control: &RunControl,
+    session: &str,
+) -> Result<Option<String>, String> {
+    let Some(effort) = service.pending_jev_route_reasoning(task_id)? else {
+        return Ok(None);
+    };
+    let session_result = control.acp_session_config_snapshot()?;
+    match crate::acp_session_config::configured_thought_level_request(
+        &session_result,
+        session,
+        &effort,
+    ) {
+        Ok(crate::acp_session_config::ThoughtLevelConfiguration::Request {
+            method,
+            params,
+            applied_value,
+        }) => {
+            send(
+                control,
+                acp_protocol::request(json!(REASONING_CONFIG_ID), method, params),
+            )?;
+            Ok(Some(applied_value))
+        }
+        Ok(crate::acp_session_config::ThoughtLevelConfiguration::AlreadyCurrent {
+            applied_value,
+        }) => {
+            service.set_jev_route_reasoning_status(
+                task_id,
+                "already_current",
+                Some(&applied_value),
+            )?;
+            Ok(None)
+        }
+        Ok(crate::acp_session_config::ThoughtLevelConfiguration::Unsupported(reason)) => {
+            let _ = reason;
+            service.set_jev_route_reasoning_status(task_id, "unsupported", None)?;
+            Ok(None)
+        }
+        Err(_) => {
+            service.set_jev_route_reasoning_status(task_id, "unsupported", None)?;
+            Ok(None)
+        }
+    }
+}
+
+fn send_first_prompt(control: &RunControl, session: &str, prompt: &str) -> Result<(), String> {
+    control.set_app_server_turn(format!("acp:{FIRST_PROMPT_ID}"));
+    control.mark_app_server_turn_request(FIRST_PROMPT_ID)?;
+    send(
+        control,
+        acp_protocol::request(
+            json!(FIRST_PROMPT_ID),
+            "session/prompt",
+            json!({"sessionId":session,"prompt":[{"type":"text","text":prompt}]}),
+        ),
+    )
 }
 
 fn content_text(value: &Value) -> Option<&str> {
@@ -906,7 +981,9 @@ fn normalized_mona_response_metadata(
             .filter(|value| !value.is_empty())
             .ok_or_else(|| format!("Mona prompt result omitted text {key}."))?;
         if value.len() > max {
-            return Err(format!("Mona prompt result field {key} exceeded its safety limit."));
+            return Err(format!(
+                "Mona prompt result field {key} exceeded its safety limit."
+            ));
         }
         Ok(value.to_string())
     };
@@ -920,7 +997,9 @@ fn normalized_mona_response_metadata(
             .get(key)
             .and_then(Value::as_u64)
             .filter(|value| *value <= MAX_RESPONSE_METADATA_TOKENS)
-            .ok_or_else(|| format!("Mona prompt result usage.{key} was not a supported token count."))?;
+            .ok_or_else(|| {
+                format!("Mona prompt result usage.{key} was not a supported token count.")
+            })?;
         Ok(value)
     };
     let input_tokens = tokens("inputTokens")?;
@@ -975,8 +1054,14 @@ fn normalized_mona_response_metadata(
         input_tokens,
         output_tokens,
         jev_rationale: routing_text("rationale", MAX_RESPONSE_METADATA_RATIONALE_BYTES)?,
-        requested_model: routing_text("requestedModel", MAX_RESPONSE_METADATA_REQUESTED_MODEL_BYTES)?,
-        requested_effort: routing_text("requestedEffort", MAX_RESPONSE_METADATA_REQUESTED_EFFORT_BYTES)?,
+        requested_model: routing_text(
+            "requestedModel",
+            MAX_RESPONSE_METADATA_REQUESTED_MODEL_BYTES,
+        )?,
+        requested_effort: routing_text(
+            "requestedEffort",
+            MAX_RESPONSE_METADATA_REQUESTED_EFFORT_BYTES,
+        )?,
         confidence,
         route_applied,
         application_error: routing_text("applicationError", MAX_RESPONSE_METADATA_ERROR_BYTES)?,
@@ -1146,7 +1231,11 @@ fn run(
     if host.kind == "local" && acp_discovery::is_managed_agy_bridge(launch) {
         command.env(
             "MONITTER_AGY_PERMISSION",
-            if task.sandbox == "yolo" { "yolo" } else { "accept-edits" },
+            if task.sandbox == "yolo" {
+                "yolo"
+            } else {
+                "accept-edits"
+            },
         );
     }
     let mut child = match command.spawn() {
@@ -1274,6 +1363,7 @@ fn run(
         }
     }
     let mut turn = String::new();
+    let mut pending_jev_reasoning_value: Option<String> = None;
     let mut messages = Vec::<(String, String)>::new();
     let mut dirty_messages = HashSet::<String>::new();
     let mut last_message_flush = Instant::now();
@@ -1320,9 +1410,9 @@ fn run(
         {
             for (item, text) in &messages {
                 if dirty_messages.contains(item) {
-                    if let Err(error) = service
-                        .app_server_message(&task_id, &control, &turn, item, text, None, false, None)
-                    {
+                    if let Err(error) = service.app_server_message(
+                        &task_id, &control, &turn, item, text, None, false, None,
+                    ) {
                         fail(&service, &task_id, &control, error);
                         return;
                     }
@@ -1341,6 +1431,9 @@ fn run(
             last_reasoning_flush = Instant::now();
         }
         if phase != "idle" && Instant::now() >= phase_deadline {
+            if phase == "session/reasoning" {
+                let _ = service.set_jev_route_reasoning_status(&task_id, "unconfirmed", None);
+            }
             fail(
                 &service,
                 &task_id,
@@ -1534,6 +1627,45 @@ fn run(
             }
         }
         if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
+            if value.get("id").and_then(Value::as_i64) == Some(REASONING_CONFIG_ID)
+                && phase == "session/reasoning"
+            {
+                let _ = error;
+                if let Err(status_error) =
+                    service.set_jev_route_reasoning_status(&task_id, "rejected", None)
+                {
+                    fail(&service, &task_id, &control, status_error);
+                    return;
+                }
+                pending_jev_reasoning_value = None;
+                let Some(prompt) = initial_prompt.as_deref() else {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP reasoning response had no pending prompt.",
+                    );
+                    return;
+                };
+                let session = control.current_app_server_thread().unwrap_or_default();
+                if session.is_empty() {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP session was lost before its first prompt.",
+                    );
+                    return;
+                }
+                turn = format!("acp:{FIRST_PROMPT_ID}");
+                if let Err(send_error) = send_first_prompt(&control, &session, prompt) {
+                    fail(&service, &task_id, &control, send_error);
+                    return;
+                }
+                phase = "prompt";
+                phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+                continue;
+            }
             fail(
                 &service,
                 &task_id,
@@ -1723,8 +1855,15 @@ fn run(
                     continue;
                 }
                 if initial_prompt.is_some() {
+                    let current_session_result = match control.acp_session_config_snapshot() {
+                        Ok(value) => value,
+                        Err(error) => {
+                            fail(&service, &task_id, &control, error);
+                            return;
+                        }
+                    };
                     let configured = match crate::acp_session_config::configured_model_request(
-                        &session_result,
+                        &current_session_result,
                         &session,
                         &task.model,
                     ) {
@@ -1756,20 +1895,21 @@ fn run(
                     phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
                     continue;
                 };
-                turn = format!("acp:{FIRST_PROMPT_ID}");
-                control.set_app_server_turn(turn.clone());
-                if let Err(error) = control.mark_app_server_turn_request(FIRST_PROMPT_ID) {
-                    fail(&service, &task_id, &control, error);
-                    return;
+                match request_jev_reasoning_if_supported(&service, &task_id, &control, &session) {
+                    Ok(Some(value)) => {
+                        pending_jev_reasoning_value = Some(value);
+                        phase = "session/reasoning";
+                        phase_deadline = Instant::now() + SESSION_TIMEOUT;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
                 }
-                if let Err(error) = send(
-                    &control,
-                    acp_protocol::request(
-                        json!(FIRST_PROMPT_ID),
-                        "session/prompt",
-                        json!({"sessionId":session,"prompt":[{"type":"text","text":prompt}]}),
-                    ),
-                ) {
+                turn = format!("acp:{FIRST_PROMPT_ID}");
+                if let Err(error) = send_first_prompt(&control, &session, prompt) {
                     fail(&service, &task_id, &control, error);
                     return;
                 }
@@ -1807,8 +1947,15 @@ fn run(
                     return;
                 }
                 if initial_prompt.is_some() {
+                    let current_session_result = match control.acp_session_config_snapshot() {
+                        Ok(value) => value,
+                        Err(error) => {
+                            fail(&service, &task_id, &control, error);
+                            return;
+                        }
+                    };
                     let configured = match crate::acp_session_config::configured_model_request(
-                        &session_result,
+                        &current_session_result,
                         &session,
                         &task.model,
                     ) {
@@ -1836,9 +1983,24 @@ fn run(
                     phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
                     continue;
                 };
+                match request_jev_reasoning_if_supported(&service, &task_id, &control, &session) {
+                    Ok(Some(value)) => {
+                        pending_jev_reasoning_value = Some(value);
+                        phase = "session/reasoning";
+                        phase_deadline = Instant::now() + SESSION_TIMEOUT;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                }
                 turn = format!("acp:{FIRST_PROMPT_ID}");
-                control.set_app_server_turn(turn.clone());
-                if let Err(error) = control.mark_app_server_turn_request(FIRST_PROMPT_ID).and_then(|_| send(&control, acp_protocol::request(json!(FIRST_PROMPT_ID), "session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":prompt}]})))) { fail(&service,&task_id,&control,error); return; }
+                if let Err(error) = send_first_prompt(&control, &session, prompt) {
+                    fail(&service, &task_id, &control, error);
+                    return;
+                }
                 phase = "prompt";
                 phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
                 continue;
@@ -1877,7 +2039,84 @@ fn run(
                     );
                     return;
                 }
-                if let Err(error) = control.mark_app_server_turn_request(FIRST_PROMPT_ID).and_then(|_| send(&control, acp_protocol::request(json!(FIRST_PROMPT_ID), "session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":prompt}]})))) { fail(&service,&task_id,&control,error); return; }
+                match request_jev_reasoning_if_supported(&service, &task_id, &control, &session) {
+                    Ok(Some(value)) => {
+                        pending_jev_reasoning_value = Some(value);
+                        phase = "session/reasoning";
+                        phase_deadline = Instant::now() + SESSION_TIMEOUT;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                }
+                if let Err(error) = send_first_prompt(&control, &session, prompt) {
+                    fail(&service, &task_id, &control, error);
+                    return;
+                }
+                phase = "prompt";
+                phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+                continue;
+            }
+            if id == REASONING_CONFIG_ID {
+                if phase != "session/reasoning" {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP reasoning response was out of order.",
+                    );
+                    return;
+                }
+                if let Some(options) = value.pointer("/result/configOptions") {
+                    if let Err(error) = control.update_acp_config_options(options) {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
+                }
+                let Some(applied_value) = pending_jev_reasoning_value.take() else {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP reasoning response had no pending value.",
+                    );
+                    return;
+                };
+                if let Err(error) = service.set_jev_route_reasoning_status(
+                    &task_id,
+                    "applied",
+                    Some(&applied_value),
+                ) {
+                    fail(&service, &task_id, &control, error);
+                    return;
+                }
+                let Some(prompt) = initial_prompt.as_deref() else {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP reasoning response had no pending prompt.",
+                    );
+                    return;
+                };
+                let session = control.current_app_server_thread().unwrap_or_default();
+                if session.is_empty() {
+                    fail(
+                        &service,
+                        &task_id,
+                        &control,
+                        "ACP session was lost before its first prompt.",
+                    );
+                    return;
+                }
+                turn = format!("acp:{FIRST_PROMPT_ID}");
+                if let Err(error) = send_first_prompt(&control, &session, prompt) {
+                    fail(&service, &task_id, &control, error);
+                    return;
+                }
                 phase = "prompt";
                 phase_deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
                 continue;
@@ -1975,20 +2214,19 @@ fn run(
                     let metadata = (metadata_item == Some(item.as_str()))
                         .then(|| response_metadata.clone())
                         .flatten();
-                    let message_phase = (status == "completed" && metadata_item == Some(item.as_str()))
-                        .then_some("final_answer");
-                    if let Err(error) = service
-                        .app_server_message(
-                            &task_id,
-                            &control,
-                            &turn,
-                            item,
-                            text,
-                            message_phase,
-                            true,
-                            metadata,
-                        )
-                    {
+                    let message_phase = (status == "completed"
+                        && metadata_item == Some(item.as_str()))
+                    .then_some("final_answer");
+                    if let Err(error) = service.app_server_message(
+                        &task_id,
+                        &control,
+                        &turn,
+                        item,
+                        text,
+                        message_phase,
+                        true,
+                        metadata,
+                    ) {
                         fail(&service, &task_id, &control, error);
                         return;
                     }
@@ -2107,8 +2345,7 @@ fn run(
                 let usage = update.get("usage").unwrap_or(update);
                 let input = usage.get("inputTokens").and_then(Value::as_i64);
                 let output = usage.get("outputTokens").and_then(Value::as_i64);
-                if !input.is_some_and(|value| value >= 0)
-                    || !output.is_some_and(|value| value >= 0)
+                if !input.is_some_and(|value| value >= 0) || !output.is_some_and(|value| value >= 0)
                 {
                     service.record(
                         &task_id,

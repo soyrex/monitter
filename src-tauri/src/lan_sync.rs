@@ -190,6 +190,8 @@ fn compact_jev_decision_detail(detail: &str) -> String {
                 "applied",
                 "modelChanged",
                 "appliedReasoning",
+                "reasoningStatus",
+                "autoEligible",
                 "taskKind",
                 "permissionTier",
             ] {

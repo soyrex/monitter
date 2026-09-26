@@ -169,6 +169,13 @@ No fake conversations, progress, token counts, host connections or model replies
   idempotent `jevDecision` card to that task. The card shows the selected or recommended model tier,
   reasoning level, lowest routing confidence, application outcome, and available Jev cost/timing
   metadata. It contains no raw prompt or credential. Existing chats are not automatically rerouted.
+  For a new ACP chat in safe-auto mode, a qualifying Jev reasoning level remains pending until
+  the live session advertises a `thought_level` select control. Monitter requests only the exact
+  advertised level through `session/set_config_option` after any model selection and before the
+  first prompt. An acknowledged choice is recorded as applied; a level already current is recorded
+  separately. Missing controls, missing levels, and rejected requests keep the harness default and
+  are shown as such on the route card. A timed-out setting is shown as unconfirmed and the turn
+  fails without claiming the harness applied it. Jev never changes ACP permission controls.
 - `plan_jev_command { query: string, candidates: JevCommandCandidate[] }` -> `JevCommandPlan`
   (native-owner only; requires the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). The caller supplies a bounded catalogue of
   currently enabled Cmd-P controls. Jev may select only one offered candidate ID and returns a typed confidence

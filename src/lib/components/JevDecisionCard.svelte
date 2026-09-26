@@ -108,6 +108,19 @@
     const value = response?.[key];
     return typeof value === 'string' ? value.replaceAll('_', ' ') : 'n/a';
   }
+  function routeReasoningOutcome(): string {
+    const level = routeText('reasoningLevel');
+    switch (response?.reasoningStatus) {
+      case 'selected': return `${level} reasoning selected for this chat`;
+      case 'applied': return `${level} reasoning applied by the harness`;
+      case 'already_current': return `${level} reasoning already active`;
+      case 'pending': return `${level} reasoning · checking harness support`;
+      case 'unsupported': return `${level} recommended · harness default kept`;
+      case 'rejected': return `${level} rejected · harness default kept`;
+      case 'unconfirmed': return `${level} reasoning · harness response unconfirmed`;
+      default: return `${level} reasoning recommended`;
+    }
+  }
   const timeText = $derived(new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(record?.createdAt ?? event.createdAt));
   const fullTimeText = $derived(new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(record?.createdAt ?? event.createdAt));
   function latencyText(value: number | null): string { return value === null ? 'Latency n/a' : value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(2)} s`; }
@@ -156,6 +169,7 @@
     <div class="jev-top"><span class="jev-mark">Jev</span><span class="jev-kind">{toolLabel}</span><time title={fullTimeText}>{timeText}</time></div>
     {#if record}<div class="jev-question">{record.question}</div>{:else}<div class="jev-question">Jev decision details unavailable</div>{/if}
     <div class="jev-result-line"><strong title={outcomeText()}>{outcomeText()}</strong>{#if confidence !== null}<span>{record?.toolName === 'jev_route' ? 'Lowest confidence' : 'Confidence'} {Math.round(confidence * 100)}%</span>{/if}</div>
+    {#if record?.toolName === 'jev_route'}<div class="jev-route-reasoning">{routeReasoningOutcome()}</div>{/if}
     {#if segments.length}<div class="jev-bar" role="img" aria-label={distributionLabel()} title={distributionLabel()}>{#each segments as segment, index (segment.id)}<span style={`width:${segment.probability * 100}%;background:${segmentColor(segment, index)}`}></span>{/each}</div>{/if}
     {#if record?.toolName === 'jev_route' && confidence !== null}<div class="jev-bar" role="img" aria-label={`Lowest routing confidence ${Math.round(confidence * 100)}%`}><span style={`width:${confidence * 100}%;background:var(--accent)`}></span></div>{/if}
     <div class="jev-meta"><span>{latencyText(record?.latencyMs ?? null)}</span><span>{costText(record?.costUsd ?? null)}</span><span class="jev-expand-hint">{record?.compact && expandedDetail === null ? 'Open for details' : 'Details'}</span></div>
@@ -171,7 +185,8 @@
           <div><dt>Model tier</dt><dd>{routeText('modelTier')}</dd></div>
           <div><dt>Reasoning</dt><dd>{routeText('reasoningLevel')}</dd></div>
           <div><dt>Chat model</dt><dd>{routeText('selectedModel')}</dd></div>
-          <div><dt>Applied</dt><dd>{response.applied !== true ? 'Recommendation only; default kept' : response.modelChanged === true ? 'Model selected for this chat' : response.appliedReasoning ? `Default model kept; ${routeText('appliedReasoning')} reasoning applied` : 'Default model kept'}</dd></div>
+          <div><dt>Model selection</dt><dd>{response.applied !== true ? 'Default kept' : response.modelChanged === true ? 'Selected for this chat' : 'Default model kept'}</dd></div>
+          <div><dt>Reasoning outcome</dt><dd>{routeReasoningOutcome()}</dd></div>
           <div><dt>Task kind</dt><dd>{routeText('taskKind')}</dd></div>
           <div><dt>Permission signal</dt><dd>{routeText('permissionTier')} · advisory only</dd></div>
         </dl>
@@ -193,6 +208,7 @@
   .jev-result-line { display:flex; align-items:center; gap:9px; min-width:0; }
   .jev-result-line strong { overflow:hidden; color:var(--ink); font-size:11px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
   .jev-result-line span { flex:none; color:var(--accent); font:10px var(--mono); }
+  .jev-route-reasoning { overflow:hidden; color:var(--muted); font:9px var(--mono); text-overflow:ellipsis; white-space:nowrap; }
   .jev-bar,.jev-track { display:flex; overflow:hidden; height:5px; border-radius:4px; background:var(--soft); }
   .jev-bar span { min-width:1px; height:100%; }
   .jev-meta { display:flex; align-items:center; gap:10px; color:var(--muted); font:9px var(--mono); font-variant-numeric:tabular-nums; }

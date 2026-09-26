@@ -4360,8 +4360,8 @@ impl Service {
             .map_err(|_| "Jev route trace ID is invalid.".to_string())?
             .to_string();
         let path = self.router_trace_dir.join(format!("{trace_id}.json"));
-        let metadata = std::fs::metadata(&path)
-            .map_err(|_| "Jev route trace was not found.".to_string())?;
+        let metadata =
+            std::fs::metadata(&path).map_err(|_| "Jev route trace was not found.".to_string())?;
         if metadata.len() > 64 * 1024 {
             return Err("Jev route trace is too large.".into());
         }
@@ -4384,7 +4384,10 @@ impl Service {
             if plan.agent_id.as_deref() != Some(task.agent_id.as_str()) {
                 return Err("Jev route trace does not belong to this task's agent.".into());
             }
-            let agent = state.agents.iter().find(|agent| agent.id == task.agent_id)
+            let agent = state
+                .agents
+                .iter()
+                .find(|agent| agent.id == task.agent_id)
                 .ok_or("Task agent was not found.")?;
             if agent.jev_routing == model::JevRoutingMode::Off {
                 return Err("Jev routing is not enabled for this task's agent.".into());
@@ -4394,16 +4397,37 @@ impl Service {
                     && event.kind == "jevDecision"
                     && serde_json::from_str::<serde_json::Value>(&event.detail)
                         .ok()
-                        .and_then(|value| value.get("traceId").and_then(|id| id.as_str()).map(str::to_owned))
+                        .and_then(|value| {
+                            value
+                                .get("traceId")
+                                .and_then(|id| id.as_str())
+                                .map(str::to_owned)
+                        })
                         .as_deref()
                         == Some(trace_id.as_str())
             }) {
                 return Ok(());
             }
-            let applied = task.model_settings.as_ref().is_some_and(|settings| !settings.model.is_empty());
+            let applied = task
+                .model_settings
+                .as_ref()
+                .is_some_and(|settings| !settings.model.is_empty());
             let model_changed = applied && task.model != agent.model;
-            let applied_effort = task.model_settings.as_ref()
+            let applied_effort = task
+                .model_settings
+                .as_ref()
                 .and_then(|settings| settings.reasoning_effort.as_deref());
+            let auto_eligible = agent.jev_routing == model::JevRoutingMode::SafeAuto
+                && plan.decision.confidence >= 0.5;
+            let reasoning_status = if applied_effort.is_some() {
+                "selected"
+            } else if auto_eligible && task.provider == "acp" {
+                "pending"
+            } else if auto_eligible {
+                "unsupported"
+            } else {
+                "recommended"
+            };
             let tier = serde_json::to_value(plan.decision.model_tier)
                 .map_err(|_| "Jev route tier could not be recorded.".to_string())?;
             let tier_label = tier.as_str().unwrap_or("model").replace('_', " ");
@@ -4412,7 +4436,9 @@ impl Service {
                 format!("{tier_label} · {selected_model} selected")
             } else if applied {
                 match applied_effort {
-                    Some(effort) => format!("{tier_label} · default model kept · {effort} reasoning"),
+                    Some(effort) => {
+                        format!("{tier_label} · default model kept · {effort} reasoning")
+                    }
                     None => format!("{tier_label} · default model kept"),
                 }
             } else {
@@ -4439,6 +4465,8 @@ impl Service {
                     "applied": applied,
                     "modelChanged": model_changed,
                     "appliedReasoning": applied_effort,
+                    "reasoningStatus": reasoning_status,
+                    "autoEligible": auto_eligible,
                 },
                 "provider": plan.classifier_evidence.provider,
                 "model": plan.classifier_evidence.model,
@@ -4447,7 +4475,8 @@ impl Service {
                 "outputTokens": plan.classifier_evidence.output_tokens,
                 "costUsd": plan.classifier_evidence.cost_usd,
                 "createdAt": created_at,
-            }).to_string();
+            })
+            .to_string();
             state.events.push(Arc::new(RunEvent {
                 id: id(),
                 task_id: task_id.into(),
@@ -4456,6 +4485,79 @@ impl Service {
                 detail: detail.into(),
                 created_at,
             }));
+            Ok(())
+        })
+    }
+
+    /// The route receipt is written before the first prompt. ACP can only
+    /// confirm a thought level after its session advertises and acknowledges
+    /// the exact option, so the runner reads this pending native receipt.
+    pub(crate) fn pending_jev_route_reasoning(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>, String> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.".to_string())?;
+        Ok(data
+            .snapshot
+            .events
+            .iter()
+            .rev()
+            .filter(|event| event.task_id == task_id && event.kind == "jevDecision")
+            .find_map(|event| {
+                let detail: serde_json::Value = serde_json::from_str(&event.detail).ok()?;
+                if detail["toolName"] != "jev_route"
+                    || detail["response"]["autoEligible"] != true
+                    || detail["response"]["reasoningStatus"] != "pending"
+                {
+                    return None;
+                }
+                detail["response"]["reasoningLevel"]
+                    .as_str()
+                    .map(str::to_owned)
+            }))
+    }
+
+    /// Replace only the receipt's application fields after an ACP capability
+    /// decision. The selected Jev judgment and its evidence remain immutable.
+    pub(crate) fn set_jev_route_reasoning_status(
+        &self,
+        task_id: &str,
+        status: &str,
+        applied_value: Option<&str>,
+    ) -> Result<(), String> {
+        if !matches!(
+            status,
+            "applied" | "already_current" | "unsupported" | "rejected" | "unconfirmed"
+        ) {
+            return Err("Invalid Jev reasoning status.".into());
+        }
+        self.mutate(Some(task_id.into()), |state| {
+            let Some((index, mut detail)) =
+                state
+                    .events
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, event)| {
+                        if event.task_id != task_id || event.kind != "jevDecision" {
+                            return None;
+                        }
+                        let detail: serde_json::Value = serde_json::from_str(&event.detail).ok()?;
+                        (detail["toolName"] == "jev_route"
+                            && detail["response"]["reasoningStatus"] == "pending")
+                            .then_some((index, detail))
+                    })
+            else {
+                return Ok(());
+            };
+            detail["response"]["reasoningStatus"] = serde_json::json!(status);
+            detail["response"]["appliedReasoning"] = serde_json::json!(applied_value);
+            let mut updated = (*state.events[index]).clone();
+            updated.detail = detail.to_string().into();
+            state.events[index] = Arc::new(updated);
             Ok(())
         })
     }
