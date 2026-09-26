@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onMount, type Snippet } from 'svelte';
+  import { onMount } from 'svelte';
   import type { Agent, Message, Snapshot, Task } from '$lib/types';
   import { getBridge } from '$lib/bridge';
-  import { mergeOlderTranscriptMessages } from '$lib/ui-sync';
+  import { captureTranscriptAnchor, mergeOlderTranscriptMessages } from '$lib/ui-sync';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import MessagePane from '$lib/components/MessagePane.svelte';
   import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
@@ -13,6 +13,7 @@
   let olderMessages = $state<Message[]>([]);
   let nextBeforeId = $state<string | null | undefined>();
   let loading = $state(false);
+  let transcriptList: { restoreItemAnchor: (key: string, offset: number) => Promise<boolean> } | undefined = $state();
   const buffer = createTranscriptBuffer(() => taskId, () => ({ messages: snapshot.messages }), () => JSON.stringify(snapshot.messages.map(message => [message.id, message.text])));
   const displayed = $derived(buffer.value());
   const messages = $derived(mergeOlderTranscriptMessages(displayed.messages.filter(message => message.taskId === taskId), olderMessages));
@@ -25,10 +26,13 @@
     const beforeId = nextBeforeId ?? visible[0]?.id;
     if (!beforeId) { nextBeforeId = null; return; }
     loading = true;
+    const viewport = document.querySelector<HTMLElement>('.messages');
+    const anchor = buffer.held() ? captureTranscriptAnchor(viewport) : null;
     try {
       const page = await bridge.getTaskMessages(taskId, beforeId, 16);
       olderMessages = mergeOlderTranscriptMessages(olderMessages, page.messages);
       nextBeforeId = page.nextBeforeId === beforeId ? null : page.nextBeforeId;
+      if (anchor) await transcriptList?.restoreItemAnchor(anchor.key, anchor.offset);
     } finally { loading = false; }
   }
   function followChange(following: boolean) { buffer.setFollowing(following); }
@@ -37,7 +41,7 @@
     (window as unknown as { __syncQA: unknown }).__syncQA = {
       refresh,
       loadEarlier,
-      state: () => ({ snapshot, messages, held: buffer.held(), pending: buffer.pendingUpdates(), cursor: nextBeforeId }),
+      state: () => ({ snapshot, messages, displayMessages: displayed.messages, held: buffer.held(), pending: buffer.pendingUpdates(), cursor: nextBeforeId, loading }),
     };
   });
 </script>
@@ -47,7 +51,7 @@
     {#snippet header()}
       {#if canLoadEarlier}<div class="pager"><button type="button" aria-label="Load earlier messages" disabled={loading} onclick={() => void loadEarlier()}>{loading ? 'Loading…' : 'Load earlier messages'}</button></div>{/if}
     {/snippet}
-    <TranscriptVirtualList items={messages} getKey={message => message.id} active>
+    <TranscriptVirtualList bind:this={transcriptList} items={messages} getKey={message => message.id} active>
       {#snippet children(message)}<article class="message" data-message-id={message.id}><b>{message.id}</b><span data-message-text>{message.text}</span></article>{/snippet}
     </TranscriptVirtualList>
   </MessagePane>

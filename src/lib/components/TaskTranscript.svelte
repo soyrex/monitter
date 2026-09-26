@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, setContext, type Snippet } from 'svelte';
+  import { onMount, setContext, tick, type Snippet } from 'svelte';
   import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import Check from "@lucide/svelte/icons/check";
   import CircleStop from "@lucide/svelte/icons/circle-stop";
@@ -41,7 +41,7 @@
   import SparkleField from '$lib/components/SparkleField.svelte';
   import MailTriageBatch from '$lib/components/MailTriageBatch.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
-  import { mergeOlderTranscriptMessages } from '$lib/ui-sync';
+  import { captureTranscriptAnchor, mergeOlderTranscriptMessages } from '$lib/ui-sync';
   import { perfMark, perfMeasure } from '$lib/perf-phases';
 
   type Avatar = Snippet<[Agent | null | undefined, number?]>;
@@ -159,6 +159,7 @@
   setContext('monitter-markdown-task-id', task.id);
 
   let taskMenuAnchor = $state<HTMLButtonElement>();
+  let conversationRoot = $state<HTMLElement>();
   let inboxView = $state(true);
   type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; steeringMessages: QueuedMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
   const taskMailBatches = $derived((snapshot.mailBatches ?? []).filter(batch => batch.taskId === task.id));
@@ -173,6 +174,7 @@
   const displayAgent = $derived(display.agent);
   let olderMessages = $state<Message[]>([]);
   let nextHistoryCursor = $state<string | null | undefined>();
+  let transcriptList: { restoreItemAnchor: (key: string, offset: number) => Promise<boolean> } | undefined = $state();
   let historyLoading = $state(false);
   let historyError = $state('');
   const displayItems = $derived.by(() => {
@@ -236,11 +238,14 @@
     if (!beforeId) { nextHistoryCursor = null; return; }
     historyLoading = true;
     historyError = '';
+    const viewport = conversationRoot?.querySelector<HTMLElement>('.messages');
+    const viewportAnchor = transcriptBuffer.held() ? captureTranscriptAnchor(viewport) : null;
     try {
       const page = await getTaskMessages(task.id, beforeId, 64);
       if (page.messages.some(message => message.taskId !== task.id)) throw new Error('History page did not match this chat.');
       olderMessages = mergeOlderTranscriptMessages(olderMessages, page.messages);
       nextHistoryCursor = page.nextBeforeId === beforeId ? null : page.nextBeforeId;
+      if (viewportAnchor) await transcriptList?.restoreItemAnchor(viewportAnchor.key, viewportAnchor.offset);
     } catch (reason) {
       historyError = reason instanceof Error ? reason.message : String(reason);
     } finally { historyLoading = false; }
@@ -291,7 +296,7 @@
     </div>
   </div>
 {/if}
-<section class="conversation">
+<section class="conversation" bind:this={conversationRoot}>
     <SparkleField active={task.status === 'running'} animation={snapshot.settings.activityAnimation ?? 'sparkles'} pane />
     <TaskActivity goal={null} onclear={onClearGoal} tools={computerTools} onstop={onStop} disabled={busy} />
     {#if inboxView && displayMailInboxes.length}
@@ -307,6 +312,7 @@
         </div>{/if}
       {/snippet}
       <TranscriptVirtualList
+        bind:this={transcriptList}
         items={displayItems}
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' || item.type === 'process-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
         stickyKey={displayLatestUserRequest?.id ?? null}

@@ -48,6 +48,21 @@
   const controller = useTranscriptScrollController();
   const isFollowing = () => controller?.isFollowing() !== false;
 
+  /** Restore a reader's exact item position after older rows change its index. */
+  export async function restoreItemAnchor(key: string, offset: number): Promise<boolean> {
+    const index = items.findIndex((item, itemIndex) => getKey(item, itemIndex) === key);
+    if (index < 0 || !scrollParent) return false;
+    instance().scrollToIndex(index, { align: 'start' });
+    await tick();
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    await tick();
+    const row = root?.querySelector<HTMLElement>(`[data-item-key="${CSS.escape(key)}"]`);
+    if (!row || !scrollParent) return false;
+    const viewportTop = scrollParent.getBoundingClientRect().top;
+    scrollParent.scrollTop += row.getBoundingClientRect().top - viewportTop - offset;
+    return true;
+  }
+
   // The virtualizer owns history measurement, but not the live bottom edge.
   // A single post-commit write follows the DOM that actually rendered. This
   // avoids competing virtualizer end anchors and scroll adjustments per chunk.
@@ -251,7 +266,7 @@
   {#each renderedRows as row, index (row.key)}
     {@const item = items[row.index]!}
     {#if index > 0}<div aria-hidden="true" style:height={`${Math.max(0, row.start - renderedRows[index - 1].end)}px`}></div>{/if}
-    <div class="transcript-row" data-index={row.index} use:measureRow>
+    <div class="transcript-row" data-index={row.index} data-item-key={row.key} use:measureRow>
       {@render children(item, row.index)}
     </div>
   {/each}

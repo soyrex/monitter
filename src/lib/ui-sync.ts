@@ -61,3 +61,18 @@ export function mergeTaskMessagesPage(snapshot: Snapshot, page: TaskMessagesPage
 export function mergeOlderTranscriptMessages(current: readonly Message[], older: readonly Message[]): Message[] {
   return mergeMessagesById(current, older);
 }
+
+export interface TranscriptViewportAnchor { key: string; offset: number; }
+/** Capture a stable item key and its offset from the scroll viewport before history is prepended. */
+export function captureTranscriptAnchor(viewport: HTMLElement | null | undefined): TranscriptViewportAnchor | null {
+  if (!viewport) return null;
+  const viewportTop = viewport.getBoundingClientRect().top;
+  for (const row of viewport.querySelectorAll<HTMLElement>('[data-item-key]')) {
+    const rect = row.getBoundingClientRect();
+    if (rect.bottom > viewportTop + 10) {
+      const key = row.dataset.itemKey;
+      if (key) return { key, offset: rect.top - viewportTop };
+    }
+  }
+  return null;
+}

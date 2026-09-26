@@ -34,12 +34,14 @@ try {
   await context.addInitScript(() => {
     const taskId = '11111111-1111-4111-8111-111111111111';
     const messages = Array.from({ length: 100 }, (_, index) => ({ id: `m${String(index + 1).padStart(3, '0')}`, taskId, role: index % 2 ? 'assistant' : 'user', text: `message-${index + 1}`, createdAt: index + 1, attachments: [] }));
-    let revision = 'rev-1'; let delta = null; let staleGap = false; let delayPage = false; let releasePage; let pendingPageResolve;
+    let revision = 'rev-1'; let delta = null; let staleGap = false; let delayPage = false; let releasePage; let pendingPageResolve; let removedChannel = false; let removedTranscript = false;
     const pageGate = new Promise(resolve => { releasePage = resolve; });
     const emptySnapshot = () => ({ hosts: [], agents: [], tasks: [], messages: [], events: [], channels: [], projects: [], collaborations: [], queuedMessages: [], approvalRequests: [], approvalRules: [], settings: { accent: '#3978d4', theme: 'light', interfaceScale: 100, showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard' },
       subagentTranscripts: { retained: [{ id: 'transcript-old', taskId, role: 'assistant', text: 'old retained transcript', createdAt: 1 }], removed: [{ id: 'transcript-remove', taskId, role: 'assistant', text: 'must disappear', createdAt: 1 }] },
       channels: [{ id: 'kept-channel', name: 'old name', description: '', agentIds: [], messages: [{ id: 'channel-history', role: 'user', agentId: null, text: 'keep channel message', createdAt: 1, taskId }] }, { id: 'removed-channel', name: 'remove me', description: '', agentIds: [], messages: [] }] });
-    const currentSnapshot = () => ({ ...emptySnapshot(), messages: messages.slice(-64) });
+    const currentSnapshot = () => ({ ...emptySnapshot(), messages: messages.slice(-64),
+      channels: emptySnapshot().channels.filter(channel => !(removedChannel && channel.id === 'removed-channel')),
+      subagentTranscripts: removedTranscript ? { retained: emptySnapshot().subagentTranscripts.retained } : emptySnapshot().subagentTranscripts });
     const metadata = () => ({ ...currentSnapshot(), messages: [], channels: [{ ...emptySnapshot().channels[0], name: 'fresh name', messages: [] }], subagentTranscripts: {} });
     const state = { snapshot: currentSnapshot(), pageCalls: 0, resetReads: 0 };
     window.__syncServer = {
@@ -52,6 +54,7 @@ try {
         const updated = { ...messages.find(message => message.id === 'm100'), text: 'message-100-updated-live' };
         messages[messages.findIndex(message => message.id === 'm100')] = updated;
         messages.splice(messages.findIndex(message => message.id === 'm099'), 1);
+        removedChannel = true; removedTranscript = true;
         delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [updated], removedMessageIds: ['m099'], retainedChannelIds: ['kept-channel'], retainedSubagentTranscriptIds: ['retained'] } };
         state.snapshot = currentSnapshot();
       },
@@ -95,16 +98,19 @@ try {
     node.dispatchEvent(new Event('scroll'));
   });
   await expect(page.getByRole('button', { name: 'Jump to latest message' })).toBeVisible();
-  const heldText = await page.locator('[data-message-id="m100"] [data-message-text]').textContent();
+  const heldText = await page.evaluate(() => window.__syncQA.state().displayMessages.find(message => message.id === 'm100').text);
   await page.evaluate(() => window.__syncServer.delayNextPage());
   await page.getByRole('button', { name: 'Load earlier messages' }).click();
   await expect.poll(() => page.evaluate(() => window.__syncServer.state.pageCalls)).toBe(1);
   await page.evaluate(() => window.__syncServer.pushDelta());
   await page.evaluate(() => window.__syncQA.refresh());
   await page.evaluate(() => window.__syncServer.releasePage());
-  await expect(page.locator('[data-message-id="m021"]')).toBeVisible();
-  assert.equal(await page.locator('[data-message-id="m100"] [data-message-text]').textContent(), heldText, 'detached reader freezes live delta text');
-  assert.equal(await page.locator('[data-message-id="m099"]').count(), 1, 'detached reader freezes live deletion');
+  await expect.poll(() => page.evaluate(() => window.__syncQA.state().messages.some(message => message.id === 'm021'))).toBe(true);
+  const detached = await page.evaluate(() => window.__syncQA.state());
+  assert.equal(detached.displayMessages.find(message => message.id === 'm100').text, heldText, 'detached reader freezes live delta text');
+  assert.equal(detached.displayMessages.some(message => message.id === 'm099'), true, 'detached reader freezes live deletion');
+  assert.equal(detached.snapshot.messages.some(message => message.id === 'm099'), false, 'cached snapshot applies the deletion while held');
+  assert.equal(await page.evaluate(() => window.__syncServer.state.pageCalls), 2, 'a page read racing a delta retries once against the current revision');
   const anchorBefore = await viewport.evaluate(node => {
     const top = node.getBoundingClientRect().top;
     const row = [...node.querySelectorAll('[data-message-id]')].find(item => item.getBoundingClientRect().bottom > top + 10);
@@ -113,7 +119,9 @@ try {
   assert.ok(anchorBefore, 'the detached viewport has a visible stable row');
   await page.evaluate(value => { window.__syncAnchorId = value.id; }, anchorBefore);
   await page.getByRole('button', { name: 'Load earlier messages' }).click();
-  await expect(page.locator('[data-message-id="m005"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__syncQA.state().messages.some(message => message.id === 'm005'))).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__syncQA.state().loading)).toBe(false);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const restoredAnchorTop = await viewport.evaluate(node => node.querySelector(`[data-message-id="${window.__syncAnchorId}"]`)?.getBoundingClientRect().top ?? null);
   assert.ok(anchorBefore && restoredAnchorTop !== null, 'page prepend retains the visible anchor row');
   assert.ok(Math.abs(restoredAnchorTop - anchorBefore.top) < 4, `prepend moves the reader anchor only ${Math.abs(restoredAnchorTop - anchorBefore.top)}px`);
