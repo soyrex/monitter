@@ -189,6 +189,7 @@
   import ArchivedChats from "$lib/components/ArchivedChats.svelte";
   import ModelPicker from '$lib/components/ModelPicker.svelte';
   import AgentModelPicker from '$lib/components/AgentModelPicker.svelte';
+  import JevTierModelPicker from '$lib/components/JevTierModelPicker.svelte';
   import AccessPicker from '$lib/components/AccessPicker.svelte';
   import DraftPicker from '$lib/components/DraftPicker.svelte';
   import TerminalPane from '$lib/components/TerminalPane.svelte';
@@ -5982,12 +5983,7 @@
         </select></label>
         {#if draft.jevRouting === 'safe_auto' && draft.jevModelTiers}
           <p class="hint">Map only the models this harness can use. A blank tier keeps this harness’s normal model. Any selected model is still validated by the provider before the task starts.</p>
-          <div class="form-grid">
-            <label>Fast model<input bind:value={draft.jevModelTiers.fast} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
-            <label>Balanced model<input bind:value={draft.jevModelTiers.balanced} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
-            <label>Strong model<input bind:value={draft.jevModelTiers.strong} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
-            <label>Frontier model<input bind:value={draft.jevModelTiers.frontier} oninput={() => markAgentDirty(draft.id)} placeholder="Use normal model" /></label>
-          </div>
+          <JevTierModelPicker draft={draft} saved={settingsAgents.find(agent => agent.id === draft.id) ?? null} disabled={busy} onchange={(tier, modelId) => { if (agentDraft?.jevModelTiers) { agentDraft.jevModelTiers[tier] = modelId; markAgentDirty(agentDraft.id); } }} />
         {/if}
       </details>
       {#if !draft.internal}

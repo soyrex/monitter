@@ -37,13 +37,11 @@ try {
   await page.getByRole('button', { name: 'Send task message', exact: true }).click();
 
   await expect.poll(() => page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks.length)).toBe(1);
-  await expect(page.getByText(
-    'Jev flagged this for human review before any consequential effect. The chat was started without granting additional authority. Jev recommends frontier · xhigh reasoning (25% confidence). Your model selection was kept.',
-    { exact: true },
-  )).toBeVisible();
+  expect(await page.evaluate(() => window.__MONITTER_QA__.calls.some(call => call.method === 'createTask'))).toBe(true);
+  expect(await page.locator('body').innerText()).not.toContain('flagged this for human review');
   expect(await page.locator('body').innerText()).not.toContain('It was not started');
   expect(errors).toEqual([]);
-  console.log('Review-required Jev routing starts the first chat without granting authority.');
+  console.log('Advisory Jev routing starts the first chat without inventing a human-review flow.');
 } finally {
   await browser.close();
 }
