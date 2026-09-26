@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { invoke, isTauri } from '@tauri-apps/api/core';
+  import { isTauri } from '@tauri-apps/api/core';
+  import { invokeCommand } from '$lib/command-invoke';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
   import RemoteControl from "$lib/components/RemoteControl.svelte";
@@ -16,7 +17,7 @@
   function returnToPackagedUi() {
     if (returningToPackagedUi) return;
     returningToPackagedUi = true;
-    void invoke('use_packaged_ui').catch(reason => {
+    void invokeCommand('use_packaged_ui').catch(reason => {
       returningToPackagedUi = false;
       devUiError = `Could not restore the packaged interface: ${String(reason)}`;
     });

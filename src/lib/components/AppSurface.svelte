@@ -38,7 +38,8 @@
   import { channelCommands, parseChannelCommand, resolveChannelAgent } from "$lib/channel-commands";
   import { completeVimCommand, parseVimCommand, parseVimWindowKey, vimCommandHelp, type VimCommand, type VimTabTarget } from "$lib/vim-commands";
   import { mentionedAgentIds } from "$lib/mentions";
-  import { invoke, isTauri } from "@tauri-apps/api/core";
+  import { isTauri } from "@tauri-apps/api/core";
+  import { invokeCommand } from '$lib/command-invoke';
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Bot from "@lucide/svelte/icons/bot";
@@ -121,6 +122,7 @@
     JevRoutePlan,
     SubagentTranscriptEntry,
     SlashCommand,
+    JsonValue,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
   import { contrastForeground } from '$lib/accent-contrast';
@@ -2427,7 +2429,11 @@
   async function resolveInput(request: ApprovalRequest, response: unknown) {
     if (busy || request.status !== 'pending') return;
     resolvingApprovalId = request.id;
-    try { await run(() => bridge.resolveInput(request.id, response)); }
+    try {
+      const encoded = JSON.stringify(response);
+      if (encoded === undefined) throw new Error('Input response must be JSON data.');
+      await run(() => bridge.resolveInput(request.id, JSON.parse(encoded) as JsonValue));
+    }
     finally { resolvingApprovalId = null; }
   }
   function debouncedReload() {
@@ -2457,7 +2463,7 @@
         if (nativeRuntime) {
           const stopBeforeQuit = await listen('monitter-before-quit', async () => {
             if (workspaceReady && !workspaceSave.flush()) { error = workspacePersistenceError || 'Could not save workspace state before quitting.'; return; }
-            try { await invoke('finish_quit'); } catch (reason) { error = `Could not quit: ${text(reason)}`; }
+            try { await invokeCommand('finish_quit'); } catch (reason) { error = `Could not quit: ${text(reason)}`; }
           });
           if (mounted) unlistenBeforeQuit = stopBeforeQuit; else { stopBeforeQuit(); return; }
         }
@@ -4206,7 +4212,7 @@
     if (embedded || !nativeRuntime) return;
     const enabled = vimShortcuts;
     let disposed=false, stop:UnlistenFn|undefined;
-    const syncShield=()=>{void invoke('set_native_escape_shield',{enabled:enabled && !(document.activeElement instanceof Element && document.activeElement.closest('.terminal-pane'))}).catch(reason=>{error=`Could not apply keyboard mode: ${text(reason)}`;});};
+    const syncShield=()=>{void invokeCommand('set_native_escape_shield',{enabled:enabled && !(document.activeElement instanceof Element && document.activeElement.closest('.terminal-pane'))}).catch(reason=>{error=`Could not apply keyboard mode: ${text(reason)}`;});};
     document.addEventListener('focusin',syncShield);
     syncShield();
     void listen('monitter-native-escape',()=>{
@@ -4214,7 +4220,7 @@
       const target=document.activeElement ?? window;
       target.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));
     }).then(unlisten=>{if(disposed)unlisten();else stop=unlisten;});
-    return()=>{disposed=true;stop?.();document.removeEventListener('focusin',syncShield);void invoke('set_native_escape_shield',{enabled:false}).catch(()=>{});};
+    return()=>{disposed=true;stop?.();document.removeEventListener('focusin',syncShield);void invokeCommand('set_native_escape_shield',{enabled:false}).catch(()=>{});};
   });
   function cancelPaneFocusChord() { paneFocusChord=false; }
   function closeFocusedTab() {

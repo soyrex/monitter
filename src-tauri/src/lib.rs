@@ -691,6 +691,48 @@ fn upgrade_local_gemini_agent_profiles(snapshot: &mut Snapshot) -> bool {
     changed
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandCapabilities {
+    protocol_version: u32,
+    commands: Vec<String>,
+}
+
+fn command_contract() -> Result<serde_json::Value, String> {
+    serde_json::from_str(include_str!("../../command-contract.json"))
+        .map_err(|_| "The generated command contract is invalid.".to_string())
+}
+
+fn command_available_on_surface(command: &str, surface: &str) -> Result<bool, String> {
+    let contract = command_contract()?;
+    Ok(contract
+        .get("commands")
+        .and_then(|commands| commands.get(command))
+        .and_then(|entry| entry.get("surfaces"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|surfaces| surfaces.iter().any(|value| value.as_str() == Some(surface))))
+}
+
+fn command_capabilities(surface: &str) -> Result<CommandCapabilities, String> {
+    let contract = command_contract()?;
+    let protocol_version = contract
+        .get("protocolVersion")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "The generated command contract has no valid protocol version.".to_string())?;
+    let commands = contract
+        .get("commands")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "The generated command contract has no command map.".to_string())?
+        .iter()
+        .filter_map(|(name, entry)| {
+            entry.get("surfaces")?.as_array()?.iter()
+                .any(|value| value.as_str() == Some(surface)).then(|| name.clone())
+        })
+        .collect();
+    Ok(CommandCapabilities { protocol_version, commands })
+}
+
 impl Service {
     fn open(app: Option<AppHandle>, dir: PathBuf) -> Result<Arc<Self>, String> {
         let (store, mut snapshot, task_hosts, attachments) = store::Store::open(dir.clone())?;
@@ -1557,6 +1599,9 @@ impl Service {
         command: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        if !command_available_on_surface(command, "lan")? {
+            return Err(format!("LAN command '{command}' is not available."));
+        }
         fn arg<T: serde::de::DeserializeOwned>(
             args: &serde_json::Value,
             name: &str,
@@ -1578,6 +1623,7 @@ impl Service {
             value(lan_sync::compact_snapshot(&snapshot))
         }
         match command {
+            "get_command_capabilities" => value(command_capabilities("lan")?),
             "get_snapshot" => value(self.snapshot()?),
             "get_process_metrics" => value(process_metrics::sample()?),
             "get_ui_delta" => value(self.ui_delta(args.get("revision").and_then(|value| value.as_str()))?),
@@ -6875,6 +6921,11 @@ async fn get_snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
         .map_err(|error| format!("Snapshot worker failed: {error}"))?
 }
 
+#[tauri::command]
+fn get_command_capabilities() -> Result<CommandCapabilities, String> {
+    command_capabilities("native")
+}
+
 /// Native-owner only: route a fresh prompt through the locally stored Jev
 /// credential. The secret, raw prompt, and filesystem authority never cross
 /// this command boundary.
@@ -9382,6 +9433,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_command_capabilities,
             plan_jev_route,
             record_jev_route,
             plan_jev_command,
@@ -9509,6 +9561,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_contract_exposes_only_manifest_surfaces() {
+        let native = command_capabilities("native").unwrap();
+        let lan = command_capabilities("lan").unwrap();
+        assert!(native.protocol_version > 0);
+        assert_eq!(lan.protocol_version, native.protocol_version);
+        assert!(native.commands.contains(&"get_command_capabilities".to_string()));
+        assert!(lan.commands.contains(&"get_command_capabilities".to_string()));
+        assert!(lan.commands.contains(&"get_snapshot".to_string()));
+        assert!(native.commands.contains(&"browser_open".to_string()));
+        assert!(!lan.commands.contains(&"browser_open".to_string()));
+        assert!(!command_available_on_surface("browser_open", "lan").unwrap());
+        assert!(!command_available_on_surface("unregistered_command", "native").unwrap());
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("monitter-{name}-{}", id()))

@@ -1,0 +1,2208 @@
+{
+  "protocolVersion": 1,
+  "commands": {
+    "get_snapshot": {
+      "arguments": [],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_command_capabilities": {
+      "arguments": [],
+      "resultRustType": "CommandCapabilities",
+      "resultTsType": "CommandCapabilities",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "plan_jev_route": {
+      "arguments": [
+        {
+          "name": "agentId",
+          "rustName": "agent_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "prompt",
+          "rustName": "prompt",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "model_router::JevRoutePlan",
+      "resultTsType": "JevRoutePlan",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "record_jev_route": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "traceId",
+          "rustName": "trace_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "plan_jev_command": {
+      "arguments": [
+        {
+          "name": "query",
+          "rustName": "query",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "candidates",
+          "rustName": "candidates",
+          "rustType": "Vec<model_router::JevCommandCandidate>",
+          "tsType": "JevCommandCandidate[]",
+          "optional": false
+        }
+      ],
+      "resultRustType": "model_router::JevCommandPlan",
+      "resultTsType": "JevCommandPlan",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "get_process_metrics": {
+      "arguments": [],
+      "resultRustType": "process_metrics::ProcessMetricsSample",
+      "resultTsType": "ProcessMetricsSample",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "list_system_fonts": {
+      "arguments": [],
+      "resultRustType": "Vec<SystemFontFamily>",
+      "resultTsType": "SystemFontFamily[]",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "get_extension_config": {
+      "arguments": [],
+      "resultRustType": "extensions::ExtensionConfig",
+      "resultTsType": "ExtensionConfig",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "save_extension_config": {
+      "arguments": [
+        {
+          "name": "config",
+          "rustName": "config",
+          "rustType": "extensions::ExtensionConfig",
+          "tsType": "ExtensionConfig",
+          "optional": false
+        }
+      ],
+      "resultRustType": "extensions::ExtensionConfig",
+      "resultTsType": "ExtensionConfig",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "list_environment_secrets": {
+      "arguments": [],
+      "resultRustType": "environment_secrets::EnvironmentSecretsConfig",
+      "resultTsType": "EnvironmentSecretsConfig",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "set_environment_secret": {
+      "arguments": [
+        {
+          "name": "revision",
+          "rustName": "revision",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "name",
+          "rustName": "name",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "value",
+          "rustName": "value",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "description",
+          "rustName": "description",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "environment_secrets::EnvironmentSecretsConfig",
+      "resultTsType": "EnvironmentSecretsConfig",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "delete_environment_secret": {
+      "arguments": [
+        {
+          "name": "revision",
+          "rustName": "revision",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "name",
+          "rustName": "name",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "environment_secrets::EnvironmentSecretsConfig",
+      "resultTsType": "EnvironmentSecretsConfig",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "get_ui_snapshot": {
+      "arguments": [
+        {
+          "name": "revision",
+          "rustName": "revision",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "lan_sync::UiSnapshot",
+      "resultTsType": "UiSnapshotResponse",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_task_events": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "before",
+          "rustName": "before",
+          "rustType": "Option<i64>",
+          "tsType": "number | null",
+          "optional": true
+        },
+        {
+          "name": "limit",
+          "rustName": "limit",
+          "rustType": "Option<u32>",
+          "tsType": "number | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "lan_sync::TaskEventsPage",
+      "resultTsType": "TaskEventsPage",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_usage_overview": {
+      "arguments": [
+        {
+          "name": "policy",
+          "rustName": "policy",
+          "rustType": "Option<String>",
+          "tsType": "UsageRefreshPolicy",
+          "optional": true
+        }
+      ],
+      "resultRustType": "UsageOverview",
+      "resultTsType": "UsageOverview",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "list_codex_accounts": {
+      "arguments": [],
+      "resultRustType": "Vec<codex_accounts::CodexAccount>",
+      "resultTsType": "CodexAccount[]",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_task_event_detail": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "eventId",
+          "rustName": "event_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "offset",
+          "rustName": "offset",
+          "rustType": "Option<usize>",
+          "tsType": "number | null",
+          "optional": true
+        },
+        {
+          "name": "limit",
+          "rustName": "limit",
+          "rustType": "Option<usize>",
+          "tsType": "number | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "lan_sync::EventDetailChunk",
+      "resultTsType": "EventDetailChunk",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "read_markdown_file": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "href",
+          "rustName": "href",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "basePath",
+          "rustName": "base_path",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "markdown::MarkdownDocument",
+      "resultTsType": "MarkdownDocument",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "get_lan_server_info": {
+      "arguments": [],
+      "resultRustType": "lan::Info",
+      "resultTsType": "LanServerInfo",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "resolve_approval": {
+      "arguments": [
+        {
+          "name": "approvalId",
+          "rustName": "approval_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "decision",
+          "rustName": "decision",
+          "rustType": "String",
+          "tsType": "ApprovalDecision",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "revoke_approval_rule": {
+      "arguments": [
+        {
+          "name": "ruleId",
+          "rustName": "rule_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "resolve_input": {
+      "arguments": [
+        {
+          "name": "approvalId",
+          "rustName": "approval_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "response",
+          "rustName": "response",
+          "rustType": "serde_json::Value",
+          "tsType": "JsonValue",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "finish_quit": {
+      "arguments": [],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "read_attachment_file": {
+      "arguments": [
+        {
+          "name": "sourcePath",
+          "rustName": "source_path",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "attachments::ReadAttachmentFile",
+      "resultTsType": "AttachmentFileData",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "transcribe_voice_message": {
+      "arguments": [
+        {
+          "name": "audioBase64",
+          "rustName": "audio_base64",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "voice::VoiceTranscript",
+      "resultTsType": "VoiceTranscription",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "read_attachment_image": {
+      "arguments": [
+        {
+          "name": "attachmentId",
+          "rustName": "attachment_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "attachments::ReadAttachmentFile",
+      "resultTsType": "AttachmentFileData",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "read_attachment_audio": {
+      "arguments": [
+        {
+          "name": "attachmentId",
+          "rustName": "attachment_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "attachments::ReadAttachmentFile",
+      "resultTsType": "AttachmentFileData",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "store_attachment": {
+      "arguments": [
+        {
+          "name": "target",
+          "rustName": "target",
+          "rustType": "attachments::AttachmentTarget",
+          "tsType": "AttachmentTarget",
+          "optional": false
+        },
+        {
+          "name": "filename",
+          "rustName": "filename",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "mimeType",
+          "rustName": "mime_type",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "dataBase64",
+          "rustName": "data_base64",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "previewDataUrl",
+          "rustName": "preview_data_url",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        },
+        {
+          "name": "sourceId",
+          "rustName": "source_id",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "attachments::Attachment",
+      "resultTsType": "Attachment",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "save_host": {
+      "arguments": [
+        {
+          "name": "host",
+          "rustName": "host",
+          "rustType": "Host",
+          "tsType": "Host",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "delete_host": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "probe_host": {
+      "arguments": [
+        {
+          "name": "host",
+          "rustName": "host",
+          "rustType": "Host",
+          "tsType": "Host",
+          "optional": false
+        }
+      ],
+      "resultRustType": "ProbeResult",
+      "resultTsType": "ProbeResult",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "discover_acp_agents": {
+      "arguments": [
+        {
+          "name": "hostId",
+          "rustName": "host_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Vec<acp_discovery::AcpCandidate>",
+      "resultTsType": "AcpCandidate[]",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "verify_acp_agent": {
+      "arguments": [
+        {
+          "name": "hostId",
+          "rustName": "host_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "launch",
+          "rustName": "launch",
+          "rustType": "AcpLaunch",
+          "tsType": "AcpLaunch",
+          "optional": false
+        }
+      ],
+      "resultRustType": "acp_probe::ProbeResult",
+      "resultTsType": "AcpProbeResult",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "save_agent": {
+      "arguments": [
+        {
+          "name": "agent",
+          "rustName": "agent",
+          "rustType": "Agent",
+          "tsType": "Agent",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "delete_agent": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "chatHandling",
+          "rustName": "chat_handling",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "create_task": {
+      "arguments": [
+        {
+          "name": "input",
+          "rustName": "input",
+          "rustType": "CreateTaskInput",
+          "tsType": "CreateTaskInput",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Task",
+      "resultTsType": "Task",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "handoff_task": {
+      "arguments": [
+        {
+          "name": "input",
+          "rustName": "input",
+          "rustType": "HandoffTaskInput",
+          "tsType": "HandoffTaskInput",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Task",
+      "resultTsType": "Task",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "fork_task": {
+      "arguments": [
+        {
+          "name": "input",
+          "rustName": "input",
+          "rustType": "ForkTaskInput",
+          "tsType": "ForkTaskInput",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Task",
+      "resultTsType": "Task",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "choose_local_folder": {
+      "arguments": [
+        {
+          "name": "initial",
+          "rustName": "initial",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Option<String>",
+      "resultTsType": "string | null",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "save_project": {
+      "arguments": [
+        {
+          "name": "project",
+          "rustName": "project",
+          "rustType": "Project",
+          "tsType": "Project",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "delete_project": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "post_project_board_note": {
+      "arguments": [
+        {
+          "name": "projectId",
+          "rustName": "project_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "text",
+          "rustName": "text",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "requestId",
+          "rustName": "request_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "set_task_project": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "projectId",
+          "rustName": "project_id",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "rename_task": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "title",
+          "rustName": "title",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "autoname": {
+      "arguments": [
+        {
+          "name": "target",
+          "rustName": "target",
+          "rustType": "AutonameTarget",
+          "tsType": "AutonameTarget",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "delete_task": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "preview_task_deletion": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "deletion::DeletionPreview",
+      "resultTsType": "TaskDeletionPreview",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "delete_archived_task": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "removeNativeFiles",
+          "rustName": "remove_native_files",
+          "rustType": "bool",
+          "tsType": "boolean",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "set_task_archived": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "archived",
+          "rustName": "archived",
+          "rustType": "bool",
+          "tsType": "boolean",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "clear_task_context": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "send_message": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "text",
+          "rustName": "text",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "attachmentIds",
+          "rustName": "attachment_ids",
+          "rustType": "Option<Vec<String>>",
+          "tsType": "string[] | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "send_message_fast": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "text",
+          "rustName": "text",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "attachmentIds",
+          "rustName": "attachment_ids",
+          "rustType": "Option<Vec<String>>",
+          "tsType": "string[] | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "lan_sync::Accepted",
+      "resultTsType": "SendAccepted",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "request_mail_detail": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "mailId",
+          "rustName": "mail_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "mail_triage::MailDetailRequestResult",
+      "resultTsType": "MailDetailRequestResult",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "get_mail_detail": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "mailId",
+          "rustName": "mail_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Option<mail_triage::MailDetail>",
+      "resultTsType": "MailDetail | null",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "resume_task": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "cancel_task": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "cancel_queued_message": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "edit_queued_message": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "text",
+          "rustName": "text",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "set_channel_agent_conversation": {
+      "arguments": [
+        {
+          "name": "channelId",
+          "rustName": "channel_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "enabled",
+          "rustName": "enabled",
+          "rustType": "bool",
+          "tsType": "boolean",
+          "optional": false
+        },
+        {
+          "name": "turnLimit",
+          "rustName": "turn_limit",
+          "rustType": "u32",
+          "tsType": "number",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "stop_channel_agent_conversation": {
+      "arguments": [
+        {
+          "name": "channelId",
+          "rustName": "channel_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "save_settings": {
+      "arguments": [
+        {
+          "name": "settings",
+          "rustName": "settings",
+          "rustType": "Settings",
+          "tsType": "Settings",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "set_native_escape_shield": {
+      "arguments": [
+        {
+          "name": "enabled",
+          "rustName": "enabled",
+          "rustType": "bool",
+          "tsType": "boolean",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "load_dev_ui": {
+      "arguments": [],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "use_packaged_ui": {
+      "arguments": [],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "save_channel": {
+      "arguments": [
+        {
+          "name": "channel",
+          "rustName": "channel",
+          "rustType": "Channel",
+          "tsType": "Channel",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "set_channel_membership": {
+      "arguments": [
+        {
+          "name": "channelId",
+          "rustName": "channel_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "agentId",
+          "rustName": "agent_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "member",
+          "rustName": "member",
+          "rustType": "bool",
+          "tsType": "boolean",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "send_channel_message": {
+      "arguments": [
+        {
+          "name": "channelId",
+          "rustName": "channel_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "text",
+          "rustName": "text",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "agentIds",
+          "rustName": "agent_ids",
+          "rustType": "Vec<String>",
+          "tsType": "string[]",
+          "optional": false
+        },
+        {
+          "name": "attachmentIds",
+          "rustName": "attachment_ids",
+          "rustType": "Option<Vec<String>>",
+          "tsType": "string[] | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "send_channel_message_fast": {
+      "arguments": [
+        {
+          "name": "channelId",
+          "rustName": "channel_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "text",
+          "rustName": "text",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "agentIds",
+          "rustName": "agent_ids",
+          "rustType": "Vec<String>",
+          "tsType": "string[]",
+          "optional": false
+        },
+        {
+          "name": "attachmentIds",
+          "rustName": "attachment_ids",
+          "rustType": "Option<Vec<String>>",
+          "tsType": "string[] | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "lan_sync::Accepted",
+      "resultTsType": "SendAccepted",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_resume_command": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "String",
+      "resultTsType": "string",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "get_model_catalog": {
+      "arguments": [
+        {
+          "name": "target",
+          "rustName": "target",
+          "rustType": "ModelCatalogTarget",
+          "tsType": "ModelTarget",
+          "optional": false
+        }
+      ],
+      "resultRustType": "ModelCatalog",
+      "resultTsType": "ModelCatalog",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "set_task_model_settings": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "settings",
+          "rustName": "settings",
+          "rustType": "ModelSettings",
+          "tsType": "ModelSettings",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "set_task_sandbox": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "sandbox",
+          "rustName": "sandbox",
+          "rustType": "String",
+          "tsType": "Sandbox",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_task_goal": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Option<serde_json::Value>",
+      "resultTsType": "JsonValue | null",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_task_slash_commands": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Vec<SlashCommand>",
+      "resultTsType": "SlashCommand[]",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "execute_task_slash_command": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "command",
+          "rustName": "command",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "SlashCommandExecution",
+      "resultTsType": "SlashCommandExecution",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_subagent_transcript": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "subagentId",
+          "rustName": "subagent_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Vec<SubagentTranscriptEntry>",
+      "resultTsType": "SubagentTranscriptEntry[]",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "clear_task_goal": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_task_git_status": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "detectorSession",
+          "rustName": "detector_session",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "git::GitStatus",
+      "resultTsType": "TaskGitStatus",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "wait_for_task_git_marker": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "detectorSession",
+          "rustName": "detector_session",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "String",
+      "resultTsType": "string",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_task_git_diff": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "path",
+          "rustName": "path",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "scope",
+          "rustName": "scope",
+          "rustType": "String",
+          "tsType": "GitDiffScope",
+          "optional": false
+        }
+      ],
+      "resultRustType": "git::GitDiff",
+      "resultTsType": "TaskGitDiff",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "open_terminal": {
+      "arguments": [
+        {
+          "name": "target",
+          "rustName": "target",
+          "rustType": "terminal::TerminalTarget",
+          "tsType": "TerminalTarget",
+          "optional": false
+        },
+        {
+          "name": "cols",
+          "rustName": "cols",
+          "rustType": "u16",
+          "tsType": "number",
+          "optional": false
+        },
+        {
+          "name": "rows",
+          "rustName": "rows",
+          "rustType": "u16",
+          "tsType": "number",
+          "optional": false
+        }
+      ],
+      "resultRustType": "terminal::TerminalSession",
+      "resultTsType": "TerminalSession",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "list_terminals": {
+      "arguments": [],
+      "resultRustType": "Vec<terminal::TerminalSession>",
+      "resultTsType": "TerminalSession[]",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "write_terminal": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "data",
+          "rustName": "data",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "resize_terminal": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "cols",
+          "rustName": "cols",
+          "rustType": "u16",
+          "tsType": "number",
+          "optional": false
+        },
+        {
+          "name": "rows",
+          "rustName": "rows",
+          "rustType": "u16",
+          "tsType": "number",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "read_terminal": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "afterSeq",
+          "rustName": "after_seq",
+          "rustType": "u64",
+          "tsType": "number",
+          "optional": false
+        }
+      ],
+      "resultRustType": "terminal::TerminalRead",
+      "resultTsType": "TerminalRead",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "close_terminal": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "browser_open": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "url",
+          "rustName": "url",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "bounds",
+          "rustName": "bounds",
+          "rustType": "BrowserBounds",
+          "tsType": "BrowserBounds",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserState",
+      "resultTsType": "BrowserState",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_set_layout": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "bounds",
+          "rustName": "bounds",
+          "rustType": "BrowserBounds",
+          "tsType": "BrowserBounds",
+          "optional": false
+        },
+        {
+          "name": "visible",
+          "rustName": "visible",
+          "rustType": "bool",
+          "tsType": "boolean",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserState",
+      "resultTsType": "BrowserState",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_navigate": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "url",
+          "rustName": "url",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserState",
+      "resultTsType": "BrowserState",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_back": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserState",
+      "resultTsType": "BrowserState",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_forward": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserState",
+      "resultTsType": "BrowserState",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_reload": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserState",
+      "resultTsType": "BrowserState",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_close": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_get_state": {
+      "arguments": [
+        {
+          "name": "tabId",
+          "rustName": "tab_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserState",
+      "resultTsType": "BrowserState",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "browser_load_unpacked_extension": {
+      "arguments": [
+        {
+          "name": "path",
+          "rustName": "path",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "BrowserExtensionState",
+      "resultTsType": "BrowserExtensionLoadResult",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "list_schedules": {
+      "arguments": [],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "save_schedule": {
+      "arguments": [
+        {
+          "name": "input",
+          "rustName": "input",
+          "rustType": "scheduler::ScheduleInput",
+          "tsType": "Schedule",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "delete_schedule": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "run_schedule_now": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "pause_schedule": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native"
+      ]
+    },
+    "resume_schedule": {
+      "arguments": [
+        {
+          "name": "id",
+          "rustName": "id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "surfaces": [
+        "native"
+      ]
+    }
+  },
+  "protocols": {
+    "controller": {
+      "actions": [
+        "getSnapshot",
+        "sendMessage",
+        "beginAttachmentUpload",
+        "appendAttachmentUpload",
+        "finishAttachmentUpload",
+        "cancelTask",
+        "resumeTask",
+        "listTerminals",
+        "readTerminal"
+      ],
+      "mappings": {
+        "getSnapshot": {
+          "nativeCommands": [
+            "get_snapshot",
+            "get_ui_snapshot"
+          ],
+          "semantics": "read snapshot then bound event details for controller response"
+        },
+        "sendMessage": {
+          "nativeCommands": [
+            "send_message",
+            "send_message_fast"
+          ],
+          "semantics": "send once; legacy clients receive a snapshot, negotiated clients may receive acceptance receipt"
+        },
+        "beginAttachmentUpload": {
+          "nativeCommands": [],
+          "semantics": "allocate bounded per-peer in-memory upload; no native call"
+        },
+        "appendAttachmentUpload": {
+          "nativeCommands": [],
+          "semantics": "append bounded chunk to per-peer in-memory upload; no native call"
+        },
+        "finishAttachmentUpload": {
+          "nativeCommands": [
+            "store_attachment"
+          ],
+          "semantics": "assemble upload then persist through owner bridge"
+        },
+        "cancelTask": {
+          "nativeCommands": [
+            "cancel_task"
+          ],
+          "semantics": "owner bridge cancellation followed by bounded snapshot"
+        },
+        "resumeTask": {
+          "nativeCommands": [
+            "resume_task"
+          ],
+          "semantics": "owner bridge resume followed by bounded snapshot"
+        },
+        "listTerminals": {
+          "nativeCommands": [
+            "list_terminals"
+          ],
+          "semantics": "owner bridge terminal list"
+        },
+        "readTerminal": {
+          "nativeCommands": [
+            "read_terminal"
+          ],
+          "semantics": "owner bridge terminal read"
+        }
+      }
+    },
+    "visitor": {
+      "allowedActions": [
+        "getSnapshot",
+        "sendMessage",
+        "storeAttachment"
+      ],
+      "deniedActions": [
+        "cancelTask",
+        "resumeTask",
+        "listTerminals",
+        "readTerminal"
+      ],
+      "mappings": {
+        "getSnapshot": {
+          "nativeCommands": [
+            "get_snapshot",
+            "get_ui_snapshot"
+          ],
+          "semantics": "read then sharedSnapshot privacy projection"
+        },
+        "sendMessage": {
+          "nativeCommands": [
+            "get_snapshot",
+            "get_ui_snapshot",
+            "send_message",
+            "send_message_fast"
+          ],
+          "semantics": "check shared scope and compose tagged visitor message before owner bridge send"
+        },
+        "storeAttachment": {
+          "nativeCommands": [
+            "get_snapshot",
+            "get_ui_snapshot",
+            "store_attachment"
+          ],
+          "semantics": "check shared task scope before owner bridge attachment storage"
+        }
+      }
+    }
+  },
+  "memberParity": {
+    "checked": [
+      "Host",
+      "Agent",
+      "Task",
+      "Message",
+      "Project",
+      "Channel",
+      "Settings",
+      "Snapshot",
+      "CreateTaskInput",
+      "HandoffTaskInput",
+      "ForkTaskInput"
+    ],
+    "unsupported": [
+      "AcpCandidate",
+      "AcpLaunch",
+      "AcpProbeResult",
+      "ApprovalDecision",
+      "Attachment",
+      "AttachmentFileData",
+      "AttachmentTarget",
+      "AutonameTarget",
+      "BrowserBounds",
+      "BrowserExtensionLoadResult",
+      "BrowserState",
+      "CodexAccount",
+      "CommandCapabilities",
+      "EnvironmentSecretsConfig",
+      "EventDetailChunk",
+      "ExtensionConfig",
+      "GitDiffScope",
+      "JevCommandCandidate",
+      "JevCommandPlan",
+      "JevRoutePlan",
+      "LanServerInfo",
+      "MailDetail",
+      "MailDetailRequestResult",
+      "MarkdownDocument",
+      "ModelCatalog",
+      "ModelSettings",
+      "ModelTarget",
+      "ProbeResult",
+      "ProcessMetricsSample",
+      "Sandbox",
+      "Schedule",
+      "SendAccepted",
+      "SlashCommand",
+      "SlashCommandExecution",
+      "SubagentTranscriptEntry",
+      "SystemFontFamily",
+      "TaskDeletionPreview",
+      "TaskEventsPage",
+      "TaskGitDiff",
+      "TaskGitStatus",
+      "TerminalRead",
+      "TerminalSession",
+      "TerminalTarget",
+      "UiSnapshotResponse",
+      "UsageOverview",
+      "UsageRefreshPolicy",
+      "VoiceTranscription"
+    ]
+  }
+}

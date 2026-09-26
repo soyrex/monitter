@@ -1,4 +1,5 @@
-import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+import { invokeCommand } from './command-invoke';
+import { COMMAND_CONTRACT_PROTOCOL_VERSION, type CommandArgs, type CommandName, type CommandResults } from './generated-command-contract';
 import { isLanBrowser, lanInvoke } from './lan';
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -58,6 +59,7 @@ import type {
   BrowserState,
   BrowserExtensionLoadResult,
   VoiceTranscription,
+  JsonValue,
 } from "./types";
 
 export interface MonitterBridge {
@@ -102,7 +104,7 @@ export interface MonitterBridge {
   cancelTask(taskId: string): Promise<Snapshot>;
   resolveApproval(approvalId: string, decision: ApprovalDecision): Promise<Snapshot>;
   revokeApprovalRule(ruleId: string): Promise<Snapshot>;
-  resolveInput(approvalId: string, response: unknown): Promise<Snapshot>;
+  resolveInput(approvalId: string, response: JsonValue): Promise<Snapshot>;
   saveSettings(settings: Settings): Promise<Snapshot>;
   getExtensionConfig(): Promise<ExtensionConfig>;
   saveExtensionConfig(config: ExtensionConfig): Promise<ExtensionConfig>;
@@ -170,14 +172,21 @@ declare global {
   }
 }
 
-function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return isLanBrowser() ? lanInvoke<T>(command, args) : nativeInvoke<T>(command, args);
+function invoke<C extends CommandName>(
+  command: C,
+  ...args: keyof CommandArgs[C] extends never ? [args?: CommandArgs[C]] : [args: CommandArgs[C]]
+): Promise<CommandResults[C]> {
+  const payload = (args[0] ?? {}) as CommandArgs[C];
+  return isLanBrowser()
+    ? lanInvoke<CommandResults[C]>(command, payload as Record<string, unknown>)
+    : invokeCommand(command, payload as CommandArgs[C]);
 }
 
 function isUnknownCommand(error: unknown) {
   const value = String(error).toLowerCase();
   return value.includes('unknown command') || value.includes('unknown invoke command') ||
-    value.includes('command not found') || value.includes('command `get_ui_snapshot`') ||
+    value.includes('command not found') || value.includes('command `get_command_capabilities`') ||
+    value.includes('command get_command_capabilities') || value.includes("lan command 'get_command_capabilities' is not available") || value.includes('command `get_ui_snapshot`') ||
     value.includes('command get_ui_snapshot') || value.includes('command `send_message_fast`') ||
     value.includes('command send_message_fast') || value.includes('command `send_channel_message_fast`') ||
     value.includes('command send_channel_message_fast') ||
@@ -191,6 +200,7 @@ let uiProtocol: 'unknown' | 'revisioned' | 'legacy' = 'unknown';
 let cachedSnapshot: Snapshot | null = null;
 let cachedRevision: string | undefined;
 let snapshotRequest: Promise<Snapshot> | null = null;
+let capabilityRequest: Promise<Set<string> | null> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 const changedSubscribers = new Set<() => void>();
 
@@ -200,21 +210,50 @@ function rememberSnapshot(snapshot: Snapshot, revision?: string) {
   return snapshot;
 }
 
+function goalFromJson(value: JsonValue | null): Goal | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, JsonValue>;
+  if (typeof record.objective !== 'string' || typeof record.status !== 'string') return null;
+  return {
+    objective: record.objective,
+    status: record.status,
+    tokenBudget: typeof record.tokenBudget === 'number' || record.tokenBudget === null ? record.tokenBudget : null,
+    ...(typeof record.tokensUsed === 'number' ? { tokensUsed: record.tokensUsed } : {}),
+    ...(typeof record.timeUsedSeconds === 'number' ? { timeUsedSeconds: record.timeUsedSeconds } : {}),
+  };
+}
+
 async function getRevisionedSnapshot(): Promise<Snapshot> {
-  const result = await invoke<UiSnapshotResponse>('get_ui_snapshot', cachedRevision ? { revision: cachedRevision } : {});
-  uiProtocol = 'revisioned';
+  const result = await invoke('get_ui_snapshot', cachedRevision ? { revision: cachedRevision } : {});
   return result.snapshot ? rememberSnapshot(result.snapshot, result.revision) : (cachedSnapshot ?? (() => { throw new Error('Monitter reported an unchanged snapshot before a snapshot was loaded.'); })());
+}
+
+function getCommandCapabilities(): Promise<Set<string> | null> {
+  if (capabilityRequest) return capabilityRequest;
+  capabilityRequest = invoke('get_command_capabilities')
+    .then(result => {
+      if (result.protocolVersion !== COMMAND_CONTRACT_PROTOCOL_VERSION) {
+        throw new Error(`Unsupported Monitter command protocol ${result.protocolVersion}; this client supports ${COMMAND_CONTRACT_PROTOCOL_VERSION}.`);
+      }
+      return new Set(result.commands);
+    })
+    .catch(reason => {
+      if (isUnknownCommand(reason)) return null;
+      throw reason;
+    })
+    .finally(() => { capabilityRequest = null; });
+  return capabilityRequest;
 }
 
 function getCachedSnapshot(): Promise<Snapshot> {
   if (snapshotRequest) return snapshotRequest;
   snapshotRequest = (async () => {
-    if (uiProtocol === 'legacy') return rememberSnapshot(await invoke<Snapshot>('get_snapshot'));
+    const commands = await getCommandCapabilities();
+    if (!commands?.has('get_ui_snapshot')) return rememberSnapshot(await invoke('get_snapshot'));
     try { return await getRevisionedSnapshot(); }
     catch (reason) {
       if (!isUnknownCommand(reason)) throw reason;
-      uiProtocol = 'legacy';
-      return rememberSnapshot(await invoke<Snapshot>('get_snapshot'));
+      return rememberSnapshot(await invoke('get_snapshot'));
     }
   })().finally(() => { snapshotRequest = null; });
   return snapshotRequest;
@@ -232,33 +271,37 @@ function scheduleSnapshotRefresh() {
 }
 
 async function chooseSendProtocol(): Promise<'fast' | 'legacy'> {
-  // Probe once, before any mutation. Established revisioned sessions already
-  // have the capability and cache, so a send never waits for a snapshot read.
-  if (uiProtocol === 'legacy') return 'legacy';
-  if (uiProtocol === 'revisioned' && cachedSnapshot) return 'fast';
-  await getCachedSnapshot();
-  return uiProtocol === 'revisioned' && cachedSnapshot ? 'fast' : 'legacy';
+  // Negotiate before any mutation. Old desktop backends lack this read-only
+  // handshake, so only the known legacy send commands remain available there.
+  const commands = await getCommandCapabilities();
+  return commands?.has('send_message_fast') && commands.has('send_channel_message_fast') ? 'fast' : 'legacy';
 }
 
-async function fastSend(command: 'send_message_fast' | 'send_channel_message_fast', args: Record<string, unknown>): Promise<SendAccepted> {
-  const receipt = await invoke<SendAccepted>(command, args);
+async function fastSendMessage(taskId: string, text: string, attachmentIds: string[]): Promise<SendAccepted> {
+  const receipt = await invoke('send_message_fast', { taskId, text, attachmentIds });
+  scheduleSnapshotRefresh();
+  return receipt;
+}
+
+async function fastSendChannelMessage(channelId: string, text: string, agentIds: string[], attachmentIds: string[]): Promise<SendAccepted> {
+  const receipt = await invoke('send_channel_message_fast', { channelId, text, agentIds, attachmentIds });
   scheduleSnapshotRefresh();
   return receipt;
 }
 
 async function sendMessageWithProtocol(taskId: string, text: string, attachmentIds: string[]): Promise<Snapshot | SendAccepted> {
   const protocol = await chooseSendProtocol();
-  if (protocol === 'legacy') return rememberSnapshot(await invoke<Snapshot>('send_message', { taskId, text, attachmentIds }));
+  if (protocol === 'legacy') return rememberSnapshot(await invoke('send_message', { taskId, text, attachmentIds }));
   // No catch here: after invoking a mutation, even a command-looking error is
   // ambiguous and must never cause a duplicate legacy send.
-  return fastSend('send_message_fast', { taskId, text, attachmentIds });
+  return fastSendMessage(taskId, text, attachmentIds);
 }
 
 async function sendChannelMessageWithProtocol(channelId: string, text: string, agentIds: string[], attachmentIds: string[]): Promise<Snapshot | SendAccepted> {
   const protocol = await chooseSendProtocol();
-  if (protocol === 'legacy') return rememberSnapshot(await invoke<Snapshot>('send_channel_message', { channelId, text, agentIds, attachmentIds }));
+  if (protocol === 'legacy') return rememberSnapshot(await invoke('send_channel_message', { channelId, text, agentIds, attachmentIds }));
   // See direct-send equivalent: mutation errors are surfaced as-is.
-  return fastSend('send_channel_message_fast', { channelId, text, agentIds, attachmentIds });
+  return fastSendChannelMessage(channelId, text, agentIds, attachmentIds);
 }
 
 const nativeBridge: MonitterBridge = {
@@ -266,93 +309,97 @@ const nativeBridge: MonitterBridge = {
     typeof window !== "undefined" &&
     (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
   getSnapshot: () => getCachedSnapshot(),
-  planJevRoute: (agentId, prompt) => isLanBrowser() ? desktopOnly() : invoke<JevRoutePlan>('plan_jev_route', { agentId, prompt }),
-  recordJevRoute: (taskId, traceId) => isLanBrowser() ? desktopOnly() : invoke<void>('record_jev_route', { taskId, traceId }),
-  planJevCommand: (query, candidates) => isLanBrowser() ? desktopOnly() : invoke<JevCommandPlan>('plan_jev_command', { query, candidates }),
-  getTaskEvents: (taskId, before, limit) => invoke<TaskEventsPage>('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
-  getUsageOverview: (policy) => invoke<UsageOverview>('get_usage_overview', policy === undefined ? {} : { policy }),
-  listCodexAccounts: () => invoke<CodexAccount[]>('list_codex_accounts'),
-  getProcessMetrics: () => invoke<ProcessMetricsSample>('get_process_metrics'),
-  listSystemFonts: () => isLanBrowser() ? Promise.resolve([]) : invoke<SystemFontFamily[]>('list_system_fonts'),
-  getTaskEventDetail: (taskId, eventId, offset, limit) => invoke<EventDetailChunk>('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
-  readMarkdownFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke<MarkdownDocument>('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
-  getSubagentTranscript: (taskId, subagentId) => invoke<SubagentTranscriptEntry[]>('get_subagent_transcript', { taskId, subagentId }),
-  saveHost: (host) => invoke<Snapshot>("save_host", { host }),
-  deleteHost: (id) => invoke<Snapshot>("delete_host", { id }),
-  probeHost: (host) => invoke<ProbeResult>("probe_host", { host }),
-  discoverAcpAgents: (hostId) => invoke<AcpCandidate[]>('discover_acp_agents', { hostId }),
-  verifyAcpAgent: (hostId, launch) => invoke<AcpProbeResult>('verify_acp_agent', { hostId, launch }),
-  saveAgent: (agent) => invoke<Snapshot>("save_agent", { agent }),
+  planJevRoute: (agentId, prompt) => isLanBrowser() ? desktopOnly() : invoke('plan_jev_route', { agentId, prompt }),
+  recordJevRoute: (taskId, traceId) => isLanBrowser() ? desktopOnly() : invoke('record_jev_route', { taskId, traceId }),
+  planJevCommand: (query, candidates) => isLanBrowser() ? desktopOnly() : invoke('plan_jev_command', { query, candidates }),
+  getTaskEvents: (taskId, before, limit) => invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }),
+  getUsageOverview: (policy) => invoke('get_usage_overview', policy === undefined ? {} : { policy }),
+  listCodexAccounts: () => invoke('list_codex_accounts'),
+  getProcessMetrics: () => invoke('get_process_metrics'),
+  listSystemFonts: () => isLanBrowser() ? Promise.resolve([]) : invoke('list_system_fonts'),
+  getTaskEventDetail: (taskId, eventId, offset, limit) => invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
+  readMarkdownFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
+  getSubagentTranscript: (taskId, subagentId) => invoke('get_subagent_transcript', { taskId, subagentId }),
+  saveHost: (host) => invoke("save_host", { host }),
+  deleteHost: (id) => invoke("delete_host", { id }),
+  probeHost: (host) => invoke("probe_host", { host }),
+  discoverAcpAgents: (hostId) => invoke('discover_acp_agents', { hostId }),
+  verifyAcpAgent: (hostId, launch) => invoke('verify_acp_agent', { hostId, launch }),
+  saveAgent: (agent) => invoke("save_agent", { agent }),
   deleteAgent: (id, chatHandling: 'archive' | 'delete' = 'archive') =>
-    invoke<Snapshot>("delete_agent", { id, chatHandling }),
-  createTask: (input) => invoke<Task>("create_task", { input }),
-  handoffTask: (input) => invoke<Task>("handoff_task", { input }),
-  forkTask: (input) => invoke<Task>("fork_task", { input }),
-  chooseLocalFolder: (initial = '') => isLanBrowser() ? desktopOnly() : invoke<string | null>("choose_local_folder", { initial }),
-  renameTask: (id, title) => invoke<Snapshot>("rename_task", { id, title }),
-  autoname: target => invoke<Snapshot>("autoname", { target }),
-  deleteTask: (id) => invoke<Snapshot>("delete_task", { id }),
-  setTaskArchived: (taskId, archived) => invoke<Snapshot>("set_task_archived", {taskId, archived}),
-  saveProject: project => invoke<Snapshot>("save_project", {project}),
-  postProjectBoardNote: (projectId, text, requestId) => invoke<Snapshot>('post_project_board_note', { projectId, text, requestId }),
-  deleteProject: id => invoke<Snapshot>("delete_project", {id}),
-  setTaskProject: (taskId, projectId) => invoke<Snapshot>("set_task_project", {taskId, projectId}),
+    invoke("delete_agent", { id, chatHandling }),
+  createTask: (input) => invoke("create_task", { input }),
+  handoffTask: (input) => invoke("handoff_task", { input }),
+  forkTask: (input) => invoke("fork_task", { input }),
+  chooseLocalFolder: (initial = '') => isLanBrowser() ? desktopOnly() : invoke("choose_local_folder", { initial }),
+  renameTask: (id, title) => invoke("rename_task", { id, title }),
+  autoname: target => invoke("autoname", { target }),
+  deleteTask: (id) => invoke("delete_task", { id }),
+  setTaskArchived: (taskId, archived) => invoke("set_task_archived", {taskId, archived}),
+  saveProject: project => invoke("save_project", {project}),
+  postProjectBoardNote: (projectId, text, requestId) => invoke('post_project_board_note', { projectId, text, requestId }),
+  deleteProject: id => invoke("delete_project", {id}),
+  setTaskProject: (taskId, projectId) => invoke("set_task_project", {taskId, projectId}),
   sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
-  requestMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke<MailDetailRequestResult>('request_mail_detail', { taskId, mailId }),
-  getMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke<MailDetail | null>('get_mail_detail', { taskId, mailId }),
-  clearTaskContext: (taskId) => invoke<Snapshot>('clear_task_context', { taskId }),
-  cancelQueuedMessage: (id) => invoke<Snapshot>("cancel_queued_message", { id }),
-  editQueuedMessage: (id, text) => invoke<Snapshot>("edit_queued_message", { id, text }),
-  cancelTask: (taskId) => invoke<Snapshot>("cancel_task", { taskId }),
-  resolveApproval: (approvalId, decision) => invoke<Snapshot>("resolve_approval", { approvalId, decision }),
-  revokeApprovalRule: (ruleId) => invoke<Snapshot>("revoke_approval_rule", { ruleId }),
-  resolveInput: (approvalId, response) => invoke<Snapshot>("resolve_input", { approvalId, response }),
-  saveSettings: (settings) => invoke<Snapshot>("save_settings", { settings }),
-  getExtensionConfig: () => isLanBrowser() ? desktopOnly() : invoke<ExtensionConfig>('get_extension_config'),
-  saveExtensionConfig: (config) => isLanBrowser() ? desktopOnly() : invoke<ExtensionConfig>('save_extension_config', { config }),
-  listEnvironmentSecrets: () => isLanBrowser() ? desktopOnly() : invoke<EnvironmentSecretsConfig>('list_environment_secrets'),
-  setEnvironmentSecret: (revision, name, value, description) => isLanBrowser() ? desktopOnly() : invoke<EnvironmentSecretsConfig>('set_environment_secret', { revision, name, value, description }),
-  deleteEnvironmentSecret: (revision, name) => isLanBrowser() ? desktopOnly() : invoke<EnvironmentSecretsConfig>('delete_environment_secret', { revision, name }),
-  saveChannel: (channel) => invoke<Snapshot>("save_channel", { channel }),
-  setChannelAgentConversation: (channelId, enabled, turnLimit) => invoke<Snapshot>("set_channel_agent_conversation", {channelId, enabled, turnLimit}),
-  stopChannelAgentConversation: (channelId) => invoke<Snapshot>("stop_channel_agent_conversation", {channelId}),
+  requestMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('request_mail_detail', { taskId, mailId }),
+  getMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('get_mail_detail', { taskId, mailId }),
+  clearTaskContext: (taskId) => invoke('clear_task_context', { taskId }),
+  cancelQueuedMessage: (id) => invoke("cancel_queued_message", { id }),
+  editQueuedMessage: (id, text) => invoke("edit_queued_message", { id, text }),
+  cancelTask: (taskId) => invoke("cancel_task", { taskId }),
+  resolveApproval: (approvalId, decision) => invoke("resolve_approval", { approvalId, decision }),
+  revokeApprovalRule: (ruleId) => invoke("revoke_approval_rule", { ruleId }),
+  resolveInput: (approvalId, response) => invoke("resolve_input", { approvalId, response }),
+  saveSettings: (settings) => invoke("save_settings", { settings }),
+  getExtensionConfig: () => isLanBrowser() ? desktopOnly() : invoke('get_extension_config'),
+  saveExtensionConfig: (config) => isLanBrowser() ? desktopOnly() : invoke('save_extension_config', { config }),
+  listEnvironmentSecrets: () => isLanBrowser() ? desktopOnly() : invoke('list_environment_secrets'),
+  setEnvironmentSecret: (revision, name, value, description) => isLanBrowser() ? desktopOnly() : invoke('set_environment_secret', { revision, name, value, description }),
+  deleteEnvironmentSecret: (revision, name) => isLanBrowser() ? desktopOnly() : invoke('delete_environment_secret', { revision, name }),
+  saveChannel: (channel) => invoke("save_channel", { channel }),
+  setChannelAgentConversation: (channelId, enabled, turnLimit) => invoke("set_channel_agent_conversation", {channelId, enabled, turnLimit}),
+  stopChannelAgentConversation: (channelId) => invoke("stop_channel_agent_conversation", {channelId}),
   setChannelMembership: (channelId, agentId, member) =>
-    invoke<Snapshot>("set_channel_membership", { channelId, agentId, member }),
+    invoke("set_channel_membership", { channelId, agentId, member }),
   sendChannelMessage: (channelId, text, agentIds, attachmentIds = []) => sendChannelMessageWithProtocol(channelId, text, agentIds, attachmentIds),
-  resumeTask: (taskId) => invoke<Snapshot>("resume_task", { taskId }),
-  listTerminals: () => invoke<TerminalSession[]>('list_terminals'),
-  openTerminal: (target, cols, rows) => invoke<TerminalSession>('open_terminal', {target,cols,rows}),
-  writeTerminal: (id, data) => invoke<void>('write_terminal', {id,data}),
-  resizeTerminal: (id, cols, rows) => invoke<void>('resize_terminal', {id,cols,rows}),
-  readTerminal: (id, afterSeq) => invoke<TerminalRead>('read_terminal', {id,afterSeq}),
-  closeTerminal: id => invoke<void>('close_terminal', {id}),
-  browserOpen: (tabId, url, bounds) => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_open', {tabId, url, bounds}),
-  browserSetLayout: (tabId, bounds, visible) => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_set_layout', {tabId, bounds, visible}),
-  browserNavigate: (tabId, url) => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_navigate', {tabId, url}),
-  browserBack: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_back', {tabId}),
-  browserForward: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_forward', {tabId}),
-  browserReload: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_reload', {tabId}),
-  browserLoadUnpackedExtension: path => isLanBrowser() ? desktopOnly() : invoke<BrowserExtensionLoadResult>('browser_load_unpacked_extension', {path}),
-  browserClose: tabId => isLanBrowser() ? desktopOnly() : invoke<void>('browser_close', {tabId}),
-  browserGetState: tabId => isLanBrowser() ? desktopOnly() : invoke<BrowserState>('browser_get_state', {tabId}),
+  resumeTask: (taskId) => invoke("resume_task", { taskId }),
+  listTerminals: () => invoke('list_terminals'),
+  openTerminal: (target, cols, rows) => invoke('open_terminal', {target,cols,rows}),
+  writeTerminal: (id, data) => invoke('write_terminal', {id,data}),
+  resizeTerminal: (id, cols, rows) => invoke('resize_terminal', {id,cols,rows}),
+  readTerminal: (id, afterSeq) => invoke('read_terminal', {id,afterSeq}),
+  closeTerminal: id => invoke('close_terminal', {id}),
+  browserOpen: (tabId, url, bounds) => isLanBrowser() ? desktopOnly() : invoke('browser_open', {tabId, url, bounds}),
+  browserSetLayout: (tabId, bounds, visible) => isLanBrowser() ? desktopOnly() : invoke('browser_set_layout', {tabId, bounds, visible}),
+  browserNavigate: (tabId, url) => isLanBrowser() ? desktopOnly() : invoke('browser_navigate', {tabId, url}),
+  browserBack: tabId => isLanBrowser() ? desktopOnly() : invoke('browser_back', {tabId}),
+  browserForward: tabId => isLanBrowser() ? desktopOnly() : invoke('browser_forward', {tabId}),
+  browserReload: tabId => isLanBrowser() ? desktopOnly() : invoke('browser_reload', {tabId}),
+  browserLoadUnpackedExtension: path => isLanBrowser() ? desktopOnly() : invoke('browser_load_unpacked_extension', {path}),
+  browserClose: tabId => isLanBrowser() ? desktopOnly() : invoke('browser_close', {tabId}),
+  browserGetState: tabId => isLanBrowser() ? desktopOnly() : invoke('browser_get_state', {tabId}),
   onBrowserState: handler => isLanBrowser() ? desktopOnly() : listen<BrowserState>('monitter:browser-state', event => handler(event.payload)),
-  getModelCatalog: target => invoke<ModelCatalog>("get_model_catalog", {target}),
-  setTaskModelSettings: (taskId, settings) => invoke<Snapshot>("set_task_model_settings", {taskId,settings}),
-  setTaskSandbox: (taskId, sandbox) => invoke<Snapshot>('set_task_sandbox', {taskId,sandbox}),
-  getTaskGoal: taskId => invoke<Goal | null>("get_task_goal", { taskId }),
-  getTaskSlashCommands: taskId => invoke<SlashCommand[]>("get_task_slash_commands", { taskId }),
-  executeTaskSlashCommand: (taskId, command) => invoke<SlashCommandExecution>("execute_task_slash_command", { taskId, command }),
-  clearTaskGoal: taskId => invoke<void>("clear_task_goal", { taskId }),
-  getTaskGitStatus: (taskId, detectorSession = '') => invoke<TaskGitStatus>("get_task_git_status", { taskId, detectorSession }),
-  waitForTaskGitMarker: (taskId, detectorSession = '') => invoke<'found' | 'timeout' | 'already-present'>("wait_for_task_git_marker", { taskId, detectorSession }),
-  getTaskGitDiff: (taskId, path, scope) => invoke<TaskGitDiff>("get_task_git_diff", { taskId, path, scope }),
-  previewTaskDeletion: taskId => invoke<TaskDeletionPreview>("preview_task_deletion", { taskId }),
-  deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
-  storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}),
-  transcribeVoiceMessage: audioBase64 => isLanBrowser() ? desktopOnly() : invoke<VoiceTranscription>('transcribe_voice_message', { audioBase64 }),
-  readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
-  readAttachmentAudio: attachmentId => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>('read_attachment_audio', { attachmentId }),
-  readAttachmentImage: attachmentId => invoke<AttachmentFileData>('read_attachment_image', {attachmentId}),
+  getModelCatalog: target => invoke("get_model_catalog", {target}),
+  setTaskModelSettings: (taskId, settings) => invoke("set_task_model_settings", {taskId,settings}),
+  setTaskSandbox: (taskId, sandbox) => invoke('set_task_sandbox', {taskId,sandbox}),
+  getTaskGoal: async taskId => goalFromJson(await invoke("get_task_goal", { taskId })),
+  getTaskSlashCommands: taskId => invoke("get_task_slash_commands", { taskId }),
+  executeTaskSlashCommand: (taskId, command) => invoke("execute_task_slash_command", { taskId, command }),
+  clearTaskGoal: taskId => invoke("clear_task_goal", { taskId }),
+  getTaskGitStatus: (taskId, detectorSession = '') => invoke("get_task_git_status", { taskId, detectorSession }),
+  waitForTaskGitMarker: async (taskId, detectorSession = '') => {
+    const result = await invoke("wait_for_task_git_marker", { taskId, detectorSession });
+    if (result === 'found' || result === 'timeout' || result === 'already-present') return result;
+    throw new Error('Monitter returned an unknown git marker state.');
+  },
+  getTaskGitDiff: (taskId, path, scope) => invoke("get_task_git_diff", { taskId, path, scope }),
+  previewTaskDeletion: taskId => invoke("preview_task_deletion", { taskId }),
+  deleteArchivedTask: (taskId, removeNativeFiles) => invoke("delete_archived_task", { taskId, removeNativeFiles }),
+  storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}),
+  transcribeVoiceMessage: audioBase64 => isLanBrowser() ? desktopOnly() : invoke('transcribe_voice_message', { audioBase64 }),
+  readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke("read_attachment_file", {sourcePath}),
+  readAttachmentAudio: attachmentId => isLanBrowser() ? desktopOnly() : invoke('read_attachment_audio', { attachmentId }),
+  readAttachmentImage: attachmentId => invoke('read_attachment_image', {attachmentId}),
   onChanged: async (handler) => {
     changedSubscribers.add(handler);
     const changed = () => scheduleSnapshotRefresh();

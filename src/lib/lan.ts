@@ -1,4 +1,5 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from './command-invoke';
+export type { LanServerInfo } from './types';
 
 export const isLanBrowser = () => typeof document !== 'undefined' && (
   (import.meta.env.DEV && (import.meta.env.MODE === 'monitter-web' || import.meta.env.MODE === 'monitter-app-ui')) ||
@@ -27,8 +28,7 @@ export async function lanAccessCodeRequired(): Promise<boolean> {
     return (await response.json()).required !== false;
   } catch { return true; }
 }
-export interface LanServerInfo { urls: string[]; token: string; error: string | null; accessCodeRequired: boolean; }
-export const getLanServerInfo = () => invoke<LanServerInfo>('get_lan_server_info');
+export const getLanServerInfo = () => invokeCommand('get_lan_server_info');
 
 // randomUUID requires HTTPS in browsers; getRandomValues also works on LAN HTTP.
 export function localUuid(): string {

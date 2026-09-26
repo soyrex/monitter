@@ -1,0 +1,20 @@
+name: Command contract
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  contract:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run contract:check
+      - run: npm run check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib command_contract_exposes_only_manifest_surfaces
