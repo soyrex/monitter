@@ -6,6 +6,7 @@
   import Copy from "@lucide/svelte/icons/copy";
   import GitFork from "@lucide/svelte/icons/git-fork";
   import GitBranch from "@lucide/svelte/icons/git-branch";
+  import FolderGit2 from "@lucide/svelte/icons/folder-git-2";
   import Inbox from "@lucide/svelte/icons/inbox";
   import Maximize2 from "@lucide/svelte/icons/maximize-2";
   import MessageSquare from "@lucide/svelte/icons/message-square";
@@ -350,6 +351,7 @@
       <button class="git-changes-bar" type="button" aria-label={`Open Git changes: ${gitStatus.branch ?? 'Detached HEAD'}, ${gitStatus.files.length} changed ${gitStatus.files.length === 1 ? 'file' : 'files'}`} title="Open Git changes" onclick={onOpenGit}>
         <GitBranch size={13} aria-hidden="true"/>
         <code>{gitStatus.branch ?? 'Detached HEAD'}</code>
+        {#if gitStatus.worktree}<span class="git-worktree" title="Linked Git worktree"><FolderGit2 size={12} aria-hidden="true"/>Worktree</span>{/if}
         <span>{gitStatus.files.length}{gitStatus.truncated ? '+' : ''} {gitStatus.files.length === 1 ? 'file changed' : 'files changed'}</span>
       </button>
     {/if}
@@ -383,6 +385,8 @@
   .git-changes-bar:hover { color:var(--ink); border-color:color-mix(in srgb, var(--accent) 42%, var(--line)); background:color-mix(in srgb, var(--panel) 82%, var(--accent)); }
   .git-changes-bar :global(svg) { flex:none; color:var(--accent-ink, var(--accent)); }
   .git-changes-bar code { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:inherit; }
+  .git-changes-bar .git-worktree { display:inline-flex; align-items:center; gap:4px; flex:none; margin-left:2px; padding-left:7px; border-left:1px solid var(--line); color:var(--muted); }
+  .git-changes-bar .git-worktree :global(svg) { color:inherit; }
   .git-changes-bar span { flex:none; margin-left:auto; white-space:nowrap; color:var(--muted); }
   .conversation-head { background:var(--paper); display:flex; flex-shrink:0; overflow:visible; align-items:flex-start; justify-content:space-between; gap:20px; padding:25px clamp(25px,4vw,50px) 17px; border-bottom:1px solid var(--line); }
   .task-heading { align-items:center; padding-top:13px; padding-bottom:13px; }

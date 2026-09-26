@@ -39,6 +39,7 @@ pub struct GitStatus {
     pub repository: bool,
     pub root: Option<String>,
     pub branch: Option<String>,
+    pub worktree: bool,
     pub files: Vec<GitFileStatus>,
     pub truncated: bool,
 }
@@ -92,6 +93,7 @@ pub fn status(host: &Host, cwd: &str) -> Result<GitStatus, String> {
             repository: false,
             root: None,
             branch: None,
+            worktree: false,
             files: vec![],
             truncated: false,
         });
@@ -116,12 +118,14 @@ pub fn status(host: &Host, cwd: &str) -> Result<GitStatus, String> {
         return Err(command_error("Git status failed", &output.stderr));
     }
     let (branch, mut files) = parse_status(&output.stdout);
+    let worktree = is_linked_worktree(host, cwd)?;
     let truncated = output.truncated || files.len() > FILE_LIMIT;
     files.truncate(FILE_LIMIT);
     Ok(GitStatus {
         repository: true,
         root: Some(root),
         branch,
+        worktree,
         files,
         truncated,
     })
@@ -187,6 +191,7 @@ fn absent_status() -> GitStatus {
         repository: false,
         root: None,
         branch: None,
+        worktree: false,
         files: vec![],
         truncated: false,
     }
@@ -496,6 +501,26 @@ fn repository_root(host: &Host, cwd: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Linked worktrees have their own git directory under the primary
+/// repository's `.git/worktrees/` directory. The main checkout reports its
+/// `.git` directory directly, so this remains correct for nested task paths
+/// and remote hosts without relying on folder-name conventions.
+fn is_linked_worktree(host: &Host, cwd: &str) -> Result<bool, String> {
+    let output = run_git(host, cwd, &["rev-parse", "--git-dir", "--git-common-dir"], 32 * 1024)?;
+    if output.status.is_none() {
+        return Err("Git worktree check timed out.".into());
+    }
+    if !output.status.is_some_and(|status| status.success()) {
+        return Err(command_error("Git worktree check failed", &output.stderr));
+    }
+    let values = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    Ok(values.len() == 2 && values[0] != values[1])
+}
+
 fn run_git(host: &Host, cwd: &str, args: &[&str], limit: usize) -> Result<Output, String> {
     if cwd.trim().is_empty() {
         return Err("Task folder is empty.".into());
@@ -762,6 +787,24 @@ mod tests {
         );
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn status_marks_linked_worktrees_without_marking_the_primary_checkout() {
+        let root = repo();
+        let linked = std::env::temp_dir().join(format!("monitter-git-worktree-{}", uuid::Uuid::new_v4()));
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["worktree", "add", "--detach"])
+            .arg(&linked)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!status(&host(), root.to_str().unwrap()).unwrap().worktree);
+        assert!(status(&host(), linked.to_str().unwrap()).unwrap().worktree);
+        git(&root, &["worktree", "remove", "--force", linked.to_str().unwrap()]);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

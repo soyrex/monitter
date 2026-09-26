@@ -459,6 +459,7 @@ export type TaskGitStatus = { repository: false } | {
   repository: true;
   root: string;
   branch: string | null;
+  worktree: boolean;
   files: GitFileStatus[];
   truncated: boolean;
 };
