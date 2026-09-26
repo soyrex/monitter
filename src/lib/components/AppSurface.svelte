@@ -599,7 +599,6 @@
   let slashCommandTask = '', slashCommandRevision = 0;
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
-  let statisticsExpanded = $state(false);
   let statisticsModalOpen = $state(false);
   let mobileSidebar = $state(false);
   const desktopInterfaceScale = interfaceScaleStore('desktop');
@@ -5365,7 +5364,7 @@
   <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
   {#if !embedded}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the sidebar delegates arrow navigation among its focusable controls) -->
-  <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:statistics-expanded={statisticsExpanded && !sidebarCompressed} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
+  <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null;railProjectId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
@@ -5433,7 +5432,7 @@
         {/if}
         {#if sidebarRecentChats.length}
           <p class="activity-heading activity-recent-heading">Recent</p>
-          <div class="activity-list">{#each sidebarRecentChats as task (task.id)}{@render sidebarChat(task,true)}{/each}</div>
+          <div class="activity-list">{#each sidebarRecentChats as task (task.id)}{@render sidebarChat(task,true,true)}{/each}</div>
         {/if}
         {#if !sidebarRootChats.length}<p class="empty-tree">No chats yet</p>{/if}
       {:else}
@@ -5518,17 +5517,15 @@
     </div>{/if}
     {#if sidebarCompressed}
       <div class="sidebar-statistics-compact">
-        <button class="icon compact-usage-control" aria-label="Open Statistics" title="Open Statistics" onclick={() => { sidebarCollapsed = false; statisticsExpanded = true; }}><ChartPie size={16}/></button>
+        <button class="icon compact-usage-control" aria-label="Open Statistics" title="Open Statistics" onclick={() => { sidebarCollapsed = false; }}><ChartPie size={16}/></button>
       </div>
     {:else}
-      <section class="sidebar-statistics" class:expanded={statisticsExpanded} aria-label="Statistics" onclick={(event)=>{const target=event.target as HTMLElement;if(target.closest('button,a,input,select,textarea,[role="button"]'))return;statisticsModalOpen=true}}>
-        <button class="statistics-toggle" type="button" aria-expanded={statisticsExpanded} aria-controls="sidebar-statistics-body" onclick={()=>{statisticsExpanded=!statisticsExpanded;statisticsModalOpen=true}}>
-          <span>STATISTICS</span><ChevronDown class="statistics-chevron" size={13} aria-hidden="true" />
-        </button>
-        <div class="statistics-body" id="sidebar-statistics-body" inert={!statisticsExpanded}>
+      <!-- svelte-ignore a11y_click_events_have_key_events (the footer opens Statistics from its non-control surface) -->
+      <section class="sidebar-statistics" aria-label="Statistics" onclick={(event)=>{const target=event.target as HTMLElement;if(target.closest('button,a,input,select,textarea,[role="button"]'))return;statisticsModalOpen=true}}>
+        <div class="statistics-body" id="sidebar-statistics-body">
           <div class="statistics-content">
             <UsageRings usage={sidebarUsage} expanded={true} showHeader={false} iconOnly={true} class="rings-only"/>
-            <SidebarClock expanded={statisticsExpanded} panel={true} bind:metricsModalOpen={statisticsModalOpen}/>
+            <SidebarClock expanded={true} panel={true} bind:metricsModalOpen={statisticsModalOpen}/>
           </div>
         </div>
       </section>
@@ -6550,19 +6547,16 @@
     background:color-mix(in srgb,var(--sidebar) 96%,transparent);
     backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
   }
-  .statistics-toggle { display:grid; grid-template-columns:minmax(0,1fr) 16px; align-items:center; gap:7px; width:100%; height:33px; padding:0 10px 0 13px; color:var(--muted); text-align:left; }
-  .statistics-toggle:hover { color:var(--ink); background:var(--soft); }
-  .statistics-toggle > span { overflow:hidden; color:var(--ink); font-size:calc(9px * var(--interface-font-ratio,1)); font-weight:650; letter-spacing:.11em; text-overflow:ellipsis; white-space:nowrap; }
-  .statistics-toggle :global(.statistics-chevron) { justify-self:end; transform:rotate(180deg); transition:transform 180ms ease; }
-  .sidebar-statistics.expanded .statistics-toggle :global(.statistics-chevron) { transform:rotate(0); }
-  .statistics-body { max-height:0; overflow:hidden; transition:max-height 240ms cubic-bezier(.2,.7,.2,1); }
-  .sidebar-statistics.expanded .statistics-body { max-height:min(380px,56vh); overflow-y:auto; overscroll-behavior:contain; }
-  .statistics-content { display:grid; gap:3px; min-height:0; padding:5px 0 2px; }
+  .statistics-body { overflow:visible; }
+  .statistics-content { display:grid; gap:0; min-height:0; padding:4px 0 0; }
   .statistics-content :global(.usage-rings) { border:0; border-radius:0; background:transparent; }
+  .statistics-content :global(.usage-rings.rings-only .usage-body) { padding:2px 4px 4px; }
+  .statistics-content :global(.usage-rings.rings-only .usage-ring-wrap),
+  .statistics-content :global(.usage-rings.rings-only .usage-ring) { width:36px; height:36px; }
+  .statistics-content :global(.usage-rings.rings-only .usage-ring-label) { font-size:calc(7px * var(--interface-font-ratio,1)); }
   .sidebar-statistics-compact { position:absolute; right:0; bottom:var(--sidebar-footer-safe-area,0px); left:0; z-index:4; display:grid; place-items:center; height:41px; border-top:1px solid var(--line); background:var(--sidebar); }
   .sidebar-statistics-compact .compact-usage-control { width:100%; height:40px; border-radius:0; color:var(--muted); }
   .sidebar-statistics-compact .compact-usage-control:hover { color:var(--ink); background:var(--soft); }
-  @media (prefers-reduced-motion:reduce) { .statistics-body,.statistics-toggle :global(.statistics-chevron) { transition:none; } }
   .sidebar-statistics::before {
     content:'';
     position:absolute;
@@ -6686,7 +6680,7 @@
   .agent-avatar-toggle:focus-visible .avatar-toggle-overlay { opacity:1; }
   @media (hover:hover) and (pointer:fine) { .agent-avatar-toggle:hover .avatar-toggle-overlay { opacity:1; } }
   .task-tree[hidden] { display:none; }
-  .task-row.recent { opacity:.65; }
+  .task-row.recent { opacity:.7; }
   .task-row.recent:focus-within { opacity:1; }
   @media (hover:hover) and (pointer:fine) { .task-row.recent:hover { opacity:1; } }
   .recents-divider { display:flex; align-items:center; gap:8px; margin:9px 8px 5px; color:var(--muted); font-size:11px; }
@@ -6839,7 +6833,8 @@
   .activity-task-content { position:relative; z-index:1; display:flex; align-items:center; flex:1; gap:10px; min-width:0; pointer-events:none; }
   .sidebar-card-task :global(.observer-indicator) { position:relative; z-index:2; }
   .activity-task-copy { display:grid; flex:1; gap:2px; min-width:0; }
-  .activity-task .activity-task-title { display:block; width:100%; overflow:hidden; color:var(--ink); font-size:calc(13px * var(--interface-font-ratio,1)); font-weight:600; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
+  .activity-task .activity-task-title { display:block; width:100%; overflow:hidden; color:var(--ink); font-size:calc(13px * var(--interface-font-ratio,1)); font-weight:400; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
+  .activity-task.recent .activity-task-title { font-weight:200; }
   .activity-task .activity-task-meta { display:flex; align-items:center; gap:4px; min-width:0; overflow:hidden; font-size:calc(10px * var(--interface-font-ratio,1)); line-height:1.3; white-space:nowrap; }
   .activity-agent-name, .activity-host { min-width:0; overflow:hidden; text-overflow:ellipsis; }
   .activity-time { flex:none; }
@@ -7042,8 +7037,7 @@
     flex-shrink: 0;
     padding-bottom: var(--density-tabbar-inset);
   }
-  .sidebar { --sidebar-statistics-height:33px; }
-  .sidebar.statistics-expanded { --sidebar-statistics-height:min(413px, calc(56vh + 33px)); }
+  .sidebar { --sidebar-statistics-height:147px; }
   .sidebar.sidebar-compressed { --sidebar-statistics-height:41px; }
   .sidebar .side-scroll { padding-bottom:calc(var(--sidebar-statistics-height) + var(--sidebar-footer-safe-area,0px) + 12px); }
   .sidebar .agent-rail { padding-bottom:calc(var(--sidebar-statistics-height) + var(--sidebar-footer-safe-area,0px) + 12px); }

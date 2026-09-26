@@ -288,7 +288,7 @@
   }
 </script>
 
-<section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class:simple class:icon-only={iconOnly} class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
+<section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class:simple class:icon-only={iconOnly} class:codex-multi={iconOnly && (usage.codex?.accounts?.length ?? 0) > 1} class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
   {#if !compact && showHeader}
     <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" aria-label={toggleAction()} title={toggleAction()} onclick={toggle}>
       <span>MODEL USAGE</span>
@@ -304,6 +304,7 @@
         {@const data = selectedAccount ?? sourceData}
         {@const active = data?.active}
         {@const weekly = data?.weekly}
+        {@const showCodexAccountArrows = iconOnly && provider.id === 'codex' && (sourceData?.accounts?.length ?? 0) > 1}
         {@const status = data?.status ?? 'unavailable'}
         {@const hasValue = showValue(data)}
         <article
@@ -313,32 +314,43 @@
           class:unavailable={status === 'unavailable' || status === 'error' || !hasValue}
           class:stale={status === 'stale'}
           class:error={status === 'error'}
+          class:codex-account-cycling={showCodexAccountArrows}
           aria-label={providerTitle(provider, data)}
           title={providerTitle(provider, data)}
         >
-          <div class="usage-ring-wrap">
-            <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`} style={`--ring-active-color:${usageColor(active)};--ring-weekly-color:${usageColor(weekly)}`}>
-              <circle class="ring-track" cx="20" cy="20" r={radius} />
-              <circle
-                class="ring-active"
-                cx="20" cy="20" r={radius}
-                pathLength="100"
-                stroke-dasharray="100"
-                stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
-              />
-              {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
+          <div class="usage-ring-container" class:codex-account-arrows={showCodexAccountArrows}>
+            {#if showCodexAccountArrows}
+              {@const accounts = sourceData?.accounts ?? []}
+              <button type="button" class="ring-account-arrow" aria-label="Previous Codex account" title={`Previous account${selectedAccount?.label ? ` from ${selectedAccount.label}` : ''}`} onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, -1)}><ChevronLeft size={13}/></button>
+            {/if}
+            <div class="usage-ring-wrap">
+              <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`} style={`--ring-active-color:${usageColor(active)};--ring-weekly-color:${usageColor(weekly)}`}>
+                <circle class="ring-track" cx="20" cy="20" r={radius} />
                 <circle
-                  class="ring-weekly"
-                  cx="20" cy="20" r="11.5"
+                  class="ring-active"
+                  cx="20" cy="20" r={radius}
                   pathLength="100"
                   stroke-dasharray="100"
-                  stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
+                  stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
                 />
-              {/if}
-            </svg>
-            <span class="ring-value" aria-hidden="true">
-              {#if iconOnly}<ProviderIcon provider={provider.id} size={15}/>{:else}{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}{/if}
-            </span>
+                {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
+                  <circle
+                    class="ring-weekly"
+                    cx="20" cy="20" r="11.5"
+                    pathLength="100"
+                    stroke-dasharray="100"
+                    stroke-dashoffset={100 - (percent(weekly.usedPercent) ?? 0)}
+                  />
+                {/if}
+              </svg>
+              <span class="ring-value" aria-hidden="true">
+                {#if iconOnly}<ProviderIcon provider={provider.id} size={15}/>{:else}{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}{/if}
+              </span>
+            </div>
+            {#if showCodexAccountArrows}
+              {@const accounts = sourceData?.accounts ?? []}
+              <button type="button" class="ring-account-arrow" aria-label="Next Codex account" title={`Next account${selectedAccount?.label ? ` from ${selectedAccount.label}` : ''}`} onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, 1)}><ChevronRight size={13}/></button>
+            {/if}
           </div>
           {#if simple}
             <div class="usage-simple-copy">
@@ -447,6 +459,11 @@
   .usage-body { display:grid; gap:4px; padding:4px; border-top:1px solid color-mix(in srgb,var(--line) 65%,transparent); }
   .usage-provider { display:grid; grid-template-columns:40px minmax(0,1fr); align-items:center; gap:8px; min-width:0; padding:5px 6px; border:1px solid transparent; border-radius:8px; }
   .usage-provider:hover { background:color-mix(in srgb,var(--accent) 5%,transparent); border-color:color-mix(in srgb,var(--accent) 12%,transparent); }
+  .usage-ring-container { display:flex; align-items:center; justify-content:center; width:40px; height:40px; overflow:visible; }
+  .usage-ring-container.codex-account-arrows { display:grid; grid-template-columns:22px 36px 22px; width:80px; height:36px; }
+  .ring-account-arrow { display:grid; place-items:center; width:22px; height:30px; padding:0; border-radius:5px; color:var(--muted); }
+  .ring-account-arrow:hover { color:var(--ink); background:var(--soft); }
+  .ring-account-arrow:focus-visible { outline:1px solid var(--accent); outline-offset:-2px; }
   .usage-ring-wrap { position:relative; display:grid; width:40px; height:40px; place-items:center; }
   .usage-ring { display:block; width:40px; height:40px; overflow:visible; }
   .usage-provider-icon { display:grid; flex:0 0 auto; width:14px; height:14px; place-items:center; color:var(--ink); }
@@ -502,7 +519,9 @@
   .compact .usage-provider:hover { border-color:color-mix(in srgb,var(--accent) 22%,transparent); }
   .usage-ring-label { display:none; }
   .rings-only .usage-body { grid-template-columns:repeat(5,minmax(0,1fr)); justify-items:center; gap:0; padding:6px 4px; }
+  .rings-only.codex-multi .usage-body { grid-template-columns:80px repeat(4,minmax(0,1fr)); }
   .rings-only .usage-provider { grid-template-columns:1fr; grid-template-rows:auto auto; justify-items:center; gap:2px; padding:3px 0; border:0; }
+  .rings-only .usage-provider.codex-account-cycling { width:80px; }
   .rings-only .usage-provider:hover { border-color:transparent; }
   .rings-only .usage-copy { display:none; }
   .rings-only .usage-ring-label { display:flex; align-items:center; justify-content:center; gap:3px; max-width:100%; overflow:hidden; color:var(--muted); font:calc(8px * var(--interface-font-ratio,1)) var(--mono); letter-spacing:.01em; text-align:center; white-space:nowrap; }
