@@ -43,6 +43,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Bot from "@lucide/svelte/icons/bot";
   import Archive from "@lucide/svelte/icons/archive";
+  import Info from "@lucide/svelte/icons/info";
   import Activity from "@lucide/svelte/icons/activity";
   import Clock from "@lucide/svelte/icons/clock";
   import Check from "@lucide/svelte/icons/check";
@@ -630,6 +631,7 @@
   let railProjectAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
   let detailTab = $state<'run' | 'git' | 'timeline' | 'approvals' | 'subagents'>('run');
+  let taskInfoOpen = $state(false);
   let selectedSubagentId = $state<string | null>(null);
   let subagentVisorOpen = $state(false);
   let subagentOwnerTaskId = $state<string | null>(null);
@@ -5313,37 +5315,14 @@
               {#key subagentLifecycleRevision}<UnifiedSubagentSidebar items={taskSubagents} selectedId={selectedSubagentId} onselect={inspectSubagent}/>{/key}
             </section>
             <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || detailTab==='subagents' || (detailTab==='git' && gitState.repository===true)}>
-              <details class="agent-identity" open aria-label="Agent identity"><summary><button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button><span><b>{selectedAgent?.name ?? 'Agent'}</b><small><ProviderIcon provider={selectedTask.provider} size={12} />{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span></summary>{#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}</details>
-              <dl>
-                <div>
-                  <dt>harness</dt>
-                  <dd><span class="provider-value"><ProviderIcon provider={selectedTask.provider} size={12} />{selectedTask.provider}</span></dd>
+              <section class="agent-identity" aria-label="Agent identity">
+                <div class="agent-identity-heading">
+                  <button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button>
+                  <span class="agent-identity-copy"><b>{selectedAgent?.name ?? 'Agent'}</b><small><ProviderIcon provider={selectedTask.provider} size={12} />{selectedTask.provider}{selectedTask.model ? ` · ${selectedTask.model}` : ''}</small></span>
+                  <button type="button" class="agent-info-trigger" aria-label={`Show details for ${selectedAgent?.name ?? 'agent'}`} title="Agent and chat details" onclick={()=>taskInfoOpen=true}><Info size={15}/></button>
                 </div>
-                <div>
-                  <dt>model</dt>
-                  <dd>{selectedTask.model || "Harness default"}</dd>
-                </div>
-                <div>
-                  <dt>host</dt>
-                  <dd>{selectedHost?.name ?? "Unknown host"}</dd>
-                </div>
-                {#if selectedTask.provider === 'codex'}<div>
-                  <dt>Codex account</dt>
-                  <dd>{codexAccountLabel(selectedTask.codexHome)}</dd>
-                </div>{/if}
-                <div class="task-folder"><dt>folder</dt><dd><code>{selectedTask.cwd || "No folder set"}</code></dd></div>
-                <div><dt>project</dt><dd>{projects.find(project=>project.id===selectedTask.projectId)?.name ?? 'No project'}</dd></div>
-                <div>
-                  <dt>permissions</dt>
-                  <dd>{selectedTask.sandbox === "yolo" ? "YOLO — skip permissions" : selectedTask.sandbox === "harness-configured" ? "Harness permissions" : selectedTask.sandbox}</dd>
-                </div>
-                {#if selectedTask.nativeSessionId}<div>
-                    <dt>native session</dt>
-                    <dd>
-                      <button type="button" class="session-id-link" title="Open in terminal" onclick={()=>openNativeSessionTerminal(selectedTask)}>{selectedTask.nativeSessionId}</button>
-                    </dd>
-                  </div>{/if}
-              </dl>
+                {#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}
+              </section>
               <RunSummary task={selectedTask} gitStatus={gitState.status} tasks={visibleTasks} terminalSessions={Object.values($terminalSessions)} workPlans={snapshot.workPlans?.filter(plan=>plan.taskId===selectedTask.id)} onOpenGit={()=>detailTab='git'}/>
               <section class="detail-section collaboration-list"><h3>COLLABORATION <span>{taskCollaborations.length}</span></h3>{#each taskCollaborations as collaboration}<button class="collaboration-row" onclick={()=>{const id=collaboration.fromTaskId===selectedTask?.id?collaboration.toTaskId:collaboration.fromTaskId; const task=snapshot?.tasks.find(item=>item.id===id); if(task) openTask(task)}}><span class={`dot ${collaboration.status === 'running' ? 'running' : collaboration.status === 'error' ? 'error' : 'completed'}`}></span><span><b>{collaboration.kind === 'delegation' ? 'Delegation' : 'Agent message'} · {visibleAgents.find(agent=>agent.id===(collaboration.fromTaskId===selectedTask?.id?collaboration.toAgentId:collaboration.fromAgentId))?.name ?? 'Agent'}</b><small>{collaborationStatus(collaboration)} · {relative(collaboration.updatedAt)}</small>{#if collaboration.result}<em>{collaboration.result}</em>{/if}{#if collaboration.error}<em class="collaboration-error">{collaboration.error}</em>{:else if !collaboration.result}<em>{collaboration.text}</em>{/if}</span></button>{:else}<p class="detail-empty">No routed agent messages or delegations yet.</p>{/each}</section>
               <section class="detail-section">
@@ -5562,6 +5541,19 @@
 {#if snapshot}<ArchivedChats {snapshot} open={modal === 'archived'} onclose={()=>modal=null}
   onRestore={async taskId=>applySnapshot(await bridge.setTaskArchived(taskId,false),++snapshotIssued)}
   onDelete={deleteArchivedTask} previewDeletion={taskId=>bridge.previewTaskDeletion(taskId)}/>{/if}
+
+<Modal title={`${selectedAgent?.name ?? 'Agent'} details`} open={taskInfoOpen && !!selectedTask} onclose={()=>taskInfoOpen=false} globalLayer>
+  {#if selectedTask}<dl class="task-info-list">
+    <div><dt>Harness</dt><dd><span class="provider-value"><ProviderIcon provider={selectedTask.provider} size={12} />{selectedTask.provider}</span></dd></div>
+    <div><dt>Model</dt><dd>{selectedTask.model || "Harness default"}</dd></div>
+    <div><dt>Host</dt><dd>{selectedHost?.name ?? "Unknown host"}</dd></div>
+    {#if selectedTask.provider === 'codex'}<div><dt>Codex account</dt><dd>{codexAccountLabel(selectedTask.codexHome)}</dd></div>{/if}
+    <div class="task-folder"><dt>Folder</dt><dd><code>{selectedTask.cwd || "No folder set"}</code></dd></div>
+    <div><dt>Project</dt><dd>{projects.find(project=>project.id===selectedTask.projectId)?.name ?? 'No project'}</dd></div>
+    <div><dt>Permissions</dt><dd>{selectedTask.sandbox === "yolo" ? "YOLO — skip permissions" : selectedTask.sandbox === "harness-configured" ? "Harness permissions" : selectedTask.sandbox}</dd></div>
+    {#if selectedTask.nativeSessionId}<div><dt>Native session</dt><dd><button type="button" class="session-id-link" title="Open in terminal" onclick={()=>openNativeSessionTerminal(selectedTask)}>{selectedTask.nativeSessionId}</button></dd></div>{/if}
+  </dl>{/if}
+</Modal>
 
 <Modal title={projectDraft?.id ? 'Edit project' : 'New project'} open={modal === 'project'} onclose={()=>modal=null}>
   {#if projectDraft}<form class="form" onsubmit={event=>{event.preventDefault();void saveProject();}}>
@@ -8187,8 +8179,15 @@
   .task-menu { display: grid; grid-auto-rows: min-content; align-content: start; width: max-content; min-width: 155px; max-width: min(240px, calc(100vw - 24px)); height: max-content; max-height: min(320px, calc(100vh - 24px)); overflow-y: auto; overflow-x: hidden; }
   .task-menu button { display: flex; width: 100%; min-height: 32px; height: auto; flex: none; align-self: stretch; box-sizing: border-box; gap: 7px; align-items: center; padding: 7px; text-align: left; }
   .agent-identity { margin: 0 0 14px; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
-  .agent-identity summary { display: flex; gap: 9px; align-items: center; cursor: pointer; list-style: none; }
-  .agent-identity summary::-webkit-details-marker { display: none; }
+  .agent-identity-heading { display:flex; align-items:center; gap:9px; min-width:0; }
+  .agent-identity-copy { flex:1; min-width:0; }
+  .agent-info-trigger { display:grid; place-items:center; flex:none; width:28px; height:28px; margin-left:auto; border:1px solid var(--line); border-radius:7px; color:var(--muted); background:var(--panel); }
+  .agent-info-trigger:hover { color:var(--accent-ink); border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); background:var(--soft); }
+  .task-info-list { display:grid; gap:11px; margin:0; }
+  .task-info-list > div { display:grid; grid-template-columns:minmax(105px,auto) minmax(0,1fr); align-items:start; gap:12px; padding-bottom:9px; border-bottom:1px solid var(--line); font-size:calc(12px * var(--interface-font-ratio,1)); }
+  .task-info-list dt { color:var(--muted); font:calc(10px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
+  .task-info-list dd { min-width:0; margin:0; overflow-wrap:anywhere; color:var(--ink); }
+  .task-info-list dd code { white-space:normal; overflow-wrap:anywhere; }
   .identity-avatar { width: 32px; height: 32px; }.identity-avatar-button { position:relative; padding:0; border:0; cursor:pointer; overflow:hidden; }.avatar-edit-overlay { position:absolute; inset:0; display:grid; place-items:center; border-radius:inherit; color:#fff; background:rgba(0,0,0,.75); opacity:0; transition:opacity .15s ease; pointer-events:none; }
   @media (hover:hover) and (pointer:fine) { .identity-avatar-button:hover .avatar-edit-overlay { opacity:1; } }
   @media (hover:none), (pointer:coarse) {
