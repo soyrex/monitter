@@ -2364,6 +2364,7 @@ dependencies = [
 name = "monitter"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "block2",
  "cc",
  "chrono",
@@ -2389,9 +2390,11 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "time",
  "uuid",
  "webkit2gtk",
  "webview2-com",
+ "x509-parser",
 ]
 
 [[package]]

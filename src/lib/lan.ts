@@ -27,7 +27,16 @@ export async function lanAccessCodeRequired(): Promise<boolean> {
     return (await response.json()).required !== false;
   } catch { return true; }
 }
-export interface LanServerInfo { urls: string[]; token: string; error: string | null; accessCodeRequired: boolean; }
+export interface LanServerInfo {
+  urls: string[];
+  token: string;
+  error: string | null;
+  accessCodeRequired: boolean;
+  /** Public local root CA certificate in PEM form; never contains the private key. */
+  localCaPem?: string | null;
+  /** SHA-256 fingerprint of the public local root CA certificate. */
+  localCaFingerprint?: string | null;
+}
 export const getLanServerInfo = () => invoke<LanServerInfo>('get_lan_server_info');
 
 // randomUUID requires HTTPS in browsers; getRandomValues also works on LAN HTTP.

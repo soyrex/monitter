@@ -41,11 +41,41 @@ to paired mobile controllers and shared visitor clients.
 
 ## LAN HTTPS setup
 
-Use a hostname you control that resolves to the Mac's private LAN address from
-the client devices. Obtain a browser-trusted certificate for that hostname;
-[DNS-01 validation](https://letsencrypt.org/docs/challenge-types/) works without
-exposing the Monitter server to the public Internet. Configure the installed
-desktop app at `~/Library/Application Support/com.monitter.desktop/lan-tls.json`:
+No domain, public DNS record, or certificate service is required. At first LAN
+startup, the desktop generates a private local certificate authority (CA) for
+this installation and saves it in its app data. It creates an HTTPS server
+certificate for the Mac's current private IP addresses on port 18437. Settings
+→ LAN access shows the HTTPS addresses, offers the public root certificate for
+download, and shows its SHA-256 fingerprint. The root's private key stays on
+the desktop. Ordinary trusted-LAN HTTP remains available on port 18436 for
+existing clients, but browser microphone capture requires HTTPS.
+
+To use a browser microphone on another device:
+
+1. In desktop Settings → LAN access, note an HTTPS address and the CA
+   fingerprint. Export the **public** root certificate.
+2. Transfer the public certificate to the device over a trusted channel. Before
+   trusting it, compare its SHA-256 fingerprint with the desktop display. A
+   download from an untrusted HTTP page alone does not prove identity.
+3. Install and explicitly trust that root certificate on the device. On iOS,
+   manually installed roots additionally need full trust enabled under Settings
+   → General → About → Certificate Trust Settings.
+4. Open the HTTPS IP address, allow microphone access, and record. The device
+   sends the temporary audio to the Mac for transcription; the composer and
+   harness receive only the transcript.
+
+Trust is a per-device setup step. Installing a local root grants trust to
+certificates signed by that root; only do this for your own desktop and devices.
+Keep the private CA directory under the desktop app-data directory private and
+back it up securely if you need the same identity after reinstalling. Replacing
+the CA requires trusting the new root on client devices. The server regenerates
+its IP certificate when Monitter starts; restart after the Mac's LAN IP changes
+or after a year of continuous uptime. An invalid/incomplete stored CA causes a
+visible LAN startup error rather than silent identity replacement.
+
+For advanced setups, `lan-tls.json` can instead specify a certificate for a
+hostname you control, such as `lan.monitter.com`. Configure it in
+`~/Library/Application Support/com.monitter.desktop/lan-tls.json`:
 
 ```json
 {
@@ -55,23 +85,11 @@ desktop app at `~/Library/Application Support/com.monitter.desktop/lan-tls.json`
 }
 ```
 
-Keep the private key readable only by the desktop user. Monitter loads the
-certificate and key at startup and advertises `https://lan.monitter.com:18437/`
-in Settings → LAN access. Restart Monitter after certificate renewal. If the
-configuration, certificate parsing or key loading fails, LAN startup reports
-an error and does not expose a plain HTTP owner interface. Browsers reject
-expired, untrusted or hostname-mismatched certificates. Port 18436 remains HTTP on loopback for
-developer tooling while TLS is configured. Without TLS configuration, the
-legacy HTTP LAN interface remains available, but remote browser recording is
-blocked by browser secure-context rules. The LAN interface grants owner-level
-workspace control to trusted LAN users; HTTPS provides encryption, not a
-separate visitor permission level.
-
-For this installation, `lan.monitter.com` is the selected hostname. LAN clients
-need DNS to resolve it to the desktop's LAN address; a split DNS record on the
-LAN resolver keeps that address off public DNS. The address observed on the
-desktop at setup time was `192.168.10.110`, assigned by DHCP, so reserve it or
-update the record if the lease changes. The public DNS provider only needs to
-serve the DNS-01 TXT challenge for certificate issuance and renewal. Install
-`lan-tls.json` only after the certificate and key files exist: an incomplete
-configuration prevents the LAN server from starting.
+A browser-trusted certificate and LAN DNS resolution are then your
+responsibility. [DNS-01 validation](https://letsencrypt.org/docs/challenge-types/)
+can issue a public certificate without exposing the server to the Internet.
+When a custom TLS configuration is present, HTTP remains on loopback only.
+A partial/invalid custom configuration fails LAN startup rather than falling
+back to the owner-level HTTP LAN interface. Restart after custom certificate
+renewal. Neither HTTPS option adds visitor permissions: trusted LAN users can
+control the owner workspace, including terminals.

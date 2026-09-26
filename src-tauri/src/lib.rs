@@ -1539,6 +1539,8 @@ impl Service {
                 urls: vec![],
                 token: String::new(),
                 access_code_required: lan::REQUIRE_ACCESS_CODE,
+                local_ca_pem: None,
+                local_ca_fingerprint: None,
                 error: self
                     .lan_error
                     .lock()

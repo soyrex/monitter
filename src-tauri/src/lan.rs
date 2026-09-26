@@ -1,9 +1,10 @@
-//! Small, deliberately dependency-free HTTP server for the owner LAN view.
+//! Small HTTP/HTTPS server for the owner LAN view.
 //! It is not a general web server: connections are bounded, one request each,
 //! and the only mutable endpoint is the authenticated command bridge.
 use crate::Service;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{BufReader, Read, Write},
@@ -38,6 +39,8 @@ pub struct Info {
     pub token: String,
     pub access_code_required: bool,
     pub error: Option<String>,
+    pub local_ca_pem: Option<String>,
+    pub local_ca_fingerprint: Option<String>,
 }
 
 pub struct Server {
@@ -51,49 +54,54 @@ impl Server {
         asset_roots: Vec<PathBuf>,
         tls_config_path: PathBuf,
     ) -> Result<Self, String> {
-        let tls = TlsConfig::load(&tls_config_path)?;
-        let (listener, tls_listener) = if tls.is_some() {
-            let tls_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, TLS_PORT))
-                .map_err(|e| format!("LAN HTTPS server could not bind port {TLS_PORT}: {e}"))?;
-            // Plain HTTP remains available only to local developer tooling.
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).map_err(|e| {
-                format!("LAN developer bridge could not bind 127.0.0.1:{PORT}: {e}")
-            })?;
-            (listener, Some(tls_listener))
-        } else {
-            (
-                TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT))
-                    .map_err(|e| format!("LAN server could not bind port {PORT}: {e}"))?,
-                None,
-            )
+        let addresses = lan_addresses();
+        let custom_tls = TlsConfig::load(&tls_config_path)?;
+        let custom = custom_tls.is_some();
+        let tls = match custom_tls {
+            Some(config) => config,
+            None => TlsConfig::local(&tls_config_path, &addresses)?,
         };
+        let tls_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, TLS_PORT))
+            .map_err(|e| format!("LAN HTTPS server could not bind port {TLS_PORT}: {e}"))?;
+        // Custom public certificates retain the original loopback-only HTTP
+        // bridge. The per-install CA adds HTTPS while preserving HTTP LAN users.
+        let http_bind = if custom {
+            Ipv4Addr::LOCALHOST
+        } else {
+            Ipv4Addr::UNSPECIFIED
+        };
+        let listener = TcpListener::bind((http_bind, PORT))
+            .map_err(|e| format!("LAN server could not bind {http_bind}:{PORT}: {e}"))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        if let Some(listener) = &tls_listener {
-            listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        }
+        tls_listener
+            .set_nonblocking(true)
+            .map_err(|e| e.to_string())?;
         let token = random_token()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let urls = if let Some(config) = &tls {
-            vec![format!("https://{}:{TLS_PORT}/", config.hostname)]
-        } else {
-            lan_addresses()
-                .into_iter()
-                .map(|ip| format!("http://{ip}:{PORT}/"))
-                .collect()
-        };
+        let mut urls: Vec<_> = tls
+            .hosts
+            .iter()
+            .map(|host| format!("https://{host}:{TLS_PORT}/"))
+            .collect();
+        if !custom {
+            urls.extend(addresses.iter().map(|ip| format!("http://{ip}:{PORT}/")));
+        }
         let info = Info {
             urls,
             token: token.clone(),
             access_code_required: REQUIRE_ACCESS_CODE,
             error: None,
+            local_ca_pem: tls.local_ca_pem.clone(),
+            local_ca_fingerprint: tls.local_ca_fingerprint.clone(),
         };
         let active = Arc::new(AtomicUsize::new(0));
         let auth_limiter = Arc::new(Mutex::new(AuthRateLimiter::default()));
-        let thread_tls = tls.as_ref().map(|config| Arc::clone(&config.server_config));
-        let thread_host = tls.as_ref().map(|config| config.hostname.clone());
+        let thread_tls = Arc::clone(&tls.server_config);
+        let thread_hosts = tls.hosts.clone();
+        let thread_ca = tls.local_ca_pem.clone();
         let launch = |listener: TcpListener,
                       tls_config: Option<Arc<rustls::ServerConfig>>,
-                      tls_host: Option<String>,
+                      tls_hosts: Option<Vec<String>>,
                       name: &'static str| {
             let thread_stop = Arc::clone(&stop);
             let service = Arc::clone(&service);
@@ -101,6 +109,7 @@ impl Server {
             let token = token.clone();
             let active = Arc::clone(&active);
             let auth_limiter = Arc::clone(&auth_limiter);
+            let ca_pem = thread_ca.clone();
             thread::Builder::new()
                 .name(name.into())
                 .spawn(move || {
@@ -120,7 +129,8 @@ impl Server {
                                 let active = Arc::clone(&active);
                                 let auth_limiter = Arc::clone(&auth_limiter);
                                 let tls_config = tls_config.clone();
-                                let tls_host = tls_host.clone();
+                                let tls_hosts = tls_hosts.clone();
+                                let ca_pem = ca_pem.clone();
                                 thread::spawn(move || {
                                     let _ = stream.set_nonblocking(false);
                                     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -139,7 +149,8 @@ impl Server {
                                                 &roots,
                                                 &auth_limiter,
                                                 REQUIRE_ACCESS_CODE,
-                                                tls_host.as_deref(),
+                                                tls_hosts.as_deref(),
+                                                ca_pem.as_deref(),
                                             );
                                         }
                                     } else {
@@ -152,6 +163,7 @@ impl Server {
                                             &auth_limiter,
                                             REQUIRE_ACCESS_CODE,
                                             None,
+                                            ca_pem.as_deref(),
                                         );
                                     }
                                     active.fetch_sub(1, Ordering::AcqRel);
@@ -167,11 +179,14 @@ impl Server {
                 .map_err(|e| format!("Could not start LAN server thread: {e}"))
         };
         launch(listener, None, None, "monitter-lan")?;
-        if let Some(listener) = tls_listener {
-            if let Err(error) = launch(listener, thread_tls, thread_host, "monitter-lan-https") {
-                stop.store(true, Ordering::Release);
-                return Err(error);
-            }
+        if let Err(error) = launch(
+            tls_listener,
+            Some(thread_tls),
+            Some(thread_hosts),
+            "monitter-lan-https",
+        ) {
+            stop.store(true, Ordering::Release);
+            return Err(error);
         }
         Ok(Self { stop, info })
     }
@@ -192,11 +207,167 @@ struct TlsFileConfig {
 }
 
 struct TlsConfig {
-    hostname: String,
+    hosts: Vec<String>,
     server_config: Arc<rustls::ServerConfig>,
+    local_ca_pem: Option<String>,
+    local_ca_fingerprint: Option<String>,
+}
+
+fn pem_certificate(der: &[u8]) -> String {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
 }
 
 impl TlsConfig {
+    fn local(config_path: &Path, addresses: &[IpAddr]) -> Result<Self, String> {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+            KeyPair, KeyUsagePurpose,
+        };
+        let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(base)
+            .map_err(|e| format!("Could not create LAN settings directory: {e}"))?;
+        let ca_dir = base.join("lan-local-ca");
+        let cert_path = ca_dir.join("root.crt");
+        let key_path = ca_dir.join("root.key");
+        if !ca_dir.exists() {
+            // A directory rename publishes both files together. Never repair an
+            // incomplete or corrupt identity by silently replacing a trusted CA.
+            let temp = base.join(format!(".lan-local-ca-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&temp).map_err(|e| format!("Could not create LAN CA directory: {e}"))?;
+            #[cfg(unix)]
+            fs::set_permissions(&temp, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+                .map_err(|e| format!("Could not secure LAN CA directory: {e}"))?;
+            let result = (|| -> Result<(), String> {
+                let key = KeyPair::generate()
+                    .map_err(|e| format!("Could not generate LAN CA key: {e}"))?;
+                let mut params =
+                    CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
+                params
+                    .distinguished_name
+                    .push(DnType::CommonName, "Monitter local root CA");
+                params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+                params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+                params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+                params.not_after = params.not_before + time::Duration::days(3650);
+                let cert = params
+                    .self_signed(&key)
+                    .map_err(|e| format!("Could not generate LAN CA: {e}"))?;
+                let temp_key = temp.join("root.key");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&temp_key)
+                        .map_err(|e| format!("Could not save LAN CA key: {e}"))?;
+                    file.write_all(&key.serialize_der())
+                        .map_err(|e| format!("Could not write LAN CA key: {e}"))?;
+                    file.sync_all()
+                        .map_err(|e| format!("Could not sync LAN CA key: {e}"))?;
+                }
+                #[cfg(not(unix))]
+                fs::write(&temp_key, key.serialize_der())
+                    .map_err(|e| format!("Could not save LAN CA key: {e}"))?;
+                fs::write(temp.join("root.crt"), pem_certificate(cert.der().as_ref()))
+                    .map_err(|e| format!("Could not save LAN CA certificate: {e}"))?;
+                fs::rename(&temp, &ca_dir)
+                    .map_err(|e| format!("Could not publish LAN CA identity: {e}"))?;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = fs::remove_dir_all(&temp);
+            }
+            result?;
+        }
+        let metadata =
+            fs::symlink_metadata(&ca_dir).map_err(|e| format!("Could not inspect LAN CA: {e}"))?;
+        if !metadata.file_type().is_dir() {
+            return Err("LAN CA path is not a directory.".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err("LAN CA directory permissions must be private (0700).".into());
+            }
+            let key_meta = fs::symlink_metadata(&key_path)
+                .map_err(|e| format!("LAN CA key is missing: {e}"))?;
+            if !key_meta.file_type().is_file() || key_meta.permissions().mode() & 0o077 != 0 {
+                return Err("LAN CA key must be a private regular file (0600).".into());
+            }
+        }
+        let ca_pem = fs::read_to_string(&cert_path)
+            .map_err(|e| format!("Could not read LAN CA certificate: {e}"))?;
+        let ca_key_der =
+            fs::read(&key_path).map_err(|e| format!("Could not read LAN CA key: {e}"))?;
+        let ca_key =
+            KeyPair::try_from(ca_key_der).map_err(|e| format!("Invalid LAN CA key: {e}"))?;
+        let ca_der = rustls_pemfile::certs(&mut BufReader::new(ca_pem.as_bytes()))
+            .next()
+            .ok_or("LAN CA certificate is empty.")?
+            .map_err(|e| format!("Invalid LAN CA certificate: {e}"))?;
+        let (_, parsed_ca) = x509_parser::parse_x509_certificate(ca_der.as_ref())
+            .map_err(|e| format!("Invalid LAN CA certificate: {e}"))?;
+        if !parsed_ca.is_ca()
+            || parsed_ca.public_key().subject_public_key.data.as_ref() != ca_key.public_key_raw()
+            || parsed_ca.verify_signature(None).is_err()
+        {
+            return Err("Stored LAN CA certificate and key are invalid or do not match.".into());
+        }
+        let issuer = Issuer::from_ca_cert_der(&ca_der, &ca_key)
+            .map_err(|e| format!("Invalid LAN CA certificate: {e}"))?;
+        let fingerprint = Sha256::digest(ca_der.as_ref());
+        let fingerprint = fingerprint
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(":");
+        let hosts: Vec<String> = addresses
+            .iter()
+            .filter(|ip| local_ip(**ip))
+            .map(ToString::to_string)
+            .collect();
+        let leaf_key =
+            KeyPair::generate().map_err(|e| format!("Could not generate LAN TLS key: {e}"))?;
+        let mut params = CertificateParams::new(hosts.clone())
+            .map_err(|e| format!("Invalid LAN TLS addresses: {e}"))?;
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Monitter LAN");
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+        params.not_after = params.not_before + time::Duration::days(365);
+        let leaf = params
+            .signed_by(&leaf_key, &issuer)
+            .map_err(|e| format!("Could not sign LAN TLS certificate: {e}"))?;
+        let certs = vec![
+            rustls::pki_types::CertificateDer::from(leaf.der().to_vec()),
+            ca_der,
+        ];
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()).into();
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| format!("Invalid local LAN TLS identity: {e}"))?;
+        Ok(Self {
+            hosts,
+            server_config: Arc::new(server_config),
+            local_ca_pem: Some(ca_pem),
+            local_ca_fingerprint: Some(fingerprint),
+        })
+    }
+
     fn load(path: &Path) -> Result<Option<Self>, String> {
         let env_values = [
             "MONITTER_LAN_TLS_HOST",
@@ -273,8 +444,10 @@ impl TlsConfig {
             .with_single_cert(certs, key)
             .map_err(|e| format!("Invalid LAN TLS certificate/key: {e}"))?;
         Ok(Some(Self {
-            hostname,
+            hosts: vec![hostname],
             server_config: Arc::new(server_config),
+            local_ca_pem: None,
+            local_ca_fingerprint: None,
         }))
     }
 }
@@ -325,7 +498,8 @@ fn handle<S: Read + Write>(
     roots: &[PathBuf],
     auth_limiter: &Mutex<AuthRateLimiter>,
     require_access_code: bool,
-    tls_host: Option<&str>,
+    tls_hosts: Option<&[String]>,
+    ca_pem: Option<&str>,
 ) {
     let result = (|| -> Result<(), String> {
         let request = read_request(&mut stream)?;
@@ -334,13 +508,33 @@ fn handle<S: Read + Write>(
         }
         // Host must be a literal local address. This avoids trusting a DNS name
         // that could be rebound after the browser has received the owner token.
-        let valid_host = if let Some(expected) = tls_host {
-            valid_tls_request_host(request.headers.get("host"), expected)
+        let valid_host = if let Some(expected) = tls_hosts {
+            expected
+                .iter()
+                .any(|host| valid_tls_request_host(request.headers.get("host"), host))
         } else {
             valid_host(request.headers.get("host"))
         };
         if !valid_host {
             return reply(&mut stream, 421, "text/plain", b"Invalid Host", None);
+        }
+        if request.method == "GET" && request.path == "/api/lan-ca.crt" {
+            return match ca_pem {
+                Some(pem) => reply(
+                    &mut stream,
+                    200,
+                    "application/x-x509-ca-cert",
+                    pem.as_bytes(),
+                    Some("no-store"),
+                ),
+                None => reply(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    b"Not Found",
+                    Some("no-store"),
+                ),
+            };
         }
         let developer_bridge = request
             .headers
@@ -358,8 +552,11 @@ fn handle<S: Read + Write>(
             );
         }
         if request.method == "POST" && request.path == "/api/invoke" {
-            let origin_valid = if let Some(expected) = tls_host {
-                same_tls_origin(request.headers.get("origin"), expected)
+            let origin_valid = if let Some(expected) = tls_hosts {
+                expected.iter().any(|host| {
+                    valid_tls_request_host(request.headers.get("host"), host)
+                        && same_tls_origin(request.headers.get("origin"), host)
+                })
             } else {
                 same_origin(
                     request.headers.get("origin"),
@@ -829,6 +1026,84 @@ mod tests {
     }
 
     #[test]
+    fn local_ca_persists_and_trusts_an_ip_certificate() {
+        let base =
+            std::env::temp_dir().join(format!("monitter-local-ca-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&base).unwrap();
+        let path = base.join("lan-tls.json");
+        let addresses = [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)),
+        ];
+        let first = TlsConfig::local(&path, &addresses).unwrap();
+        let fingerprint = first.local_ca_fingerprint.clone().unwrap();
+        let root = fs::read(base.join("lan-local-ca/root.crt")).unwrap();
+        let second = TlsConfig::local(&path, &addresses).unwrap();
+        assert_eq!(fingerprint, second.local_ca_fingerprint.unwrap());
+        assert_eq!(root, fs::read(base.join("lan-local-ca/root.crt")).unwrap());
+        assert_eq!(first.hosts, vec!["127.0.0.1", "192.168.1.9"]);
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(
+                rustls_pemfile::certs(&mut BufReader::new(root.as_slice()))
+                    .next()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_config = Arc::clone(&first.server_config);
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            assert_eq!(byte, [b'x']);
+            stream.write_all(b"y").unwrap();
+        });
+        let socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let server_name =
+            rustls::pki_types::ServerName::IpAddress(Ipv4Addr::new(192, 168, 1, 9).into());
+        let connection = rustls::ClientConnection::new(client_config, server_name).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        stream.write_all(b"x").unwrap();
+        let mut response = [0];
+        stream.read_exact(&mut response).unwrap();
+        assert_eq!(response, [b'y']);
+        server.join().unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn incomplete_local_ca_is_not_replaced() {
+        let base = std::env::temp_dir().join(format!(
+            "monitter-local-ca-corrupt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(base.join("lan-local-ca")).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            base.join("lan-local-ca"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let path = base.join("lan-tls.json");
+        assert!(TlsConfig::local(&path, &[IpAddr::V4(Ipv4Addr::LOCALHOST)]).is_err());
+        assert!(!base.join("lan-local-ca/root.key").exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn tls_configuration_rejects_partial_environment_and_invalid_file_config() {
         let missing = PathBuf::from(format!(
             "/tmp/monitter-tls-missing-{}.json",
@@ -1144,6 +1419,7 @@ mod tests {
                 &[root],
                 &limiter,
                 require_access_code,
+                None,
                 None,
             );
         });

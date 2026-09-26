@@ -1634,19 +1634,29 @@ can select another free port. It does not publish LAN assets or replace the inst
 Svelte/CSS changes use Vite HMR; backend changes still need a desktop rebuild. Normal `npm run dev`
 and production builds do not enable the dev proxy or dev-only browser bridge.
 
-The desktop app owns an internal LAN server. Without TLS configuration it serves the
-trusted LAN over HTTP on port 18436. With TLS configured, it serves LAN peers over
-HTTPS on port 18437 and keeps port 18436 bound to loopback only for developer tooling.
-The TLS configuration is `lan-tls.json` in the app data directory, with a
-`hostname` and absolute `certPath` and `keyPath` values (the hostname has no
-scheme or port). The complete `MONITTER_LAN_TLS_HOST`, `MONITTER_LAN_TLS_CERT`, and
-`MONITTER_LAN_TLS_KEY` environment trio overrides that file. A partial or invalid
-configuration fails LAN startup rather than exposing owner commands over plain
-HTTP. The certificate and key are loaded at startup; renewal requires a desktop
-restart. The browser separately verifies certificate trust, expiry and hostname.
-A publicly trusted certificate can be obtained for a controlled hostname
-using a DNS-01 challenge without exposing the Monitter server to the Internet.
-The hostname must resolve to the Mac's private LAN address for LAN clients.
+The desktop app owns an internal LAN server. By default it generates a persistent,
+per-install local root CA in the app data directory and serves LAN peers over
+HTTPS on port 18437 using IP-address SANs for the current private addresses.
+It also retains the trusted-LAN HTTP listener on port 18436 for existing clients.
+The native `get_lan_server_info` result includes the public `localCaPem` and its
+SHA-256 `localCaFingerprint` for export and verification; it never includes the
+private key. `GET /api/lan-ca.crt` serves the public root certificate. Each
+browser device must explicitly trust that root before using microphone capture;
+users should compare its fingerprint against native Settings before trusting it.
+The root persists across app restarts; the IP leaf is regenerated at startup.
+An invalid or incomplete stored root fails LAN startup rather than silently
+replacing its identity.
+
+An optional `lan-tls.json` in the app data directory replaces the local TLS
+identity with a custom hostname and absolute `certPath` and `keyPath` values
+(the hostname has no scheme or port). The complete `MONITTER_LAN_TLS_HOST`,
+`MONITTER_LAN_TLS_CERT`, and `MONITTER_LAN_TLS_KEY` environment trio overrides
+that file. With a custom identity, HTTP binds loopback only, and the public
+local-root endpoint is unavailable. A partial or invalid custom configuration
+fails LAN startup. Custom certificate renewal requires a desktop restart. A
+browser separately verifies certificate trust, expiry, and hostname. DNS-01 can
+issue a publicly trusted custom certificate without exposing the server to the
+Internet, but no domain or DNS configuration is needed for the default path.
 
 The server prefers live web assets
 in the app data folder's `lan-web` directory, with bundled assets as a fallback.
@@ -1656,7 +1666,7 @@ assets before atomically replacing `index.html`, retaining old hashed chunks for
 Refresh the browser to load the new interface. This updates LAN browsers only; the desktop
 webview remains bundled. Backend/API changes still require a matching app rebuild.
 Settings → LAN access displays local addresses and a random
-per-process six-digit access code (`get_lan_server_info {}` -> `{urls, token, error, accessCodeRequired}`;
+per-process six-digit access code (`get_lan_server_info {}` -> `{urls, token, error, accessCodeRequired, localCaPem?, localCaFingerprint?}`;
 the `token` string preserves leading zeros). Five incorrect guesses lock API access
 for five minutes across all clients; successful polling does not reset the counter. The server
 starts with the app and stops with it. A bind failure is shown in Settings.
@@ -1664,7 +1674,8 @@ starts with the app and stops with it. A bind failure is shown in Settings.
 During trusted-LAN prototyping, `REQUIRE_ACCESS_CODE` is false: the code gate and guess
 limiter are bypassed, while private/loopback peer and same-origin checks remain enforced.
 The HTTP listener accepts only literal local Host values; the HTTPS listener requires
-the exact configured DNS hostname in Host and Origin. `GET /api/access` returns
+an advertised IP or custom DNS hostname in Host, with the POST Origin matching
+that exact Host. `GET /api/access` returns
 `{required:false}` so browsers skip the gate.
 Anyone on the trusted LAN has owner-level access, including terminals. The code and limiter
 implementation remain available to re-enable later; this is intentionally not Internet-facing.
@@ -1675,7 +1686,7 @@ stores the code in sessionStorage. Access links place the code in a fragment, wh
 removed after loading. Static assets are public; workspace data and commands require
 authentication and same-origin requests. The code grants owner-level workspace control,
 including terminals; this is distinct from limited visitor sharing. The legacy HTTP
-LAN mode is unencrypted. HTTPS encrypts the connection but does not turn the trusted-LAN
+LAN listener is unencrypted. HTTPS encrypts the connection but does not turn the trusted-LAN
 owner interface into visitor access. Restarting the app invalidates browser access codes.
 
 The full interface uses the same compact revision-based UI protocol as the desktop. Browser
