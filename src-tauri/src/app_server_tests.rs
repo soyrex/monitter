@@ -332,6 +332,113 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_reply_failure_retires_exact_current_turn() {
+        let service = Service::open(None, dir("reply-retirement")).unwrap();
+        let task = running_task(&service, "/bin/echo");
+        let control = service.reserve_run(&task.id).unwrap();
+        control.set_app_server_thread("thread-retire".into());
+        control.set_app_server_turn("turn-current".into());
+
+        let started = Instant::now();
+        assert!(service.fail_app_server_turn_and_retire(
+            &task.id,
+            &control,
+            "turn-current",
+            "approval delivery is unknown".into(),
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(control.is_cancelled());
+        assert_eq!(control.current_app_server_turn(), None);
+        let snapshot = service.snapshot().unwrap();
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .find(|item| item.id == task.id)
+                .unwrap()
+                .status,
+            "error"
+        );
+        assert!(snapshot.events.iter().any(|event| {
+            event.task_id == task.id
+                && event.title == "Resident transport turn failed"
+                && event.detail == "approval delivery is unknown"
+        }));
+        let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
+    }
+
+    #[test]
+    fn stale_turn_failure_leaves_newer_turn_running_and_uncancelled() {
+        let service = Service::open(None, dir("stale-reply-retirement")).unwrap();
+        let task = running_task(&service, "/bin/echo");
+        let control = service.reserve_run(&task.id).unwrap();
+        control.set_app_server_thread("thread-stale".into());
+        control.set_app_server_turn("turn-old".into());
+        control.set_app_server_turn("turn-new".into());
+
+        assert!(!service.fail_app_server_turn_and_retire(
+            &task.id,
+            &control,
+            "turn-old",
+            "late approval delivery failure".into(),
+        ));
+        assert!(!control.is_cancelled());
+        assert_eq!(control.current_app_server_turn().as_deref(), Some("turn-new"));
+        let snapshot = service.snapshot().unwrap();
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .find(|item| item.id == task.id)
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert!(!snapshot.events.iter().any(|event| {
+            event.task_id == task.id && event.title == "Resident transport turn failed"
+        }));
+        let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
+    }
+
+    #[test]
+    fn replaced_run_cannot_retire_the_current_owner() {
+        let service = Service::open(None, dir("replaced-reply-retirement")).unwrap();
+        let task = running_task(&service, "/bin/echo");
+        let stale = service.reserve_run(&task.id).unwrap();
+        stale.set_app_server_thread("thread-shared".into());
+        stale.set_app_server_turn("turn-shared".into());
+        service.release_app_server_run(&task.id, &stale);
+        let current = service.reserve_run(&task.id).unwrap();
+        current.set_app_server_thread("thread-shared".into());
+        current.set_app_server_turn("turn-shared".into());
+
+        assert!(!service.fail_app_server_turn_and_retire(
+            &task.id,
+            &stale,
+            "turn-shared",
+            "replaced owner's failure".into(),
+        ));
+        assert!(!stale.is_cancelled());
+        assert!(!current.is_cancelled());
+        assert_eq!(current.current_app_server_turn().as_deref(), Some("turn-shared"));
+        let snapshot = service.snapshot().unwrap();
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .find(|item| item.id == task.id)
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert!(!snapshot.events.iter().any(|event| {
+            event.task_id == task.id && event.title == "Resident transport turn failed"
+        }));
+        current.terminate_owned();
+        let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
+    }
+
+    #[test]
     fn unavailable_codex_steer_returns_the_message_to_fifo() {
         let service = Service::open(None, dir("steer-fallback")).unwrap();
         let task = running_task(&service, "/bin/echo");
