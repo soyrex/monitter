@@ -6833,7 +6833,8 @@
   .grouped-task .activity-task-content { gap:9px; }
   .grouped-task .activity-avatar { width:24px; height:24px; border-radius:7px; font-size:calc(11px * var(--interface-font-ratio,1)); }
   .grouped-task .activity-status-dot { right:-3px; bottom:-3px; width:8px; height:8px; border-width:1.5px; }
-  .grouped-task .activity-task-title { display:block; width:100%; overflow:hidden; color:var(--ink); font-size:calc(12px * var(--interface-font-ratio,1)); font-weight:550; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }
+  .grouped-task .activity-task-title { display:block; width:100%; overflow:hidden; color:var(--ink); font-size:calc(12px * var(--interface-font-ratio,1)); font-weight:400; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }
+  .grouped-task.recent .activity-task-title { font-weight:200; }
   .grouped-task .activity-task-meta { display:flex; align-items:center; gap:4px; min-width:0; overflow:hidden; font-size:calc(10px * var(--interface-font-ratio,1)); line-height:1.25; white-space:nowrap; }
   .activity-task-tile { position:absolute; z-index:0; inset:0; width:100%; height:100%; padding:0; border:0; border-radius:inherit; color:inherit; background:transparent; cursor:pointer; }
   .activity-task-tile:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
