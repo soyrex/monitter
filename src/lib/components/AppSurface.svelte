@@ -3407,21 +3407,17 @@
     let routePlan: JevRoutePlan | null = null;
     const routeAgent = taskFormAgent;
     // An explicit model selection is a user preference and always wins. Jev
-    // never changes the sandbox or approval path. A review-required result is
-    // advisory at chat creation: the harness can still inspect and discuss the
-    // request, while its normal approval boundary guards any later effect.
+    // never changes the sandbox or approval path. Jev's permission signal is
+    // advisory and does not create a separate review step.
     if (!draft.createdTaskId && routeAgent?.jevRouting && routeAgent.jevRouting !== 'off' && !modelSettings) {
       busy = true; error = ''; notice = '';
       try {
         routePlan = await bridge.planJevRoute(routeAgent.id, textToSend);
         const decision = routePlan.decision;
-        const reviewNotice = decision.permission_tier === 'human_review_required'
-          ? 'Jev flagged this for human review before any consequential effect. The chat was started without granting additional authority.'
-          : '';
-        const withReviewNotice = (routeNotice: string) => reviewNotice ? `${reviewNotice} ${routeNotice}` : routeNotice;
         const label = `${decision.model_tier.replace('_', ' ')} · ${decision.reasoning_level} reasoning`;
         if (routeAgent.jevRouting === 'safe_auto' && decision.confidence >= 0.5) {
-          const mappedModel = routeAgent.jevModelTiers?.[decision.model_tier] || routeAgent.model;
+          const tierModel = routeAgent.jevModelTiers?.[decision.model_tier]?.trim() || '';
+          const mappedModel = tierModel || routeAgent.model;
           if (mappedModel) {
             const catalog = await bridge.getModelCatalog({agentId:routeAgent.id,projectId:captured.projectId||null,codexHome:routeAgent.provider==='codex'?routeAgent.codexHome??null:null});
             const wanted = mappedModel.trim().toLowerCase();
@@ -3439,15 +3435,20 @@
                 : routeAgent.provider === 'acp'
                   ? `${decision.reasoning_level} reasoning will be checked against this ACP session's advertised options.`
                   : `${decision.reasoning_level} reasoning is unavailable for this model; its default was kept.`;
-              routingNotice = withReviewNotice(`Jev selected ${selected.name} for its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence). ${reasoningNotice}`);
+              const modelNotice = tierModel
+                ? selected.id === routeAgent.model
+                  ? `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence). Its mapped model is already the default: ${selected.name}.`
+                  : `Jev selected ${selected.name} for its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence).`
+                : `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence). No model is mapped to that tier, so the default ${selected.name} was kept.`;
+              routingNotice = `${modelNotice} ${reasoningNotice}`;
             } else {
-              routingNotice = withReviewNotice(`Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default model was kept.${routeAgent.provider === 'acp' ? ' Its reasoning choice will be checked against the ACP session.' : ''}`);
+              routingNotice = `Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default model was kept.${routeAgent.provider === 'acp' ? ' Its reasoning choice will be checked against the ACP session.' : ''}`;
             }
           } else {
-            routingNotice = withReviewNotice(`Jev recommends ${label}; this harness has no mapped model for that tier. ${routeAgent.provider === 'acp' ? 'Its reasoning choice will be checked against the ACP session.' : 'The harness default was kept.'}`);
+            routingNotice = `Jev recommends ${label}; this harness has no mapped model for that tier. ${routeAgent.provider === 'acp' ? 'Its reasoning choice will be checked against the ACP session.' : 'The harness default was kept.'}`;
           }
         } else {
-          routingNotice = withReviewNotice(`Jev recommends ${label} (${Math.round(decision.confidence * 100)}% confidence). Your model selection was kept.`);
+          routingNotice = `Jev recommends ${label} (${Math.round(decision.confidence * 100)}% confidence). Your model selection was kept.`;
         }
       } catch (reason) {
         error = `Jev routing could not run: ${text(reason)}`;

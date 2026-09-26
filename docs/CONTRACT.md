@@ -161,8 +161,9 @@ No fake conversations, progress, token counts, host connections or model replies
   explicit non-internal harness opt-in and the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). It classifies a fresh prompt,
   writes an app-local trace containing a prompt fingerprint and typed decision/evidence, and does not create a
   task, invoke a provider, inspect a workspace, grant permissions, or expose the credential. LAN callers are
-  rejected. A `human_review_required` result is shown as a review notice before task creation;
-  it never grants authority or changes the task's existing approval boundary.
+  rejected. A `human_review_required` result remains an advisory permission signal in the
+  route card; it does not create a review step, grant authority, or change the task's
+  existing approval boundary.
 - `record_jev_route { taskId: string, traceId: string }` -> void (native-owner only). After a new
   chat is created, the desktop reads the already persisted route trace by UUID, checks its agent
   identity against the created task, and appends one

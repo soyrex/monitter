@@ -121,6 +121,14 @@
       default: return `${level} reasoning recommended`;
     }
   }
+  function routePermissionSignal(): string {
+    switch (response?.permissionTier) {
+      case 'human_review_required': return 'Consequential action';
+      case 'workspace_write': return 'Workspace changes';
+      case 'read_only': return 'Read only';
+      default: return 'Unspecified';
+    }
+  }
   const timeText = $derived(new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(record?.createdAt ?? event.createdAt));
   const fullTimeText = $derived(new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(record?.createdAt ?? event.createdAt));
   function latencyText(value: number | null): string { return value === null ? 'Latency n/a' : value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(2)} s`; }
@@ -188,7 +196,7 @@
           <div><dt>Model selection</dt><dd>{response.applied !== true ? 'Default kept' : response.modelChanged === true ? 'Selected for this chat' : 'Default model kept'}</dd></div>
           <div><dt>Reasoning outcome</dt><dd>{routeReasoningOutcome()}</dd></div>
           <div><dt>Task kind</dt><dd>{routeText('taskKind')}</dd></div>
-          <div><dt>Permission signal</dt><dd>{routeText('permissionTier')} · advisory only</dd></div>
+          <div><dt>Permission signal</dt><dd>{routePermissionSignal()} · advisory only; existing approvals apply</dd></div>
         </dl>
       {/if}
     {:else if response?.status === 'unavailable'}<p class="jev-detail-state">Jev could not return a decision for this request.</p>{/if}
