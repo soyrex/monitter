@@ -117,6 +117,7 @@
     CodexAccount,
     UsageOverview,
     UsageRefreshPolicy,
+    JevRoutePlan,
     SubagentTranscriptEntry,
     SlashCommand,
   } from "$lib/types";
@@ -3400,16 +3401,17 @@
     const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId, cwd: taskCwd };
     let modelSettings = draftModelSettings;
     let routingNotice = '';
+    let routePlan: JevRoutePlan | null = null;
     const routeAgent = taskFormAgent;
     // An explicit model selection is a user preference and always wins. Jev
     // never changes the sandbox or approval path. A review-required result is
     // advisory at chat creation: the harness can still inspect and discuss the
     // request, while its normal approval boundary guards any later effect.
-    if (routeAgent?.jevRouting && routeAgent.jevRouting !== 'off' && !modelSettings) {
+    if (!draft.createdTaskId && routeAgent?.jevRouting && routeAgent.jevRouting !== 'off' && !modelSettings) {
       busy = true; error = ''; notice = '';
       try {
-        const plan = await bridge.planJevRoute(routeAgent.id, textToSend);
-        const decision = plan.decision;
+        routePlan = await bridge.planJevRoute(routeAgent.id, textToSend);
+        const decision = routePlan.decision;
         const reviewNotice = decision.permission_tier === 'human_review_required'
           ? 'Jev flagged this for human review before any consequential effect. The chat was started without granting additional authority.'
           : '';
@@ -3466,6 +3468,13 @@
       }
       if (!taskId) throw new Error('Task creation did not return an ID.');
       const resolvedTaskId = taskId;
+      if (routePlan) {
+        try {
+          await bridge.recordJevRoute(resolvedTaskId, routePlan.traceId);
+        } catch (reason) {
+          notice = `${routingNotice} Jev's route card could not be saved: ${text(reason)}`.trim();
+        }
+      }
       const baselineIds = new Set(snapshot?.messages.filter(message => message.taskId === resolvedTaskId).map(message => message.id) ?? []);
       updateOptimisticMessage(optimistic.id, { kind: 'task', targetId: resolvedTaskId, baselineIds, baselineQueuedIds: new Set((snapshot?.queuedMessages ?? []).filter(message => message.taskId === resolvedTaskId).map(message => message.id)) });
       const migrated = optimisticMessages.find(message => message.id === optimistic.id) ?? optimistic;

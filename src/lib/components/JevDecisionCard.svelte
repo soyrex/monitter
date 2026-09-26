@@ -54,7 +54,7 @@
 
   const record = $derived(parseRecord(expandedDetail ?? event.detail));
   const response = $derived(record?.response ?? null);
-  const toolLabel = $derived(record?.toolName === 'jev_choose' ? 'Choice' : response?.kind === 'score' ? 'Score' : response?.kind === 'noul' ? 'Noul' : 'Assessment');
+  const toolLabel = $derived(record?.toolName === 'jev_route' ? 'Route' : record?.toolName === 'jev_choose' ? 'Choice' : response?.kind === 'score' ? 'Score' : response?.kind === 'noul' ? 'Noul' : 'Assessment');
   function numberField(key: string): number | null {
     const value = response?.[key];
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -90,6 +90,7 @@
   function outcomeText(): string {
     if (!record || !response) return 'Decision details unavailable';
     if (response.status === 'unavailable') return 'Jev unavailable';
+    if (record.toolName === 'jev_route') return typeof response.outcome === 'string' ? response.outcome : 'Route outcome unavailable';
     if (record.toolName === 'jev_choose') {
       const id = typeof response.candidateId === 'string' ? response.candidateId : '';
       return id === 'abstain' ? 'Abstained' : (record.labels[id] ?? id) || 'No outcome';
@@ -103,6 +104,10 @@
   }
 
   const confidence = $derived(numberField('confidence'));
+  function routeText(key: string): string {
+    const value = response?.[key];
+    return typeof value === 'string' ? value.replaceAll('_', ' ') : 'n/a';
+  }
   const timeText = $derived(new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(record?.createdAt ?? event.createdAt));
   const fullTimeText = $derived(new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(record?.createdAt ?? event.createdAt));
   function latencyText(value: number | null): string { return value === null ? 'Latency n/a' : value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(2)} s`; }
@@ -150,8 +155,9 @@
   <summary aria-label={`Jev ${toolLabel}: ${outcomeText()}`}>
     <div class="jev-top"><span class="jev-mark">Jev</span><span class="jev-kind">{toolLabel}</span><time title={fullTimeText}>{timeText}</time></div>
     {#if record}<div class="jev-question">{record.question}</div>{:else}<div class="jev-question">Jev decision details unavailable</div>{/if}
-    <div class="jev-result-line"><strong title={outcomeText()}>{outcomeText()}</strong>{#if confidence !== null}<span>Confidence {Math.round(confidence * 100)}%</span>{/if}</div>
+    <div class="jev-result-line"><strong title={outcomeText()}>{outcomeText()}</strong>{#if confidence !== null}<span>{record?.toolName === 'jev_route' ? 'Lowest confidence' : 'Confidence'} {Math.round(confidence * 100)}%</span>{/if}</div>
     {#if segments.length}<div class="jev-bar" role="img" aria-label={distributionLabel()} title={distributionLabel()}>{#each segments as segment, index (segment.id)}<span style={`width:${segment.probability * 100}%;background:${segmentColor(segment, index)}`}></span>{/each}</div>{/if}
+    {#if record?.toolName === 'jev_route' && confidence !== null}<div class="jev-bar" role="img" aria-label={`Lowest routing confidence ${Math.round(confidence * 100)}%`}><span style={`width:${confidence * 100}%;background:var(--accent)`}></span></div>{/if}
     <div class="jev-meta"><span>{latencyText(record?.latencyMs ?? null)}</span><span>{costText(record?.costUsd ?? null)}</span><span class="jev-expand-hint">{record?.compact && expandedDetail === null ? 'Open for details' : 'Details'}</span></div>
   </summary>
   <div class="jev-details">
@@ -160,6 +166,16 @@
     {#if record}<p class="jev-full-question"><span>Question</span>{record.question}</p>{/if}
     {#if response && response.status !== 'unavailable'}
       {#if detailRows().length}<div class="jev-breakdown" aria-label="Jev probability breakdown">{#each detailRows() as segment (segment.id)}<div class="jev-breakdown-row"><span class:selected={segment.selected}>{segment.label}</span><div class="jev-track"><i style={`width:${segment.probability * 100}%;background:${segmentColor(segment, 0)}`}></i></div><b>{Math.round(segment.probability * 100)}%</b></div>{/each}</div>{/if}
+      {#if record?.toolName === 'jev_route'}
+        <dl class="jev-route-detail">
+          <div><dt>Model tier</dt><dd>{routeText('modelTier')}</dd></div>
+          <div><dt>Reasoning</dt><dd>{routeText('reasoningLevel')}</dd></div>
+          <div><dt>Chat model</dt><dd>{routeText('selectedModel')}</dd></div>
+          <div><dt>Applied</dt><dd>{response.applied !== true ? 'Recommendation only; default kept' : response.modelChanged === true ? 'Model selected for this chat' : response.appliedReasoning ? `Default model kept; ${routeText('appliedReasoning')} reasoning applied` : 'Default model kept'}</dd></div>
+          <div><dt>Task kind</dt><dd>{routeText('taskKind')}</dd></div>
+          <div><dt>Permission signal</dt><dd>{routeText('permissionTier')} · advisory only</dd></div>
+        </dl>
+      {/if}
     {:else if response?.status === 'unavailable'}<p class="jev-detail-state">Jev could not return a decision for this request.</p>{/if}
     {#if record}<dl class="jev-usage"><div><dt>Model</dt><dd>{record.model ?? 'n/a'}</dd></div><div><dt>Provider</dt><dd>{record.provider ?? 'n/a'}</dd></div><div><dt>Time</dt><dd>{fullTimeText}</dd></div><div><dt>Latency</dt><dd>{latencyText(record.latencyMs)}</dd></div><div><dt>Cost</dt><dd>{costText(record.costUsd)}</dd></div><div><dt>Tokens</dt><dd>{record.inputTokens ?? 'n/a'} in · {record.outputTokens ?? 'n/a'} out</dd></div></dl>{/if}
   </div>
@@ -189,6 +205,10 @@
   .jev-breakdown-row b { color:var(--muted); text-align:right; font:10px var(--mono); font-variant-numeric:tabular-nums; }
   .jev-track { height:4px; }.jev-track i { display:block; height:100%; border-radius:inherit; }
   .jev-usage { display:flex; flex-wrap:wrap; gap:5px 12px; margin:0; padding-top:7px; border-top:1px solid var(--line); }
+  .jev-route-detail { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 12px; margin:0; }
+  .jev-route-detail div { display:grid; gap:2px; min-width:0; }
+  .jev-route-detail dt { color:var(--muted); }
+  .jev-route-detail dd { overflow:hidden; margin:0; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; }
   .jev-usage div { display:flex; gap:4px; min-width:0; }
   .jev-usage dt { color:var(--muted); }.jev-usage dd { overflow:hidden; margin:0; color:var(--ink); text-overflow:ellipsis; white-space:nowrap; }
   .jev-full-question { display:grid; gap:3px; margin:0; color:var(--ink); font-size:10px; line-height:1.4; overflow-wrap:anywhere; }.jev-full-question span { color:var(--muted); font:9px var(--mono); }

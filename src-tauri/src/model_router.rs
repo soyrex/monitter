@@ -363,6 +363,8 @@ pub struct ClassifierResult {
 #[serde(rename_all = "camelCase")]
 pub struct JevRoutePlan {
     pub trace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub prompt_fingerprint: String,
     pub decision: RoutingDecision,
     pub classifier_evidence: ClassifierEvidence,
@@ -1584,6 +1586,7 @@ pub fn live_jev_route_plan(prompt: &str) -> Result<JevRoutePlan, String> {
     let result = LiveJevClassifier::from_monitter_secret()?.classify(prompt)?;
     Ok(JevRoutePlan {
         trace_id: Uuid::new_v4().to_string(),
+        agent_id: None,
         prompt_fingerprint: fingerprint(prompt),
         decision: result.decision,
         classifier_evidence: result.evidence,

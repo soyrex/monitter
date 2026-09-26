@@ -4306,9 +4306,118 @@ impl Service {
         if prompt.trim().is_empty() {
             return Err("Write a task before requesting a Jev route.".into());
         }
-        let plan = model_router::live_jev_route_plan(prompt)?;
+        let mut plan = model_router::live_jev_route_plan(prompt)?;
+        plan.agent_id = Some(agent.id);
         model_router::persist_jev_route_plan(&self.router_trace_dir, &plan)?;
         Ok(plan)
+    }
+
+    /// Attach a route already produced by this desktop to the chat it created.
+    /// The renderer supplies only the trace ID; the decision and usage figures
+    /// come from the native trace, never from renderer-provided JSON.
+    fn record_jev_route(&self, task_id: &str, trace_id: &str) -> Result<(), String> {
+        let trace_id = uuid::Uuid::parse_str(trace_id)
+            .map_err(|_| "Jev route trace ID is invalid.".to_string())?
+            .to_string();
+        let path = self.router_trace_dir.join(format!("{trace_id}.json"));
+        let metadata = std::fs::metadata(&path)
+            .map_err(|_| "Jev route trace was not found.".to_string())?;
+        if metadata.len() > 64 * 1024 {
+            return Err("Jev route trace is too large.".into());
+        }
+        let plan: model_router::JevRoutePlan = serde_json::from_slice(
+            &std::fs::read(&path).map_err(|_| "Jev route trace could not be read.".to_string())?,
+        )
+        .map_err(|_| "Jev route trace is invalid.".to_string())?;
+        if plan.trace_id != trace_id
+            || !plan.decision.confidence.is_finite()
+            || !(0.0..=1.0).contains(&plan.decision.confidence)
+        {
+            return Err("Jev route trace is invalid.".into());
+        }
+        self.mutate(Some(task_id.into()), |state| {
+            let task = state
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .ok_or("Task was not found.")?;
+            if plan.agent_id.as_deref() != Some(task.agent_id.as_str()) {
+                return Err("Jev route trace does not belong to this task's agent.".into());
+            }
+            let agent = state.agents.iter().find(|agent| agent.id == task.agent_id)
+                .ok_or("Task agent was not found.")?;
+            if agent.jev_routing == model::JevRoutingMode::Off {
+                return Err("Jev routing is not enabled for this task's agent.".into());
+            }
+            if state.events.iter().any(|event| {
+                event.task_id == task_id
+                    && event.kind == "jevDecision"
+                    && serde_json::from_str::<serde_json::Value>(&event.detail)
+                        .ok()
+                        .and_then(|value| value.get("traceId").and_then(|id| id.as_str()).map(str::to_owned))
+                        .as_deref()
+                        == Some(trace_id.as_str())
+            }) {
+                return Ok(());
+            }
+            let applied = task.model_settings.as_ref().is_some_and(|settings| !settings.model.is_empty());
+            let model_changed = applied && task.model != agent.model;
+            let applied_effort = task.model_settings.as_ref()
+                .and_then(|settings| settings.reasoning_effort.as_deref());
+            let tier = serde_json::to_value(plan.decision.model_tier)
+                .map_err(|_| "Jev route tier could not be recorded.".to_string())?;
+            let tier_label = tier.as_str().unwrap_or("model").replace('_', " ");
+            let selected_model: String = task.model.chars().take(100).collect();
+            let outcome = if model_changed {
+                format!("{tier_label} · {selected_model} selected")
+            } else if applied {
+                match applied_effort {
+                    Some(effort) => format!("{tier_label} · default model kept · {effort} reasoning"),
+                    None => format!("{tier_label} · default model kept"),
+                }
+            } else {
+                format!("{tier_label} recommended · default kept")
+            };
+            let created_at = now();
+            let detail = serde_json::json!({
+                "traceId": trace_id,
+                "taskId": task_id,
+                "toolName": "jev_route",
+                "question": "Which model tier and reasoning level fit this new chat?",
+                "labels": {},
+                "response": {
+                    "status": "ok",
+                    "kind": "route",
+                    "outcome": outcome,
+                    "confidence": plan.decision.confidence,
+                    "modelTier": plan.decision.model_tier,
+                    "reasoningLevel": plan.decision.reasoning_level,
+                    "taskKind": plan.decision.task_kind,
+                    "executionMode": plan.decision.execution_mode,
+                    "permissionTier": plan.decision.permission_tier,
+                    "selectedModel": selected_model,
+                    "applied": applied,
+                    "modelChanged": model_changed,
+                    "appliedReasoning": applied_effort,
+                },
+                "provider": plan.classifier_evidence.provider,
+                "model": plan.classifier_evidence.model,
+                "latencyMs": plan.classifier_evidence.latency_ms,
+                "inputTokens": plan.classifier_evidence.input_tokens,
+                "outputTokens": plan.classifier_evidence.output_tokens,
+                "costUsd": plan.classifier_evidence.cost_usd,
+                "createdAt": created_at,
+            }).to_string();
+            state.events.push(Arc::new(RunEvent {
+                id: id(),
+                task_id: task_id.into(),
+                kind: "jevDecision".into(),
+                title: "Jev route".into(),
+                detail: detail.into(),
+                created_at,
+            }));
+            Ok(())
+        })
     }
 
     /// Produces one advisory Cmd-P proposal through Jev. Unlike task routing,
@@ -6553,6 +6662,18 @@ async fn plan_jev_route(
     tauri::async_runtime::spawn_blocking(move || service.plan_jev_route(&agent_id, &prompt))
         .await
         .map_err(|_| "Jev route worker failed.".to_string())?
+}
+
+#[tauri::command]
+async fn record_jev_route(
+    state: State<'_, AppState>,
+    task_id: String,
+    trace_id: String,
+) -> Result<(), String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.record_jev_route(&task_id, &trace_id))
+        .await
+        .map_err(|_| "Jev route record worker failed.".to_string())?
 }
 
 /// Native-owner only: make one bounded, advisory Cmd-P selection with the
@@ -9022,6 +9143,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             plan_jev_route,
+            record_jev_route,
             plan_jev_command,
             get_process_metrics,
             list_system_fonts,

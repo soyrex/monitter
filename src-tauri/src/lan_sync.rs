@@ -183,6 +183,15 @@ fn compact_jev_decision_detail(detail: &str) -> String {
                 "score",
                 "probabilities",
                 "otherProbability",
+                "outcome",
+                "modelTier",
+                "reasoningLevel",
+                "selectedModel",
+                "applied",
+                "modelChanged",
+                "appliedReasoning",
+                "taskKind",
+                "permissionTier",
             ] {
                 if let Some(value) = source.get(key) {
                     response.insert(key.into(), value.clone());

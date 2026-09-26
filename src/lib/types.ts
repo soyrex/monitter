@@ -69,7 +69,7 @@ export interface JevRoutingDecision {
   confidence: number; rationale: string; escalation_conditions: string[];
 }
 export interface JevRoutePlan {
-  traceId: string; promptFingerprint: string; decision: JevRoutingDecision;
+  traceId: string; agentId?: string | null; promptFingerprint: string; decision: JevRoutingDecision;
   classifierEvidence: { provider: string; model: string; latencyMs: number; inputTokens: number | null; outputTokens: number | null; costUsd: number | null; };
 }
 export interface JevCommandCandidate { id: string; label: string; description?: string | null; }

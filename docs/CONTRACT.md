@@ -161,7 +161,14 @@ No fake conversations, progress, token counts, host connections or model replies
   explicit non-internal harness opt-in and the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). It classifies a fresh prompt,
   writes an app-local trace containing a prompt fingerprint and typed decision/evidence, and does not create a
   task, invoke a provider, inspect a workspace, grant permissions, or expose the credential. LAN callers are
-  rejected. A `human_review_required` result must be stopped by the composer before task creation.
+  rejected. A `human_review_required` result is shown as a review notice before task creation;
+  it never grants authority or changes the task's existing approval boundary.
+- `record_jev_route { taskId: string, traceId: string }` -> void (native-owner only). After a new
+  chat is created, the desktop reads the already persisted route trace by UUID, checks its agent
+  identity against the created task, and appends one
+  idempotent `jevDecision` card to that task. The card shows the selected or recommended model tier,
+  reasoning level, lowest routing confidence, application outcome, and available Jev cost/timing
+  metadata. It contains no raw prompt or credential. Existing chats are not automatically rerouted.
 - `plan_jev_command { query: string, candidates: JevCommandCandidate[] }` -> `JevCommandPlan`
   (native-owner only; requires the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). The caller supplies a bounded catalogue of
   currently enabled Cmd-P controls. Jev may select only one offered candidate ID and returns a typed confidence
@@ -936,6 +943,10 @@ score-level labels, validated typed answer, confidence/probability distribution,
 provider/model, timestamp, latency, token, and cost metadata. It never stores the input state or
 API credential. The live projection keeps a compact parseable summary; the full record is available
 through the task-event detail endpoint.
+The same event kind also displays a new-chat `jev_route` record sourced from the native route trace.
+Its confidence is the lowest of Jev's five routing judgments, so its compact bar is a confidence
+indicator rather than a choice distribution. It distinguishes a model selected for the chat from a
+recommendation that left the harness default in place; permission signals remain advisory.
 Codex `ContextCompaction` tool detail preserves its native `id` plus
 `monitterPhase:"started"|"completed"`. The UI may show a duration only for a matching pair;
 an interrupted or legacy lone record remains neutral rather than being described as completed.
