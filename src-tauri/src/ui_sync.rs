@@ -1,7 +1,8 @@
 //! Bounded live projections and a revision journal. Full transcripts remain in
 //! durable history and are read explicitly by stable message-ID cursors.
 
-use crate::model::{Message, Snapshot};
+use crate::history::{History, HistoryRecord};
+use crate::model::{ChannelMessage, Message, Snapshot};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -28,6 +29,7 @@ pub struct UiDelta {
     pub messages: Vec<Message>,
     pub removed_message_ids: Vec<String>,
     pub retained_channel_ids: Vec<String>,
+    pub channel_message_changes: Vec<ChannelMessageChange>,
     pub retained_subagent_transcript_ids: Vec<String>,
 }
 
@@ -40,11 +42,30 @@ pub struct TaskMessagesPage {
     pub revision: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelMessageChange {
+    pub channel_id: String,
+    pub messages: Vec<ChannelMessage>,
+    pub removed_message_ids: Vec<String>,
+    pub reset: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelMessagesPage {
+    pub channel_id: String,
+    pub messages: Vec<ChannelMessage>,
+    pub next_before_id: Option<String>,
+    pub revision: String,
+}
+
 struct Revision {
     number: u64,
     changes: Option<(Vec<Message>, Vec<String>)>,
     bytes: usize,
     changed_channels: Option<BTreeSet<String>>,
+    channel_changes: Option<Vec<ChannelMessageChange>>,
     changed_subagents: Option<BTreeSet<String>>,
 }
 
@@ -75,6 +96,7 @@ impl Journal {
             changes,
             bytes,
             changed_channels: None,
+            channel_changes: None,
             changed_subagents: None,
         });
         while self.revisions.len() > MAX_JOURNAL_REVISIONS || self.bytes > MAX_JOURNAL_BYTES {
@@ -86,7 +108,38 @@ impl Journal {
 
     pub fn record_snapshot(&mut self, number: u64, before: &Snapshot, after: &Snapshot) {
         self.record(number, message_changes(before, after));
+        let channel_changes: Vec<_> = after
+            .channels
+            .iter()
+            .filter_map(|channel| {
+                let old = before.channels.iter().find(|old| old.id == channel.id);
+                if old.is_some_and(|old| old.messages == channel.messages) {
+                    return None;
+                }
+                let changes = old.and_then(|old| history_changes(&old.messages, &channel.messages));
+                let reset = changes.is_none();
+                let (messages, removed_message_ids) =
+                    changes.unwrap_or_else(|| (channel_tail(&channel.messages), vec![]));
+                Some(ChannelMessageChange {
+                    channel_id: channel.id.clone(),
+                    messages,
+                    removed_message_ids,
+                    reset,
+                })
+            })
+            .collect();
         if let Some(revision) = self.revisions.back_mut() {
+            let extra = serde_json::to_vec(&channel_changes)
+                .map_or(MAX_JOURNAL_BYTES + 1, |value| value.len());
+            if revision.bytes.saturating_add(extra) > MAX_JOURNAL_BYTES {
+                self.bytes -= revision.bytes;
+                revision.bytes = 0;
+                revision.changes = None;
+            } else {
+                revision.bytes += extra;
+                self.bytes += extra;
+                revision.channel_changes = Some(channel_changes);
+            }
             revision.changed_channels = Some(
                 after
                     .channels
@@ -109,6 +162,82 @@ impl Journal {
                     .collect(),
             );
         }
+        while self.bytes > MAX_JOURNAL_BYTES {
+            if let Some(expired) = self.revisions.pop_front() {
+                self.bytes -= expired.bytes;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn channel_changes(
+        &self,
+        from: u64,
+        through: u64,
+        snapshot: &Snapshot,
+    ) -> Option<Vec<ChannelMessageChange>> {
+        let mut combined: BTreeMap<String, ChannelMessageChange> = BTreeMap::new();
+        for revision in self
+            .revisions
+            .iter()
+            .filter(|revision| revision.number > from && revision.number <= through)
+        {
+            for change in revision.channel_changes.as_ref()? {
+                let current = combined
+                    .entry(change.channel_id.clone())
+                    .or_insert_with(|| ChannelMessageChange {
+                        channel_id: change.channel_id.clone(),
+                        messages: vec![],
+                        removed_message_ids: vec![],
+                        reset: false,
+                    });
+                if change.reset {
+                    current.reset = true;
+                    current.messages.clear();
+                    current.removed_message_ids.clear();
+                }
+                if current.reset {
+                    continue;
+                }
+                let mut messages: BTreeMap<_, _> = current
+                    .messages
+                    .drain(..)
+                    .map(|message| (message.id.clone(), message))
+                    .collect();
+                let mut removed: BTreeSet<_> = current.removed_message_ids.drain(..).collect();
+                for id in &change.removed_message_ids {
+                    messages.remove(id);
+                    removed.insert(id.clone());
+                }
+                for message in &change.messages {
+                    removed.remove(&message.id);
+                    messages.insert(message.id.clone(), message.clone());
+                }
+                current.messages = messages.into_values().collect();
+                current.removed_message_ids = removed.into_iter().collect();
+            }
+        }
+        let mut result = Vec::new();
+        for (_, mut change) in combined {
+            // Deletion is represented by missing metadata, including delete+recreate histories.
+            let Some(channel) = snapshot
+                .channels
+                .iter()
+                .find(|channel| channel.id == change.channel_id)
+            else {
+                continue;
+            };
+            if change.reset {
+                change.messages = channel_tail(&channel.messages);
+            } else {
+                change
+                    .messages
+                    .sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+            }
+            result.push(change);
+        }
+        Some(result)
     }
 
     fn retained(&self, from: u64, through: u64, snapshot: &Snapshot) -> (Vec<String>, Vec<String>) {
@@ -196,9 +325,15 @@ pub fn parse_revision(revision: &str, epoch: &str) -> Option<u64> {
 }
 
 pub fn message_changes(before: &Snapshot, after: &Snapshot) -> Option<(Vec<Message>, Vec<String>)> {
+    history_changes(&before.messages, &after.messages)
+}
+
+fn history_changes<T: HistoryRecord>(
+    before: &History<T>,
+    after: &History<T>,
+) -> Option<(Vec<T>, Vec<String>)> {
     use crate::history::{HistoryChange, HistoryDelta};
-    let HistoryDelta::Incremental { changes, .. } = after.messages.delta_since(&before.messages)
-    else {
+    let HistoryDelta::Incremental { changes, .. } = after.delta_since(&before) else {
         return None;
     };
     if changes.len() > 512 {
@@ -212,28 +347,35 @@ pub fn message_changes(before: &Snapshot, after: &Snapshot) -> Option<(Vec<Messa
                 touched.insert(index);
             }
             HistoryChange::TruncateFrom { new_len } => {
-                if before.messages.len().saturating_sub(new_len) > 512 {
+                if before.len().saturating_sub(new_len) > 512 {
                     return None;
                 }
-                for index in new_len..before.messages.len() {
-                    removed.insert(before.messages[index].id.clone());
+                for index in new_len..before.len() {
+                    removed.insert(before[index].id().to_owned());
                 }
             }
         }
     }
     let mut messages = Vec::new();
     for index in touched {
-        if let Some(message) = after.messages.get(index) {
-            if let Some(old) = before.messages.get(index) {
-                if old.id != message.id {
-                    removed.insert(old.id.clone());
+        if let Some(message) = after.get(index) {
+            if let Some(old) = before.get(index) {
+                if old.id() != message.id() {
+                    removed.insert(old.id().to_owned());
                 }
             }
-            removed.remove(&message.id);
+            removed.remove(message.id());
             messages.push(message.clone());
         }
     }
     Some((messages, removed.into_iter().collect()))
+}
+
+fn channel_tail(messages: &History<ChannelMessage>) -> Vec<ChannelMessage> {
+    let start = messages.len().saturating_sub(LIVE_MESSAGES_PER_TASK);
+    (start..messages.len())
+        .map(|index| messages[index].clone())
+        .collect()
 }
 
 /// The work here is bounded per task, regardless of the amount of retained
@@ -252,6 +394,9 @@ pub fn projection(snapshot: &Snapshot, include_messages: bool) -> Snapshot {
         .into_iter()
         .map(|index| snapshot.messages[index].clone())
         .collect();
+    for channel in &mut output.channels {
+        channel.messages = channel_tail(&channel.messages).into();
+    }
     output.events = compact_events(snapshot);
     output
 }
@@ -338,7 +483,60 @@ pub fn message_page(
     })
 }
 
+pub fn channel_message_page(
+    snapshot: &Snapshot,
+    channel_id: &str,
+    before_id: Option<&str>,
+    limit: Option<u32>,
+    revision: String,
+) -> Result<ChannelMessagesPage, String> {
+    let channel = snapshot
+        .channels
+        .iter()
+        .find(|channel| channel.id == channel_id)
+        .ok_or("Channel was not found.")?;
+    let end = match before_id {
+        Some(id) => channel
+            .messages
+            .index_of_id(id)
+            .map_err(|error| error.to_string())?
+            .ok_or("This channel cursor is no longer available. Refresh the conversation.")?,
+        None => channel.messages.len(),
+    };
+    let start = end.saturating_sub(
+        limit
+            .unwrap_or(LIVE_MESSAGES_PER_TASK as u32)
+            .clamp(1, MAX_MESSAGE_PAGE as u32) as usize,
+    );
+    let messages: Vec<_> = (start..end)
+        .map(|index| channel.messages[index].clone())
+        .collect();
+    let next_before_id = (start > 0).then(|| channel.messages[start].id.clone());
+    Ok(ChannelMessagesPage {
+        channel_id: channel_id.into(),
+        messages,
+        next_before_id,
+        revision,
+    })
+}
+
 impl crate::Service {
+    pub(crate) fn channel_messages(
+        &self,
+        channel_id: &str,
+        before_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<ChannelMessagesPage, String> {
+        let data = self.committed_data()?;
+        channel_message_page(
+            &data.snapshot,
+            channel_id,
+            before_id,
+            limit,
+            format!("{}:{}", self.revision_epoch, data.revision),
+        )
+    }
+
     pub(crate) fn ui_delta(&self, revision: Option<&str>) -> Result<UiDeltaResponse, String> {
         let data = self.committed_data()?;
         let current = format!("{}:{}", self.revision_epoch, data.revision);
@@ -355,18 +553,18 @@ impl crate::Service {
                 let journal = self.ui_journal.lock().ok()?;
                 let changes = journal.changes(from, data.revision)?;
                 let retained = journal.retained(from, data.revision, &data.snapshot);
-                Some((changes, retained))
+                let channels = journal.channel_changes(from, data.revision, &data.snapshot)?;
+                Some((changes, retained, channels))
             });
         if let Some((
             (messages, removed_message_ids),
             (retained_channel_ids, retained_subagent_transcript_ids),
+            channel_message_changes,
         )) = changes
         {
             let mut metadata = projection(&data.snapshot, false);
             for channel in &mut metadata.channels {
-                if retained_channel_ids.contains(&channel.id) {
-                    channel.messages.clear();
-                }
+                channel.messages.clear();
             }
             for id in &retained_subagent_transcript_ids {
                 metadata.subagent_transcripts.remove(id);
@@ -380,6 +578,7 @@ impl crate::Service {
                     messages,
                     removed_message_ids,
                     retained_channel_ids,
+                    channel_message_changes,
                     retained_subagent_transcript_ids,
                 }),
             })
@@ -450,6 +649,83 @@ mod tests {
             agent_conversation_turns_used: 0,
             agent_conversation_paused: false,
         }
+    }
+
+    #[test]
+    fn channel_history_deltas_and_pages_are_bounded_and_preserve_identity() {
+        let mut before = crate::model::default_snapshot();
+        let mut large = channel("large", "seed");
+        large.messages = (0..10_000)
+            .map(|index| ChannelMessage {
+                id: format!("channel-{index:05}"),
+                text: "history".repeat(20),
+                created_at: index,
+                role: "assistant".into(),
+                agent_id: None,
+                task_id: None,
+            })
+            .collect();
+        before.channels.push(large);
+        let projected = projection(&before, true);
+        assert_eq!(projected.channels[0].messages.len(), LIVE_MESSAGES_PER_TASK);
+        assert_eq!(projected.channels[0].messages[0].id, "channel-09936");
+        let page = channel_message_page(
+            &before,
+            "large",
+            Some("channel-09936"),
+            Some(500),
+            "epoch:0".into(),
+        )
+        .unwrap();
+        assert_eq!(page.messages.len(), MAX_MESSAGE_PAGE);
+        assert_eq!(page.messages[0].id, "channel-09836");
+        assert_eq!(page.next_before_id.as_deref(), Some("channel-09836"));
+        assert!(
+            channel_message_page(&before, "large", Some("missing"), None, "epoch:0".into())
+                .is_err()
+        );
+        assert!(channel_message_page(&before, "missing", None, None, "epoch:0".into()).is_err());
+        let mut after = before.clone();
+        after.channels[0]
+            .messages
+            .get_mut_tracked(9_999)
+            .unwrap()
+            .text = "fresh".into();
+        let mut journal = Journal::default();
+        journal.record_snapshot(1, &before, &after);
+        let changes = journal.channel_changes(0, 1, &after).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].reset);
+        assert_eq!(changes[0].messages.len(), 1);
+        assert_eq!(changes[0].messages[0].text, "fresh");
+        assert!(serde_json::to_vec(&changes).unwrap().len() < 1024);
+        let mut truncated = after.clone();
+        truncated.channels[0].messages.truncate(9_999);
+        journal.record_snapshot(2, &after, &truncated);
+        let changes = journal.channel_changes(0, 2, &truncated).unwrap();
+        assert!(changes[0].messages.is_empty());
+        assert_eq!(changes[0].removed_message_ids, vec!["channel-09999"]);
+        let mut replaced = truncated.clone();
+        replaced.channels[0].messages = vec![ChannelMessage {
+            id: "new".into(),
+            ..before.channels[0].messages[0].clone()
+        }]
+        .into();
+        journal.record_snapshot(3, &truncated, &replaced);
+        let changes = journal.channel_changes(0, 3, &replaced).unwrap();
+        assert!(changes[0].reset);
+        assert_eq!(changes[0].messages.len(), 1);
+        assert_eq!(changes[0].messages[0].id, "new");
+        assert!(changes[0].removed_message_ids.is_empty());
+        let mut oversized = replaced.clone();
+        oversized.channels[0]
+            .messages
+            .get_mut_tracked(0)
+            .unwrap()
+            .text = "x".repeat(MAX_JOURNAL_BYTES + 1);
+        journal.record_snapshot(4, &replaced, &oversized);
+        assert!(journal.bytes <= MAX_JOURNAL_BYTES);
+        assert!(journal.changes(3, 4).is_none());
     }
 
     #[test]

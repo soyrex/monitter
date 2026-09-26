@@ -1,4 +1,4 @@
-name: Command contract
+name: Harness contracts and regressions
 
 on:
   pull_request:
@@ -16,8 +16,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run contract:check
+      - run: npm run test:command-protocol
+      - run: npm run test:command-contract
       - run: npm run check
       - run: npx playwright install webkit
       - run: npm run test:ui-sync
       - run: ./node_modules/.bin/vite build
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib command_contract_exposes_only_manifest_surfaces
+      - run: python3 scripts/check-jev-evaluation-fixtures.py
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=2

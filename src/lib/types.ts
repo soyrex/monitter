@@ -71,12 +71,14 @@ export interface JevRoutingDecision {
   permission_tier: 'read_only' | 'workspace_write' | 'shell_and_tests' | 'human_review_required';
   confidence: number;
   question_confidences?: { task_kind: number; model_tier: number; reasoning_level: number; execution_mode: number; permission_tier: number } | null;
+  question_probabilities?: { task_kind: Record<string, number>; model_tier: Record<string, number>; reasoning_level: Record<string, number>; execution_mode: Record<string, number>; permission_tier: Record<string, number> } | null;
   rationale: string; escalation_conditions: string[];
 }
 export interface JevRoutePlan {
   traceId: string; agentId?: string | null; promptFingerprint: string; decision: JevRoutingDecision;
+  policyVersion?: string; questionSchemaVersion?: string;
   autoRoutePolicy?: { confidence: number; threshold: number; eligible: boolean; basis: 'model_and_reasoning' | 'task_kind' } | null;
-  classifierEvidence: { provider: string; model: string; latencyMs: number; inputTokens: number | null; outputTokens: number | null; costUsd: number | null; };
+  classifierEvidence: { provider: string; model: string; modelVersion?: string | null; latencyMs: number; inputTokens: number | null; outputTokens: number | null; costUsd: number | null; };
 }
 export interface JevCommandCandidate { id: string; label: string; description?: string | null; }
 export interface JevCommandPlan { traceId: string; candidateId: string; confidence: number; reason: string; }
@@ -230,9 +232,11 @@ export interface UiDelta {
   messages: Message[];
   removedMessageIds: string[];
   retainedChannelIds: string[];
+  channelMessageChanges?: { channelId: string; messages: ChannelMessage[]; removedMessageIds: string[]; reset: boolean }[];
   retainedSubagentTranscriptIds: string[];
 }
 export interface UiDeltaResponse { revision: string; snapshot: Snapshot | null; delta: UiDelta | null; }
+export interface ChannelMessagesPage { channelId: string; messages: ChannelMessage[]; nextBeforeId: string | null; revision: string; }
 export interface TaskMessagesPage { messages: Message[]; nextBeforeId: string | null; revision: string; }
 /** Fast-send acknowledgement: acceptance is durable, but no snapshot is implied. */
 export interface SendAccepted { accepted: true; }

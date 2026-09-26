@@ -59,11 +59,41 @@ No fake conversations, progress, token counts, host connections or model replies
   It is the only custom Tauri command allowed from the dedicated developer bridge origin. Switching
   either direction reloads ephemeral frontend state, while the same native service, stored data,
   active harnesses and task sessions continue running.
+- `get_command_capabilities {}` -> `{ protocolVersion: number, commands: string[] }`.
+  Native and owner-LAN clients check the version and advertised command before invoking an operation.
+  The native list reflects the checked manifest; the LAN list includes only its explicit LAN surface.
+  Unknown handshakes on older backends allow only the manifest's legacy command baseline. A present
+  incompatible version, malformed reply, authentication failure or transport error fails visibly.
+  Mutations are never retried after ambiguous delivery. This compatibility check does not grant
+  permission: Tauri ACLs and native resource/actor checks still apply. Controller and visitor action
+  mappings remain separate restricted protocols. `use_packaged_ui` retains its narrow origin-specific
+  bootstrap exception. See `docs/COMMAND-CONTRACT.md` for generation and validation.
 - `get_snapshot {}` -> Snapshot
 - `get_ui_snapshot { revision?: string }` -> `{ revision: string, snapshot: Snapshot | null }`
   Shared desktop/LAN UI projection. An unchanged launch-scoped revision returns null; changed
   snapshots contain at most 300 recent activity events (60 per task), omit output/log payloads,
   and bound details to 1,000 bytes (300 for error summaries) rather than full diagnostic history.
+- `get_ui_delta { revision?: string }` -> `UiDeltaResponse`.
+  Native and owner-LAN only. Initial reads or expired, foreign, oversized or unrepresentable journal
+  revisions reset with a compact snapshot containing the latest 64 messages per task and channel. Incremental
+  reads contain changed messages, explicit message removals, and replacement metadata. Unchanged
+  channel/subagent histories are retained only by explicit IDs. A delta applies only to its exact
+  `fromRevision`; otherwise the client fetches a reset. The launch-scoped journal retains at most
+  128 revisions and 8 MiB of encoded changed task/channel messages. Changed channels include
+  `channelMessageChanges` with message upserts/removals and an explicit `reset` for structural
+  replacement; channel metadata carries empty message arrays in deltas. Full durable history remains available locally.
+- `get_task_messages { taskId: string, beforeId?: string, limit?: number }` ->
+  `{ messages: Message[], nextBeforeId: string | null, revision: string }`.
+  Native and owner-LAN only. Pages are chronological, default to 64 records, and cap at 100. The
+  stable message ID is an exclusive cursor; unknown/deleted cursors or cursors from another task
+  fail visibly. Clients only merge a page at its matching snapshot revision. Loading earlier
+  messages preserves the detached reader's anchor and frozen live transcript; returning to the
+  bottom, sending or switching conversations releases queued live updates.
+- `get_channel_messages { channelId: string, beforeId?: string, limit?: number }` ->
+  `{ channelId: string, messages: ChannelMessage[], nextBeforeId: string | null, revision: string }`.
+  Native and owner-LAN only. It uses the same chronological default-64/max-100 exclusive-ID page
+  contract as task history. The cursor must exist within this channel. Clients validate channel ID
+  and revision before merging; structural channel resets discard stale loaded pages.
 - `get_task_events { taskId: string, before?: number, limit?: number }` ->
   `{ events: RunEvent[], nextBefore: number | null }`. On-demand diagnostic pages are newest-first;
   `before` is an exclusive per-task array index, not a timestamp. Pages are bounded and any
@@ -985,6 +1015,11 @@ The same event kind also displays a new-chat `jev_route` record sourced from the
 Its confidence is the lowest of Jev's five routing judgments, so its compact bar is a confidence
 indicator rather than a choice distribution. It distinguishes a model selected for the chat from a
 Jev-only recommendation; permission signals remain advisory.
+New route plans retain `policyVersion`, `questionSchemaVersion`, an optional classifier `modelVersion`,
+and optional full `question_probabilities` maps for all five choices. Legacy traces remain readable
+with unspecified versions; missing probabilities are never fabricated. Offline evaluation compares
+explicitly imported outcomes by case and repeat IDs with caller-supplied evidence references and separates replayed policy agreement from
+observed quality, cost and latency. Synthetic fixtures establish code behavior, not live model quality.
 The ACP route receipt also distinguishes a requested model from an acknowledged model change,
 an already active model, and unsupported, rejected, or unconfirmed model requests.
 Codex `ContextCompaction` tool detail preserves its native `id` plus

@@ -223,7 +223,7 @@ impl Service {
                     Some(&channel.id) == task.channel_id.as_ref()
                         && channel.agent_ids.contains(&task.agent_id)
                 }) {
-                    if !channel.messages.iter().any(|m| m.id == message.id) {
+                    if channel.messages.index_of_id(&message.id).map_err(|error| error.to_string())?.is_none() {
                         channel.messages.push(ChannelMessage {
                             id: message.id,
                             role: "assistant".into(),

@@ -1629,6 +1629,11 @@ impl Service {
             "get_snapshot" => value(self.snapshot()?),
             "get_process_metrics" => value(process_metrics::sample()?),
             "get_ui_delta" => value(self.ui_delta(args.get("revision").and_then(|value| value.as_str()))?),
+            "get_channel_messages" => value(self.channel_messages(
+                &arg::<String>(&args, "channelId")?,
+                args.get("beforeId").and_then(|value| value.as_str()),
+                args.get("limit").filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose().map_err(|_| "Invalid limit.")?,
+            )?),
             "get_task_messages" => value(self.task_messages(
                 &arg::<String>(&args, "taskId")?,
                 args.get("beforeId").and_then(|value| value.as_str()),
@@ -7071,6 +7076,13 @@ async fn get_ui_delta(state: State<'_, AppState>, revision: Option<String>) -> R
 }
 
 #[tauri::command]
+async fn get_channel_messages(state: State<'_, AppState>, channel_id: String, before_id: Option<String>, limit: Option<u32>) -> Result<ui_sync::ChannelMessagesPage, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.channel_messages(&channel_id, before_id.as_deref(), limit))
+        .await.map_err(|error| format!("Channel page worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn get_task_messages(state: State<'_, AppState>, task_id: String, before_id: Option<String>, limit: Option<u32>) -> Result<ui_sync::TaskMessagesPage, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || service.task_messages(&task_id, before_id.as_deref(), limit))
@@ -7816,10 +7828,8 @@ impl Service {
                 .iter()
                 .find(|channel| channel.id == channel_id)
                 .ok_or("Channel was not found.")?;
-            let mut messages = channel.messages.iter().collect::<Vec<_>>();
-            if messages.len() > 12 {
-                messages.drain(..messages.len() - 12);
-            }
+            let mut messages = channel.messages.iter().rev().take(12).collect::<Vec<_>>();
+            messages.reverse();
             messages
                 .into_iter()
                 .map(|message| format!("{}: {}", message.role, message.text))
@@ -9449,6 +9459,7 @@ pub fn run() {
             get_ui_snapshot,
             get_ui_delta,
             get_task_messages,
+            get_channel_messages,
             get_task_events,
             get_usage_overview,
             list_codex_accounts,

@@ -44,7 +44,9 @@
     "test:mobile": "node scripts/mobile-ui-test.mjs",
     "package:relay": "node scripts/package-relay.mjs",
     "test:android-bundle": "node scripts/android-bundle-test.mjs",
-    "test:svelte-compiler-cache": "node scripts/patch-svelte-compiler.test.mjs"
+    "test:svelte-compiler-cache": "node scripts/patch-svelte-compiler.test.mjs",
+    "test:command-protocol": "node scripts/command-protocol-test.mjs",
+    "test:command-contract": "node scripts/command-contract-test.mjs"
   },
   "license": "MIT",
   "dependencies": {

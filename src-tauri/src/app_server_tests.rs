@@ -362,7 +362,7 @@ mod tests {
         assert!(snapshot.events.iter().any(|event| {
             event.task_id == task.id
                 && event.title == "Resident transport turn failed"
-                && event.detail == "approval delivery is unknown"
+                && event.detail.as_ref() == "approval delivery is unknown"
         }));
         let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
     }

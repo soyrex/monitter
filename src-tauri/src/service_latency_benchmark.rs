@@ -108,6 +108,14 @@ fn large_history_mutation_and_ui_snapshot_latency() {
                     attachments: vec![],
                 })
                 .collect();
+            data.snapshot.channels = vec![Channel {
+                id: "bench-channel".into(), name: "Synthetic channel".into(), description: String::new(),
+                agent_ids: vec![], messages: (0..messages).map(|index| ChannelMessage {
+                    id: format!("channel-{index}"), role: "assistant".into(), text: message_text.clone(),
+                    created_at: index as i64, agent_id: None, task_id: None,
+                }).collect(), agent_conversation_enabled: false, agent_conversation_turn_limit: 6,
+                agent_conversation_turns_used: 0, agent_conversation_paused: false,
+            }];
             Ok(())
         })
         .unwrap();
@@ -148,6 +156,7 @@ fn large_history_mutation_and_ui_snapshot_latency() {
             .mutate_data(None, |data| {
                 let index = data.snapshot.messages.len() - 1;
                 data.snapshot.messages.get_mut_tracked(index).unwrap().text.push('x');
+                data.snapshot.channels[0].messages.get_mut_tracked(index).unwrap().text.push('x');
                 data.snapshot.events.push(benchmark_event(
                     &task.id, format!("stream-event-{sample}"),
                     Arc::from("stream"),
@@ -162,6 +171,7 @@ fn large_history_mutation_and_ui_snapshot_latency() {
         delta_times.push(started.elapsed());
         max_delta_bytes = max_delta_bytes.max(bytes);
         assert_eq!(response.delta.as_ref().unwrap().messages.len(), 1);
+        assert_eq!(response.delta.as_ref().unwrap().channel_message_changes[0].messages.len(), 1);
         delta_revision = response.revision;
 
         let revision = service.ui_snapshot(None).unwrap().revision;
@@ -181,7 +191,7 @@ fn large_history_mutation_and_ui_snapshot_latency() {
         .unwrap_or(0);
     let total_bytes = tree_bytes(&root.0);
     eprintln!(
-        "native-latency events={events} messages={messages} samples={SAMPLES} \\
+        "native-latency events={events} task_messages={messages} channel_messages={messages} samples={SAMPLES} \\
 mutation_p50={:?} mutation_p95={:?} cached_ui_p50={:?} cached_ui_p95={:?} \\
 projection_p50={:?} projection_p95={:?} database_bytes={database_bytes} total_bytes={total_bytes}",
         percentile(&mutation_times, 0.50),

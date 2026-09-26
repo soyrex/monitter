@@ -1,4 +1,5 @@
 import { invokeCommand } from './command-invoke';
+import { createCommandGuard } from './command-protocol';
 export type { LanServerInfo } from './types';
 
 export const isLanBrowser = () => typeof document !== 'undefined' && (
@@ -8,7 +9,12 @@ export const isLanBrowser = () => typeof document !== 'undefined' && (
 const storageKey = 'monitter.lan.access';
 export function accessKey(): string { return sessionStorage.getItem(storageKey) ?? ''; }
 export function setAccessKey(key: string) { sessionStorage.setItem(storageKey, key.trim()); }
+const requireCompatibleCommand = createCommandGuard(() => lanRequest('get_command_capabilities', {}));
 export async function lanInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  await requireCompatibleCommand(command);
+  return lanRequest<T>(command, args);
+}
+async function lanRequest<T>(command: string, args: Record<string, unknown>): Promise<T> {
   const response = await fetch('/api/invoke', {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessKey()}` },
     body: JSON.stringify({ command, args }),

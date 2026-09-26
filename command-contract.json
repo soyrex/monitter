@@ -5,6 +5,7 @@
       "arguments": [],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -14,6 +15,7 @@
       "arguments": [],
       "resultRustType": "CommandCapabilities",
       "resultTsType": "CommandCapabilities",
+      "legacyCompatible": false,
       "surfaces": [
         "native",
         "lan"
@@ -38,6 +40,7 @@
       ],
       "resultRustType": "model_router::JevRoutePlan",
       "resultTsType": "JevRoutePlan",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -61,6 +64,7 @@
       ],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -84,6 +88,7 @@
       ],
       "resultRustType": "model_router::JevCommandPlan",
       "resultTsType": "JevCommandPlan",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -92,6 +97,7 @@
       "arguments": [],
       "resultRustType": "process_metrics::ProcessMetricsSample",
       "resultTsType": "ProcessMetricsSample",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -101,6 +107,7 @@
       "arguments": [],
       "resultRustType": "Vec<SystemFontFamily>",
       "resultTsType": "SystemFontFamily[]",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -109,6 +116,7 @@
       "arguments": [],
       "resultRustType": "extensions::ExtensionConfig",
       "resultTsType": "ExtensionConfig",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -125,6 +133,7 @@
       ],
       "resultRustType": "extensions::ExtensionConfig",
       "resultTsType": "ExtensionConfig",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -133,6 +142,7 @@
       "arguments": [],
       "resultRustType": "environment_secrets::EnvironmentSecretsConfig",
       "resultTsType": "EnvironmentSecretsConfig",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -170,6 +180,7 @@
       ],
       "resultRustType": "environment_secrets::EnvironmentSecretsConfig",
       "resultTsType": "EnvironmentSecretsConfig",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -193,6 +204,7 @@
       ],
       "resultRustType": "environment_secrets::EnvironmentSecretsConfig",
       "resultTsType": "EnvironmentSecretsConfig",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -209,6 +221,89 @@
       ],
       "resultRustType": "lan_sync::UiSnapshot",
       "resultTsType": "UiSnapshotResponse",
+      "legacyCompatible": true,
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_ui_delta": {
+      "arguments": [
+        {
+          "name": "revision",
+          "rustName": "revision",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "ui_sync::UiDeltaResponse",
+      "resultTsType": "UiDeltaResponse",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_task_messages": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "beforeId",
+          "rustName": "before_id",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        },
+        {
+          "name": "limit",
+          "rustName": "limit",
+          "rustType": "Option<u32>",
+          "tsType": "number | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "ui_sync::TaskMessagesPage",
+      "resultTsType": "TaskMessagesPage",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
+    "get_channel_messages": {
+      "arguments": [
+        {
+          "name": "channelId",
+          "rustName": "channel_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "beforeId",
+          "rustName": "before_id",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        },
+        {
+          "name": "limit",
+          "rustName": "limit",
+          "rustType": "Option<u32>",
+          "tsType": "number | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "ui_sync::ChannelMessagesPage",
+      "resultTsType": "ChannelMessagesPage",
+      "legacyCompatible": false,
       "surfaces": [
         "native",
         "lan"
@@ -240,6 +335,7 @@
       ],
       "resultRustType": "lan_sync::TaskEventsPage",
       "resultTsType": "TaskEventsPage",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -257,6 +353,7 @@
       ],
       "resultRustType": "UsageOverview",
       "resultTsType": "UsageOverview",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -266,6 +363,7 @@
       "arguments": [],
       "resultRustType": "Vec<codex_accounts::CodexAccount>",
       "resultTsType": "CodexAccount[]",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -304,6 +402,7 @@
       ],
       "resultRustType": "lan_sync::EventDetailChunk",
       "resultTsType": "EventDetailChunk",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -335,6 +434,7 @@
       ],
       "resultRustType": "markdown::MarkdownDocument",
       "resultTsType": "MarkdownDocument",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -343,6 +443,7 @@
       "arguments": [],
       "resultRustType": "lan::Info",
       "resultTsType": "LanServerInfo",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -366,6 +467,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -383,6 +485,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -407,6 +510,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -416,6 +520,7 @@
       "arguments": [],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -432,6 +537,7 @@
       ],
       "resultRustType": "attachments::ReadAttachmentFile",
       "resultTsType": "AttachmentFileData",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -448,6 +554,7 @@
       ],
       "resultRustType": "voice::VoiceTranscript",
       "resultTsType": "VoiceTranscription",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -464,6 +571,7 @@
       ],
       "resultRustType": "attachments::ReadAttachmentFile",
       "resultTsType": "AttachmentFileData",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -481,6 +589,7 @@
       ],
       "resultRustType": "attachments::ReadAttachmentFile",
       "resultTsType": "AttachmentFileData",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -532,6 +641,7 @@
       ],
       "resultRustType": "attachments::Attachment",
       "resultTsType": "Attachment",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -549,6 +659,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -566,6 +677,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -583,6 +695,7 @@
       ],
       "resultRustType": "ProbeResult",
       "resultTsType": "ProbeResult",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -600,6 +713,7 @@
       ],
       "resultRustType": "Vec<acp_discovery::AcpCandidate>",
       "resultTsType": "AcpCandidate[]",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -624,6 +738,7 @@
       ],
       "resultRustType": "acp_probe::ProbeResult",
       "resultTsType": "AcpProbeResult",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -641,6 +756,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -665,6 +781,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -682,6 +799,7 @@
       ],
       "resultRustType": "Task",
       "resultTsType": "Task",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -699,6 +817,7 @@
       ],
       "resultRustType": "Task",
       "resultTsType": "Task",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -716,6 +835,7 @@
       ],
       "resultRustType": "Task",
       "resultTsType": "Task",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -733,6 +853,7 @@
       ],
       "resultRustType": "Option<String>",
       "resultTsType": "string | null",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -749,6 +870,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -766,6 +888,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -797,6 +920,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -821,6 +945,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -845,6 +970,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -862,6 +988,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -879,6 +1006,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -896,6 +1024,7 @@
       ],
       "resultRustType": "deletion::DeletionPreview",
       "resultTsType": "TaskDeletionPreview",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -920,6 +1049,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -944,6 +1074,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -961,6 +1092,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -992,6 +1124,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1023,6 +1156,7 @@
       ],
       "resultRustType": "lan_sync::Accepted",
       "resultTsType": "SendAccepted",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1047,6 +1181,7 @@
       ],
       "resultRustType": "mail_triage::MailDetailRequestResult",
       "resultTsType": "MailDetailRequestResult",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1070,6 +1205,7 @@
       ],
       "resultRustType": "Option<mail_triage::MailDetail>",
       "resultTsType": "MailDetail | null",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1086,6 +1222,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1103,6 +1240,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1120,6 +1258,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1144,6 +1283,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1175,6 +1315,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1192,6 +1333,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1209,6 +1351,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1226,6 +1369,7 @@
       ],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1234,6 +1378,7 @@
       "arguments": [],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1242,6 +1387,7 @@
       "arguments": [],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1258,6 +1404,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1289,6 +1436,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1327,6 +1475,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1365,6 +1514,7 @@
       ],
       "resultRustType": "lan_sync::Accepted",
       "resultTsType": "SendAccepted",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1382,6 +1532,7 @@
       ],
       "resultRustType": "String",
       "resultTsType": "string",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1398,6 +1549,7 @@
       ],
       "resultRustType": "ModelCatalog",
       "resultTsType": "ModelCatalog",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1422,6 +1574,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1446,6 +1599,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1463,6 +1617,7 @@
       ],
       "resultRustType": "Option<serde_json::Value>",
       "resultTsType": "JsonValue | null",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1480,6 +1635,7 @@
       ],
       "resultRustType": "Vec<SlashCommand>",
       "resultTsType": "SlashCommand[]",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1504,6 +1660,7 @@
       ],
       "resultRustType": "SlashCommandExecution",
       "resultTsType": "SlashCommandExecution",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1528,6 +1685,7 @@
       ],
       "resultRustType": "Vec<SubagentTranscriptEntry>",
       "resultTsType": "SubagentTranscriptEntry[]",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1545,6 +1703,7 @@
       ],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1569,6 +1728,7 @@
       ],
       "resultRustType": "git::GitStatus",
       "resultTsType": "TaskGitStatus",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1593,6 +1753,7 @@
       ],
       "resultRustType": "String",
       "resultTsType": "string",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1624,6 +1785,7 @@
       ],
       "resultRustType": "git::GitDiff",
       "resultTsType": "TaskGitDiff",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1655,6 +1817,7 @@
       ],
       "resultRustType": "terminal::TerminalSession",
       "resultTsType": "TerminalSession",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1664,6 +1827,7 @@
       "arguments": [],
       "resultRustType": "Vec<terminal::TerminalSession>",
       "resultTsType": "TerminalSession[]",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1688,6 +1852,7 @@
       ],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1719,6 +1884,7 @@
       ],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1743,6 +1909,7 @@
       ],
       "resultRustType": "terminal::TerminalRead",
       "resultTsType": "TerminalRead",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1760,6 +1927,7 @@
       ],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native",
         "lan"
@@ -1791,6 +1959,7 @@
       ],
       "resultRustType": "BrowserState",
       "resultTsType": "BrowserState",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1821,6 +1990,7 @@
       ],
       "resultRustType": "BrowserState",
       "resultTsType": "BrowserState",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1844,6 +2014,7 @@
       ],
       "resultRustType": "BrowserState",
       "resultTsType": "BrowserState",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1860,6 +2031,7 @@
       ],
       "resultRustType": "BrowserState",
       "resultTsType": "BrowserState",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1876,6 +2048,7 @@
       ],
       "resultRustType": "BrowserState",
       "resultTsType": "BrowserState",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1892,6 +2065,7 @@
       ],
       "resultRustType": "BrowserState",
       "resultTsType": "BrowserState",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1908,6 +2082,7 @@
       ],
       "resultRustType": "()",
       "resultTsType": "void",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1924,6 +2099,7 @@
       ],
       "resultRustType": "BrowserState",
       "resultTsType": "BrowserState",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1940,6 +2116,7 @@
       ],
       "resultRustType": "BrowserExtensionState",
       "resultTsType": "BrowserExtensionLoadResult",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1948,6 +2125,7 @@
       "arguments": [],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1964,6 +2142,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1980,6 +2159,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -1996,6 +2176,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -2012,6 +2193,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -2028,6 +2210,7 @@
       ],
       "resultRustType": "Snapshot",
       "resultTsType": "Snapshot",
+      "legacyCompatible": true,
       "surfaces": [
         "native"
       ]
@@ -2167,6 +2350,7 @@
       "BrowserBounds",
       "BrowserExtensionLoadResult",
       "BrowserState",
+      "ChannelMessagesPage",
       "CodexAccount",
       "CommandCapabilities",
       "EnvironmentSecretsConfig",
@@ -2196,9 +2380,11 @@
       "TaskEventsPage",
       "TaskGitDiff",
       "TaskGitStatus",
+      "TaskMessagesPage",
       "TerminalRead",
       "TerminalSession",
       "TerminalTarget",
+      "UiDeltaResponse",
       "UiSnapshotResponse",
       "UsageOverview",
       "UsageRefreshPolicy",

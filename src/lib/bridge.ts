@@ -1,6 +1,5 @@
 import { invokeCommand } from './command-invoke';
 import { COMMAND_CONTRACT_PROTOCOL_VERSION, type CommandArgs, type CommandName, type CommandResults } from './generated-command-contract';
-import { invoke as nativeInvoke } from '@tauri-apps/api/core';
 import { isLanBrowser, lanInvoke } from './lan';
 import { applyUiDelta, mergeTaskMessagesPage } from './ui-sync';
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -215,20 +214,12 @@ let capabilityRequest: Promise<Set<string> | null> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 const changedSubscribers = new Set<() => void>();
 
-// Read-only sync calls are typed locally while their Rust signatures and
-// generated command entries are integrated at the native boundary.
 function invokeUiDelta(revision?: string): Promise<UiDeltaResponse> {
-  const args = revision === undefined ? {} : { revision };
-  return isLanBrowser()
-    ? lanInvoke<UiDeltaResponse>('get_ui_delta', args)
-    : nativeInvoke<UiDeltaResponse>('get_ui_delta', args);
+  return invoke('get_ui_delta', revision === undefined ? {} : { revision });
 }
 
 function invokeTaskMessages(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage> {
-  const args = { taskId, ...(beforeId === undefined ? {} : { beforeId }), ...(limit === undefined ? {} : { limit }) };
-  return isLanBrowser()
-    ? lanInvoke<TaskMessagesPage>('get_task_messages', args)
-    : nativeInvoke<TaskMessagesPage>('get_task_messages', args);
+  return invoke('get_task_messages', { taskId, ...(beforeId === undefined ? {} : { beforeId }), ...(limit === undefined ? {} : { limit }) });
 }
 
 function rememberSnapshot(snapshot: Snapshot, revision?: string) {
@@ -322,6 +313,7 @@ async function getTaskMessages(taskId: string, beforeId?: string, limit?: number
   if (page.revision !== cachedRevision) {
     await getCachedSnapshot();
     page = await invokeTaskMessages(taskId, beforeId, limit);
+    if (page.messages.some(message => message.taskId !== taskId)) throw new Error('Monitter returned a message for a different task.');
     if (page.revision !== cachedRevision) throw new Error('Transcript history changed while loading. Please try again.');
   }
   if (cachedSnapshot) cachedSnapshot = mergeTaskMessagesPage(cachedSnapshot, page);

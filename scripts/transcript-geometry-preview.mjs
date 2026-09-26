@@ -4,7 +4,6 @@
 import { build } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'node:http';
-import { fileURLToPath } from 'node:url';
 
 const root = process.cwd();
 const args = process.argv.slice(2);
@@ -13,13 +12,12 @@ const portArgument = args.find((value) => value.startsWith('--port='));
 const port = portArgument ? Number(portArgument.slice('--port='.length)) : 18434;
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Expected --port=<1..65535>.');
 
-const lucideStub = fileURLToPath(new URL('./fixtures/transcript-geometry-lucide-stub.js', import.meta.url));
 const started = performance.now();
 const result = await build({
   configFile: false,
   root,
   plugins: [svelte()],
-  resolve: { alias: { '$lib': `${root}/src/lib`, '@lucide/svelte': lucideStub } },
+  resolve: { alias: { '$lib': `${root}/src/lib` } },
   build: {
     write: false,
     minify: false,

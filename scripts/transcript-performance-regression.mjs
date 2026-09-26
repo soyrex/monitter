@@ -36,7 +36,7 @@ assert.match(virtualList, /ResizeObserver/);
 assert.match(appSurface, /items=\{displayedChannelTranscript\.messages\}[\s\S]{0,180}active=\{embedded \? active : activePaneId === 'main'\}/,
   'visible channel panes must render transcript rows even when another split has focus');
 const taskTranscript = await readFile(`${root}/src/lib/components/TaskTranscript.svelte`, 'utf8');
-assert.match(taskTranscript, /<TranscriptVirtualList[\s\S]{0,260}\{active\}/,
+assert.match(taskTranscript.split('<TranscriptVirtualList')[1]?.split('{#snippet')[0] ?? '', /\{active\}/,
   'visible task panes must render transcript rows even when another split has focus');
 assert.doesNotMatch(terminalRuntime, /setInterval\s*\(/, 'terminal runtime must not keep a global interval');
 assert.match(terminalRuntime, /runtimeCanPoll/);
