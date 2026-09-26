@@ -2039,7 +2039,20 @@ fn run(
                     );
                     return;
                 }
-                match request_jev_reasoning_if_supported(&service, &task_id, &control, &session) {
+                // A model change can replace its thought-level choices. If
+                // the agent omits refreshed controls, the old advertisement
+                // cannot authorize a reasoning request for the new model.
+                let reasoning_request = if value.pointer("/result/configOptions").is_some() {
+                    request_jev_reasoning_if_supported(&service, &task_id, &control, &session)
+                } else {
+                    service.pending_jev_route_reasoning(&task_id).and_then(|pending| {
+                        if pending.is_some() {
+                            service.set_jev_route_reasoning_status(&task_id, "unsupported", None)?;
+                        }
+                        Ok(None)
+                    })
+                };
+                match reasoning_request {
                     Ok(Some(value)) => {
                         pending_jev_reasoning_value = Some(value);
                         phase = "session/reasoning";
