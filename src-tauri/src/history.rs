@@ -140,13 +140,13 @@ impl<T: HistoryRecord> History<T> {
         self.rows.is_empty()
     }
 
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
+    pub fn iter(&self) -> im::vector::Iter<'_, T> {
         self.rows.iter()
     }
 
     /// Mutable iteration is supported, but may alter any ID or scope. It
     /// therefore invalidates both indexes and forces a full delta fallback.
-    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut T> + ExactSizeIterator {
+    pub fn iter_mut(&mut self) -> im::vector::IterMut<'_, T> {
         self.mark_full_and_dirty();
         self.rows.iter_mut()
     }
@@ -154,6 +154,8 @@ impl<T: HistoryRecord> History<T> {
     pub fn get(&self, index: usize) -> Option<&T> {
         self.rows.get(index)
     }
+
+    pub fn first(&self) -> Option<&T> { self.rows.front() }
 
     pub fn last(&self) -> Option<&T> {
         self.rows.back()
@@ -573,6 +575,12 @@ impl<T: HistoryRecord> IndexMut<usize> for History<T> {
             .get_mut(index)
             .expect("index was checked against history length")
     }
+}
+
+impl<T: HistoryRecord> IntoIterator for History<T> {
+    type Item = T;
+    type IntoIter = im::vector::ConsumingIter<T>;
+    fn into_iter(self) -> Self::IntoIter { self.rows.into_iter() }
 }
 
 impl<'a, T: HistoryRecord> IntoIterator for &'a History<T> {

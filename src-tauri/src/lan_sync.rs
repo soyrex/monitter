@@ -340,7 +340,7 @@ fn compact_acp_activity_detail(detail: &str) -> String {
     }
 }
 
-fn compact_event(event: &RunEvent) -> RunEvent {
+pub(crate) fn compact_event(event: &RunEvent) -> RunEvent {
     RunEvent {
         id: event.id.clone(),
         task_id: event.task_id.clone(),

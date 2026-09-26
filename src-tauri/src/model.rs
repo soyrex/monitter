@@ -630,7 +630,7 @@ pub fn finalize_subagent_sessions(
 const MAX_SUBAGENT_TRANSCRIPT_ENTRIES: usize = 200;
 
 pub fn append_subagent_transcript_entry(
-    transcripts: &mut std::collections::HashMap<String, Vec<SubagentTranscriptEntry>>,
+    transcripts: &mut std::collections::HashMap<String, crate::history::History<SubagentTranscriptEntry>>,
     subagent_id: &str,
     entry: SubagentTranscriptEntry,
 ) {
@@ -638,7 +638,7 @@ pub fn append_subagent_transcript_entry(
     entries.push(entry);
     if entries.len() > MAX_SUBAGENT_TRANSCRIPT_ENTRIES {
         let excess = entries.len() - MAX_SUBAGENT_TRANSCRIPT_ENTRIES;
-        entries.drain(0..excess);
+        for _ in 0..excess { entries.remove(0); }
     }
 }
 
@@ -892,7 +892,7 @@ pub struct Channel {
     pub name: String,
     pub description: String,
     pub agent_ids: Vec<String>,
-    pub messages: Vec<ChannelMessage>,
+    pub messages: crate::history::History<ChannelMessage>,
     #[serde(default)]
     pub agent_conversation_enabled: bool,
     #[serde(default = "default_agent_conversation_turn_limit")]
@@ -1204,7 +1204,7 @@ pub struct Snapshot {
     pub hosts: Vec<Host>,
     pub agents: Vec<Agent>,
     pub tasks: Vec<Task>,
-    pub messages: Vec<Message>,
+    pub messages: crate::history::History<Message>,
     /// Body-free, owner-facing mail cards. Shared-visitor projection omits
     /// this field explicitly; full bodies are never stored here.
     #[serde(default)]
@@ -1215,7 +1215,7 @@ pub struct Snapshot {
     /// keeps a candidate Snapshot clone from duplicating every historical
     /// event on an ordinary streaming update; serde retains the same JSON
     /// array-of-event-records shape.
-    pub events: Vec<Arc<RunEvent>>,
+    pub events: crate::history::History<Arc<RunEvent>>,
     pub channels: Vec<Channel>,
     #[serde(default)]
     pub project_board_messages: Vec<ProjectBoardMessage>,
@@ -1233,7 +1233,7 @@ pub struct Snapshot {
     /// `collaboration` sessions never populate this; their transcript is
     /// fetched live or read from the child task's own messages.
     #[serde(default)]
-    pub subagent_transcripts: std::collections::HashMap<String, Vec<SubagentTranscriptEntry>>,
+    pub subagent_transcripts: std::collections::HashMap<String, crate::history::History<SubagentTranscriptEntry>>,
     #[serde(default)]
     pub queued_messages: Vec<QueuedMessage>,
     #[serde(default)]
@@ -1669,10 +1669,10 @@ pub fn default_snapshot() -> Snapshot {
             internal: false,
         }],
         tasks: vec![],
-        messages: vec![],
+        messages: Default::default(),
         mail_batches: vec![],
         work_plans: vec![],
-        events: vec![],
+        events: Default::default(),
         channels: vec![],
         project_board_messages: vec![],
         projects: vec![],
@@ -2242,4 +2242,25 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
             .flatten(),
         archived_agent_name: None,
     }
+}
+
+impl crate::history::HistoryRecord for Message {
+    fn id(&self) -> &str { &self.id }
+    fn scope_id(&self) -> Option<&str> { Some(&self.task_id) }
+}
+impl crate::history::HistoryRecord for RunEvent {
+    fn id(&self) -> &str { &self.id }
+    fn scope_id(&self) -> Option<&str> { Some(&self.task_id) }
+}
+impl crate::history::HistoryRecord for RunUsageSample {
+    fn id(&self) -> &str { &self.sample_id }
+    fn scope_id(&self) -> Option<&str> { Some(&self.task_id) }
+}
+
+impl crate::history::HistoryRecord for ChannelMessage {
+    fn id(&self) -> &str { &self.id }
+    fn scope_id(&self) -> Option<&str> { self.task_id.as_deref() }
+}
+impl crate::history::HistoryRecord for SubagentTranscriptEntry {
+    fn id(&self) -> &str { &self.id }
 }

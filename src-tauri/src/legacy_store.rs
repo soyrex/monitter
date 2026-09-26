@@ -101,7 +101,7 @@ pub(crate) fn read(dir: &Path) -> Result<(ImportedState, Vec<PathBuf>), String> 
     let mut snapshot = data.snapshot;
     let mut sources = vec![path];
     if let Some(reference) = data.event_journal {
-        snapshot.events = read_journal(dir, &reference)?.0;
+        snapshot.events = read_journal(dir, &reference)?.0.into();
         sources.push(journal_path(dir, &reference));
     }
     let (usage, captured_since) = if let Some(reference) = data.usage_ledger {

@@ -3,6 +3,7 @@
 //! Store owns migration, legacy import, recovery, and publication policy. This
 //! module only stores a fully materialized state as individually queryable rows.
 
+use crate::history::{History, HistoryChange, HistoryDelta, HistoryRecord};
 use crate::{attachments::StoredAttachment, model::*};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
@@ -173,6 +174,20 @@ impl Database {
         private_sidecars(&self.path)
     }
 
+    pub(crate) fn apply_update_history_usage(
+        &self, before: StateRef<'_>, after: StateRef<'_>,
+        usage_before: &History<RunUsageSample>, usage_after: &History<RunUsageSample>,
+        captured_since: Option<i64>,
+    ) -> Result<(), String> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        diff_state(&transaction, before, after)?;
+        diff_usage_history(&transaction, usage_before, usage_after)?;
+        set_capture_since_if_changed(&transaction, captured_since)?;
+        transaction.commit().map_err(|error| format!("Cannot commit SQLite update: {error}"))?;
+        private_sidecars(&self.path)
+    }
+
     pub(crate) fn read_snapshot(
         &self,
     ) -> Result<
@@ -192,7 +207,7 @@ impl Database {
             hosts: read_vec(&connection, "hosts")?,
             agents: read_vec(&connection, "agents")?,
             tasks: read_vec(&connection, "tasks")?,
-            messages: read_vec(&connection, "messages")?,
+            messages: read_vec(&connection, "messages")?.into(),
             mail_batches: read_vec(&connection, "mail_batches")?,
             work_plans: read_vec(&connection, "work_plans")?,
             events: read_vec::<RunEvent>(&connection, "events")?
@@ -402,7 +417,7 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
     write_vec(transaction, "hosts", &snapshot.hosts, plain_id)?;
     write_vec(transaction, "agents", &snapshot.agents, plain_id)?;
     write_vec(transaction, "tasks", &snapshot.tasks, plain_id)?;
-    write_vec(transaction, "messages", &snapshot.messages, message_key)?;
+    write_history(transaction, "messages", &snapshot.messages, message_key)?;
     write_vec(
         transaction,
         "mail_batches",
@@ -410,7 +425,7 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
         mail_batch_key,
     )?;
     write_vec(transaction, "work_plans", &snapshot.work_plans, plain_id)?;
-    write_vec(transaction, "events", &snapshot.events, event_key)?;
+    write_history(transaction, "events", &snapshot.events, event_key)?;
     write_vec(transaction, "channels", &snapshot.channels, plain_id)?;
     write_vec(transaction, "project_board_messages", &snapshot.project_board_messages, plain_id)?;
     write_vec(transaction, "projects", &snapshot.projects, plain_id)?;
@@ -499,7 +514,7 @@ fn diff_state(
         &after_snapshot.tasks,
         plain_id,
     )?;
-    diff_vec(
+    diff_history(
         transaction,
         "messages",
         &before_snapshot.messages,
@@ -514,7 +529,7 @@ fn diff_state(
         mail_batch_key,
     )?;
     diff_vec(transaction, "work_plans", &before_snapshot.work_plans, &after_snapshot.work_plans, plain_id)?;
-    diff_events(transaction, &before_snapshot.events, &after_snapshot.events)?;
+    diff_history(transaction, "events", &before_snapshot.events, &after_snapshot.events, event_key)?;
     diff_vec(
         transaction,
         "channels",
@@ -711,6 +726,53 @@ fn write_vec<T: Serialize>(
     Ok(())
 }
 
+fn write_history<T: HistoryRecord + Clone + Serialize>(transaction: &Transaction<'_>, collection: &str, values: &History<T>, key: impl Fn(&T) -> (&str, Option<&str>, Option<i64>)) -> Result<(), String> {
+    let rows = values.iter().collect::<Vec<_>>();
+    write_vec(transaction, collection, &rows, |value| key(*value))
+}
+
+fn diff_history<T: HistoryRecord + Clone + Serialize + PartialEq>(transaction: &Transaction<'_>, collection: &str, before: &History<T>, after: &History<T>, key: impl Fn(&T) -> (&str, Option<&str>, Option<i64>)) -> Result<(), String> {
+    if let HistoryDelta::Incremental { changes, .. } = after.delta_since(before) {
+        let mut touched = std::collections::BTreeSet::new();
+        let mut truncated = None::<usize>;
+        for change in changes {
+            match change {
+                HistoryChange::Append { index } | HistoryChange::Update { index } => { touched.insert(index); }
+                HistoryChange::TruncateFrom { new_len } => { truncated = Some(truncated.map_or(new_len, |old| old.min(new_len))); }
+            }
+        }
+        // Identity-changing edits can collide with other row keys. They use
+        // the complete differential path; normal streaming never changes IDs.
+        let stable = touched.iter().all(|index| match (before.get(*index), after.get(*index)) {
+            (Some(old), Some(new)) => key(old).0 == key(new).0 || truncated.is_some_and(|start| *index >= start),
+            _ => true,
+        });
+        if stable {
+            if let Some(start) = truncated {
+                transaction.execute("DELETE FROM entities WHERE collection=?1 AND position>=?2", params![collection, start as i64]).map_err(|error| error.to_string())?;
+            }
+            for index in touched {
+                let Some(value) = after.get(index) else { continue; };
+                let (id, task_id, created_at) = key(value);
+                // Index lookup rejects appended duplicates without walking the
+                // historical table. SQL remains the final atomic constraint.
+                if after.index_of_id(id).map_err(|error| error.to_string())? != Some(index) {
+                    return Err(format!("Invalid {collection} identity index"));
+                }
+                if index >= before.len() || truncated.is_some_and(|start| index >= start) {
+                    insert_new(transaction, collection, id, index, task_id, created_at, value)?;
+                } else if before.get(index) != Some(value) {
+                    put(transaction, collection, id, index, task_id, created_at, value)?;
+                }
+            }
+            return Ok(());
+        }
+    }
+    let old = before.iter().collect::<Vec<_>>();
+    let new = after.iter().collect::<Vec<_>>();
+    diff_vec(transaction, collection, &old, &new, |value| key(*value))
+}
+
 fn diff_vec<T: Serialize + PartialEq>(
     transaction: &Transaction<'_>,
     collection: &str,
@@ -792,89 +854,6 @@ fn diff_vec<T: Serialize + PartialEq>(
     Ok(())
 }
 
-fn diff_events(
-    transaction: &Transaction<'_>,
-    before: &[Arc<RunEvent>],
-    after: &[Arc<RunEvent>],
-) -> Result<(), String> {
-    // Streaming normally preserves the committed order and appends
-    // a few events. Scanning shared Arc pointers is cheap; rebuilding two
-    // 50,000-entry hash indexes on every token is not. The before state comes
-    // from the committed Service view (or read_snapshot), whose IDs are unique.
-    // Strict INSERT below lets SQLite's existing primary-key index reject an
-    // appended duplicate, including duplicates within the new tail, atomically.
-    if after.len() >= before.len()
-        && before
-            .iter()
-            .zip(after)
-            .all(|(old, new)| Arc::ptr_eq(old, new) || old.id == new.id)
-    {
-        for (position, (old, new)) in before.iter().zip(after).enumerate() {
-            if !same_event(old, new) {
-                put(
-                    transaction,
-                    "events",
-                    &new.id,
-                    position,
-                    Some(&new.task_id),
-                    Some(new.created_at),
-                    new,
-                )?;
-            }
-        }
-        for (offset, event) in after[before.len()..].iter().enumerate() {
-            insert_new(
-                transaction,
-                "events",
-                &event.id,
-                before.len() + offset,
-                Some(&event.task_id),
-                Some(event.created_at),
-                event,
-            )?;
-        }
-        return Ok(());
-    }
-    let mut old = HashMap::with_capacity(before.len());
-    for (position, event) in before.iter().enumerate() {
-        if old.insert(event.id.as_str(), (position, event)).is_some() {
-            return Err(format!("Duplicate events id {}", event.id));
-        }
-    }
-    let mut seen = HashSet::with_capacity(after.len());
-    for (position, event) in after.iter().enumerate() {
-        let id = event.id.as_str();
-        if !seen.insert(id) {
-            return Err(format!("Duplicate events id {id}"));
-        }
-        match old.get(id) {
-            Some((old_position, old_event))
-                if same_event(*old_event, event) && *old_position == position => {}
-            Some((_, old_event)) if same_event(*old_event, event) => {
-                update_position(transaction, "events", id, position)?
-            }
-            _ => put(
-                transaction,
-                "events",
-                id,
-                position,
-                Some(event.task_id.as_str()),
-                Some(event.created_at),
-                event,
-            )?,
-        }
-    }
-    for id in old.keys() {
-        if !seen.contains(*id) {
-            delete_entity(transaction, "events", id)?;
-        }
-    }
-    Ok(())
-}
-
-fn same_event(before: &Arc<RunEvent>, after: &Arc<RunEvent>) -> bool {
-    Arc::ptr_eq(before, after) || before.as_ref() == after.as_ref()
-}
 
 fn put<T: Serialize>(
     transaction: &Transaction<'_>,
@@ -1071,6 +1050,36 @@ fn write_all_usage(transaction: &Transaction<'_>, usage: &[RunUsageSample]) -> R
     }
     Ok(())
 }
+fn diff_usage_history(transaction: &Transaction<'_>, before: &History<RunUsageSample>, after: &History<RunUsageSample>) -> Result<(), String> {
+    if let HistoryDelta::Incremental { changes, .. } = after.delta_since(before) {
+        let mut touched = std::collections::BTreeSet::new();
+        let mut truncate = None::<usize>;
+        for change in changes {
+            match change {
+                HistoryChange::Append { index } | HistoryChange::Update { index } => { touched.insert(index); }
+                HistoryChange::TruncateFrom { new_len } => { truncate = Some(truncate.map_or(new_len, |old| old.min(new_len))); }
+            }
+        }
+        if touched.iter().all(|index| match (before.get(*index), after.get(*index)) {
+            (Some(old), Some(new)) => old.sample_id == new.sample_id || truncate.is_some_and(|start| *index >= start),
+            _ => true,
+        }) {
+            if let Some(start) = truncate {
+                transaction.execute("DELETE FROM usage_samples WHERE position>=?1", [start as i64]).map_err(|error| error.to_string())?;
+            }
+            for index in touched {
+                let Some(sample) = after.get(index) else { continue; };
+                if after.index_of_id(&sample.sample_id).map_err(|error| error.to_string())? != Some(index) { return Err("Invalid usage identity index".into()); }
+                if before.get(index) != Some(sample) || truncate.is_some_and(|start| index >= start) {
+                    put_usage(transaction, sample, index)?;
+                }
+            }
+            return Ok(());
+        }
+    }
+    diff_usage(transaction, &before.iter().cloned().collect::<Vec<_>>(), &after.iter().cloned().collect::<Vec<_>>())
+}
+
 fn diff_usage(
     transaction: &Transaction<'_>,
     before: &[RunUsageSample],
@@ -1286,7 +1295,7 @@ mod tests {
         let (directory, path) = temp_path("roundtrip");
         let database = Database::create(&path).unwrap();
         let mut snapshot = default_snapshot();
-        snapshot.events = vec![event("first")];
+        snapshot.events = vec![event("first")].into();
         let samples = vec![usage("one")];
         database
             .replace_all(state(&snapshot), &samples, Some(7))
@@ -1329,10 +1338,10 @@ mod tests {
         let (directory, path) = temp_path("delta");
         let database = Database::create(&path).unwrap();
         let mut before = default_snapshot();
-        before.events = vec![event("one"), event("two")];
+        before.events = vec![event("one"), event("two")].into();
         database.replace_all(state(&before), &[], None).unwrap();
         let mut after = before.clone();
-        after.events = vec![event("two"), event("three")];
+        after.events = vec![event("two"), event("three")].into();
         let changes_before = database.lock().unwrap().total_changes();
         database
             .apply_update(state(&before), state(&after), &[], &[], None)
@@ -1353,7 +1362,7 @@ mod tests {
         let (directory, path) = temp_path("duplicate");
         let database = Database::create(&path).unwrap();
         let mut before = default_snapshot();
-        before.events = vec![event("one")];
+        before.events = vec![event("one")].into();
         database.replace_all(state(&before), &[], None).unwrap();
         let mut invalid = before.clone();
         invalid.events.push(event("one"));

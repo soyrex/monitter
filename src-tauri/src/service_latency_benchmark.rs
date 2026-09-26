@@ -40,10 +40,10 @@ fn tree_bytes(path: &Path) -> u64 {
         .sum()
 }
 
-fn benchmark_event(id: String, detail: Arc<str>) -> Arc<RunEvent> {
+fn benchmark_event(task_id: &str, id: String, detail: Arc<str>) -> Arc<RunEvent> {
     Arc::new(RunEvent {
         id,
-        task_id: "benchmark-task".into(),
+        task_id: task_id.into(),
         kind: "tool".into(),
         title: "Synthetic streaming activity".into(),
         detail,
@@ -72,6 +72,11 @@ fn large_history_mutation_and_ui_snapshot_latency() {
     };
     let root = TempRoot(std::env::temp_dir().join(format!("monitter-service-latency-{}", id())));
     let service = Service::open(None, root.0.clone()).unwrap();
+    let task = service.create_task(CreateTaskInput {
+        agent_id: service.snapshot().unwrap().agents[0].id.clone(), title: "Synthetic benchmark".into(),
+        native_session_id: None, parent_task_id: None, channel_id: None, project_id: None,
+        cwd: None, model_settings: None, sandbox: None,
+    }).unwrap();
     let message_text = "m".repeat(MESSAGE_BYTES);
 
     // Seed through the production transactional writer path before measuring
@@ -83,7 +88,7 @@ fn large_history_mutation_and_ui_snapshot_latency() {
                 // later snapshot clones share those immutable allocations.
                 .map(|index| {
                     benchmark_event(
-                        format!("fixture-event-{index}"),
+                        &task.id, format!("fixture-event-{index}"),
                         "e".repeat(EVENT_BYTES).into(),
                     )
                 })
@@ -94,7 +99,7 @@ fn large_history_mutation_and_ui_snapshot_latency() {
                     phase: None,
                     response_metadata: None,
                     id: format!("fixture-message-{index}"),
-                    task_id: "benchmark-task".into(),
+                    task_id: task.id.clone(),
                     role: "assistant".into(),
                     text: message_text.clone(),
                     created_at: index as i64,
@@ -119,10 +124,11 @@ fn large_history_mutation_and_ui_snapshot_latency() {
     // including this first use in the evidence.
     service
         .mutate_data(None, |data| {
-            data.snapshot.messages.last_mut().unwrap().text.push('w');
+            let index = data.snapshot.messages.len() - 1;
+            data.snapshot.messages.get_mut_tracked(index).unwrap().text.push('w');
             data.snapshot
                 .events
-                .push(benchmark_event("warm-event".into(), Arc::from("warm")));
+                .push(benchmark_event(&task.id, "warm-event".into(), Arc::from("warm")));
             Ok(())
         })
         .unwrap();
@@ -130,6 +136,9 @@ fn large_history_mutation_and_ui_snapshot_latency() {
     let _ = service.ui_snapshot(Some(&warm_revision)).unwrap();
     let _ = service.ui_snapshot(None).unwrap();
 
+    let mut delta_revision = service.ui_delta(None).unwrap().revision;
+    let mut delta_times = Vec::with_capacity(SAMPLES);
+    let mut max_delta_bytes = 0;
     let mut mutation_times = Vec::with_capacity(SAMPLES);
     let mut cached_read_times = Vec::with_capacity(SAMPLES);
     let mut projection_times = Vec::with_capacity(SAMPLES);
@@ -137,15 +146,23 @@ fn large_history_mutation_and_ui_snapshot_latency() {
         let started = Instant::now();
         service
             .mutate_data(None, |data| {
-                data.snapshot.messages.last_mut().unwrap().text.push('x');
+                let index = data.snapshot.messages.len() - 1;
+                data.snapshot.messages.get_mut_tracked(index).unwrap().text.push('x');
                 data.snapshot.events.push(benchmark_event(
-                    format!("stream-event-{sample}"),
+                    &task.id, format!("stream-event-{sample}"),
                     Arc::from("stream"),
                 ));
                 Ok(())
             })
             .unwrap();
         mutation_times.push(started.elapsed());
+        let started = Instant::now();
+        let response = service.ui_delta(Some(&delta_revision)).unwrap();
+        let bytes = serde_json::to_vec(&response).unwrap().len();
+        delta_times.push(started.elapsed());
+        max_delta_bytes = max_delta_bytes.max(bytes);
+        assert_eq!(response.delta.as_ref().unwrap().messages.len(), 1);
+        delta_revision = response.revision;
 
         let revision = service.ui_snapshot(None).unwrap().revision;
         let started = Instant::now();
@@ -175,5 +192,6 @@ projection_p50={:?} projection_p95={:?} database_bytes={database_bytes} total_by
         percentile(&projection_times, 0.95),
     );
 
+    eprintln!("revisioned-ui delta_and_encode_p50={:?} delta_and_encode_p95={:?} max_delta_bytes={max_delta_bytes}", percentile(&delta_times, 0.50), percentile(&delta_times, 0.95));
     drop(service);
 }

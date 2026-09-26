@@ -25,8 +25,8 @@ use std::{
 };
 
 struct UsageState {
-    committed: Vec<RunUsageSample>,
-    staged: Vec<RunUsageSample>,
+    committed: crate::history::History<RunUsageSample>,
+    staged: crate::history::History<RunUsageSample>,
     captured_since: Option<i64>,
 }
 
@@ -76,6 +76,7 @@ impl Store {
                 captured_since,
             )?;
         }
+        let samples: crate::history::History<_> = samples.into();
         let store = Self {
             database,
             usage: Mutex::new(UsageState {
@@ -124,10 +125,12 @@ impl Store {
             .or_else(|| (!usage.staged.is_empty()).then(now));
         let result =
             self.database
-                .apply_update(before, after, &usage.committed, &usage.staged, captured);
+                .apply_update_history_usage(before, after, &usage.committed, &usage.staged, captured);
         match result {
             Ok(()) => {
                 usage.committed = usage.staged.clone();
+                // Start a new direct lineage for the next usage transaction.
+                usage.staged = usage.committed.clone();
                 usage.captured_since = captured;
                 Ok(())
             }
@@ -147,11 +150,7 @@ impl Store {
             .usage
             .lock()
             .map_err(|_| "Monitter usage state lock failed.".to_string())?;
-        if !usage
-            .staged
-            .iter()
-            .any(|existing| existing.sample_id == sample.sample_id)
-        {
+        if usage.staged.get_by_id(&sample.sample_id).map_err(|error| error.to_string())?.is_none() {
             usage.staged.push(sample);
         }
         Ok(())
@@ -172,7 +171,7 @@ impl Store {
             .usage
             .lock()
             .map_err(|_| "Monitter usage state lock failed.".to_string())?;
-        Ok(aggregate_usage(usage.staged.clone(), usage.captured_since))
+        Ok(aggregate_usage(usage.staged.iter().cloned().collect(), usage.captured_since))
     }
 }
 

@@ -687,8 +687,7 @@ impl Service {
                 .iter()
                 .position(|message| message.collaboration_id.as_deref() == Some(item.id.as_str()))
                 .and_then(|marker| {
-                    snapshot.messages[marker + 1..]
-                        .iter()
+                    snapshot.messages.iter().skip(marker + 1)
                         .rev()
                         .find(|message| message.task_id == task_id && message.role == "assistant")
                 })

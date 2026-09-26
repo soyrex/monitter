@@ -115,10 +115,10 @@ fn exclusive_owner_releases_lease_on_drop() {
 fn event_edits_deletes_and_reordering_survive_reopen() {
     let path = directory();
     let (store, mut snapshot, hosts, attachments) = Store::open(path.clone()).unwrap();
-    snapshot.events = vec![event("one"), event("two"), event("three")];
+    snapshot.events = vec![event("one"), event("two"), event("three")].into();
     store.save(&snapshot, &hosts, &attachments).unwrap();
     let before = snapshot.clone();
-    snapshot.events = vec![event("three"), event("one")];
+    snapshot.events = vec![event("three"), event("one")].into();
     Arc::make_mut(&mut snapshot.events[0]).detail = Arc::from("changed");
     store
         .save_update(
@@ -143,7 +143,7 @@ fn subagent_projection_round_trips_updates_and_deletes_atomically() {
         vec![
             subagent_entry("entry-1", "small captured detail", 11),
             subagent_entry("entry-2", "still deliberately bounded", 12),
-        ],
+        ].into(),
     );
     store.save(&snapshot, &hosts, &attachments).unwrap();
 

@@ -163,8 +163,8 @@ impl Service {
                 && data
                     .snapshot
                     .messages
-                    .iter()
-                    .any(|m| m.id == message_id && m.stream_status.as_deref() == Some("complete"))
+                    .get_by_id(&message_id).map_err(|error| error.to_string())?
+                    .is_some_and(|m| m.stream_status.as_deref() == Some("complete"))
             {
                 return Ok(());
             }
@@ -178,12 +178,9 @@ impl Service {
             } else {
                 vec![]
             };
-            let message = if let Some(message) = data
-                .snapshot
-                .messages
-                .iter_mut()
-                .find(|m| m.id == message_id)
-            {
+            let existing = data.snapshot.messages.index_of_id(&message_id).map_err(|error| error.to_string())?;
+            let message = if let Some(index) = existing {
+                let mut message = data.snapshot.messages.get_mut_tracked(index).ok_or("Message index is missing")?;
                 message.text = text.into();
                 if phase.is_some() {
                     message.phase.clone_from(&phase);
@@ -268,11 +265,10 @@ impl Service {
             let id = ids
                 .get(&(task_id.into(), turn_id.into(), item_id.into()))
                 .ok_or("ACP image message is missing")?;
-            let message = data
+            let mut message = data
                 .snapshot
                 .messages
-                .iter_mut()
-                .find(|m| &m.id == id)
+                .get_by_id_mut(id).map_err(|error| error.to_string())?
                 .ok_or("ACP image message is missing")?;
             if message.attachments.len() >= 4 {
                 return Err("Too many images in one ACP message.".into());

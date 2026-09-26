@@ -62,6 +62,8 @@ mod idle_runtime_live_tests;
 mod internal_agent_tests;
 mod lan;
 mod lan_sync;
+mod ui_sync;
+mod history;
 mod markdown;
 mod mail_triage;
 mod menu;
@@ -400,6 +402,7 @@ pub(crate) struct Service {
     lan: Mutex<Option<lan::Server>>,
     lan_error: Mutex<Option<String>>,
     revision_epoch: String,
+    ui_journal: Mutex<ui_sync::Journal>,
     // These channels deliberately are not persisted. A restart interrupts
     // native runs, and a persisted request remains visible for audit/review
     // without claiming a tool can be resumed after that interruption.
@@ -753,6 +756,7 @@ impl Service {
             lan: Mutex::new(None),
             lan_error: Mutex::new(None),
             revision_epoch: uuid::Uuid::new_v4().to_string(),
+            ui_journal: Mutex::new(ui_sync::Journal::default()),
             approval_waiters: Mutex::new(HashMap::new()),
             app_server_approvals: Mutex::new(HashMap::new()),
             session_approval_grants: Mutex::new(Vec::new()),
@@ -1576,6 +1580,12 @@ impl Service {
         match command {
             "get_snapshot" => value(self.snapshot()?),
             "get_process_metrics" => value(process_metrics::sample()?),
+            "get_ui_delta" => value(self.ui_delta(args.get("revision").and_then(|value| value.as_str()))?),
+            "get_task_messages" => value(self.task_messages(
+                &arg::<String>(&args, "taskId")?,
+                args.get("beforeId").and_then(|value| value.as_str()),
+                args.get("limit").filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose().map_err(|_| "Invalid limit.")?,
+            )?),
             "get_ui_snapshot" => {
                 value(self.ui_snapshot(args.get("revision").and_then(|value| value.as_str()))?)
             }
@@ -2844,6 +2854,12 @@ impl Service {
                 (&candidate.snapshot, &candidate.task_hosts, &candidate.attachments),
             )?;
             candidate.revision = previous.revision.saturating_add(1);
+            // Record only durable changes. A poisoned projection cache is not
+            // permission to reject an already-committed mutation; readers can
+            // always recover with a fresh bounded snapshot.
+            if let Ok(mut journal) = self.ui_journal.lock() {
+                journal.record_snapshot(candidate.revision, &previous.snapshot, &candidate.snapshot);
+            }
             let shortcut_mode = native_shortcut_mode_code(&candidate.snapshot.settings.shortcut_mode);
             *self.data.lock()
                 .map_err(|_| "Monitter state lock failed.".to_string())? = Arc::new(candidate);
@@ -4811,7 +4827,7 @@ impl Service {
             if state.messages[cutoff].stream_status.as_deref() == Some("streaming") {
                 return Err("Wait for this message to finish before forking it.".into());
             }
-            let copied = state.messages[..=cutoff].iter()
+            let copied = state.messages.iter().take(cutoff + 1)
                 .filter(|message| message.task_id == source.id && matches!(message.role.as_str(), "user" | "assistant"))
                 .cloned().collect::<Vec<_>>();
             if copied.len() > 2_000 || copied.iter().map(|message| message.text.len()).sum::<usize>() > 8 * 1024 * 1024 {
@@ -6455,9 +6471,7 @@ fn prepare_channel_mention_routes(
         .messages
         .iter()
         .rposition(|message| message.task_id == origin_task_id && message.role == "user");
-    let turn_messages = turn_start
-        .map(|index| &data.snapshot.messages[index + 1..])
-        .unwrap_or(&[]);
+    let turn_messages = turn_start.map(|index| data.snapshot.messages.iter().skip(index + 1).collect::<Vec<_>>()).unwrap_or_default();
     if turn_messages.last().map(|message| message.role.as_str()) != Some("assistant") {
         return Ok(vec![]);
     }
@@ -6994,6 +7008,20 @@ async fn get_ui_snapshot(
     tauri::async_runtime::spawn_blocking(move || service.ui_snapshot(revision.as_deref()))
         .await
         .map_err(|error| format!("Snapshot worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_ui_delta(state: State<'_, AppState>, revision: Option<String>) -> Result<ui_sync::UiDeltaResponse, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.ui_delta(revision.as_deref()))
+        .await.map_err(|error| format!("Snapshot delta worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_task_messages(state: State<'_, AppState>, task_id: String, before_id: Option<String>, limit: Option<u32>) -> Result<ui_sync::TaskMessagesPage, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.task_messages(&task_id, before_id.as_deref(), limit))
+        .await.map_err(|error| format!("Transcript page worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -8888,7 +8916,7 @@ fn subagent_transcript_target(
             snapshot
                 .subagent_transcripts
                 .get(&session.id)
-                .cloned()
+                .map(|entries| entries.iter().cloned().collect())
                 .unwrap_or_default(),
         )),
         _ => Err("This subagent transcript is stored in its Monitter task.".into()),
@@ -9365,6 +9393,8 @@ pub fn run() {
             set_environment_secret,
             delete_environment_secret,
             get_ui_snapshot,
+            get_ui_delta,
+            get_task_messages,
             get_task_events,
             get_usage_overview,
             list_codex_accounts,
@@ -9577,7 +9607,7 @@ mod tests {
                     name: "Channel".into(),
                     description: String::new(),
                     agent_ids: vec![alpha.id.clone(), beta.id.clone()],
-                    messages: vec![],
+                    messages: Default::default(),
                     agent_conversation_enabled: true,
                     agent_conversation_turn_limit: 2,
                     agent_conversation_turns_used: 0,
@@ -10295,8 +10325,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             "Resume adds its visible continuation and the real harness response."
         );
         assert_eq!(
-            &after.messages[..before.messages.len()],
-            before.messages.as_slice(),
+            after.messages.iter().take(before.messages.len()).collect::<Vec<_>>(),
+            before.messages.iter().collect::<Vec<_>>(),
             "Resume must preserve earlier transcript entries."
         );
         let continuation = &after.messages[before.messages.len()];
@@ -12239,7 +12269,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                         text: "Keep this".into(),
                         created_at: now(),
                         task_id: None,
-                    }],
+                    }].into(),
                     agent_conversation_enabled: false,
                     agent_conversation_turn_limit: default_agent_conversation_turn_limit(),
                     agent_conversation_turns_used: 0,
@@ -12304,7 +12334,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
                     name: "Channel".into(),
                     description: String::new(),
                     agent_ids: vec![agent.id.clone()],
-                    messages: vec![],
+                    messages: Default::default(),
                     agent_conversation_enabled: false,
                     agent_conversation_turn_limit: default_agent_conversation_turn_limit(),
                     agent_conversation_turns_used: 0,
