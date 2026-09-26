@@ -82,6 +82,8 @@ export interface AuthenticatedControllerContext {
 
 export interface ControllerClient {
   getSnapshot(): Promise<Snapshot>;
+  /** Owner-side compatibility read for clients without transcript paging. Not a wire action. */
+  getLegacySnapshot?(): Promise<Snapshot>;
   /**
    * New desktop bridges may return a durable acceptance receipt. Callers that
    * did not negotiate receipt support must receive a Snapshot instead.

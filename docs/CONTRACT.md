@@ -73,6 +73,9 @@ No fake conversations, progress, token counts, host connections or model replies
   Shared desktop/LAN UI projection. An unchanged launch-scoped revision returns null; changed
   snapshots contain at most 300 recent activity events (60 per task), omit output/log payloads,
   and bound details to 1,000 bytes (300 for error summaries) rather than full diagnostic history.
+  Task/channel messages remain complete for legacy consumers. Owner-side controller/visitor v1
+  adapters use an unbased full read because their wire protocols do not support history paging;
+  this does not replace the desktop's paged cache or bypass visitor projection/revocation checks.
 - `get_ui_delta { revision?: string }` -> `UiDeltaResponse`.
   Native and owner-LAN only. Initial reads or expired, foreign, oversized or unrepresentable journal
   revisions reset with a compact snapshot containing the latest 64 messages per task and channel. Incremental

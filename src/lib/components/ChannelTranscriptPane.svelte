@@ -14,8 +14,8 @@
     pendingUpdates = false,
     resetKey,
     onfollowchange,
-    children,
-    footer,
+    children: renderMessage,
+    footer: renderFooter,
   }: {
     channelId: string;
     messages: ChannelMessage[];
@@ -104,8 +104,8 @@
       </div>{/if}
     {/snippet}
     <TranscriptVirtualList bind:this={transcriptList} items={displayedMessages} getKey={message => message.id} {active}>
-      {#snippet children(message, index)}{@render children(message, index, displayedMessages[index - 1])}{/snippet}
-      {#snippet footer()}{@render footer?.()}{/snippet}
+      {#snippet children(message, index)}{@render renderMessage(message, index, displayedMessages[index - 1])}{/snippet}
+      {#snippet footer()}{@render renderFooter?.()}{/snippet}
     </TranscriptVirtualList>
   </MessagePane>
 </div>

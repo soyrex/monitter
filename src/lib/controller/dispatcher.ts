@@ -16,7 +16,7 @@ import {
 } from './protocol';
 
 export type MonitterControllerClient = Pick<MonitterBridge,
-  'getSnapshot' | 'sendMessage' | 'cancelTask' | 'resumeTask' | 'listTerminals' | 'readTerminal'>;
+  'getSnapshot' | 'getLegacySnapshot' | 'sendMessage' | 'cancelTask' | 'resumeTask' | 'listTerminals' | 'readTerminal'>;
 
 // Mobile currently displays conversations, not the complete diagnostic timeline.
 // Keep a bounded recent activity window so long-running desktop history cannot
@@ -111,7 +111,7 @@ export class ControllerDispatcher {
     try {
       let result: ControllerResult;
       switch (request.action) {
-        case 'getSnapshot': result = controllerSnapshot(await this.client.getSnapshot()); break;
+        case 'getSnapshot': result = controllerSnapshot(await (this.client.getLegacySnapshot?.() ?? this.client.getSnapshot())); break;
         case 'sendMessage': {
           const sendResult = await this.client.sendMessage(request.params.taskId, request.params.text, request.params.attachmentIds);
           // Older mobile builds expect every send response to be a Snapshot.
@@ -119,7 +119,7 @@ export class ControllerDispatcher {
           // the small durable receipt; no mutation is retried to learn this.
           result = isSendReceipt(sendResult) && options.allowSendReceipt
             ? sendResult
-            : controllerSnapshot(isSendReceipt(sendResult) ? await this.client.getSnapshot() : sendResult);
+            : controllerSnapshot(isSendReceipt(sendResult) ? await (this.client.getLegacySnapshot?.() ?? this.client.getSnapshot()) : sendResult);
           break;
         }
         case 'beginAttachmentUpload': {

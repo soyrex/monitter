@@ -69,6 +69,8 @@ import type {
 export interface MonitterBridge {
   available: boolean;
   getSnapshot(): Promise<Snapshot>;
+  /** Owner-side compatibility read for controller/visitor clients without paging. */
+  getLegacySnapshot?(): Promise<Snapshot>;
   /** Optional for legacy/test bridges; native and LAN bridges provide paging. */
   getTaskMessages?(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage>;
   getChannelMessages?(channelId: string, beforeId?: string, limit?: number): Promise<ChannelMessagesPage>;
@@ -253,6 +255,22 @@ async function getRevisionedSnapshot(): Promise<Snapshot> {
   return result.snapshot ? rememberSnapshot(result.snapshot, result.revision) : (cachedSnapshot ?? (() => { throw new Error('Monitter reported an unchanged snapshot before a snapshot was loaded.'); })());
 }
 
+async function getLegacySnapshot(): Promise<Snapshot> {
+  // Legacy controller and visitor protocols have no history page action. Keep
+  // their complete transcript without replacing the desktop's paged cache.
+  const commands = await getCommandCapabilities();
+  if (commands?.has('get_ui_snapshot')) {
+    try {
+      const result = await invoke('get_ui_snapshot', {});
+      if (!result.snapshot) throw new Error('Monitter omitted a requested full snapshot.');
+      return result.snapshot;
+    } catch (reason) {
+      if (!isUnknownCommand(reason)) throw reason;
+    }
+  }
+  return invoke('get_snapshot');
+}
+
 async function getDeltaSnapshot(): Promise<Snapshot> {
   const response = await invokeUiDelta(cachedRevision);
   const applied = applyUiDelta(cachedSnapshot, cachedRevision, response);
@@ -395,6 +413,7 @@ const nativeBridge: MonitterBridge = {
     typeof window !== "undefined" &&
     (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
   getSnapshot: () => getCachedSnapshot(),
+  getLegacySnapshot,
   getTaskMessages,
   getChannelMessages,
   planJevRoute: (agentId, prompt) => isLanBrowser() ? desktopOnly() : invoke('plan_jev_route', { agentId, prompt }),

@@ -100,6 +100,29 @@ assert.equal(legacyReceipt.ok, true); assert.ok('tasks' in legacyReceipt.result)
 const negotiatedReceipt = JSON.parse(await new ControllerDispatcher(receiptClient).dispatchJson(receiptRequest, context, { allowSendReceipt: true }));
 assert.deepEqual(negotiatedReceipt.result, { accepted: true });
 
+// Mobile protocol v1 cannot request older pages. Its reads and legacy send
+// acknowledgements must use the full owner-side compatibility projection.
+const fullHistory: Snapshot = { ...sourceSnapshot, messages: Array.from({ length: 105 }, (_, i) => ({
+  id: `legacy-message-${i}`, taskId: task, role: 'assistant', text: `History ${i}`, createdAt: i,
+})) };
+let legacyReads = 0, legacySends = 0;
+const pagedClient: ControllerClient = {
+  ...client,
+  getSnapshot: async () => ({ ...fullHistory, messages: fullHistory.messages.slice(-64) }),
+  getLegacySnapshot: async () => { legacyReads += 1; return fullHistory; },
+  sendMessage: async () => { legacySends += 1; return { accepted: true }; },
+};
+const legacyDispatcher = new ControllerDispatcher(pagedClient);
+const fullRead = JSON.parse(await legacyDispatcher.dispatchJson(request('10101010-1010-4010-8010-101010101010', 'getSnapshot', {}), context));
+assert.equal(fullRead.ok, true);
+assert.equal(fullRead.result.messages.length, 105);
+const legacySendRequest = request('20202020-2020-4020-8020-202020202020', 'sendMessage', { taskId: task, text: 'Legacy send' });
+const fullReceipt = JSON.parse(await legacyDispatcher.dispatchJson(legacySendRequest, context));
+assert.equal(fullReceipt.result.messages.length, 105);
+assert.equal(JSON.parse(await legacyDispatcher.dispatchJson(legacySendRequest, context)).result.messages.length, 105);
+assert.equal(legacySends, 1, 'Compatibility reads must not replay a mutation.');
+assert.equal(legacyReads, 2);
+
 // Large files never need a single relay frame: the controller accepts bounded
 // chunks and only hands a complete, declared-size file to the scoped bridge.
 let uploaded: { taskId: string; dataBase64: string; preview?: string } | null = null;

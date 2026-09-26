@@ -242,4 +242,35 @@ release();
 await assert.rejects(inFlight, /revoked|not shared/i);
 assert.equal(sent, 1, 'Revocation during the snapshot await must prevent dispatch.');
 
+// Visitor protocol v1 cannot page. Read full history owner-side, then apply the
+// same explicit share projection; never give the visitor that owner capability.
+const fullHistory: Snapshot = { ...source, messages: [
+  ...source.messages,
+  ...Array.from({ length: 105 }, (_, i) => ({ id: `older-${i}`, taskId: selectedId,
+    role: 'assistant' as const, text: `Shared history ${i}`, createdAt: i + 2 })),
+] };
+const compatibilityGrant = grant();
+let compatibilityReads = 0, compatibilitySends = 0;
+const compatibilityBridge = createOperatorScopedBridge({
+  getSnapshot: async () => ({ ...fullHistory, messages: fullHistory.messages.slice(-64) }),
+  getLegacySnapshot: async () => { compatibilityReads += 1; return fullHistory; },
+  sendMessage: async () => { compatibilitySends += 1; return { accepted: true }; },
+}, () => compatibilityGrant);
+const compatibilityRead = await compatibilityBridge.getSnapshot();
+assert.equal(compatibilityRead.messages.length, 106);
+assert.ok(compatibilityRead.messages.some(message => message.id === 'visible'));
+assert.ok(compatibilityRead.messages.every(message => message.taskId === selectedId));
+assert.equal('getLegacySnapshot' in compatibilityBridge, false);
+const compatibilityReceipt = await compatibilityBridge.sendMessage(selectedId, 'Continue');
+assert.equal(compatibilityReceipt.messages.length, 106);
+assert.equal(compatibilitySends, 1);
+assert.equal(compatibilityReads, 3);
+for (const result of [compatibilityRead, compatibilityReceipt]) {
+  assert.deepEqual(result.hosts, []);
+  assert.deepEqual(result.approvalRequests, []);
+  for (const hidden of ['hidden chat', 'secret system profile', '/private', 'future private value']) {
+    assert.ok(!JSON.stringify(result).includes(hidden), hidden);
+  }
+}
+
 console.log('Operator sharing security assertions passed.');
