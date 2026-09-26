@@ -54,12 +54,10 @@
      long description the scrolling region. This keeps the card border visible
      instead of scrolling the whole card out of view. */
   .task-activity:has(details[open]) { max-height: none; overflow: visible; }
-  /* Keep the goal dock aligned to the composer, with an exact 10px inset. */
-  .task-activity.docked { position:relative; z-index:0; width:min(calc(var(--chat-content-max-width,900px) - 10px),calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 10px)); box-sizing:border-box; margin:0 auto -10px; }
-  .docked .goal-card { border-bottom-left-radius:0; border-bottom-right-radius:0; }
-  .docked .goal-card:last-child { padding-bottom:20px; }
-  .docked .goal-card:last-child::after { content:""; position:absolute; left:0; right:0; bottom:9px; height:14px; pointer-events:none; background:linear-gradient(to bottom,transparent,rgba(0,0,0,.14)); }
-  .docked .goal-card:last-child .clear-goal { bottom:18px; }
+  /* Keep the goal dock 16px inside the Git dock (32px inside the composer),
+     and meet the immediately following Git dock or composer cleanly. */
+  .task-activity.docked { position:relative; z-index:0; width:min(calc(var(--chat-content-max-width,900px) - 32px),calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 32px)); box-sizing:border-box; margin:0 auto; }
+  .docked .goal-card { border-bottom:0; border-bottom-left-radius:0; border-bottom-right-radius:0; }
   section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 10px 12px; }
   section + section { margin-top: 8px; }
   .goal-card { position:relative; isolation:isolate; }

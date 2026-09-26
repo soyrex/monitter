@@ -1,15 +1,13 @@
 <script lang="ts">
   import type { RunEvent } from '$lib/types';
+  import { formatTimelineDetail, rawTimelineDetail } from '$lib/timeline-detail';
 
   let { events = [], goalError = '', provider = '', loading = false, error = '', hasMore = false, onloadolder, onretry }: { events?: RunEvent[]; goalError?: string; provider?: string; loading?: boolean; error?: string; hasMore?: boolean; onloadolder?: () => void; onretry?: () => void } = $props();
   let expanded = $state<Record<string, boolean>>({});
+  let rawExpanded = $state<Record<string, boolean>>({});
 
   const stamp = (value: number) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const title = (event: RunEvent) => event.title === 'Codex process failed' && provider && provider !== 'codex' ? `${provider[0].toUpperCase()}${provider.slice(1)} process failed` : event.title;
-  const formatDetail = (value: string) => {
-    try { return JSON.stringify(JSON.parse(value), null, 2); }
-    catch { return value; }
-  };
   const hasMoreDetail = (value: string) => value.split('\n').length > 3 || value.length > 180;
 </script>
 
@@ -24,11 +22,13 @@
       <div class="entry">
         <b>{eventTitle}</b>
         {#if event.detail}
-          {@const detail = formatDetail(event.detail)}
-          {@const expandable = hasMoreDetail(detail)}
+          {@const detail = formatTimelineDetail(event)}
+          {@const expandable = hasMoreDetail(detail.text)}
           <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable diagnostic output must be keyboard reachable when expanded) -->
-          <pre class:collapsed={expandable && !expanded[event.id]} class:expanded={expanded[event.id]} tabindex={expanded[event.id] ? 0 : undefined} aria-label={`Detail for ${eventTitle || 'timeline event'}`}>{detail}</pre>
+          <pre class:collapsed={expandable && !expanded[event.id]} class:expanded={expanded[event.id]} class:human-detail={detail.structured} tabindex={expanded[event.id] ? 0 : undefined} aria-label={`Detail for ${eventTitle || 'timeline event'}`}>{detail.text}</pre>
           {#if expandable}<button type="button" class="detail-toggle" aria-expanded={expanded[event.id] ?? false} aria-label={`${expanded[event.id] ? 'Show less detail for' : 'Show full detail for'} ${eventTitle || 'timeline event'}`} onclick={() => expanded[event.id] = !expanded[event.id]}>{expanded[event.id] ? 'Less' : 'More'}</button>{/if}
+          {#if detail.structured}<button type="button" class="detail-toggle raw-toggle" aria-expanded={rawExpanded[event.id] ?? false} aria-label={`${rawExpanded[event.id] ? 'Hide' : 'Show'} raw data for ${eventTitle || 'timeline event'}`} onclick={() => rawExpanded[event.id] = !rawExpanded[event.id]}>{rawExpanded[event.id] ? 'Hide raw data' : 'Raw data'}</button>{/if}
+          {#if rawExpanded[event.id] && detail.structured}<pre class="expanded raw-detail" tabindex="0" aria-label={`Raw data for ${eventTitle || 'timeline event'}`}>{rawTimelineDetail(event.detail)}</pre>{/if}
         {/if}
       </div>
     </article>
@@ -45,11 +45,14 @@
   .entry{min-width:0}
   .timeline p,.timeline pre{margin:3px 0;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0}
   .timeline pre{font:calc(9.5px * var(--interface-font-ratio, 1))/1.35 var(--mono);letter-spacing:-.01em}
+  .timeline pre.human-detail{color:var(--ink);font:calc(10px * var(--interface-font-ratio, 1))/1.45 var(--sans);letter-spacing:normal}
   .timeline pre.collapsed{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
   .timeline pre.expanded{max-height:240px;overflow:auto;padding:7px;background:var(--soft);border-radius:5px}
   .timeline summary{cursor:pointer;color:var(--muted);font-size:calc(10px * var(--interface-font-ratio, 1))}
   .detail-toggle{display:inline;padding:0;border:0;background:transparent;color:var(--accent-ink);font:500 calc(9.5px * var(--interface-font-ratio, 1))/1.4 var(--sans);cursor:pointer;text-decoration:none}
   .detail-toggle:hover{text-decoration:underline}
+  .raw-toggle{margin-left:8px}
+  .timeline pre.raw-detail{margin-top:7px}
   .detail-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
   .empty,.error{color:var(--muted);font-size:calc(11px * var(--interface-font-ratio, 1))}
   .error,.error b{color:#b54a55}

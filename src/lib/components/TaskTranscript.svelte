@@ -5,6 +5,8 @@
   import CircleStop from "@lucide/svelte/icons/circle-stop";
   import Copy from "@lucide/svelte/icons/copy";
   import GitFork from "@lucide/svelte/icons/git-fork";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import FolderGit2 from "@lucide/svelte/icons/folder-git-2";
   import Inbox from "@lucide/svelte/icons/inbox";
   import Maximize2 from "@lucide/svelte/icons/maximize-2";
   import MessageSquare from "@lucide/svelte/icons/message-square";
@@ -14,7 +16,7 @@
   import Reply from "@lucide/svelte/icons/reply";
   import Share2 from "@lucide/svelte/icons/share-2";
   import Terminal from "@lucide/svelte/icons/terminal";
-  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, QueuedMessage, RunEvent, Snapshot, Task, TaskMessagesPage } from '$lib/types';
+  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, QueuedMessage, RunEvent, Snapshot, Task, TaskGitStatus, TaskMessagesPage } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
@@ -65,6 +67,8 @@
     clearingGoal,
     goalClearError,
     onClearGoal,
+    gitStatus = null,
+    onOpenGit = () => {},
     computerTools,
     scrollRevision,
     busy,
@@ -117,6 +121,8 @@
     clearingGoal: boolean;
     goalClearError: string;
     onClearGoal: () => void;
+    gitStatus?: TaskGitStatus | null;
+    onOpenGit?: () => void;
     computerTools: ComputerActivity[];
     scrollRevision: number;
     busy: boolean;
@@ -392,6 +398,14 @@
     {/if}
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
     <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />
+    {#if gitStatus?.repository}
+      <button class="git-changes-bar" type="button" aria-label={`Open Git changes: ${gitStatus.branch ?? 'Detached HEAD'}, ${gitStatus.files.length} changed ${gitStatus.files.length === 1 ? 'file' : 'files'}`} title="Open Git changes" onclick={onOpenGit}>
+        <GitBranch size={13} aria-hidden="true"/>
+        <code>{gitStatus.branch ?? 'Detached HEAD'}</code>
+        {#if gitStatus.worktree}<span class="git-worktree" title="Linked Git worktree"><FolderGit2 size={12} aria-hidden="true"/>Worktree</span>{/if}
+        <span>{gitStatus.files.length}{gitStatus.truncated ? '+' : ''} {gitStatus.files.length === 1 ? 'file changed' : 'files changed'}</span>
+      </button>
+    {/if}
   <div class="composer-area">
     {#if !inboxView || !displayMailInboxes.length}
       {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
@@ -419,6 +433,13 @@
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .composer-area { position:relative; flex-shrink:0; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }
+  .git-changes-bar { display:flex; align-items:center; gap:7px; width:min(calc(var(--chat-content-max-width, 900px) - 16px), calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 16px)); box-sizing:border-box; margin:0 auto -1px; padding:6px 9px; overflow:hidden; border:1px solid var(--line); border-bottom-left-radius:0; border-bottom-right-radius:0; border-top-left-radius:7px; border-top-right-radius:7px; color:var(--muted); background:color-mix(in srgb, var(--panel) 92%, var(--ink)); font:500 calc(10px * var(--interface-font-ratio, 1)) / 1.2 var(--mono); text-align:left; }
+  .git-changes-bar:hover { color:var(--ink); border-color:color-mix(in srgb, var(--accent) 42%, var(--line)); background:color-mix(in srgb, var(--panel) 82%, var(--accent)); }
+  .git-changes-bar :global(svg) { flex:none; color:var(--accent-ink, var(--accent)); }
+  .git-changes-bar code { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:inherit; }
+  .git-changes-bar .git-worktree { display:inline-flex; align-items:center; gap:4px; flex:none; margin-left:2px; padding-left:7px; border-left:1px solid var(--line); color:var(--muted); }
+  .git-changes-bar .git-worktree :global(svg) { color:inherit; }
+  .git-changes-bar span { flex:none; margin-left:auto; white-space:nowrap; color:var(--muted); }
   .conversation-head { background:var(--paper); display:flex; flex-shrink:0; overflow:visible; align-items:flex-start; justify-content:space-between; gap:20px; padding:25px clamp(25px,4vw,50px) 17px; border-bottom:1px solid var(--line); }
   .task-heading { align-items:center; padding-top:13px; padding-bottom:13px; }
   .conversation-head h1 { flex:1; min-width:0; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:calc(22px * var(--interface-font-ratio,1)); }
