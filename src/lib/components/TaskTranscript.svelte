@@ -14,7 +14,7 @@
   import Reply from "@lucide/svelte/icons/reply";
   import Share2 from "@lucide/svelte/icons/share-2";
   import Terminal from "@lucide/svelte/icons/terminal";
-  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, QueuedMessage, RunEvent, Snapshot, Task } from '$lib/types';
+  import type { Agent, ApprovalRequest, Collaboration, ComputerActivity, Goal, MailBatch, Message, QueuedMessage, RunEvent, Snapshot, Task, TaskMessagesPage } from '$lib/types';
   import type { UnifiedSubagent } from '$lib/unified-subagents';
   import type { OptimisticMessage } from '$lib/pane-outbox-types';
   import { autonaming } from '$lib/autoname-state';
@@ -41,6 +41,7 @@
   import SparkleField from '$lib/components/SparkleField.svelte';
   import MailTriageBatch from '$lib/components/MailTriageBatch.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
+  import { mergeOlderTranscriptMessages } from '$lib/ui-sync';
   import { perfMark, perfMeasure } from '$lib/perf-phases';
 
   type Avatar = Snippet<[Agent | null | undefined, number?]>;
@@ -99,6 +100,7 @@
     onReplyMessage,
     onForkMessage,
     onMaximise,
+    getTaskMessages,
   }: {
     active: boolean;
     task: Task;
@@ -150,6 +152,7 @@
     onReplyMessage: (message: Message) => void;
     onForkMessage: (message: Message) => void;
     onMaximise: () => void;
+    getTaskMessages?: (taskId: string, beforeId?: string, limit?: number) => Promise<TaskMessagesPage>;
   } = $props();
 
   // The keyed transcript is recreated when the selected task changes.
@@ -168,7 +171,21 @@
   const display = $derived(transcriptBuffer.value());
   const displayTask = $derived(display.task);
   const displayAgent = $derived(display.agent);
-  const displayItems = $derived(display.conversationItems);
+  let olderMessages = $state<Message[]>([]);
+  let nextHistoryCursor = $state<string | null | undefined>();
+  let historyLoading = $state(false);
+  let historyError = $state('');
+  const displayItems = $derived.by(() => {
+    const items = [...display.conversationItems];
+    const existing = new Set(items.flatMap(item => item.type === 'message' ? [item.value.id] : []));
+    for (const message of olderMessages) if (!existing.has(message.id)) items.push({ type: 'message', value: message });
+    const at = (item: ConversationActivityItem) => item.type === 'message' || item.type === 'activity' ? item.value.createdAt
+      : item.type === 'approval' ? item.value.resolvedAt ?? item.value.createdAt
+      : item.values[0]?.createdAt ?? 0;
+    return items.sort((left, right) => at(left) - at(right));
+  });
+  const baseTranscriptMessageCount = $derived(display.conversationItems.filter(item => item.type === 'message').length);
+  const hasEarlierMessages = $derived(!!getTaskMessages && (nextHistoryCursor === undefined ? baseTranscriptMessageCount >= 64 : nextHistoryCursor !== null));
   const displayOptimisticMessages = $derived(display.optimisticMessages);
   const displaySteeringMessages = $derived(display.steeringMessages);
   const displayConfirmedDeliveryIds = $derived(display.confirmedDeliveryIds);
@@ -212,6 +229,22 @@
   });
   const usageExhausted = $derived(/(?:credits? exhausted|usage limit|rate limit|quota[^\n]*exhaust|limit reached|out of credits)/i.test(liveError));
   function handleFollowChange(following: boolean) { transcriptBuffer.setFollowing(following); }
+  async function loadEarlierMessages() {
+    if (!getTaskMessages || historyLoading || !hasEarlierMessages) return;
+    const persistedMessages = display.conversationItems.flatMap(item => item.type === 'message' && item.value.taskId === task.id ? [item.value] : []);
+    const beforeId = nextHistoryCursor ?? [...persistedMessages].sort((left, right) => left.createdAt - right.createdAt)[0]?.id;
+    if (!beforeId) { nextHistoryCursor = null; return; }
+    historyLoading = true;
+    historyError = '';
+    try {
+      const page = await getTaskMessages(task.id, beforeId, 64);
+      if (page.messages.some(message => message.taskId !== task.id)) throw new Error('History page did not match this chat.');
+      olderMessages = mergeOlderTranscriptMessages(olderMessages, page.messages);
+      nextHistoryCursor = page.nextBeforeId === beforeId ? null : page.nextBeforeId;
+    } catch (reason) {
+      historyError = reason instanceof Error ? reason.message : String(reason);
+    } finally { historyLoading = false; }
+  }
   function routedLifecycle(item: UnifiedSubagent, title: string): UnifiedSubagent {
     if (title === 'Collaboration queued') return { ...item, status: 'queued', activity: `${item.agentName} was assigned` };
     if (title === 'Peer delivery started') return { ...item, status: 'running', activity: `${item.agentName} started working` };
@@ -267,6 +300,12 @@
       </div>
     {:else}
       <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
+      {#snippet header()}
+        {#if hasEarlierMessages || historyError}<div class="history-pager">
+          {#if hasEarlierMessages}<button type="button" aria-label="Load earlier messages" disabled={historyLoading} onclick={() => void loadEarlierMessages()}>{historyLoading ? 'Loading earlier messages…' : 'Load earlier messages'}</button>{/if}
+          {#if historyError}<span role="status">{historyError}</span>{/if}
+        </div>{/if}
+      {/snippet}
       <TranscriptVirtualList
         items={displayItems}
         getKey={(item) => item.type === 'tool-group' || item.type === 'reasoning-group' || item.type === 'process-group' ? `${item.type}:${item.values[0].id}` : item.value.id}
@@ -364,6 +403,7 @@
   .mail-inbox-surface > :global(.mail-batch) { width:100%; }
   .mail-view-toggle { display:inline-flex; align-items:center; gap:6px; min-height:29px; padding:0 9px; border:1px solid var(--line); border-radius:7px; color:var(--muted); background:var(--panel); font:500 calc(10px * var(--interface-font-ratio,1)) var(--mono); }
   .mail-view-toggle:hover { color:var(--ink); background:var(--soft); }
+  .history-pager{display:flex;align-items:center;justify-content:center;gap:10px;padding:5px 8px;background:color-mix(in srgb,var(--paper) 92%,transparent);font-size:calc(10px * var(--interface-font-ratio,1))}.history-pager button{padding:5px 10px;border:1px solid var(--line);border-radius:6px;color:var(--muted);background:var(--panel);font:inherit}.history-pager button:hover:not(:disabled){color:var(--ink);background:var(--soft)}.history-pager button:disabled{opacity:.55}.history-pager span{color:#bd655b}
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .composer-area { position:relative; flex-shrink:0; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }

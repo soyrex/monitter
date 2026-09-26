@@ -5307,6 +5307,7 @@
           onReplyMessage={(message) => { void replyWithMessage(message); }}
           onForkMessage={beginFork}
           onMaximise={() => expandTab(true)}
+          getTaskMessages={bridge.getTaskMessages ? bridge.getTaskMessages.bind(bridge) : undefined}
         />{/key}
         {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
         <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">

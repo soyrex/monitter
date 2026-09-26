@@ -1,0 +1,63 @@
+import type { Message, Snapshot, TaskMessagesPage, UiDeltaResponse } from './types';
+
+export type UiDeltaApplication =
+  | { kind: 'snapshot'; snapshot: Snapshot; revision: string }
+  | { kind: 'delta'; snapshot: Snapshot; revision: string }
+  | { kind: 'unchanged'; snapshot: Snapshot; revision: string }
+  | { kind: 'gap' };
+
+export function mergeMessagesById(current: readonly Message[], upserts: readonly Message[], removedIds: readonly string[] = []): Message[] {
+  const removed = new Set(removedIds);
+  const byId = new Map(current.filter(message => !removed.has(message.id)).map(message => [message.id, message]));
+  for (const message of upserts) if (!removed.has(message.id)) byId.set(message.id, message);
+  return [...byId.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+}
+
+/** Applies only a delta whose base revision is exactly the cache revision. */
+export function applyUiDelta(current: Snapshot | null, currentRevision: string | undefined, response: UiDeltaResponse): UiDeltaApplication {
+  if (response.snapshot) return { kind: 'snapshot', snapshot: response.snapshot, revision: response.revision };
+  if (!response.delta) {
+    return current && currentRevision === response.revision
+      ? { kind: 'unchanged', snapshot: current, revision: response.revision }
+      : { kind: 'gap' };
+  }
+  const delta = response.delta;
+  if (!current || !currentRevision || delta.fromRevision !== currentRevision) return { kind: 'gap' };
+
+  const retainedChannels = new Set(delta.retainedChannelIds);
+  const currentChannels = new Map(current.channels.map(channel => [channel.id, channel]));
+  const channels = delta.metadata.channels.map(channel => {
+    const previous = currentChannels.get(channel.id);
+    return retainedChannels.has(channel.id) && previous
+      ? { ...channel, messages: previous.messages }
+      : channel;
+  });
+
+  const retainedTranscriptIds = new Set(delta.retainedSubagentTranscriptIds);
+  const transcripts = { ...(delta.metadata.subagentTranscripts ?? {}) };
+  for (const id of retainedTranscriptIds) {
+    const previous = current.subagentTranscripts?.[id];
+    if (previous && Object.prototype.hasOwnProperty.call(transcripts, id) === false) transcripts[id] = previous;
+  }
+
+  const snapshot: Snapshot = {
+    ...delta.metadata,
+    messages: mergeMessagesById(current.messages, delta.messages, delta.removedMessageIds),
+    channels,
+    ...(delta.metadata.subagentTranscripts !== undefined || Object.keys(transcripts).length
+      ? { subagentTranscripts: transcripts }
+      : { subagentTranscripts: undefined }),
+  };
+  return { kind: 'delta', snapshot, revision: response.revision };
+}
+
+export function mergeTaskMessagesPage(snapshot: Snapshot, page: TaskMessagesPage): Snapshot {
+  if (page.messages.some(message => message.taskId !== page.messages[0]?.taskId)) {
+    throw new Error('Task message page contains messages from different tasks.');
+  }
+  return { ...snapshot, messages: mergeMessagesById(snapshot.messages, page.messages) };
+}
+
+export function mergeOlderTranscriptMessages(current: readonly Message[], older: readonly Message[]): Message[] {
+  return mergeMessagesById(current, older);
+}

@@ -34,6 +34,7 @@
     "test:permissions": "node scripts/permission-contract-test.mjs",
     "contract:check": "node scripts/command-contract.mjs",
     "contract:write": "node scripts/command-contract.mjs --write",
+    "test:ui-sync": "node scripts/ui-sync-history-test.mjs",
     "build:mac:local": "node scripts/build-macos.mjs --debug",
     "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py",
     "test:controller": "node scripts/controller-protocol-test.mjs",

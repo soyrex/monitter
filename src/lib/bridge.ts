@@ -1,6 +1,8 @@
 import { invokeCommand } from './command-invoke';
 import { COMMAND_CONTRACT_PROTOCOL_VERSION, type CommandArgs, type CommandName, type CommandResults } from './generated-command-contract';
+import { invoke as nativeInvoke } from '@tauri-apps/api/core';
 import { isLanBrowser, lanInvoke } from './lan';
+import { applyUiDelta, mergeTaskMessagesPage } from './ui-sync';
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Agent,
@@ -36,6 +38,8 @@ import type {
   Sandbox,
   RunEvent,
   UiSnapshotResponse,
+  UiDeltaResponse,
+  TaskMessagesPage,
   TaskEventsPage,
   ProcessMetricsSample,
   SystemFontFamily,
@@ -65,6 +69,8 @@ import type {
 export interface MonitterBridge {
   available: boolean;
   getSnapshot(): Promise<Snapshot>;
+  /** Optional for legacy/test bridges; native and LAN bridges provide paging. */
+  getTaskMessages?(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage>;
   planJevRoute(agentId: string, prompt: string): Promise<JevRoutePlan>;
   recordJevRoute(taskId: string, traceId: string): Promise<void>;
   planJevCommand(query: string, candidates: JevCommandCandidate[]): Promise<JevCommandPlan>;
@@ -160,6 +166,8 @@ export interface MonitterBridge {
 
 export interface TestBridge {
   invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
+  getUiDelta?(revision?: string): Promise<UiDeltaResponse>;
+  getTaskMessages?(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage>;
   listen(event: string, handler: () => void): Promise<UnlistenFn>;
 }
 
@@ -185,7 +193,10 @@ function invoke<C extends CommandName>(
 function isUnknownCommand(error: unknown) {
   const value = String(error).toLowerCase();
   return value.includes('unknown command') || value.includes('unknown invoke command') ||
-    value.includes('command not found') || value.includes('command `get_command_capabilities`') ||
+    value.includes('command not found') || value.includes('command `get_ui_delta`') || value.includes('command get_ui_delta') ||
+    value.includes('command `get_task_messages`') || value.includes('command get_task_messages') ||
+    value.includes("lan command 'get_ui_delta' is not available") || value.includes("lan command 'get_task_messages' is not available") ||
+    value.includes('command `get_command_capabilities`') ||
     value.includes('command get_command_capabilities') || value.includes("lan command 'get_command_capabilities' is not available") || value.includes('command `get_ui_snapshot`') ||
     value.includes('command get_ui_snapshot') || value.includes('command `send_message_fast`') ||
     value.includes('command send_message_fast') || value.includes('command `send_channel_message_fast`') ||
@@ -203,6 +214,22 @@ let snapshotRequest: Promise<Snapshot> | null = null;
 let capabilityRequest: Promise<Set<string> | null> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 const changedSubscribers = new Set<() => void>();
+
+// Read-only sync calls are typed locally while their Rust signatures and
+// generated command entries are integrated at the native boundary.
+function invokeUiDelta(revision?: string): Promise<UiDeltaResponse> {
+  const args = revision === undefined ? {} : { revision };
+  return isLanBrowser()
+    ? lanInvoke<UiDeltaResponse>('get_ui_delta', args)
+    : nativeInvoke<UiDeltaResponse>('get_ui_delta', args);
+}
+
+function invokeTaskMessages(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage> {
+  const args = { taskId, ...(beforeId === undefined ? {} : { beforeId }), ...(limit === undefined ? {} : { limit }) };
+  return isLanBrowser()
+    ? lanInvoke<TaskMessagesPage>('get_task_messages', args)
+    : nativeInvoke<TaskMessagesPage>('get_task_messages', args);
+}
 
 function rememberSnapshot(snapshot: Snapshot, revision?: string) {
   cachedSnapshot = snapshot;
@@ -228,6 +255,26 @@ async function getRevisionedSnapshot(): Promise<Snapshot> {
   return result.snapshot ? rememberSnapshot(result.snapshot, result.revision) : (cachedSnapshot ?? (() => { throw new Error('Monitter reported an unchanged snapshot before a snapshot was loaded.'); })());
 }
 
+async function getDeltaSnapshot(): Promise<Snapshot> {
+  const response = await invokeUiDelta(cachedRevision);
+  const applied = applyUiDelta(cachedSnapshot, cachedRevision, response);
+  if (applied.kind !== 'gap') {
+    cachedSnapshot = applied.snapshot;
+    cachedRevision = applied.revision;
+    uiProtocol = 'revisioned';
+    return applied.snapshot;
+  }
+
+  // A gap may mean an out-of-order read or a new backend epoch. Reset with an
+  // unbased read; a delta without its base cannot safely repair the cache.
+  const reset = applyUiDelta(null, undefined, await invokeUiDelta());
+  if (reset.kind !== 'snapshot') throw new Error('Monitter could not reset the transcript cache after a revision gap.');
+  cachedSnapshot = reset.snapshot;
+  cachedRevision = reset.revision;
+  uiProtocol = 'revisioned';
+  return reset.snapshot;
+}
+
 function getCommandCapabilities(): Promise<Set<string> | null> {
   if (capabilityRequest) return capabilityRequest;
   capabilityRequest = invoke('get_command_capabilities')
@@ -249,6 +296,13 @@ function getCachedSnapshot(): Promise<Snapshot> {
   if (snapshotRequest) return snapshotRequest;
   snapshotRequest = (async () => {
     const commands = await getCommandCapabilities();
+    if (commands?.has('get_ui_delta')) {
+      try { return await getDeltaSnapshot(); }
+      catch (reason) {
+        if (!isUnknownCommand(reason)) throw reason;
+        uiProtocol = 'legacy';
+      }
+    }
     if (!commands?.has('get_ui_snapshot')) return rememberSnapshot(await invoke('get_snapshot'));
     try { return await getRevisionedSnapshot(); }
     catch (reason) {
@@ -257,6 +311,22 @@ function getCachedSnapshot(): Promise<Snapshot> {
     }
   })().finally(() => { snapshotRequest = null; });
   return snapshotRequest;
+}
+
+async function getTaskMessages(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage> {
+  const commands = await getCommandCapabilities();
+  if (!commands?.has('get_task_messages')) throw new Error('Earlier transcript history is unavailable on this desktop version.');
+  if (!cachedSnapshot || !cachedRevision) await getCachedSnapshot();
+  let page = await invokeTaskMessages(taskId, beforeId, limit);
+  if (page.messages.some(message => message.taskId !== taskId)) throw new Error('Monitter returned a message for a different task.');
+  if (page.revision !== cachedRevision) {
+    await getCachedSnapshot();
+    page = await invokeTaskMessages(taskId, beforeId, limit);
+    if (page.revision !== cachedRevision) throw new Error('Transcript history changed while loading. Please try again.');
+  }
+  if (cachedSnapshot) cachedSnapshot = mergeTaskMessagesPage(cachedSnapshot, page);
+  scheduleSnapshotRefresh();
+  return page;
 }
 
 function scheduleSnapshotRefresh() {
@@ -309,6 +379,7 @@ const nativeBridge: MonitterBridge = {
     typeof window !== "undefined" &&
     (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
   getSnapshot: () => getCachedSnapshot(),
+  getTaskMessages,
   planJevRoute: (agentId, prompt) => isLanBrowser() ? desktopOnly() : invoke('plan_jev_route', { agentId, prompt }),
   recordJevRoute: (taskId, traceId) => isLanBrowser() ? desktopOnly() : invoke('record_jev_route', { taskId, traceId }),
   planJevCommand: (query, candidates) => isLanBrowser() ? desktopOnly() : invoke('plan_jev_command', { query, candidates }),
@@ -431,6 +502,22 @@ const emptyPreviewSnapshot = (): Snapshot => ({
 });
 const emptyUsageOverview = (): UsageOverview => ({ generatedAt: Date.now(), capturedSince: null, subscriptions: [], providerTotals: [], recentRuns: [] });
 
+const testSnapshotCaches = new WeakMap<TestBridge, { snapshot: Snapshot | null; revision?: string }>();
+async function readTestSnapshot(test: TestBridge): Promise<Snapshot> {
+  if (!test.getUiDelta) return test.invoke('get_snapshot') as Promise<Snapshot>;
+  let cache = testSnapshotCaches.get(test);
+  if (!cache) { cache = { snapshot: null }; testSnapshotCaches.set(test, cache); }
+  const response = await test.getUiDelta(cache.revision);
+  let applied = applyUiDelta(cache.snapshot, cache.revision, response);
+  if (applied.kind === 'gap') {
+    applied = applyUiDelta(null, undefined, await test.getUiDelta());
+    if (applied.kind !== 'snapshot') throw new Error('Test bridge must return a full snapshot after a revision gap.');
+  }
+  cache.snapshot = applied.snapshot;
+  cache.revision = applied.revision;
+  return applied.snapshot;
+}
+
 async function desktopOnly<T>(): Promise<T> {
   throw new Error(
     "Open the Monitter desktop app to use hosts, agents, tasks, and settings.",
@@ -535,7 +622,19 @@ export function getBridge(): MonitterBridge {
     const test = window.__MONITTER_TEST_BRIDGE__;
     return {
       available: true,
-      getSnapshot: () => test.invoke("get_snapshot") as Promise<Snapshot>,
+      getSnapshot: () => readTestSnapshot(test),
+      ...(test.getTaskMessages ? { getTaskMessages: async (taskId: string, beforeId?: string, limit?: number) => {
+        let page = await test.getTaskMessages!(taskId, beforeId, limit);
+        let cache = testSnapshotCaches.get(test);
+        if (cache?.snapshot && cache.revision !== page.revision) {
+          await readTestSnapshot(test);
+          page = await test.getTaskMessages!(taskId, beforeId, limit);
+          cache = testSnapshotCaches.get(test);
+          if (cache?.revision !== page.revision) throw new Error('Test bridge history changed while loading.');
+        }
+        if (cache?.snapshot && cache.revision === page.revision) cache.snapshot = mergeTaskMessagesPage(cache.snapshot, page);
+        return page;
+      } } : {}),
       getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,
       getUsageOverview: (policy) => test.invoke('get_usage_overview', policy === undefined ? {} : { policy }) as Promise<UsageOverview>,
       planJevRoute: (agentId, prompt) => test.invoke('plan_jev_route', { agentId, prompt }) as Promise<JevRoutePlan>,

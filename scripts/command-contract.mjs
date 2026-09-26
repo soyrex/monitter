@@ -14,6 +14,8 @@ const TYPE_OVERRIDES = {
   'BrowserExtensionState': 'BrowserExtensionLoadResult',
   'ScheduleInput': 'Schedule',
   'acp_probe::ProbeResult': 'AcpProbeResult',
+  'ui_sync::UiDeltaResponse': 'UiDeltaResponse',
+  'ui_sync::TaskMessagesPage': 'TaskMessagesPage',
 };
 const ARG_TYPE_OVERRIDES = {
   'get_usage_overview.policy': 'UsageRefreshPolicy',
@@ -134,7 +136,7 @@ function typeName(rustType) {
     const args = splitTopLevel(generic[2]);
     const inner = args[0];
     if (generic[1].endsWith('Option') && args.length === 1) return `${typeName(inner)} | null`;
-    if (generic[1].endsWith('Vec') && args.length === 1) return `${typeName(inner)}[]`;
+    if ((generic[1].endsWith('Vec') || generic[1].endsWith('History')) && args.length === 1) return `${typeName(inner)}[]`;
     if ((generic[1].endsWith('HashMap') || generic[1].endsWith('BTreeMap')) && args.length === 2) return `Record<${typeName(args[0])}, ${typeName(args[1])}>`;
     fail(`unsupported Rust type ${value}`);
   }

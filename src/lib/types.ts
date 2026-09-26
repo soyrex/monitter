@@ -224,6 +224,16 @@ export interface RunEvent {
 }
 /** A revision-aware, compact UI projection. A null snapshot means unchanged. */
 export interface UiSnapshotResponse { revision: string; snapshot: Snapshot | null; }
+export interface UiDelta {
+  fromRevision: string;
+  metadata: Snapshot;
+  messages: Message[];
+  removedMessageIds: string[];
+  retainedChannelIds: string[];
+  retainedSubagentTranscriptIds: string[];
+}
+export interface UiDeltaResponse { revision: string; snapshot: Snapshot | null; delta: UiDelta | null; }
+export interface TaskMessagesPage { messages: Message[]; nextBeforeId: string | null; revision: string; }
 /** Fast-send acknowledgement: acceptance is durable, but no snapshot is implied. */
 export interface SendAccepted { accepted: true; }
 /** Full diagnostic activity is deliberately loaded only when its pane is opened. */
