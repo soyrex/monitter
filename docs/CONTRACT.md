@@ -828,6 +828,10 @@ recovery also fail or interrupt normally and are not silently retried. Recovery 
 task, launcher, host, working folder, native session and single-writer claim; an old process finishing
 cannot evict its replacement. Recovery diagnostics are bounded and exclude command arguments,
 environment values, credentials and raw provider frames.
+If a load/resume response explicitly returns an identity, it must match the requested saved
+session exactly. A changed, malformed, or conflicting identity fails before the transport is
+published as ready or receives a prompt. The saved ID and transcript remain unchanged. A load
+response that omits identity legitimately reuses the requested saved ID.
 
 Host.claudePath defaults to an empty string for older stored host snapshots. Task.archived defaults
 false; archiving preserves messages/events/native IDs and hides the chat from ordinary navigation.

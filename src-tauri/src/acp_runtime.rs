@@ -569,6 +569,32 @@ fn session_id(value: &Value) -> Option<&str> {
         .or_else(|| value.pointer("/result/session/id").and_then(Value::as_str))
 }
 
+/// A load/resume repairs a transport for the exact saved session. It never
+/// transfers ownership to an alias or a new session returned by the provider.
+fn validated_session_response(value: &Value, saved: Option<&str>) -> Result<String, String> {
+    if !value.get("result").is_some_and(Value::is_object) {
+        return Err("ACP session response did not contain a result object.".into());
+    }
+    let mut returned: Option<&str> = None;
+    for path in ["/result/sessionId", "/result/session/id"] {
+        if let Some(value) = value.pointer(path) {
+            let id = value.as_str().filter(|id| !id.trim().is_empty() && !id.contains('\0'))
+                .ok_or("ACP session response contained an invalid session identity.")?;
+            if returned.is_some_and(|previous| previous != id) {
+                return Err("ACP session response contained conflicting session identities.".into());
+            }
+            returned = Some(id);
+        }
+    }
+    if let Some(saved) = saved {
+        if returned.is_some_and(|returned| returned != saved) {
+            return Err("ACP recovery returned a different native session. The saved session and its history were preserved; no prompt was sent.".into());
+        }
+        return Ok(saved.into());
+    }
+    returned.map(str::to_owned).ok_or_else(|| "ACP session/new omitted sessionId.".into())
+}
+
 /// ACP sends a `tool_call` followed by partial `tool_call_update` patches.
 /// Keep the provider's identifiers and merge those patches before recording
 /// them, so every activity row remains useful on its own while the UI groups
@@ -1757,17 +1783,12 @@ fn run(
                     );
                     return;
                 }
-                let session = session_id(&value)
-                    .map(str::to_owned)
-                    .or_else(|| task.native_session_id.clone());
-                let Some(session) = session else {
-                    fail(
-                        &service,
-                        &task_id,
-                        &control,
-                        "ACP session/new omitted sessionId.",
-                    );
-                    return;
+                let session = match validated_session_response(&value, task.native_session_id.as_deref()) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        fail(&service, &task_id, &control, error);
+                        return;
+                    }
                 };
                 let session_result = value.get("result").cloned().unwrap_or(Value::Null);
                 control.set_acp_session_result(session_result.clone());

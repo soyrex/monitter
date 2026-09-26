@@ -72,8 +72,12 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   }
   else if(f.method==='session/load'||f.method==='session/resume') {
     session=f.params.sessionId;
+    write('recover:'+session);
     if(mode==='load-history') update('historical-context-from-load');
     if(mode==='delay-recovery') setTimeout(()=>reply(f.id,{}),250);
+    else if(mode==='wrong-recovery-id') reply(f.id,{sessionId:'unrelated-session'});
+    else if(mode==='invalid-recovery-id') reply(f.id,{sessionId:42});
+    else if(mode==='matching-recovery-id') reply(f.id,{sessionId:session});
     else reply(f.id,{});
     if(mode==='recovery-handshake-eof' && starts()>=2) setTimeout(()=>process.exit(0),10);
   }
@@ -82,7 +86,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     if((mode==='recovery-handshake-eof' || mode==='delay-recovery' || mode==='double-loss') && starts()===1) process.exit(0);
     if(mode==='double-loss' && starts()===2) { update('second-reply'); reply(f.id,{stopReason:'end_turn'}); setTimeout(()=>process.exit(0),20); return; }
     if(mode==='active-eof') { update('partial-before-eof'); process.exit(0); }
-    if(mode==='idle-eof') { update('first-reply'); reply(f.id,{stopReason:'end_turn'}); setTimeout(()=>process.exit(0),20); }
+    if(mode==='idle-eof'||mode==='wrong-recovery-id') { update('first-reply'); reply(f.id,{stopReason:'end_turn'}); setTimeout(()=>process.exit(0),20); }
     else if(mode==='always-eof') process.exit(0);
     else { update('reply'); reply(f.id,{stopReason:'end_turn'}); if(mode==='load-history') setTimeout(()=>process.exit(0),20); }
   } else if(f.method==='session/cancel') { write('cancel'); process.exit(0); }
@@ -240,6 +244,57 @@ fn unsupported_saved_session_keeps_history_and_reports_capability_error() {
         .messages
         .iter()
         .any(|m| m.task_id == t.id && m.role == "user" && m.text.contains("recover")));
+}
+
+#[test]
+fn cold_recovery_rejects_changed_or_invalid_session_identity_before_any_prompt() {
+    for mode in ["wrong-recovery-id", "invalid-recovery-id"] {
+        let f = fixture(mode);
+        let t = task(&f, Some("saved-session"));
+        send(&f, &t, "do not send to another session");
+        wait_for(&f, &t.id, |s| s.tasks.iter().any(|task| task.id == t.id && task.status == "error"));
+        // Durable failure is published before process teardown releases the
+        // single-writer reservation. Wait for that separate lifecycle fence.
+        wait_for(&f, &t.id, |_| !f.service.runs.lock().unwrap().tasks.contains_key(&t.id));
+        let snapshot = f.service.snapshot().unwrap();
+        assert_eq!(snapshot.tasks.iter().find(|task| task.id == t.id).unwrap().native_session_id.as_deref(), Some("saved-session"));
+        let log = fs::read_to_string(&f.log).unwrap();
+        assert!(log.contains("recover:saved-session"));
+        assert!(!log.lines().any(|line| line.starts_with("prompt:")));
+        assert!(!f.service.runs.lock().unwrap().native_sessions.values().any(|owner| owner == &t.id));
+        assert!(snapshot.messages.iter().any(|message| message.task_id == t.id && message.role == "user" && message.text.contains("do not send")));
+    }
+}
+
+#[test]
+fn prompt_free_recovery_rejects_changed_id_and_next_cold_attempt_keeps_original_identity() {
+    let f = fixture("wrong-recovery-id");
+    let t = task(&f, None);
+    send(&f, &t, "first");
+    wait_for(&f, &t.id, |snapshot| snapshot.events.iter().any(|event| event.task_id == t.id && event.kind == "error" && event.detail.contains("different native session")));
+    wait_for(&f, &t.id, |_| !f.service.runs.lock().unwrap().tasks.contains_key(&t.id));
+    let snapshot = f.service.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.iter().find(|task| task.id == t.id).unwrap().native_session_id.as_deref(), Some("fixture-session"));
+    assert!(snapshot.messages.iter().any(|message| message.role == "assistant" && message.text.contains("first-reply")));
+    send(&f, &t, "try the saved session again");
+    wait_for(&f, &t.id, |snapshot| snapshot.tasks.iter().any(|task| task.id == t.id && task.status == "error"));
+    let log = fs::read_to_string(&f.log).unwrap();
+    assert_eq!(log.lines().filter(|line| line.starts_with("prompt:")).count(), 1);
+    assert_eq!(log.lines().filter(|line| *line == "recover:fixture-session").count(), 2);
+    assert!(!log.contains("recover:unrelated-session"));
+    assert_eq!(f.service.snapshot().unwrap().tasks.iter().find(|task| task.id == t.id).unwrap().native_session_id.as_deref(), Some("fixture-session"));
+}
+
+#[test]
+fn explicit_matching_session_identity_remains_resumable() {
+    let f = fixture("matching-recovery-id");
+    let t = task(&f, Some("saved-session"));
+    send(&f, &t, "first");
+    wait_for(&f, &t.id, |snapshot| snapshot.tasks.iter().any(|task| task.id == t.id && task.status == "completed"));
+    send(&f, &t, "second");
+    wait_for(&f, &t.id, |snapshot| snapshot.tasks.iter().any(|task| task.id == t.id && task.status == "completed") && snapshot.messages.iter().filter(|message| message.task_id == t.id && message.role == "assistant").count() == 2);
+    assert_eq!(f.service.snapshot().unwrap().tasks.iter().find(|task| task.id == t.id).unwrap().native_session_id.as_deref(), Some("saved-session"));
+    assert_eq!(fs::read_to_string(&f.log).unwrap().lines().filter(|line| line.starts_with("prompt:")).count(), 2);
 }
 
 #[test]
