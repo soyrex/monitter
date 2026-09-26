@@ -461,4 +461,42 @@ mod tests {
         assert_eq!(params["configId"], "permissionMode");
         assert_eq!(params["value"], "bypassPermissions");
     }
+
+    #[test]
+    fn thought_level_uses_only_the_live_advertised_value() {
+        let session = json!({"configOptions":[{
+            "id":"effort","name":"Effort","category":"thought_level","type":"select",
+            "currentValue":"default","options":[
+                {"value":"default","name":"Default"},
+                {"value":"low","name":"Low"},
+                {"value":"high","name":"High"}
+            ]
+        }]});
+        let ThoughtLevelConfiguration::Request { method, params, applied_value } =
+            configured_thought_level_request(&session, "session-1", "high").unwrap()
+        else { panic!("expected an advertised request"); };
+        assert_eq!(method, "session/set_config_option");
+        assert_eq!(params, json!({"sessionId":"session-1","configId":"effort","value":"high"}));
+        assert_eq!(applied_value, "high");
+        assert!(matches!(
+            configured_thought_level_request(&session, "session-1", "xhigh").unwrap(),
+            ThoughtLevelConfiguration::Unsupported(_)
+        ));
+        assert!(matches!(
+            configured_thought_level_request(&json!({}), "session-1", "high").unwrap(),
+            ThoughtLevelConfiguration::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn thought_level_recognizes_current_without_sending_a_request() {
+        let session = json!({"configOptions":[{
+            "id":"effort","name":"Effort","category":"thought_level","type":"select",
+            "currentValue":"medium","options":[{"value":"medium","name":"Medium"}]
+        }]});
+        assert!(matches!(
+            configured_thought_level_request(&session, "session-1", "medium").unwrap(),
+            ThoughtLevelConfiguration::AlreadyCurrent { applied_value } if applied_value == "medium"
+        ));
+    }
 }

@@ -54,12 +54,12 @@ const routerTrace=()=>console.log(JSON.stringify({jsonrpc:'2.0',method:'session/
 readline.createInterface({input:process.stdin}).on('line', line=>{
  const frame=JSON.parse(line);
  if(frame.method==='initialize') { const recovery=process.argv[2]==='load'?{loadSession:true}:process.argv[2]==='resume'?{sessionCapabilities:{resume:{}}}:{}; const http=process.argv[2]==='managed-no-http'?{}:{mcpCapabilities:{http:true}}; const steer=process.argv[2]==='mcode-steer'?{'minimax-code/extensions':{version:1,methods:['mcode/session/steer']}}:['mona-steer','mona-steer-retry'].includes(process.argv[2])?{'mona/extensions':{version:1,methods:['mona/session/steer']}}:null; reply(frame.id,{protocolVersion:1,agentCapabilities:{...recovery,...http},...(steer?{_meta:steer}:{})}); }
- else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; reply(frame.id,mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
+ else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; const thought=process.argv[2]==='thought-delayed'||process.argv[2]==='thought-reject'?{sessionId:'fixture-session',configOptions:[{id:'effort',name:'Effort',category:'thought_level',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'low',name:'Low'}]}]}:null; reply(frame.id,thought??mcode??(['model','model-delayed'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
- else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else reply(frame.id,{}); }
+ else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'||process.argv[2]==='thought-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else if(process.argv[2]==='thought-reject'){ reject(frame.id,-32602,'unsupported choice'); } else reply(frame.id,{}); }
  else if(frame.method==='session/prompt' && process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); messageDone(); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); }
  else if(frame.method==='session/prompt' && process.argv[2]==='text-done-fails'){ updateAnonymous('finished progress'); messageDone(); updateAnonymous('unfinished progress'); reject(frame.id,-32603,'transient provider connection failure'); }
- else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['mcode-steer','mona-steer','mona-steer-retry'].includes(process.argv[2])){ globalThis.activePromptId=frame.id; if(process.argv[3]) fs.appendFileSync(process.argv[3],`prompt-active:${frame.id}\n`); } else if(['permission','permission-no-allow'].includes(process.argv[2])){ const options=process.argv[2]==='permission-no-allow'?[{kind:'reject_once',optionId:'opaque-reject'}]:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]; console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
+ else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['thought-delayed','thought-reject'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-received\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['mcode-steer','mona-steer','mona-steer-retry'].includes(process.argv[2])){ globalThis.activePromptId=frame.id; if(process.argv[3]) fs.appendFileSync(process.argv[3],`prompt-active:${frame.id}\n`); } else if(['permission','permission-no-allow'].includes(process.argv[2])){ const options=process.argv[2]==='permission-no-allow'?[{kind:'reject_once',optionId:'opaque-reject'}]:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]; console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
  else if(['mcode/session/steer','mona/session/steer'].includes(frame.method)){ steerAttempts++; if(process.argv[3]) fs.appendFileSync(process.argv[3],`steer:${frame.method}:${frame.params.expectedTurnId}:${frame.params.text}\n`); if(process.argv[2]==='mona-steer-retry' && steerAttempts===1){ reject(frame.id,-32001,'prompt is not ready for steering'); } else { reply(frame.id,{turnId:frame.params.expectedTurnId,clientRequestId:frame.params.clientRequestId,mode:'steered'}); update('acp-steered'); reply(globalThis.activePromptId,{stopReason:'end_turn'}); } }
  else if(frame.id==='opaque-permission'){ const outcome=frame.result?.outcome; if(process.argv[3]) fs.appendFileSync(process.argv[3],`outcome-${outcome?.optionId ?? outcome?.outcome}\n`); update(`permission-${outcome?.optionId ?? outcome?.outcome}`); reply(3,{stopReason:'end_turn'}); }
  else if(frame.method==='session/cancel'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],'cancel\n'); }
@@ -1070,6 +1070,86 @@ fn resident_model_acknowledgement_precedes_each_prompt() {
         2,
         "{captured}"
     );
+}
+
+fn add_pending_reasoning_receipt(fixture: &Fixture, task_id: &str) {
+    fixture.mutate(Some(task_id.into()), |snapshot| {
+        snapshot.events.push(Arc::new(crate::model::RunEvent {
+            id: crate::id(),
+            task_id: task_id.into(),
+            kind: "jevDecision".into(),
+            title: "Jev route".into(),
+            detail: serde_json::json!({
+                "toolName":"jev_route",
+                "response":{"autoEligible":true,"reasoningStatus":"pending","reasoningLevel":"low"}
+            }).to_string().into(),
+            created_at: crate::now(),
+        }));
+        Ok(())
+    }).unwrap();
+}
+
+fn receipt_reasoning_status(fixture: &Fixture, task_id: &str) -> String {
+    let snapshot = fixture.snapshot().unwrap();
+    let event = snapshot.events.iter().find(|event| event.task_id == task_id && event.kind == "jevDecision").unwrap();
+    let detail: serde_json::Value = serde_json::from_str(&event.detail).unwrap();
+    detail["response"]["reasoningStatus"].as_str().unwrap().into()
+}
+
+#[test]
+fn jev_thought_level_acknowledgement_precedes_first_acp_prompt() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-thought-{}", crate::id()));
+    let fixture = fixture_with_args("thought", vec!["thought-delayed".into(), capture.to_string_lossy().into_owned()]);
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture.create_task(CreateTaskInput {
+        agent_id: agent.id, title: "ACP reasoning".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    add_pending_reasoning_receipt(&fixture, &task.id);
+    let accepted = fixture.accept_send(task.id.clone(), "first".into(), vec![]).unwrap().unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| snapshot.tasks.iter().find(|item| item.id == task.id).is_some_and(|item| item.status == "completed"));
+    assert_eq!(receipt_reasoning_status(&fixture, &task.id), "applied");
+    let captured = fs::read_to_string(&capture).unwrap_or_default();
+    let _ = fs::remove_file(&capture);
+    assert_eq!(captured.lines().collect::<Vec<_>>(), vec!["model-effort-low", "config-ack", "prompt-received"]);
+}
+
+#[test]
+fn jev_thought_level_keeps_default_when_acp_does_not_advertise_it() {
+    let fixture = fixture("no-thought");
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture.create_task(CreateTaskInput {
+        agent_id: agent.id, title: "ACP default reasoning".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    add_pending_reasoning_receipt(&fixture, &task.id);
+    let accepted = fixture.accept_send(task.id.clone(), "first".into(), vec![]).unwrap().unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| snapshot.tasks.iter().find(|item| item.id == task.id).is_some_and(|item| item.status == "completed"));
+    assert_eq!(receipt_reasoning_status(&fixture, &task.id), "unsupported");
+}
+
+#[test]
+fn jev_thought_level_rejection_keeps_default_and_sends_prompt() {
+    let capture = std::env::temp_dir().join(format!("monitter-acp-thought-reject-{}", crate::id()));
+    let fixture = fixture_with_args("thought-reject", vec!["thought-reject".into(), capture.to_string_lossy().into_owned()]);
+    let agent = fixture.snapshot().unwrap().agents.remove(0);
+    let task = fixture.create_task(CreateTaskInput {
+        agent_id: agent.id, title: "ACP rejected reasoning".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    add_pending_reasoning_receipt(&fixture, &task.id);
+    let accepted = fixture.accept_send(task.id.clone(), "first".into(), vec![]).unwrap().unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(accepted));
+    wait_for(&fixture, &task.id, |snapshot| snapshot.tasks.iter().find(|item| item.id == task.id).is_some_and(|item| item.status == "completed"));
+    assert_eq!(receipt_reasoning_status(&fixture, &task.id), "rejected");
+    let captured = fs::read_to_string(&capture).unwrap_or_default();
+    let _ = fs::remove_file(&capture);
+    assert_eq!(captured.lines().collect::<Vec<_>>(), vec!["model-effort-low", "prompt-received"]);
 }
 
 #[test]
