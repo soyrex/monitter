@@ -103,7 +103,15 @@
     return score === null ? 'No score returned' : `Score ${score.toFixed(2)}`;
   }
 
-  const confidence = $derived(numberField('confidence'));
+  const modelRouteConfidence = $derived(numberField('autoRouteConfidence'));
+  const confidence = $derived(modelRouteConfidence ?? numberField('confidence'));
+  const overallConfidence = $derived(numberField('confidence'));
+  const routeConfidenceLabel = $derived(modelRouteConfidence === null ? 'Lowest confidence' : 'Route confidence');
+  const questionConfidences = $derived(object(response?.questionConfidences) ? response.questionConfidences as JsonRecord : null);
+  function questionConfidence(key: string): string {
+    const value = questionConfidences?.[key];
+    return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : 'n/a';
+  }
   function routeText(key: string): string {
     const value = response?.[key];
     return typeof value === 'string' ? value.replaceAll('_', ' ') : 'n/a';
@@ -190,10 +198,10 @@
   <summary aria-label={`Jev ${toolLabel}: ${outcomeText()}`}>
     <div class="jev-top"><span class="jev-mark">Jev</span><span class="jev-kind">{toolLabel}</span><time title={fullTimeText}>{timeText}</time></div>
     {#if record}<div class="jev-question">{record.question}</div>{:else}<div class="jev-question">Jev decision details unavailable</div>{/if}
-    <div class="jev-result-line"><strong title={outcomeText()}>{outcomeText()}</strong>{#if confidence !== null}<span>{record?.toolName === 'jev_route' ? 'Lowest confidence' : 'Confidence'} {Math.round(confidence * 100)}%</span>{/if}</div>
+    <div class="jev-result-line"><strong title={outcomeText()}>{outcomeText()}</strong>{#if confidence !== null}<span>{record?.toolName === 'jev_route' ? routeConfidenceLabel : 'Confidence'} {Math.round(confidence * 100)}%</span>{/if}</div>
     {#if record?.toolName === 'jev_route'}<div class="jev-route-reasoning">{routeReasoningOutcome()}</div>{/if}
     {#if segments.length}<div class="jev-bar" role="img" aria-label={distributionLabel()} title={distributionLabel()}>{#each segments as segment, index (segment.id)}<span style={`width:${segment.probability * 100}%;background:${segmentColor(segment, index)}`}></span>{/each}</div>{/if}
-    {#if record?.toolName === 'jev_route' && confidence !== null}<div class="jev-bar" role="img" aria-label={`Lowest routing confidence ${Math.round(confidence * 100)}%`}><span style={`width:${confidence * 100}%;background:var(--accent)`}></span></div>{/if}
+    {#if record?.toolName === 'jev_route' && confidence !== null}<div class="jev-bar" role="img" aria-label={`${routeConfidenceLabel} ${Math.round(confidence * 100)}%`}><span style={`width:${confidence * 100}%;background:var(--accent)`}></span></div>{/if}
     <div class="jev-meta"><span>{latencyText(record?.latencyMs ?? null)}</span><span>{costText(record?.costUsd ?? null)}</span><span class="jev-expand-hint">{record?.compact && expandedDetail === null ? 'Open for details' : 'Details'}</span></div>
   </summary>
   <div class="jev-details">
@@ -209,6 +217,13 @@
           <div><dt>Chat model</dt><dd>{routeText('selectedModel')}</dd></div>
           <div><dt>Model selection</dt><dd>{routeModelOutcome()}</dd></div>
           <div><dt>Reasoning outcome</dt><dd>{routeReasoningOutcome()}</dd></div>
+          {#if questionConfidences}
+            <div><dt>Task kind confidence</dt><dd>{questionConfidence('task_kind')}</dd></div>
+            <div><dt>Model tier confidence</dt><dd>{questionConfidence('model_tier')}</dd></div>
+            <div><dt>Reasoning confidence</dt><dd>{questionConfidence('reasoning_level')}</dd></div>
+            <div><dt>Route confidence basis</dt><dd>{response.autoRouteBasis === 'task_kind' ? 'Task kind (frontier rule)' : 'Lower of model tier and reasoning'}</dd></div>
+            <div><dt>Lowest of all signals</dt><dd>{overallConfidence === null ? 'n/a' : `${Math.round(overallConfidence * 100)}%`}</dd></div>
+          {/if}
           <div><dt>Task kind</dt><dd>{routeText('taskKind')}</dd></div>
           <div><dt>Permission signal</dt><dd>{routePermissionSignal()} · advisory only; existing approvals apply</dd></div>
         </dl>

@@ -84,8 +84,72 @@ pub struct RoutingDecision {
     pub execution_mode: ExecutionMode,
     pub permission_tier: PermissionTier,
     pub confidence: f32,
+    /// The lowest of all five Jev judgments remains the audit signal. A new
+    /// chat only acts on the model and reasoning judgments, so retain their
+    /// individual confidence instead of gating on an unrelated dimension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_confidences: Option<RoutingQuestionConfidences>,
     pub rationale: String,
     pub escalation_conditions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct RoutingQuestionConfidences {
+    pub task_kind: f32,
+    pub model_tier: f32,
+    pub reasoning_level: f32,
+    pub execution_mode: f32,
+    pub permission_tier: f32,
+}
+
+/// Native policy for the optional, reversible model/effort choice on a new
+/// chat. The renderer receives the result but cannot change its receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JevAutoRoutePolicy {
+    pub confidence: f32,
+    pub threshold: f32,
+    pub eligible: bool,
+    pub basis: JevAutoRouteBasis,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JevAutoRouteBasis {
+    ModelAndReasoning,
+    TaskKind,
+}
+
+// Initial floor for a reversible new-chat model choice. Jev Choice confidence
+// describes how concentrated its answer distribution is, so this should be
+// tuned against observed route outcomes rather than treated as a truth score.
+const JEV_MODEL_ROUTE_CONFIDENCE_THRESHOLD: f32 = 0.30;
+
+fn auto_route_policy(decision: &RoutingDecision) -> Option<JevAutoRoutePolicy> {
+    decision.question_confidences.as_ref().map(|scores| {
+        // Architecture and production-sensitive routes are raised to
+        // frontier/xhigh by deterministic policy. In that case the task-kind
+        // judgment, rather than Jev's overridden model/effort answers, is
+        // the confidence that matters for this model choice.
+        let (confidence, basis) = if matches!(
+            decision.task_kind,
+            TaskKind::Architecture | TaskKind::ProductionSensitive
+        ) {
+            (scores.task_kind, JevAutoRouteBasis::TaskKind)
+        } else {
+            (
+                scores.model_tier.min(scores.reasoning_level),
+                JevAutoRouteBasis::ModelAndReasoning,
+            )
+        };
+        JevAutoRoutePolicy {
+            confidence,
+            threshold: JEV_MODEL_ROUTE_CONFIDENCE_THRESHOLD,
+            eligible: confidence >= JEV_MODEL_ROUTE_CONFIDENCE_THRESHOLD,
+            basis,
+        }
+    })
 }
 
 /// The adapter contract. It deliberately carries model choice separately from
@@ -367,7 +431,62 @@ pub struct JevRoutePlan {
     pub agent_id: Option<String>,
     pub prompt_fingerprint: String,
     pub decision: RoutingDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_route_policy: Option<JevAutoRoutePolicy>,
     pub classifier_evidence: ClassifierEvidence,
+}
+
+impl JevRoutePlan {
+    /// Legacy traces used the minimum across all five questions and keep
+    /// their original gate. New traces use only the model and effort scores.
+    pub fn auto_route_eligible(&self) -> bool {
+        self.auto_route_policy
+            .as_ref()
+            .map(|policy| policy.eligible)
+            .unwrap_or(self.decision.confidence >= CONFIDENCE_ESCALATION_THRESHOLD)
+    }
+
+    pub fn confidences_are_valid(&self) -> bool {
+        let valid = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
+        if !valid(self.decision.confidence) {
+            return false;
+        }
+        if let Some(scores) = &self.decision.question_confidences {
+            if ![
+                scores.task_kind,
+                scores.model_tier,
+                scores.reasoning_level,
+                scores.execution_mode,
+                scores.permission_tier,
+            ]
+            .into_iter()
+            .all(valid)
+            {
+                return false;
+            }
+            let expected_lowest = [
+                scores.task_kind,
+                scores.model_tier,
+                scores.reasoning_level,
+                scores.execution_mode,
+                scores.permission_tier,
+            ]
+            .into_iter()
+            .fold(1.0_f32, f32::min);
+            if self.decision.confidence != expected_lowest {
+                return false;
+            }
+        }
+        match &self.auto_route_policy {
+            Some(policy) => {
+                let Some(expected) = auto_route_policy(&self.decision) else {
+                    return false;
+                };
+                valid(policy.confidence) && *policy == expected
+            }
+            None => true,
+        }
+    }
 }
 
 /// A single, renderer-supplied command-palette choice. This is input to an
@@ -432,6 +551,7 @@ impl JevClassifier for MockJevClassifier {
                 execution_mode: ExecutionMode::Inspect,
                 permission_tier: PermissionTier::HumanReviewRequired,
                 confidence: 0.96,
+                question_confidences: None,
                 rationale:
                     "Consequential or sensitive signal requires inspection and human review.".into(),
                 escalation_conditions: vec!["Human review is required before any effect.".into()],
@@ -764,7 +884,9 @@ fn jev_command_plan_with_client(
         .cloned()
         .collect::<Vec<_>>();
     if eligible.is_empty() {
-        return Err("No non-sensitive commands are eligible for remote Jev command planning.".into());
+        return Err(
+            "No non-sensitive commands are eligible for remote Jev command planning.".into(),
+        );
     }
     let (state, questions) = jev_command_payload(query, &eligible)?;
     let result = system_one_with_client(api_key, model, &state, questions, client)?;
@@ -833,9 +955,7 @@ fn validate_jev_command_input(
         }
     }
     if contains_sensitive_signal(&query.to_lowercase()) {
-        return Err(
-            "Sensitive queries are not eligible for remote Jev command planning.".into(),
-        );
+        return Err("Sensitive queries are not eligible for remote Jev command planning.".into());
     }
     Ok(())
 }
@@ -1099,6 +1219,13 @@ fn decision_from_jev(body: &serde_json::Value) -> Result<RoutingDecision, String
         execution_mode: parse_jev_choice(&execution_mode, "execution_mode")?,
         permission_tier: parse_jev_choice(&permission_tier, "permission_tier")?,
         confidence,
+        question_confidences: Some(RoutingQuestionConfidences {
+            task_kind: task_confidence,
+            model_tier: tier_confidence,
+            reasoning_level: reasoning_confidence,
+            execution_mode: mode_confidence,
+            permission_tier: permission_confidence,
+        }),
         rationale: format!(
             "Jev selected typed routing dimensions; lowest selected confidence is {confidence:.2}."
         ),
@@ -1161,6 +1288,7 @@ fn decision(
         execution_mode: mode,
         permission_tier: permission,
         confidence,
+        question_confidences: None,
         rationale: rationale.into(),
         escalation_conditions: default_escalation_conditions(),
     }
@@ -1584,11 +1712,13 @@ pub(crate) fn persist_jev_command_plan(
 
 pub fn live_jev_route_plan(prompt: &str) -> Result<JevRoutePlan, String> {
     let result = LiveJevClassifier::from_monitter_secret()?.classify(prompt)?;
+    let auto_route_policy = auto_route_policy(&result.decision);
     Ok(JevRoutePlan {
         trace_id: Uuid::new_v4().to_string(),
         agent_id: None,
         prompt_fingerprint: fingerprint(prompt),
         decision: result.decision,
+        auto_route_policy,
         classifier_evidence: result.evidence,
     })
 }
@@ -1840,8 +1970,81 @@ mod tests {
             PermissionTier::WorkspaceWrite
         );
         assert_eq!(result.decision.confidence, 0.89);
+        let scores = result.decision.question_confidences.as_ref().unwrap();
+        assert_eq!(scores.model_tier, 0.91);
+        assert_eq!(scores.reasoning_level, 0.89);
+        assert_eq!(
+            auto_route_policy(&result.decision).unwrap().confidence,
+            0.89
+        );
         assert_eq!(result.evidence.input_tokens, Some(321));
         assert_eq!(result.evidence.latency_ms, 42);
+    }
+
+    #[test]
+    fn new_chat_gate_uses_only_the_judgments_that_choose_its_route() {
+        let body = serde_json::json!({"answers": {
+            "task_kind": {"choice":"bug_fix","confidence":0.82},
+            "model_tier": {"choice":"strong","confidence":0.71},
+            "reasoning_level": {"choice":"high","confidence":0.36},
+            "execution_mode": {"choice":"edit","confidence":0.65},
+            "permission_tier": {"choice":"workspace_write","confidence":0.12}
+        }});
+        let decision = decision_from_jev(&body).unwrap();
+        assert_eq!(decision.confidence, 0.12);
+        let policy = auto_route_policy(&decision).unwrap();
+        assert_eq!(policy.confidence, 0.36);
+        assert_eq!(policy.basis, JevAutoRouteBasis::ModelAndReasoning);
+        assert!(policy.eligible);
+
+        let plan = JevRoutePlan {
+            trace_id: Uuid::new_v4().to_string(),
+            agent_id: None,
+            prompt_fingerprint: "fixture".into(),
+            decision,
+            auto_route_policy: Some(policy),
+            classifier_evidence: ClassifierEvidence {
+                provider: "fixture".into(),
+                model: "fixture".into(),
+                latency_ms: 0,
+                input_tokens: None,
+                output_tokens: None,
+                cost_usd: None,
+            },
+        };
+        assert!(plan.confidences_are_valid());
+        assert!(plan.auto_route_eligible());
+        let mut inconsistent = plan.clone();
+        inconsistent.auto_route_policy.as_mut().unwrap().eligible = false;
+        assert!(!inconsistent.confidences_are_valid());
+
+        let mut legacy = plan;
+        legacy.auto_route_policy = None;
+        legacy.decision.question_confidences = None;
+        assert!(!legacy.auto_route_eligible());
+    }
+
+    #[test]
+    fn architecture_override_gates_on_task_kind_not_overridden_model_answers() {
+        let body = serde_json::json!({"answers": {
+            "task_kind": {"choice":"architecture","confidence":0.36},
+            "model_tier": {"choice":"balanced","confidence":0.05},
+            "reasoning_level": {"choice":"medium","confidence":0.08},
+            "execution_mode": {"choice":"inspect","confidence":0.60},
+            "permission_tier": {"choice":"read_only","confidence":0.42}
+        }});
+        let decision = decision_from_jev(&body).unwrap();
+        assert_eq!(decision.model_tier, ModelTier::Frontier);
+        assert_eq!(decision.reasoning_level, ReasoningLevel::Xhigh);
+        assert_eq!(decision.confidence, 0.05);
+        let policy = auto_route_policy(&decision).unwrap();
+        assert_eq!(policy.basis, JevAutoRouteBasis::TaskKind);
+        assert_eq!(policy.confidence, 0.36);
+        assert!(policy.eligible);
+
+        let mut low_kind = decision;
+        low_kind.question_confidences.as_mut().unwrap().task_kind = 0.29;
+        assert!(!auto_route_policy(&low_kind).unwrap().eligible);
     }
 
     #[test]

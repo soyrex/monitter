@@ -4369,10 +4369,7 @@ impl Service {
             &std::fs::read(&path).map_err(|_| "Jev route trace could not be read.".to_string())?,
         )
         .map_err(|_| "Jev route trace is invalid.".to_string())?;
-        if plan.trace_id != trace_id
-            || !plan.decision.confidence.is_finite()
-            || !(0.0..=1.0).contains(&plan.decision.confidence)
-        {
+        if plan.trace_id != trace_id || !plan.confidences_are_valid() {
             return Err("Jev route trace is invalid.".into());
         }
         self.mutate(Some(task_id.into()), |state| {
@@ -4418,7 +4415,7 @@ impl Service {
                 .as_ref()
                 .and_then(|settings| settings.reasoning_effort.as_deref());
             let auto_eligible = agent.jev_routing == model::JevRoutingMode::SafeAuto
-                && plan.decision.confidence >= 0.5;
+                && plan.auto_route_eligible();
             let model_status = if !auto_eligible || !applied {
                 "recommended"
             } else if auto_eligible && task.provider == "acp" {
@@ -4469,6 +4466,10 @@ impl Service {
                     "kind": "route",
                     "outcome": outcome,
                     "confidence": plan.decision.confidence,
+                    "questionConfidences": &plan.decision.question_confidences,
+                    "autoRouteConfidence": plan.auto_route_policy.as_ref().map(|policy| policy.confidence),
+                    "autoRouteThreshold": plan.auto_route_policy.as_ref().map(|policy| policy.threshold),
+                    "autoRouteBasis": plan.auto_route_policy.as_ref().map(|policy| policy.basis),
                     "modelTier": plan.decision.model_tier,
                     "reasoningLevel": plan.decision.reasoning_level,
                     "taskKind": plan.decision.task_kind,

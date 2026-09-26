@@ -3416,7 +3416,9 @@
         routePlan = await bridge.planJevRoute(routeAgent.id, textToSend);
         const decision = routePlan.decision;
         const label = `${decision.model_tier.replace('_', ' ')} · ${decision.reasoning_level} reasoning`;
-        if (routeAgent.jevRouting === 'safe_auto' && decision.confidence >= 0.5) {
+        const modelRouteConfidence = routePlan.autoRoutePolicy?.confidence ?? decision.confidence;
+        const autoRouteEligible = routePlan.autoRoutePolicy?.eligible ?? decision.confidence >= 0.5;
+        if (routeAgent.jevRouting === 'safe_auto' && autoRouteEligible) {
           const tierModel = routeAgent.jevModelTiers?.[decision.model_tier]?.trim() || '';
           const mappedModel = tierModel || routeAgent.model;
           if (mappedModel) {
@@ -3438,9 +3440,9 @@
                   : `${decision.reasoning_level} reasoning is unavailable for this model; its default was kept.`;
               const modelNotice = tierModel
                 ? selected.id === routeAgent.model
-                  ? `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence). Its mapped model is already the default: ${selected.name}.`
-                  : `Jev selected ${selected.name} for its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence).`
-                : `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(decision.confidence * 100)}% confidence). No model is mapped to that tier, so the default ${selected.name} was kept.`;
+                  ? `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence). Its mapped model is already the default: ${selected.name}.`
+                  : `Jev selected ${selected.name} for its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence).`
+                : `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence). No model is mapped to that tier, so the default ${selected.name} was kept.`;
               routingNotice = `${modelNotice} ${reasoningNotice}`;
             } else {
               routingNotice = `Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default model was kept.${routeAgent.provider === 'acp' ? ' Its reasoning choice will be checked against the ACP session.' : ''}`;
@@ -3449,7 +3451,7 @@
             routingNotice = `Jev recommends ${label}; this harness has no mapped model for that tier. ${routeAgent.provider === 'acp' ? 'Its reasoning choice will be checked against the ACP session.' : 'The harness default was kept.'}`;
           }
         } else {
-          routingNotice = `Jev recommends ${label} (${Math.round(decision.confidence * 100)}% confidence). Your model selection was kept.`;
+          routingNotice = `Jev recommends ${label} (${Math.round(modelRouteConfidence * 100)}% route confidence). The harness default model was kept.`;
         }
       } catch (reason) {
         error = `Jev routing could not run: ${text(reason)}`;

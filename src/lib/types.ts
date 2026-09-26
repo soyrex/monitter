@@ -66,10 +66,13 @@ export interface JevRoutingDecision {
   reasoning_level: 'low' | 'medium' | 'high' | 'xhigh';
   execution_mode: 'answer' | 'inspect' | 'edit';
   permission_tier: 'read_only' | 'workspace_write' | 'shell_and_tests' | 'human_review_required';
-  confidence: number; rationale: string; escalation_conditions: string[];
+  confidence: number;
+  question_confidences?: { task_kind: number; model_tier: number; reasoning_level: number; execution_mode: number; permission_tier: number } | null;
+  rationale: string; escalation_conditions: string[];
 }
 export interface JevRoutePlan {
   traceId: string; agentId?: string | null; promptFingerprint: string; decision: JevRoutingDecision;
+  autoRoutePolicy?: { confidence: number; threshold: number; eligible: boolean; basis: 'model_and_reasoning' | 'task_kind' } | null;
   classifierEvidence: { provider: string; model: string; latencyMs: number; inputTokens: number | null; outputTokens: number | null; costUsd: number | null; };
 }
 export interface JevCommandCandidate { id: string; label: string; description?: string | null; }

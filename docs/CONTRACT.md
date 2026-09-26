@@ -168,8 +168,15 @@ No fake conversations, progress, token counts, host connections or model replies
   chat is created, the desktop reads the already persisted route trace by UUID, checks its agent
   identity against the created task, and appends one
   idempotent `jevDecision` card to that task. The card shows the selected or recommended model tier,
-  reasoning level, lowest routing confidence, application outcome, and available Jev cost/timing
+  reasoning level, model-route confidence, application outcome, and available Jev cost/timing
   metadata. It contains no raw prompt or credential. Existing chats are not automatically rerouted.
+  Live plans retain confidence for each typed judgment. Safe-auto eligibility uses the lower of
+  the model-tier and reasoning-level confidences with a 0.30 floor. When the deterministic
+  architecture/production rule raises the route to frontier/xhigh, eligibility instead uses the
+  task-kind confidence because those model/effort answers were overridden. The lowest of all five
+  judgments remains visible in expanded details but cannot veto an otherwise usable model
+  choice. Older traces without per-question confidence retain the prior 0.50 overall gate.
+  An explicit model choice still wins, and an unadvertised mapped model is never selected.
   For ACP safe-auto routing, a mapped model is first recorded as `modelStatus:"pending"`;
   the card reports `applied` only after the live session acknowledges the exact model option, or
   `already_current` when that option is active. Unsupported, rejected, and unconfirmed outcomes
