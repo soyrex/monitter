@@ -412,6 +412,7 @@ impl crate::Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Channel, ChannelMessage};
 
     fn message(id: &str, text: &str) -> Message {
         Message {
@@ -427,6 +428,59 @@ mod tests {
             response_metadata: None,
             stream_status: Some("streaming".into()),
         }
+    }
+
+    fn channel(id: &str, text: &str) -> Channel {
+        Channel {
+            id: id.into(),
+            name: "fixture channel".into(),
+            description: String::new(),
+            agent_ids: vec![],
+            messages: vec![ChannelMessage {
+                id: "channel-message".into(),
+                role: "assistant".into(),
+                agent_id: None,
+                text: text.into(),
+                created_at: 1,
+                task_id: None,
+            }]
+            .into(),
+            agent_conversation_enabled: false,
+            agent_conversation_turn_limit: 6,
+            agent_conversation_turns_used: 0,
+            agent_conversation_paused: false,
+        }
+    }
+
+    #[test]
+    fn retained_channel_journal_does_not_reuse_deleted_id_body() {
+        let mut before = crate::model::default_snapshot();
+        before.channels.push(channel("reused", "old channel body"));
+        let mut deleted = before.clone();
+        deleted.channels.clear();
+        let mut recreated = deleted.clone();
+        recreated
+            .channels
+            .push(channel("reused", "new channel body"));
+
+        let mut journal = Journal::default();
+        journal.record_snapshot(1, &before, &deleted);
+        journal.record_snapshot(2, &deleted, &recreated);
+        let (retained, _) = journal.retained(0, 2, &recreated);
+        assert!(!retained.iter().any(|id| id == "reused"));
+        let mut metadata = projection(&recreated, false);
+        for entry in &mut metadata.channels {
+            if retained.contains(&entry.id) {
+                entry.messages.clear();
+            }
+        }
+        assert_eq!(metadata.channels.len(), 1);
+        assert_eq!(metadata.channels[0].messages[0].text, "new channel body");
+
+        journal.record_snapshot(3, &recreated, &deleted);
+        let (retained_after_delete, _) = journal.retained(2, 3, &deleted);
+        assert!(retained_after_delete.is_empty());
+        assert!(projection(&deleted, false).channels.is_empty());
     }
 
     #[test]
@@ -558,20 +612,23 @@ mod tests {
         assert!(unchanged.snapshot.is_none() && unchanged.delta.is_none());
         service
             .mutate(None, |state| {
-                state.messages.retain(|row| row.id != "row-20");
+                state
+                    .messages
+                    .retain(|row| row.id != "row-20" && row.id != cursor);
                 Ok(())
             })
             .unwrap();
+        let reset = service.ui_delta(Some(&before_failed_mutation)).unwrap();
+        assert!(reset.snapshot.is_some());
+        assert!(reset.delta.is_none());
         assert!(service
-            .ui_delta(Some(&before_failed_mutation))
-            .unwrap()
-            .snapshot
-            .is_some());
-        assert_eq!(service.snapshot().unwrap().messages.len(), 149);
+            .task_messages(&task.id, Some(&cursor), Some(100))
+            .is_err());
+        assert_eq!(service.snapshot().unwrap().messages.len(), 148);
         drop(service);
         let reopened = crate::Service::open(None, directory.clone()).unwrap();
         let restored = reopened.snapshot().unwrap();
-        assert_eq!(restored.messages.len(), 149);
+        assert_eq!(restored.messages.len(), 148);
         assert_eq!(
             restored
                 .messages

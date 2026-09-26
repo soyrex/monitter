@@ -1375,6 +1375,80 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_id_rename_rolls_back_and_random_history_edits_match_durable_order() {
+        let (directory, path) = temp_path("history-parity");
+        let database = Database::create(&path).unwrap();
+        let mut committed = default_snapshot();
+        committed.events = vec![event("seed-a"), event("seed-b")].into();
+        database.replace_all(state(&committed), &[], None).unwrap();
+
+        let mut duplicate = committed.clone();
+        duplicate
+            .events
+            .update_by_id("seed-b", |row| Arc::make_mut(row).id = "seed-a".into())
+            .unwrap();
+        assert!(database
+            .apply_update(state(&committed), state(&duplicate), &[], &[], None)
+            .is_err());
+        assert_eq!(database.read_snapshot().unwrap().0, committed);
+        assert_eq!(committed.events[1].id, "seed-b");
+
+        let mut random = 0x51_7a_5eed_u64;
+        let mut unique = 0_u64;
+        for step in 0..120 {
+            let before = committed.clone();
+            let immutable_before = before.clone();
+            let mut candidate = before.clone();
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            match (random >> 32) % 6 {
+                0 | 1 => {
+                    unique += 1;
+                    candidate.events.push(event(&format!("append-{unique}")));
+                }
+                2 if !candidate.events.is_empty() => {
+                    let index = random as usize % candidate.events.len();
+                    let mut row = candidate.events.get_mut_tracked(index).unwrap();
+                    Arc::make_mut(&mut *row).detail = Arc::from(format!("updated-at-{step}"));
+                }
+                3 if !candidate.events.is_empty() => {
+                    let index = random as usize % candidate.events.len();
+                    let mut row = candidate.events.get_mut_tracked(index).unwrap();
+                    Arc::make_mut(&mut *row).id = format!("renamed-{step}");
+                }
+                4 if !candidate.events.is_empty() => {
+                    let new_len = random as usize % (candidate.events.len() + 1);
+                    candidate.events.truncate(new_len);
+                }
+                5 if candidate.events.len() > 1 => {
+                    let from = random as usize % candidate.events.len();
+                    let mut to = (random.rotate_left(13) as usize) % candidate.events.len();
+                    let row = candidate.events.remove(from);
+                    if to > candidate.events.len() {
+                        to = candidate.events.len();
+                    }
+                    candidate.events.insert(to, row);
+                }
+                _ => {}
+            }
+            database
+                .apply_update(state(&before), state(&candidate), &[], &[], None)
+                .unwrap_or_else(|error| panic!("durability mismatch at step {step}: {error}"));
+            assert_eq!(
+                database.read_snapshot().unwrap().0,
+                candidate,
+                "step {step}"
+            );
+            assert_eq!(
+                before, immutable_before,
+                "candidate mutation changed prior snapshot at step {step}"
+            );
+            committed = candidate;
+        }
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn usage_removal_and_reorder_are_durable() {
         let (directory, path) = temp_path("usage");
         let database = Database::create(&path).unwrap();

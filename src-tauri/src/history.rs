@@ -305,6 +305,7 @@ impl<T: HistoryRecord> History<T> {
         }
         let old_id = self.rows[index].id().to_owned();
         let old_scope = self.rows[index].scope_id().map(str::to_owned);
+        let indexes_were_clean = !self.indexes_dirty.load(Ordering::Acquire);
         self.indexes_dirty.store(true, Ordering::Release);
         self.record(HistoryChange::Update { index });
         Some(HistoryMutGuard {
@@ -312,6 +313,7 @@ impl<T: HistoryRecord> History<T> {
             index,
             old_id,
             old_scope,
+            indexes_were_clean,
         })
     }
 
@@ -516,6 +518,7 @@ pub struct HistoryMutGuard<'a, T: HistoryRecord> {
     index: usize,
     old_id: String,
     old_scope: Option<String>,
+    indexes_were_clean: bool,
 }
 
 impl<T: HistoryRecord> Deref for HistoryMutGuard<'_, T> {
@@ -538,28 +541,24 @@ impl<T: HistoryRecord> Drop for HistoryMutGuard<'_, T> {
     fn drop(&mut self) {
         let new_id = self.history.rows[self.index].id().to_owned();
         let new_scope = self.history.rows[self.index].scope_id().map(str::to_owned);
-        if self.old_scope == new_scope {
-            // Restore the clean state before the local ID-index edit. If this
-            // guard was forgotten, Drop never runs and lazy repair sees dirty.
-            self.history.indexes_dirty.store(false, Ordering::Release);
-        }
-        if self.old_id != new_id {
-            self.history.remove_index(&self.old_id, self.index);
-            self.history.insert_index(&new_id, self.index);
-        }
-        if self.old_scope != new_scope {
-            if let Some(scope) = &self.old_scope {
-                self.history.remove_scope(scope, self.index);
-            }
-            if let Some(scope) = &new_scope {
-                self.history.insert_scope(scope, self.index);
-            }
-        }
         if self.old_scope != new_scope {
             self.history.changes.clear();
             self.history.full_change = true;
             // A scope move is rare and may invalidate a long ordered scope
-            // index. Keep the row delta safe, but rebuild indexes on demand.
+            // index, so leave indexes dirty for a full rebuild on demand.
+            return;
+        }
+        if !self.indexes_were_clean {
+            // An earlier raw mutable borrow may have left unrelated rows
+            // unindexed. This guard cannot clear that dirty state safely.
+            return;
+        }
+        // Restore the clean state before locally repairing a changed ID. If
+        // this guard was forgotten, Drop never runs and lazy repair sees dirty.
+        self.history.indexes_dirty.store(false, Ordering::Release);
+        if self.old_id != new_id {
+            self.history.remove_index(&self.old_id, self.index);
+            self.history.insert_index(&new_id, self.index);
         }
     }
 }
@@ -904,6 +903,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 1]
         );
+    }
+
+    #[test]
+    fn tracked_guard_does_not_clear_dirty_indexes_from_prior_raw_mutation() {
+        let mut history = History::from_vec(vec![row(1, 1, 0), row(2, 1, 0)]);
+        history.get_mut(0).unwrap().id = "raw-renamed".into();
+        history.get_mut_tracked(1).unwrap().value += 1;
+
+        assert_eq!(history.index_of_id("id-1").unwrap(), None);
+        assert_eq!(history.index_of_id("raw-renamed").unwrap(), Some(0));
+        assert_eq!(history.index_of_id("id-2").unwrap(), Some(1));
+        assert_indexes_match(&history, &rows(&history));
     }
 
     #[test]

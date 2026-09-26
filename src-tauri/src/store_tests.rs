@@ -216,6 +216,50 @@ fn usage_is_staged_deduplicated_atomic_and_removable() {
 }
 
 #[test]
+fn usage_history_baseline_rebases_after_each_durable_commit() {
+    use crate::history::{HistoryChange, HistoryDelta};
+
+    let path = directory();
+    let (store, snapshot, hosts, attachments) = Store::open(path.clone()).unwrap();
+    store.stage_usage(usage("first", "delta", 10)).unwrap();
+    {
+        let state = store.usage.lock().unwrap();
+        assert!(matches!(
+            state.staged.delta_since(&state.committed),
+            HistoryDelta::Incremental { changes, .. }
+                if changes == vec![HistoryChange::Append { index: 0 }]
+        ));
+    }
+    store.save(&snapshot, &hosts, &attachments).unwrap();
+    {
+        let state = store.usage.lock().unwrap();
+        assert!(matches!(
+            state.staged.delta_since(&state.committed),
+            HistoryDelta::Incremental { changes, .. } if changes.is_empty()
+        ));
+    }
+
+    store.stage_usage(usage("second", "delta", 5)).unwrap();
+    {
+        let state = store.usage.lock().unwrap();
+        assert!(matches!(
+            state.staged.delta_since(&state.committed),
+            HistoryDelta::Incremental { changes, .. }
+                if changes == vec![HistoryChange::Append { index: 1 }]
+        ));
+    }
+    store.save(&snapshot, &hosts, &attachments).unwrap();
+    drop(store);
+    let (store, _, _, _) = Store::open(path.clone()).unwrap();
+    assert_eq!(
+        store.usage_overview().unwrap().recent_runs[0].tokens.total,
+        Some(15)
+    );
+    drop(store);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn rejected_transaction_preserves_state_and_requires_reopen() {
     let path = directory();
     let (store, before, hosts, attachments) = Store::open(path.clone()).unwrap();
