@@ -1,13 +1,14 @@
 import { invokeCommand } from './command-invoke';
 import { COMMAND_CONTRACT_PROTOCOL_VERSION, type CommandArgs, type CommandName, type CommandResults } from './generated-command-contract';
 import { isLanBrowser, lanInvoke } from './lan';
-import { applyUiDelta, mergeTaskMessagesPage } from './ui-sync';
+import { applyUiDelta, mergeChannelMessagesPage, mergeTaskMessagesPage } from './ui-sync';
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Agent,
   AcpCandidate,
   AcpLaunch,
   AcpProbeResult,
+  ChannelMessagesPage,
   Goal,
   Channel,
   CreateTaskInput,
@@ -70,6 +71,7 @@ export interface MonitterBridge {
   getSnapshot(): Promise<Snapshot>;
   /** Optional for legacy/test bridges; native and LAN bridges provide paging. */
   getTaskMessages?(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage>;
+  getChannelMessages?(channelId: string, beforeId?: string, limit?: number): Promise<ChannelMessagesPage>;
   planJevRoute(agentId: string, prompt: string): Promise<JevRoutePlan>;
   recordJevRoute(taskId: string, traceId: string): Promise<void>;
   planJevCommand(query: string, candidates: JevCommandCandidate[]): Promise<JevCommandPlan>;
@@ -167,6 +169,7 @@ export interface TestBridge {
   invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
   getUiDelta?(revision?: string): Promise<UiDeltaResponse>;
   getTaskMessages?(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage>;
+  getChannelMessages?(channelId: string, beforeId?: string, limit?: number): Promise<ChannelMessagesPage>;
   listen(event: string, handler: () => void): Promise<UnlistenFn>;
 }
 
@@ -220,6 +223,10 @@ function invokeUiDelta(revision?: string): Promise<UiDeltaResponse> {
 
 function invokeTaskMessages(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage> {
   return invoke('get_task_messages', { taskId, ...(beforeId === undefined ? {} : { beforeId }), ...(limit === undefined ? {} : { limit }) });
+}
+
+function invokeChannelMessages(channelId: string, beforeId?: string, limit?: number): Promise<ChannelMessagesPage> {
+  return invoke('get_channel_messages', { channelId, ...(beforeId === undefined ? {} : { beforeId }), ...(limit === undefined ? {} : { limit }) });
 }
 
 function rememberSnapshot(snapshot: Snapshot, revision?: string) {
@@ -321,6 +328,23 @@ async function getTaskMessages(taskId: string, beforeId?: string, limit?: number
   return page;
 }
 
+async function getChannelMessages(channelId: string, beforeId?: string, limit?: number): Promise<ChannelMessagesPage> {
+  const commands = await getCommandCapabilities();
+  if (!commands?.has('get_channel_messages')) throw new Error('Earlier channel history is unavailable on this desktop version.');
+  if (!cachedSnapshot || !cachedRevision) await getCachedSnapshot();
+  let page = await invokeChannelMessages(channelId, beforeId, limit);
+  if (page.channelId !== channelId) throw new Error('Monitter returned channel history for a different channel.');
+  if (page.revision !== cachedRevision) {
+    await getCachedSnapshot();
+    page = await invokeChannelMessages(channelId, beforeId, limit);
+    if (page.channelId !== channelId) throw new Error('Monitter returned channel history for a different channel.');
+    if (page.revision !== cachedRevision) throw new Error('Channel history changed while loading. Please try again.');
+  }
+  if (cachedSnapshot) cachedSnapshot = mergeChannelMessagesPage(cachedSnapshot, page);
+  scheduleSnapshotRefresh();
+  return page;
+}
+
 function scheduleSnapshotRefresh() {
   // Coalesce bursts without continually pushing the refresh out forever.
   if (refreshTimer) return;
@@ -372,6 +396,7 @@ const nativeBridge: MonitterBridge = {
     (Boolean((window as any).__TAURI_INTERNALS__) || isLanBrowser()),
   getSnapshot: () => getCachedSnapshot(),
   getTaskMessages,
+  getChannelMessages,
   planJevRoute: (agentId, prompt) => isLanBrowser() ? desktopOnly() : invoke('plan_jev_route', { agentId, prompt }),
   recordJevRoute: (taskId, traceId) => isLanBrowser() ? desktopOnly() : invoke('record_jev_route', { taskId, traceId }),
   planJevCommand: (query, candidates) => isLanBrowser() ? desktopOnly() : invoke('plan_jev_command', { query, candidates }),
@@ -625,6 +650,20 @@ export function getBridge(): MonitterBridge {
           if (cache?.revision !== page.revision) throw new Error('Test bridge history changed while loading.');
         }
         if (cache?.snapshot && cache.revision === page.revision) cache.snapshot = mergeTaskMessagesPage(cache.snapshot, page);
+        return page;
+      } } : {}),
+      ...(test.getChannelMessages ? { getChannelMessages: async (channelId: string, beforeId?: string, limit?: number) => {
+        let page = await test.getChannelMessages!(channelId, beforeId, limit);
+        if (page.channelId !== channelId) throw new Error('Test bridge returned channel history for a different channel.');
+        let cache = testSnapshotCaches.get(test);
+        if (cache?.snapshot && cache.revision !== page.revision) {
+          await readTestSnapshot(test);
+          page = await test.getChannelMessages!(channelId, beforeId, limit);
+          if (page.channelId !== channelId) throw new Error('Test bridge returned channel history for a different channel.');
+          cache = testSnapshotCaches.get(test);
+          if (cache?.revision !== page.revision) throw new Error('Test bridge channel history changed while loading.');
+        }
+        if (cache?.snapshot && cache.revision === page.revision) cache.snapshot = mergeChannelMessagesPage(cache.snapshot, page);
         return page;
       } } : {}),
       getTaskEvents: (taskId, before, limit) => test.invoke('get_task_events', { taskId, ...(before === undefined ? {} : { before }), ...(limit === undefined ? {} : { limit }) }) as Promise<TaskEventsPage>,

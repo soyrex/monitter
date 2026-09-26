@@ -48,7 +48,7 @@
     return distanceFromLatest() <= 1;
   }
 
-  function detachFromLatest() {
+  export function detachFromLatest() {
     if (!viewport || !active) return;
     jumpRequest += 1;
     pendingLatestRequest = null;

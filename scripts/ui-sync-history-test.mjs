@@ -34,20 +34,24 @@ try {
   await context.addInitScript(() => {
     const taskId = '11111111-1111-4111-8111-111111111111';
     const messages = Array.from({ length: 100 }, (_, index) => ({ id: `m${String(index + 1).padStart(3, '0')}`, taskId, role: index % 2 ? 'assistant' : 'user', text: `message-${index + 1}`, createdAt: index + 1, attachments: [] }));
-    let revision = 'rev-1'; let delta = null; let staleGap = false; let delayPage = false; let releasePage; let pendingPageResolve; let removedChannel = false; let removedTranscript = false;
+    const channelMessages = Array.from({ length: 100 }, (_, index) => ({ id: `c${String(index + 1).padStart(3, '0')}`, role: index % 2 ? 'assistant' : 'user', agentId: null, taskId: null, text: `channel-${index + 1}`, createdAt: index + 1 }));
+    const channelSeed = { id: 'channel-history', role: 'user', agentId: null, taskId: taskId, text: 'keep channel message', createdAt: 0 };
+    let revision = 'rev-1'; let delta = null; let staleGap = false; let delayPage = false; let releasePage; let pendingPageResolve; let delayChannelPage = false; let releaseChannelPage; let removedChannel = false; let removedTranscript = false;
     const pageGate = new Promise(resolve => { releasePage = resolve; });
     const emptySnapshot = () => ({ hosts: [], agents: [], tasks: [], messages: [], events: [], channels: [], projects: [], collaborations: [], queuedMessages: [], approvalRequests: [], approvalRules: [], settings: { accent: '#3978d4', theme: 'light', interfaceScale: 100, showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard' },
       subagentTranscripts: { retained: [{ id: 'transcript-old', taskId, role: 'assistant', text: 'old retained transcript', createdAt: 1 }], removed: [{ id: 'transcript-remove', taskId, role: 'assistant', text: 'must disappear', createdAt: 1 }] },
-      channels: [{ id: 'kept-channel', name: 'old name', description: '', agentIds: [], messages: [{ id: 'channel-history', role: 'user', agentId: null, text: 'keep channel message', createdAt: 1, taskId }] }, { id: 'removed-channel', name: 'remove me', description: '', agentIds: [], messages: [] }] });
+      channels: [{ id: 'kept-channel', name: 'old name', description: '', agentIds: [], messages: [channelSeed, ...channelMessages].slice(-64) }, { id: 'other-channel', name: 'other channel', description: '', agentIds: [], messages: Array.from({ length: 80 }, (_, index) => ({ id: `d${String(index + 1).padStart(3, '0')}`, role: 'assistant', agentId: null, taskId: null, text: `other-${index + 1}`, createdAt: index + 1 })).slice(-64) }, { id: 'removed-channel', name: 'remove me', description: '', agentIds: [], messages: [] }] });
     const currentSnapshot = () => ({ ...emptySnapshot(), messages: messages.slice(-64),
       channels: emptySnapshot().channels.filter(channel => !(removedChannel && channel.id === 'removed-channel')),
       subagentTranscripts: removedTranscript ? { retained: emptySnapshot().subagentTranscripts.retained } : emptySnapshot().subagentTranscripts });
-    const metadata = () => ({ ...currentSnapshot(), messages: [], channels: [{ ...emptySnapshot().channels[0], name: 'fresh name', messages: [] }], subagentTranscripts: {} });
-    const state = { snapshot: currentSnapshot(), pageCalls: 0, resetReads: 0 };
+    const metadata = () => ({ ...currentSnapshot(), messages: [], channels: emptySnapshot().channels.filter(channel => !(removedChannel && channel.id === 'removed-channel')).map(channel => ({ ...channel, name: channel.id === 'kept-channel' ? 'fresh name' : channel.name, messages: [] })), subagentTranscripts: {} });
+    const state = { snapshot: currentSnapshot(), pageCalls: 0, channelPageCalls: 0, resetReads: 0 };
     window.__syncServer = {
       state,
       delayNextPage() { delayPage = true; },
       releasePage() { releasePage?.(); },
+      delayNextChannelPage() { delayChannelPage = true; },
+      releaseChannelPage() { releaseChannelPage?.(); },
       pushDelta() {
         const fromRevision = revision;
         revision = `rev-${Number(revision.split('-')[1]) + 1}`;
@@ -55,7 +59,7 @@ try {
         messages[messages.findIndex(message => message.id === 'm100')] = updated;
         messages.splice(messages.findIndex(message => message.id === 'm099'), 1);
         removedChannel = true; removedTranscript = true;
-        delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [updated], removedMessageIds: ['m099'], retainedChannelIds: ['kept-channel'], retainedSubagentTranscriptIds: ['retained'] } };
+        delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [updated], removedMessageIds: ['m099'], retainedChannelIds: ['kept-channel', 'other-channel'], retainedSubagentTranscriptIds: ['retained'] } };
         state.snapshot = currentSnapshot();
       },
       pushArchiveDelta() {
@@ -64,7 +68,16 @@ try {
         const updated = { ...messages.find(message => message.id === 'm022'), text: 'message-22-updated-live' };
         messages[messages.findIndex(message => message.id === 'm022')] = updated;
         messages.splice(messages.findIndex(message => message.id === 'm021'), 1);
-        delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [updated], removedMessageIds: ['m021'], retainedChannelIds: ['kept-channel'], retainedSubagentTranscriptIds: ['retained'] } };
+        delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [updated], removedMessageIds: ['m021'], retainedChannelIds: ['kept-channel', 'other-channel'], retainedSubagentTranscriptIds: ['retained'] } };
+        state.snapshot = currentSnapshot();
+      },
+      pushChannelDelta() {
+        const fromRevision = revision;
+        revision = `rev-${Number(revision.split('-')[1]) + 1}`;
+        const updated = { ...channelMessages.find(message => message.id === 'c022'), text: 'channel-22-updated-live' };
+        channelMessages[channelMessages.findIndex(message => message.id === 'c022')] = updated;
+        channelMessages.splice(channelMessages.findIndex(message => message.id === 'c021'), 1);
+        delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [], removedMessageIds: [], retainedChannelIds: ['other-channel'], channelMessageChanges: [{ channelId: 'kept-channel', messages: [updated], removedMessageIds: ['c021'], reset: false }], retainedSubagentTranscriptIds: ['retained'] } };
         state.snapshot = currentSnapshot();
       },
       forceGap() { staleGap = true; revision = `rev-${Number(revision.split('-')[1]) + 1}`; state.snapshot = currentSnapshot(); },
@@ -89,6 +102,18 @@ try {
         const pageMessages = messages.slice(start, safeEnd);
         if (pendingPageResolve) { pendingPageResolve = false; }
         return { revision: pageRevision, messages: pageMessages, nextBeforeId: start > 0 ? pageMessages[0]?.id ?? null : null };
+      },
+      async getChannelMessages(requestChannelId, beforeId, limit = 16) {
+        state.channelPageCalls += 1;
+        const pageRevision = revision;
+        if (!['kept-channel', 'other-channel'].includes(requestChannelId)) throw Error('wrong channel');
+        if (delayChannelPage) { delayChannelPage = false; await new Promise(resolve => { releaseChannelPage = resolve; }); }
+        const all = requestChannelId === 'kept-channel' ? [channelSeed, ...channelMessages] : Array.from({ length: 80 }, (_, index) => ({ id: `d${String(index + 1).padStart(3, '0')}`, role: 'assistant', agentId: null, taskId: null, text: `other-${index + 1}`, createdAt: index + 1 }));
+        const end = beforeId ? all.findIndex(message => message.id === beforeId) : all.length;
+        if (end < 0) throw Error('unknown channel cursor');
+        const start = Math.max(0, end - Math.min(100, Math.max(1, limit)));
+        const pageMessages = all.slice(start, end);
+        return { channelId: requestChannelId, revision: pageRevision, messages: pageMessages, nextBeforeId: start > 0 ? pageMessages[0]?.id ?? null : null };
       },
       async listen() { return () => {}; },
     };
@@ -150,7 +175,7 @@ try {
   await expect(page.locator('[data-message-id="m099"]')).toHaveCount(0);
   const retained = await page.evaluate(() => window.__syncQA.state().snapshot);
   assert.equal(retained.channels[0].name, 'fresh name');
-  assert.deepEqual(retained.channels[0].messages.map(message => message.id), ['channel-history']);
+  assert.deepEqual(retained.channels[0].messages.map(message => message.id), Array.from({ length: 64 }, (_, index) => `c${String(index + 37).padStart(3, '0')}`));
   assert.deepEqual(Object.keys(retained.subagentTranscripts).sort(), ['retained']);
   assert.equal(retained.subagentTranscripts.retained[0].id, 'transcript-old');
 
@@ -158,8 +183,64 @@ try {
   const reset = await page.evaluate(() => ({ state: window.__syncQA.state(), resetReads: window.__syncServer.state.resetReads }));
   assert.ok(reset.resetReads >= 2, 'stale fromRevision forces an unbased full snapshot reset');
   assert.equal(reset.state.snapshot.channels.some(channel => channel.id === 'removed-channel'), false, 'reset removes deleted channels');
+  assert.deepEqual(reset.state.snapshot.channels[0].messages.map(message => message.id), Array.from({ length: 64 }, (_, index) => `c${String(index + 37).padStart(3, '0')}`), 'initial/reset channel snapshot remains bounded to its newest 64 messages');
+
+  await page.evaluate(() => window.__syncQA.showChannel());
+  await expect(page.locator('[data-channel-message-id="c100"]')).toBeVisible();
+  const channelViewport = page.locator('.messages');
+  await page.waitForFunction(() => {
+    const node = document.querySelector('.messages');
+    return !!node && node.scrollHeight > node.clientHeight && node.scrollHeight - node.clientHeight - node.scrollTop <= 3;
+  });
+  await page.evaluate(() => window.__syncServer.delayNextChannelPage());
+  await page.getByRole('button', { name: 'Load earlier channel messages' }).click();
+  await expect.poll(() => page.evaluate(() => window.__syncServer.state.channelPageCalls)).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__syncQA.channelHeld())).toBe(true);
+  const channelAnchor = await channelViewport.evaluate(node => {
+    const top = node.getBoundingClientRect().top;
+    const row = [...node.querySelectorAll('[data-item-key]')].find(item => item.getBoundingClientRect().bottom > top + 10);
+    return row && { key: row.getAttribute('data-item-key'), offset: row.getBoundingClientRect().top - top };
+  });
+  assert.ok(channelAnchor, 'channel reader starts with a visible stable row');
+  await page.evaluate(value => { window.__syncChannelAnchorKey = value.key; }, channelAnchor);
+  await page.evaluate(() => window.__syncServer.releaseChannelPage());
+  const channelHistoryButton = page.getByRole('button', { name: 'Load earlier channel messages' });
+  await expect(channelHistoryButton).toHaveCount(0);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const restoredChannelAnchorOffset = await channelViewport.evaluate(node => {
+    const row = node.querySelector(`[data-item-key="${window.__syncChannelAnchorKey}"]`);
+    return row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : null;
+  });
+  assert.ok(restoredChannelAnchorOffset !== null, 'channel prepend keeps the captured anchor mounted');
+  assert.ok(Math.abs(restoredChannelAnchorOffset - channelAnchor.offset) < 4, 'channel prepend preserves the detached reader anchor relative to the scroll viewport');
+  await channelViewport.evaluate(node => { node.scrollTop = 850; node.dispatchEvent(new Event('scroll')); });
+  await expect(page.locator('[data-channel-message-id="c021"] [data-message-text]')).toHaveText('channel-21');
+  await page.evaluate(() => window.__syncServer.pushChannelDelta());
+  await page.evaluate(() => window.__syncQA.refresh());
+  await expect(page.locator('[data-channel-message-id="c021"] [data-message-text]')).toHaveText('channel-21');
+  await expect(page.locator('[data-channel-message-id="c022"] [data-message-text]')).toHaveText('channel-22');
+  const changedChannelCache = await page.evaluate(() => window.__syncQA.state().snapshot.channels.find(channel => channel.id === 'kept-channel').messages);
+  assert.equal(changedChannelCache.some(message => message.id === 'c021'), false, 'channel delta removes a page-loaded history record from cache');
+  assert.equal(changedChannelCache.find(message => message.id === 'c022')?.text, 'channel-22-updated-live', 'channel delta updates a page-loaded history record in cache');
+  await page.getByRole('button', { name: 'Jump to latest message' }).click();
+  await expect.poll(() => page.evaluate(() => window.__syncQA.channelHeld())).toBe(false);
+  const releasedChannelMessages = await page.evaluate(() => window.__syncQA.state().snapshot.channels.find(channel => channel.id === 'kept-channel').messages);
+  assert.equal(releasedChannelMessages.some(message => message.id === 'c021'), false, 'channel reader release does not resurrect deleted page history');
+  assert.equal(releasedChannelMessages.find(message => message.id === 'c022')?.text, 'channel-22-updated-live', 'channel reader release shows updated page history');
+
+  await page.evaluate(() => window.__syncQA.switchChannel('other-channel'));
+  await expect(page.locator('[data-channel-message-id="d080"]')).toBeVisible();
+  const otherChannelPager = page.getByRole('button', { name: 'Load earlier channel messages' });
+  await expect(otherChannelPager).toBeVisible();
+  await page.evaluate(() => window.__syncServer.delayNextChannelPage());
+  await otherChannelPager.click();
+  await expect.poll(() => page.evaluate(() => window.__syncServer.state.channelPageCalls)).toBe(2);
+  await page.evaluate(() => window.__syncQA.switchChannel('kept-channel'));
+  await page.evaluate(() => window.__syncServer.releaseChannelPage());
+  assert.equal(await page.evaluate(() => window.__syncQA.currentChannel()), 'kept-channel');
+  await expect(page.locator('[data-channel-message-id^="d"]')).toHaveCount(0);
   assert.deepEqual(errors, [], `browser errors: ${errors.join('; ')}`);
-  console.log('UI sync browser fixture: delta/page race, exact revision recovery, retained histories, frozen reader, and anchored pagination passed.');
+  console.log('UI sync browser fixture: task/channel delta paging, bounded channel reset, reader freeze/release, and anchored history passed.');
   await context.close();
 } finally {
   await browser.close();

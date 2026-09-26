@@ -125,6 +125,7 @@
     JsonValue,
   } from "$lib/types";
   import { getBridge } from "$lib/bridge";
+  import ChannelTranscriptPane from '$lib/components/ChannelTranscriptPane.svelte';
   import { contrastForeground } from '$lib/accent-contrast';
   import { activeOperatorShare, formatOperatorMessage, splitOperatorMessage, sharedTaskIds } from '$lib/operator-sharing';
   import {
@@ -2090,6 +2091,7 @@
     () => channelTranscriptFingerprint,
   );
   const displayedChannelTranscript = $derived(channelTranscriptBuffer.value());
+  function handleChannelFollowChange(following: boolean) { channelTranscriptBuffer.setFollowing(following); }
   const localHost = $derived(indexes?.localHost ?? null);
   const defaultAgent = $derived(indexes?.defaultAgent ?? null);
   const text = (reason: unknown) =>
@@ -5090,18 +5092,22 @@
           </div>
         {/if}
         <section class="conversation">
-        {#key activeChannel.id}<MessagePane active={embedded ? active : activePaneId === 'main'} pendingUpdates={channelTranscriptBuffer.pendingUpdates()} onfollowchange={channelTranscriptBuffer.setFollowing} resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
-          <TranscriptVirtualList
-              items={displayedChannelTranscript.messages}
-              getKey={(message) => message.id}
-              active={embedded ? active : activePaneId === 'main'}>
-              {#snippet children(message, index)}
-              {#if index === 0 || chatDay(message.createdAt) !== chatDay(displayedChannelTranscript.messages[index - 1].createdAt)}<ChatDateDivider at={message.createdAt}/>{/if}
+        {#key activeChannel.id}<ChannelTranscriptPane
+          channelId={activeChannel.id}
+          messages={displayedChannelTranscript.messages}
+          getChannelMessages={projectBoardId(activeChannel.id) ? undefined : bridge.getChannelMessages}
+          active={embedded ? active : activePaneId === 'main'}
+          pendingUpdates={channelTranscriptBuffer.pendingUpdates()}
+          onfollowchange={handleChannelFollowChange}
+          resetKey={`channel:${activeChannel.id}:${scrollRevision}`}>
+              {#snippet children(message, index, previous)}
+              {#if !previous || chatDay(message.createdAt) !== chatDay(previous.createdAt)}<ChatDateDivider at={message.createdAt}/>{/if}
               <article
                 class:user={message.role === "user"}
                 class:tinted={message.role === "user" && displayedChannelTranscript.tintUserMessages}
                 class="message"
-                  data-live-entry={message.role==='assistant'}
+                data-channel-message-id={message.id}
+                data-live-entry={message.role==='assistant'}
               >
                 <MessageMeta name={message.role === "user" ? "You" : (message.authorName ?? displayedChannelTranscript.agents.find(a => a.id === message.agentId)?.name ?? "Agent")} createdAt={message.createdAt}>
                   {#snippet avatar()}{@render messageAvatar(displayedChannelTranscript.agents.find(agent=>agent.id===message.agentId))}{/snippet}
@@ -5126,8 +5132,7 @@
                   <p>{projectBoardId(activeChannel.id) ? 'Leave a coordination note. Project agents see recent notes on their next turn and can check for updates while working.' : 'Pick the agents who should receive your message. Each gets an explicit linked task.'}</p>
                 </div>{/if}
               {/snippet}
-            </TranscriptVirtualList>
-        </MessagePane>{/key}
+        </ChannelTranscriptPane>{/key}
         {#if channelTranscriptBuffer.held() && channelLiveErrors.length}<div class="live-channel-status" aria-live="polite">
           {#each channelLiveErrors as task}<p class="live-transcript-notice" role="status">{(events.filter(event=>event.taskId===task.id&&event.kind==='error').at(-1)?.detail || 'A channel task stopped with an error.').slice(0, 500)}</p>{/each}
         </div>{/if}
