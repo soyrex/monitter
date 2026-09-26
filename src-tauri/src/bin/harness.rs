@@ -1,11 +1,13 @@
 use monitter_lib::model_router::{
-    evaluate, AgentProvider, CodexCliProvider, JevClassifier, LiveJevClassifier, MockJevClassifier,
-    MockProvider, ModelTier, ReasoningLevel, RouterRun, UserOverrides,
+    bundled_evaluation_corpus, bundled_evaluation_outcomes, evaluation_report,
+    load_evaluation_corpus, load_evaluation_outcomes, AgentProvider, CodexCliProvider,
+    JevClassifier, LiveJevClassifier, MockJevClassifier, MockProvider, ModelTier, ReasoningLevel,
+    RouterRun, UserOverrides,
 };
 use std::{env, path::PathBuf, process};
 
 fn usage() -> &'static str {
-    "Usage:\n  harness run <prompt> [--workspace <path>] [--provider mock|codex] [--classifier mock|jev] [--model <id>] [--reasoning-level low|medium|high|xhigh] [--tier fast|balanced|strong|frontier] [--max-steps <n>] [--user-correction <note>]\n  harness eval\n\n--classifier jev reads Monitter's Keychain-backed TYPESAFE_API_KEY first (with JEV_API_KEY as a legacy alias), then TYPESAFE_API_KEY or JEV_API_KEY from the environment. The codex provider uses the local authenticated Codex CLI in an isolated worktree and never bypasses sandbox or approvals."
+    "Usage:\n  harness run <prompt> [--workspace <path>] [--provider mock|codex] [--classifier mock|jev] [--model <id>] [--reasoning-level low|medium|high|xhigh] [--tier fast|balanced|strong|frontier] [--max-steps <n>] [--user-correction <note>]\n  harness eval [--corpus <json>] [--outcomes <json>]\n\nEvaluation is offline. Without --outcomes it uses the checked-in synthetic replay fixture. Imported files must identify provenance and pass schema/bounds validation. --classifier jev reads Monitter's Keychain-backed TYPESAFE_API_KEY first (with JEV_API_KEY as a legacy alias), then TYPESAFE_API_KEY or JEV_API_KEY from the environment. The codex provider uses the local authenticated Codex CLI in an isolated worktree and never bypasses sandbox or approvals."
 }
 
 fn main() {
@@ -14,10 +16,33 @@ fn main() {
         fail(usage());
     };
     if command == "eval" {
+        let mut corpus = None;
+        let mut outcomes = None;
+        while let Some(flag) = args.next() {
+            let value = args
+                .next()
+                .unwrap_or_else(|| fail(&format!("Missing value for {flag}\n\n{}", usage())));
+            match flag.as_str() {
+                "--corpus" => corpus = Some(PathBuf::from(value)),
+                "--outcomes" => outcomes = Some(PathBuf::from(value)),
+                _ => fail(&format!("Unknown option: {flag}\n\n{}", usage())),
+            }
+        }
+        let using_bundled_corpus = corpus.is_none();
+        let corpus = corpus
+            .map(|path| load_evaluation_corpus(&path))
+            .unwrap_or_else(bundled_evaluation_corpus)
+            .unwrap_or_else(|error| fail(&error));
+        let runs = match outcomes {
+            Some(path) => load_evaluation_outcomes(&path, &corpus),
+            None if using_bundled_corpus => bundled_evaluation_outcomes(&corpus),
+            None => Ok(vec![]),
+        }
+        .unwrap_or_else(|error| fail(&error));
+        let report = evaluation_report(&corpus, &runs).unwrap_or_else(|error| fail(&error));
         println!(
             "{}",
-            serde_json::to_string_pretty(&evaluate(&MockJevClassifier))
-                .expect("serializable evaluation")
+            serde_json::to_string_pretty(&report).expect("serializable evaluation")
         );
         return;
     }

@@ -1552,6 +1552,7 @@ mod tests {
                     ClassifierEvidence {
                         provider: "TypeSafe".into(),
                         model: "jev-test".into(),
+                        model_version: None,
                         latency_ms: 900,
                         input_tokens: Some(100),
                         output_tokens: Some(10),

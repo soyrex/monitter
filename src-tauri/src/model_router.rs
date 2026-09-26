@@ -15,8 +15,19 @@ use std::{
 };
 use uuid::Uuid;
 
+mod evaluation;
+pub use evaluation::{
+    bundled_corpus as bundled_evaluation_corpus, bundled_outcomes as bundled_evaluation_outcomes,
+    load_corpus as load_evaluation_corpus, load_outcomes as load_evaluation_outcomes,
+    report as evaluation_report, EvaluationReport, LabeledCase, LabeledCorpus, MetricSummary,
+    Provenance as EvaluationProvenance, RunOutcome as EvaluationRunOutcome, TestEvidence,
+    EVALUATION_SCHEMA_VERSION,
+};
+
 const CONFIDENCE_ESCALATION_THRESHOLD: f32 = 0.50;
 const TRACE_DIR_NAME: &str = ".monitter/router-traces";
+pub const ROUTING_POLICY_VERSION: &str = "monitter-model-routing-v1";
+pub const ROUTING_QUESTION_SCHEMA_VERSION: &str = "monitter-jev-questions-v1";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -89,8 +100,22 @@ pub struct RoutingDecision {
     /// individual confidence instead of gating on an unrelated dimension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_confidences: Option<RoutingQuestionConfidences>,
+    /// Full Choice distributions are retained for later calibration analysis.
+    /// Older traces omit this field and remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_probabilities: Option<RoutingQuestionProbabilities>,
     pub rationale: String,
     pub escalation_conditions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct RoutingQuestionProbabilities {
+    pub task_kind: BTreeMap<String, f32>,
+    pub model_tier: BTreeMap<String, f32>,
+    pub reasoning_level: BTreeMap<String, f32>,
+    pub execution_mode: BTreeMap<String, f32>,
+    pub permission_tier: BTreeMap<String, f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -408,6 +433,8 @@ fn codex_evidence(output: &std::process::Output, max_steps: u32) -> AgentRunEvid
 pub struct ClassifierEvidence {
     pub provider: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
     pub latency_ms: u128,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -430,10 +457,22 @@ pub struct JevRoutePlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     pub prompt_fingerprint: String,
+    #[serde(default = "default_routing_policy_version")]
+    pub policy_version: String,
+    #[serde(default = "default_routing_question_schema_version")]
+    pub question_schema_version: String,
     pub decision: RoutingDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_route_policy: Option<JevAutoRoutePolicy>,
     pub classifier_evidence: ClassifierEvidence,
+}
+
+fn default_routing_policy_version() -> String {
+    "legacy-unspecified".into()
+}
+
+fn default_routing_question_schema_version() -> String {
+    "legacy-unspecified".into()
 }
 
 impl JevRoutePlan {
@@ -474,6 +513,53 @@ impl JevRoutePlan {
             .into_iter()
             .fold(1.0_f32, f32::min);
             if self.decision.confidence != expected_lowest {
+                return false;
+            }
+        }
+        if let Some(probabilities) = &self.decision.question_probabilities {
+            let valid_distribution = |distribution: &BTreeMap<String, f32>, expected: &[&str]| {
+                distribution.len() == expected.len()
+                    && distribution
+                        .keys()
+                        .all(|key| expected.contains(&key.as_str()))
+                    && distribution.values().all(|value| valid(*value))
+                    && (distribution
+                        .values()
+                        .map(|value| f64::from(*value))
+                        .sum::<f64>()
+                        - 1.0)
+                        .abs()
+                        <= 0.025
+            };
+            if !valid_distribution(
+                &probabilities.task_kind,
+                &[
+                    "answer",
+                    "investigate",
+                    "localized_edit",
+                    "bug_fix",
+                    "refactor",
+                    "architecture",
+                    "production_sensitive",
+                ],
+            ) || !valid_distribution(
+                &probabilities.model_tier,
+                &["fast", "balanced", "strong", "frontier"],
+            ) || !valid_distribution(
+                &probabilities.reasoning_level,
+                &["low", "medium", "high", "xhigh"],
+            ) || !valid_distribution(
+                &probabilities.execution_mode,
+                &["answer", "inspect", "edit"],
+            ) || !valid_distribution(
+                &probabilities.permission_tier,
+                &[
+                    "read_only",
+                    "workspace_write",
+                    "shell_and_tests",
+                    "human_review_required",
+                ],
+            ) {
                 return false;
             }
         }
@@ -552,6 +638,7 @@ impl JevClassifier for MockJevClassifier {
                 permission_tier: PermissionTier::HumanReviewRequired,
                 confidence: 0.96,
                 question_confidences: None,
+                question_probabilities: None,
                 rationale:
                     "Consequential or sensitive signal requires inspection and human review.".into(),
                 escalation_conditions: vec!["Human review is required before any effect.".into()],
@@ -633,6 +720,7 @@ impl JevClassifier for MockJevClassifier {
             evidence: ClassifierEvidence {
                 provider: "mock".into(),
                 model: "mock-jev".into(),
+                model_version: None,
                 latency_ms: 0,
                 input_tokens: None,
                 output_tokens: None,
@@ -843,6 +931,11 @@ pub(crate) fn system_one_with_client(
             .and_then(serde_json::Value::as_str)
             .unwrap_or(model)
             .into(),
+        model_version: response
+            .body
+            .get("model_version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         latency_ms: response.latency_ms,
         input_tokens: usage
             .get("input_tokens")
@@ -1127,6 +1220,11 @@ impl JevClassifier for LiveJevClassifier {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(&self.model)
                     .into(),
+                model_version: response
+                    .body
+                    .get("model_version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
                 latency_ms: response.latency_ms,
                 input_tokens: usage
                     .get("input_tokens")
@@ -1198,11 +1296,38 @@ fn permission_criteria() -> serde_json::Value {
 }
 
 fn decision_from_jev(body: &serde_json::Value) -> Result<RoutingDecision, String> {
-    let (task_kind, task_confidence) = jev_choice(body, "task_kind")?;
-    let (model_tier, tier_confidence) = jev_choice(body, "model_tier")?;
-    let (reasoning_level, reasoning_confidence) = jev_choice(body, "reasoning_level")?;
-    let (execution_mode, mode_confidence) = jev_choice(body, "execution_mode")?;
-    let (permission_tier, permission_confidence) = jev_choice(body, "permission_tier")?;
+    let (task_kind, task_confidence, task_probabilities) = jev_routing_choice(
+        body,
+        "task_kind",
+        &[
+            "answer",
+            "investigate",
+            "localized_edit",
+            "bug_fix",
+            "refactor",
+            "architecture",
+            "production_sensitive",
+        ],
+    )?;
+    let (model_tier, tier_confidence, tier_probabilities) = jev_routing_choice(
+        body,
+        "model_tier",
+        &["fast", "balanced", "strong", "frontier"],
+    )?;
+    let (reasoning_level, reasoning_confidence, reasoning_probabilities) =
+        jev_routing_choice(body, "reasoning_level", &["low", "medium", "high", "xhigh"])?;
+    let (execution_mode, mode_confidence, mode_probabilities) =
+        jev_routing_choice(body, "execution_mode", &["answer", "inspect", "edit"])?;
+    let (permission_tier, permission_confidence, permission_probabilities) = jev_routing_choice(
+        body,
+        "permission_tier",
+        &[
+            "read_only",
+            "workspace_write",
+            "shell_and_tests",
+            "human_review_required",
+        ],
+    )?;
     let confidence = [
         task_confidence,
         tier_confidence,
@@ -1226,6 +1351,13 @@ fn decision_from_jev(body: &serde_json::Value) -> Result<RoutingDecision, String
             execution_mode: mode_confidence,
             permission_tier: permission_confidence,
         }),
+        question_probabilities: Some(RoutingQuestionProbabilities {
+            task_kind: task_probabilities,
+            model_tier: tier_probabilities,
+            reasoning_level: reasoning_probabilities,
+            execution_mode: mode_probabilities,
+            permission_tier: permission_probabilities,
+        }),
         rationale: format!(
             "Jev selected typed routing dimensions; lowest selected confidence is {confidence:.2}."
         ),
@@ -1233,6 +1365,53 @@ fn decision_from_jev(body: &serde_json::Value) -> Result<RoutingDecision, String
     };
     enforce_routing_safety(&mut decision);
     Ok(decision)
+}
+
+fn jev_routing_choice(
+    body: &serde_json::Value,
+    key: &str,
+    expected_options: &[&str],
+) -> Result<(String, f32, BTreeMap<String, f32>), String> {
+    let (choice, confidence) = jev_choice(body, key)?;
+    let answer = body
+        .get("answers")
+        .and_then(|answers| answers.get(key))
+        .ok_or_else(|| format!("Jev response omitted '{key}'."))?;
+    let raw = answer
+        .get("probabilities")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("Jev response has no probability distribution for '{key}'."))?;
+    if raw.len() != expected_options.len() {
+        return Err(format!(
+            "Jev probability distribution for '{key}' must include every option."
+        ));
+    }
+    let mut probabilities = BTreeMap::new();
+    let mut total = 0.0_f64;
+    for (option, value) in raw {
+        if !expected_options.contains(&option.as_str()) {
+            return Err(format!(
+                "Jev probability distribution for '{key}' has unknown option '{option}'."
+            ));
+        }
+        let probability = value
+            .as_f64()
+            .filter(|probability| probability.is_finite() && (0.0..=1.0).contains(probability))
+            .ok_or_else(|| format!("Jev probability for '{key}.{option}' is outside 0..=1."))?;
+        total += probability;
+        probabilities.insert(option.clone(), probability as f32);
+    }
+    if (total - 1.0).abs() > 0.025 {
+        return Err(format!(
+            "Jev probabilities for '{key}' sum to {total:.4}, not approximately 1."
+        ));
+    }
+    if !probabilities.contains_key(&choice) {
+        return Err(format!(
+            "Jev selected an option without a probability for '{key}'."
+        ));
+    }
+    Ok((choice, confidence, probabilities))
 }
 
 fn jev_choice(body: &serde_json::Value, key: &str) -> Result<(String, f32), String> {
@@ -1289,6 +1468,7 @@ fn decision(
         permission_tier: permission,
         confidence,
         question_confidences: None,
+        question_probabilities: None,
         rationale: rationale.into(),
         escalation_conditions: default_escalation_conditions(),
     }
@@ -1717,6 +1897,8 @@ pub fn live_jev_route_plan(prompt: &str) -> Result<JevRoutePlan, String> {
         trace_id: Uuid::new_v4().to_string(),
         agent_id: None,
         prompt_fingerprint: fingerprint(prompt),
+        policy_version: ROUTING_POLICY_VERSION.into(),
+        question_schema_version: ROUTING_QUESTION_SCHEMA_VERSION.into(),
         decision: result.decision,
         auto_route_policy,
         classifier_evidence: result.evidence,
@@ -1735,11 +1917,13 @@ pub struct EvaluationCase {
 #[serde(rename_all = "camelCase")]
 pub struct EvaluationRouteResult {
     pub route: String,
-    pub success: bool,
+    pub provenance: EvaluationProvenance,
+    /// Outcome fields remain absent until real run evidence is imported.
+    pub success: Option<bool>,
     pub escalated: bool,
-    pub cost_usd: f64,
-    pub latency_ms: u128,
-    pub incorrect_downgrade: bool,
+    pub cost_usd: Option<f64>,
+    pub latency_ms: Option<u128>,
+    pub incorrect_downgrade: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1794,41 +1978,25 @@ pub fn evaluate(classifier: &dyn JevClassifier) -> Vec<EvaluationResult> {
                 case: case.name,
                 fixed_strong: EvaluationRouteResult {
                     route: "fixed_strong".into(),
-                    success: true,
+                    provenance: EvaluationProvenance::Synthetic,
+                    success: None,
                     escalated: false,
-                    cost_usd: 1.0,
-                    latency_ms: 1000,
-                    incorrect_downgrade: false,
+                    cost_usd: None,
+                    latency_ms: None,
+                    incorrect_downgrade: Some(false),
                 },
                 jev_route: EvaluationRouteResult {
                     route: format!("jev_{:?}", decision.model_tier).to_lowercase(),
-                    success: !jev_downgrade,
+                    provenance: EvaluationProvenance::Synthetic,
+                    success: None,
                     escalated: jev_review,
-                    cost_usd: mock_cost(decision.model_tier),
-                    latency_ms: mock_latency(decision.model_tier),
-                    incorrect_downgrade: jev_downgrade,
+                    cost_usd: None,
+                    latency_ms: None,
+                    incorrect_downgrade: Some(jev_downgrade),
                 },
             }
         })
         .collect()
-}
-
-fn mock_cost(tier: ModelTier) -> f64 {
-    match tier {
-        ModelTier::Fast => 0.10,
-        ModelTier::Balanced => 0.30,
-        ModelTier::Strong => 0.60,
-        ModelTier::Frontier => 1.00,
-    }
-}
-
-fn mock_latency(tier: ModelTier) -> u128 {
-    match tier {
-        ModelTier::Fast => 120,
-        ModelTier::Balanced => 300,
-        ModelTier::Strong => 650,
-        ModelTier::Frontier => 1000,
-    }
 }
 
 #[cfg(test)]
@@ -1919,9 +2087,13 @@ mod tests {
         let results = evaluate(&MockJevClassifier);
         assert_eq!(results.len(), 5);
         assert!(results.iter().any(|result| result.jev_route.escalated));
-        assert!(results
-            .iter()
-            .all(|result| result.jev_route.cost_usd <= result.fixed_strong.cost_usd));
+        assert!(results.iter().all(|result| {
+            result.fixed_strong.provenance == EvaluationProvenance::Synthetic
+                && result.jev_route.provenance == EvaluationProvenance::Synthetic
+                && result.jev_route.success.is_none()
+                && result.jev_route.cost_usd.is_none()
+                && result.jev_route.latency_ms.is_none()
+        }));
     }
 
     struct FixtureJevClient;
@@ -1938,13 +2110,14 @@ mod tests {
             Ok(JevHttpResponse {
                 body: serde_json::json!({
                     "model": "jev-latest",
+                    "model_version": "fixture-jev-v1",
                     "provider": "TypeSafe",
                     "answers": {
-                        "task_kind": { "choice": "bug_fix", "confidence": 0.93 },
-                        "model_tier": { "choice": "balanced", "confidence": 0.91 },
-                        "reasoning_level": { "choice": "high", "confidence": 0.89 },
-                        "execution_mode": { "choice": "edit", "confidence": 0.94 },
-                        "permission_tier": { "choice": "workspace_write", "confidence": 0.90 }
+                        "task_kind": { "choice": "bug_fix", "confidence": 0.93, "probabilities": {"answer":0.01,"investigate":0.01,"localized_edit":0.01,"bug_fix":0.93,"refactor":0.01,"architecture":0.01,"production_sensitive":0.02} },
+                        "model_tier": { "choice": "balanced", "confidence": 0.91, "probabilities": {"fast":0.03,"balanced":0.91,"strong":0.03,"frontier":0.03} },
+                        "reasoning_level": { "choice": "high", "confidence": 0.89, "probabilities": {"low":0.04,"medium":0.03,"high":0.89,"xhigh":0.04} },
+                        "execution_mode": { "choice": "edit", "confidence": 0.94, "probabilities": {"answer":0.03,"inspect":0.03,"edit":0.94} },
+                        "permission_tier": { "choice": "workspace_write", "confidence": 0.90, "probabilities": {"read_only":0.05,"workspace_write":0.90,"shell_and_tests":0.03,"human_review_required":0.02} }
                     },
                     "usage": { "input_tokens": 321, "output_tokens": 55, "cost": 0.000013 }
                 }),
@@ -1974,21 +2147,51 @@ mod tests {
         assert_eq!(scores.model_tier, 0.91);
         assert_eq!(scores.reasoning_level, 0.89);
         assert_eq!(
+            result
+                .decision
+                .question_probabilities
+                .as_ref()
+                .unwrap()
+                .model_tier["balanced"],
+            0.91
+        );
+        assert_eq!(
             auto_route_policy(&result.decision).unwrap().confidence,
             0.89
         );
         assert_eq!(result.evidence.input_tokens, Some(321));
         assert_eq!(result.evidence.latency_ms, 42);
+        assert_eq!(
+            result.evidence.model_version.as_deref(),
+            Some("fixture-jev-v1")
+        );
+    }
+
+    #[test]
+    fn live_routing_requires_complete_valid_probability_distributions() {
+        let mut body = serde_json::json!({"answers": {
+            "task_kind": {"choice":"bug_fix","confidence":0.9,"probabilities":{"answer":0.01,"investigate":0.01,"localized_edit":0.01,"bug_fix":0.93,"refactor":0.01,"architecture":0.01,"production_sensitive":0.02}},
+            "model_tier": {"choice":"balanced","confidence":0.9,"probabilities":{"fast":0.03,"balanced":0.91,"strong":0.03,"frontier":0.03}},
+            "reasoning_level": {"choice":"high","confidence":0.9,"probabilities":{"low":0.04,"medium":0.03,"high":0.89,"xhigh":0.04}},
+            "execution_mode": {"choice":"edit","confidence":0.9,"probabilities":{"answer":0.03,"inspect":0.03,"edit":0.94}},
+            "permission_tier": {"choice":"workspace_write","confidence":0.9,"probabilities":{"read_only":0.05,"workspace_write":0.9,"shell_and_tests":0.03,"human_review_required":0.02}}
+        }});
+        assert!(decision_from_jev(&body).is_ok());
+        body["answers"]["model_tier"]["probabilities"]["fast"] = serde_json::json!(f64::NAN);
+        assert!(decision_from_jev(&body).is_err());
+        body["answers"]["model_tier"]["probabilities"]["fast"] = serde_json::json!(0.03);
+        body["answers"]["model_tier"]["probabilities"]["frontier"] = serde_json::json!(0.8);
+        assert!(decision_from_jev(&body).is_err());
     }
 
     #[test]
     fn new_chat_gate_uses_only_the_judgments_that_choose_its_route() {
         let body = serde_json::json!({"answers": {
-            "task_kind": {"choice":"bug_fix","confidence":0.82},
-            "model_tier": {"choice":"strong","confidence":0.71},
-            "reasoning_level": {"choice":"high","confidence":0.36},
-            "execution_mode": {"choice":"edit","confidence":0.65},
-            "permission_tier": {"choice":"workspace_write","confidence":0.12}
+            "task_kind": {"choice":"bug_fix","confidence":0.82,"probabilities":{"answer":0.02,"investigate":0.02,"localized_edit":0.02,"bug_fix":0.82,"refactor":0.04,"architecture":0.04,"production_sensitive":0.04}},
+            "model_tier": {"choice":"strong","confidence":0.71,"probabilities":{"fast":0.09,"balanced":0.10,"strong":0.71,"frontier":0.10}},
+            "reasoning_level": {"choice":"high","confidence":0.36,"probabilities":{"low":0.20,"medium":0.24,"high":0.36,"xhigh":0.20}},
+            "execution_mode": {"choice":"edit","confidence":0.65,"probabilities":{"answer":0.15,"inspect":0.20,"edit":0.65}},
+            "permission_tier": {"choice":"workspace_write","confidence":0.12,"probabilities":{"read_only":0.35,"workspace_write":0.12,"shell_and_tests":0.30,"human_review_required":0.23}}
         }});
         let decision = decision_from_jev(&body).unwrap();
         assert_eq!(decision.confidence, 0.12);
@@ -2001,11 +2204,14 @@ mod tests {
             trace_id: Uuid::new_v4().to_string(),
             agent_id: None,
             prompt_fingerprint: "fixture".into(),
+            policy_version: ROUTING_POLICY_VERSION.into(),
+            question_schema_version: ROUTING_QUESTION_SCHEMA_VERSION.into(),
             decision,
             auto_route_policy: Some(policy),
             classifier_evidence: ClassifierEvidence {
                 provider: "fixture".into(),
                 model: "fixture".into(),
+                model_version: None,
                 latency_ms: 0,
                 input_tokens: None,
                 output_tokens: None,
@@ -2014,6 +2220,19 @@ mod tests {
         };
         assert!(plan.confidences_are_valid());
         assert!(plan.auto_route_eligible());
+        let old_trace = serde_json::json!({
+            "traceId": "old", "agentId": null, "promptFingerprint": "legacy",
+            "decision": {
+                "task_kind": "bug_fix", "model_tier": "balanced", "reasoning_level": "high",
+                "execution_mode": "edit", "permission_tier": "workspace_write", "confidence": 0.8,
+                "rationale": "old trace", "escalation_conditions": []
+            },
+            "classifierEvidence": {"provider":"TypeSafe", "model":"jev-latest", "latencyMs":1,
+                "inputTokens":null, "outputTokens":null, "costUsd":null}
+        });
+        let legacy: JevRoutePlan = serde_json::from_value(old_trace).unwrap();
+        assert_eq!(legacy.policy_version, "legacy-unspecified");
+        assert!(legacy.decision.question_probabilities.is_none());
         let mut inconsistent = plan.clone();
         inconsistent.auto_route_policy.as_mut().unwrap().eligible = false;
         assert!(!inconsistent.confidences_are_valid());
@@ -2027,11 +2246,11 @@ mod tests {
     #[test]
     fn architecture_override_gates_on_task_kind_not_overridden_model_answers() {
         let body = serde_json::json!({"answers": {
-            "task_kind": {"choice":"architecture","confidence":0.36},
-            "model_tier": {"choice":"balanced","confidence":0.05},
-            "reasoning_level": {"choice":"medium","confidence":0.08},
-            "execution_mode": {"choice":"inspect","confidence":0.60},
-            "permission_tier": {"choice":"read_only","confidence":0.42}
+            "task_kind": {"choice":"architecture","confidence":0.36,"probabilities":{"answer":0.10,"investigate":0.10,"localized_edit":0.10,"bug_fix":0.10,"refactor":0.12,"architecture":0.36,"production_sensitive":0.12}},
+            "model_tier": {"choice":"balanced","confidence":0.05,"probabilities":{"fast":0.05,"balanced":0.85,"strong":0.05,"frontier":0.05}},
+            "reasoning_level": {"choice":"medium","confidence":0.08,"probabilities":{"low":0.05,"medium":0.84,"high":0.05,"xhigh":0.06}},
+            "execution_mode": {"choice":"inspect","confidence":0.60,"probabilities":{"answer":0.20,"inspect":0.60,"edit":0.20}},
+            "permission_tier": {"choice":"read_only","confidence":0.42,"probabilities":{"read_only":0.42,"workspace_write":0.20,"shell_and_tests":0.18,"human_review_required":0.20}}
         }});
         let decision = decision_from_jev(&body).unwrap();
         assert_eq!(decision.model_tier, ModelTier::Frontier);
