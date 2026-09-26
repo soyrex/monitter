@@ -5,8 +5,8 @@
 
 use crate::history::{History, HistoryChange, HistoryDelta, HistoryRecord};
 use crate::{attachments::StoredAttachment, model::*};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
-use serde::{de::DeserializeOwned, Serialize};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
@@ -16,7 +16,8 @@ use std::{
 };
 
 const APPLICATION_ID: i64 = 0x4d4f4e54; // "MONT"
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+const LEGACY_SCHEMA_VERSION: i64 = 1;
 
 pub(crate) type StateRef<'a> = (
     &'a Snapshot,
@@ -120,6 +121,7 @@ impl Database {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
+        migrate_schema(&connection)?;
         validate_schema(&connection)?;
         configure_connection(&connection)?;
         private_file(&sqlite_path)?;
@@ -175,16 +177,23 @@ impl Database {
     }
 
     pub(crate) fn apply_update_history_usage(
-        &self, before: StateRef<'_>, after: StateRef<'_>,
-        usage_before: &History<RunUsageSample>, usage_after: &History<RunUsageSample>,
+        &self,
+        before: StateRef<'_>,
+        after: StateRef<'_>,
+        usage_before: &History<RunUsageSample>,
+        usage_after: &History<RunUsageSample>,
         captured_since: Option<i64>,
     ) -> Result<(), String> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
         diff_state(&transaction, before, after)?;
         diff_usage_history(&transaction, usage_before, usage_after)?;
         set_capture_since_if_changed(&transaction, captured_since)?;
-        transaction.commit().map_err(|error| format!("Cannot commit SQLite update: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("Cannot commit SQLite update: {error}"))?;
         private_sidecars(&self.path)
     }
 
@@ -214,7 +223,7 @@ impl Database {
                 .into_iter()
                 .map(Arc::new)
                 .collect(),
-            channels: read_vec(&connection, "channels")?,
+            channels: read_channels(&connection)?,
             project_board_messages: read_vec(&connection, "project_board_messages")?,
             projects: read_vec(&connection, "projects")?,
             settings,
@@ -337,6 +346,17 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
 }
 
 fn validate_schema(connection: &Connection) -> Result<(), String> {
+    validate_schema_layout(connection)?;
+    let version = read_schema_version(connection)?;
+    if version != SCHEMA_VERSION {
+        return Err(format!(
+            "Unsupported Monitter SQLite schema version {version}."
+        ));
+    }
+    Ok(())
+}
+
+fn validate_schema_layout(connection: &Connection) -> Result<(), String> {
     let application_id: i64 = connection
         .query_row("PRAGMA application_id", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
@@ -377,6 +397,10 @@ fn validate_schema(connection: &Connection) -> Result<(), String> {
             return Err(format!("SQLite store is missing required index {index}."));
         }
     }
+    Ok(())
+}
+
+fn read_schema_version(connection: &Connection) -> Result<i64, String> {
     let version: String = connection
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",
@@ -386,13 +410,69 @@ fn validate_schema(connection: &Connection) -> Result<(), String> {
         .optional()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "SQLite store is missing schema version.".to_string())?;
-    let version: i64 = version
+    version
         .parse()
-        .map_err(|_| "SQLite store has an invalid schema version.".to_string())?;
-    if version != SCHEMA_VERSION {
-        return Err(format!(
+        .map_err(|_| "SQLite store has an invalid schema version.".to_string())
+}
+
+/// Upgrade known older layouts only after validating their identity and shape.
+/// The extraction and version change share one transaction so a malformed or
+/// duplicate legacy transcript leaves the original database untouched.
+fn migrate_schema(connection: &Connection) -> Result<(), String> {
+    validate_schema_layout(connection)?;
+    match read_schema_version(connection)? {
+        SCHEMA_VERSION => Ok(()),
+        LEGACY_SCHEMA_VERSION => {
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|error| error.to_string())?;
+            migrate_channels_v1_to_v2(&transaction)?;
+            transaction
+                .execute(
+                    "UPDATE meta SET value=?1 WHERE key='schema_version'",
+                    [SCHEMA_VERSION.to_string()],
+                )
+                .map_err(|error| error.to_string())?;
+            transaction
+                .commit()
+                .map_err(|error| format!("Cannot commit SQLite schema migration: {error}"))
+        }
+        version => Err(format!(
             "Unsupported Monitter SQLite schema version {version}."
-        ));
+        )),
+    }
+}
+
+fn migrate_channels_v1_to_v2(transaction: &Transaction<'_>) -> Result<(), String> {
+    let preexisting: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE collection GLOB 'channel_messages:*'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if preexisting != 0 {
+        return Err("Legacy SQLite store already contains normalized channel rows.".to_string());
+    }
+    let legacy_channels = read_vec::<Channel>(transaction, "channels")?;
+    for (position, channel) in legacy_channels.into_iter().enumerate() {
+        write_history(
+            transaction,
+            &channel_message_collection(&channel.id),
+            &channel.messages,
+            channel_message_key,
+        )?;
+        let mut metadata = channel;
+        metadata.messages = History::new();
+        put(
+            transaction,
+            "channels",
+            &metadata.id,
+            position,
+            None,
+            None,
+            &metadata,
+        )?;
     }
     Ok(())
 }
@@ -426,8 +506,13 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
     )?;
     write_vec(transaction, "work_plans", &snapshot.work_plans, plain_id)?;
     write_history(transaction, "events", &snapshot.events, event_key)?;
-    write_vec(transaction, "channels", &snapshot.channels, plain_id)?;
-    write_vec(transaction, "project_board_messages", &snapshot.project_board_messages, plain_id)?;
+    write_channels(transaction, &snapshot.channels)?;
+    write_vec(
+        transaction,
+        "project_board_messages",
+        &snapshot.project_board_messages,
+        plain_id,
+    )?;
     write_vec(transaction, "projects", &snapshot.projects, plain_id)?;
     write_vec(
         transaction,
@@ -464,12 +549,7 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
         &snapshot.approval_rules,
         plain_id,
     )?;
-    write_vec(
-        transaction,
-        "schedules",
-        &snapshot.schedules,
-        plain_id,
-    )?;
+    write_vec(transaction, "schedules", &snapshot.schedules, plain_id)?;
     write_vec(
         transaction,
         "schedule_runs",
@@ -528,16 +608,32 @@ fn diff_state(
         &after_snapshot.mail_batches,
         mail_batch_key,
     )?;
-    diff_vec(transaction, "work_plans", &before_snapshot.work_plans, &after_snapshot.work_plans, plain_id)?;
-    diff_history(transaction, "events", &before_snapshot.events, &after_snapshot.events, event_key)?;
     diff_vec(
         transaction,
-        "channels",
-        &before_snapshot.channels,
-        &after_snapshot.channels,
+        "work_plans",
+        &before_snapshot.work_plans,
+        &after_snapshot.work_plans,
         plain_id,
     )?;
-    diff_vec(transaction, "project_board_messages", &before_snapshot.project_board_messages, &after_snapshot.project_board_messages, plain_id)?;
+    diff_history(
+        transaction,
+        "events",
+        &before_snapshot.events,
+        &after_snapshot.events,
+        event_key,
+    )?;
+    diff_channels(
+        transaction,
+        &before_snapshot.channels,
+        &after_snapshot.channels,
+    )?;
+    diff_vec(
+        transaction,
+        "project_board_messages",
+        &before_snapshot.project_board_messages,
+        &after_snapshot.project_board_messages,
+        plain_id,
+    )?;
     diff_vec(
         transaction,
         "projects",
@@ -610,9 +706,7 @@ fn diff_state(
     if before_snapshot.settings != after_snapshot.settings {
         set_meta(transaction, "settings", &after_snapshot.settings)?;
     }
-    if before_snapshot.pending_throwaway_task_ids
-        != after_snapshot.pending_throwaway_task_ids
-    {
+    if before_snapshot.pending_throwaway_task_ids != after_snapshot.pending_throwaway_task_ids {
         set_meta(
             transaction,
             "pending_throwaway_task_ids",
@@ -653,6 +747,7 @@ has_id!(
     WorkPlan,
     RunEvent,
     Channel,
+    ChannelMessage,
     ProjectBoardMessage,
     Project,
     Collaboration,
@@ -678,6 +773,87 @@ fn message_key(value: &Message) -> (&str, Option<&str>, Option<i64>) {
         Some(value.task_id.as_str()),
         Some(value.created_at),
     )
+}
+
+fn channel_message_key(value: &ChannelMessage) -> (&str, Option<&str>, Option<i64>) {
+    (&value.id, value.task_id.as_deref(), Some(value.created_at))
+}
+
+fn channel_message_collection(channel_id: &str) -> String {
+    format!("channel_messages:{channel_id}")
+}
+
+fn channel_metadata(channel: &Channel) -> Channel {
+    let mut metadata = channel.clone();
+    metadata.messages = History::new();
+    metadata
+}
+
+fn write_channels(transaction: &Transaction<'_>, channels: &[Channel]) -> Result<(), String> {
+    let metadata = channels.iter().map(channel_metadata).collect::<Vec<_>>();
+    write_vec(transaction, "channels", &metadata, plain_id)?;
+    for channel in channels {
+        write_history(
+            transaction,
+            &channel_message_collection(&channel.id),
+            &channel.messages,
+            channel_message_key,
+        )?;
+    }
+    Ok(())
+}
+
+fn diff_channels(
+    transaction: &Transaction<'_>,
+    before: &[Channel],
+    after: &[Channel],
+) -> Result<(), String> {
+    let before_metadata = before.iter().map(channel_metadata).collect::<Vec<_>>();
+    let after_metadata = after.iter().map(channel_metadata).collect::<Vec<_>>();
+    diff_vec(
+        transaction,
+        "channels",
+        &before_metadata,
+        &after_metadata,
+        plain_id,
+    )?;
+
+    let before_by_id = before
+        .iter()
+        .map(|channel| (channel.id.as_str(), channel))
+        .collect::<HashMap<_, _>>();
+    let after_ids = after
+        .iter()
+        .map(|channel| channel.id.as_str())
+        .collect::<HashSet<_>>();
+    if after_ids.len() != after.len() {
+        return Err("Duplicate channels id".to_string());
+    }
+
+    for channel in after {
+        let collection = channel_message_collection(&channel.id);
+        match before_by_id.get(channel.id.as_str()) {
+            Some(previous) => diff_history(
+                transaction,
+                &collection,
+                &previous.messages,
+                &channel.messages,
+                channel_message_key,
+            )?,
+            None => write_history(
+                transaction,
+                &collection,
+                &channel.messages,
+                channel_message_key,
+            )?,
+        }
+    }
+    for channel in before {
+        if !after_ids.contains(channel.id.as_str()) {
+            delete_collection(transaction, &channel_message_collection(&channel.id))?;
+        }
+    }
+    Ok(())
 }
 fn event_key(value: &Arc<RunEvent>) -> (&str, Option<&str>, Option<i64>) {
     (
@@ -726,33 +902,59 @@ fn write_vec<T: Serialize>(
     Ok(())
 }
 
-fn write_history<T: HistoryRecord + Clone + Serialize>(transaction: &Transaction<'_>, collection: &str, values: &History<T>, key: impl Fn(&T) -> (&str, Option<&str>, Option<i64>)) -> Result<(), String> {
+fn write_history<T: HistoryRecord + Clone + Serialize>(
+    transaction: &Transaction<'_>,
+    collection: &str,
+    values: &History<T>,
+    key: impl Fn(&T) -> (&str, Option<&str>, Option<i64>),
+) -> Result<(), String> {
     let rows = values.iter().collect::<Vec<_>>();
     write_vec(transaction, collection, &rows, |value| key(*value))
 }
 
-fn diff_history<T: HistoryRecord + Clone + Serialize + PartialEq>(transaction: &Transaction<'_>, collection: &str, before: &History<T>, after: &History<T>, key: impl Fn(&T) -> (&str, Option<&str>, Option<i64>)) -> Result<(), String> {
+fn diff_history<T: HistoryRecord + Clone + Serialize + PartialEq>(
+    transaction: &Transaction<'_>,
+    collection: &str,
+    before: &History<T>,
+    after: &History<T>,
+    key: impl Fn(&T) -> (&str, Option<&str>, Option<i64>),
+) -> Result<(), String> {
     if let HistoryDelta::Incremental { changes, .. } = after.delta_since(before) {
         let mut touched = std::collections::BTreeSet::new();
         let mut truncated = None::<usize>;
         for change in changes {
             match change {
-                HistoryChange::Append { index } | HistoryChange::Update { index } => { touched.insert(index); }
-                HistoryChange::TruncateFrom { new_len } => { truncated = Some(truncated.map_or(new_len, |old| old.min(new_len))); }
+                HistoryChange::Append { index } | HistoryChange::Update { index } => {
+                    touched.insert(index);
+                }
+                HistoryChange::TruncateFrom { new_len } => {
+                    truncated = Some(truncated.map_or(new_len, |old| old.min(new_len)));
+                }
             }
         }
         // Identity-changing edits can collide with other row keys. They use
         // the complete differential path; normal streaming never changes IDs.
-        let stable = touched.iter().all(|index| match (before.get(*index), after.get(*index)) {
-            (Some(old), Some(new)) => key(old).0 == key(new).0 || truncated.is_some_and(|start| *index >= start),
-            _ => true,
-        });
+        let stable = touched
+            .iter()
+            .all(|index| match (before.get(*index), after.get(*index)) {
+                (Some(old), Some(new)) => {
+                    key(old).0 == key(new).0 || truncated.is_some_and(|start| *index >= start)
+                }
+                _ => true,
+            });
         if stable {
             if let Some(start) = truncated {
-                transaction.execute("DELETE FROM entities WHERE collection=?1 AND position>=?2", params![collection, start as i64]).map_err(|error| error.to_string())?;
+                transaction
+                    .execute(
+                        "DELETE FROM entities WHERE collection=?1 AND position>=?2",
+                        params![collection, start as i64],
+                    )
+                    .map_err(|error| error.to_string())?;
             }
             for index in touched {
-                let Some(value) = after.get(index) else { continue; };
+                let Some(value) = after.get(index) else {
+                    continue;
+                };
                 let (id, task_id, created_at) = key(value);
                 // Index lookup rejects appended duplicates without walking the
                 // historical table. SQL remains the final atomic constraint.
@@ -760,9 +962,25 @@ fn diff_history<T: HistoryRecord + Clone + Serialize + PartialEq>(transaction: &
                     return Err(format!("Invalid {collection} identity index"));
                 }
                 if index >= before.len() || truncated.is_some_and(|start| index >= start) {
-                    insert_new(transaction, collection, id, index, task_id, created_at, value)?;
+                    insert_new(
+                        transaction,
+                        collection,
+                        id,
+                        index,
+                        task_id,
+                        created_at,
+                        value,
+                    )?;
                 } else if before.get(index) != Some(value) {
-                    put(transaction, collection, id, index, task_id, created_at, value)?;
+                    put(
+                        transaction,
+                        collection,
+                        id,
+                        index,
+                        task_id,
+                        created_at,
+                        value,
+                    )?;
                 }
             }
             return Ok(());
@@ -854,7 +1072,6 @@ fn diff_vec<T: Serialize + PartialEq>(
     Ok(())
 }
 
-
 fn put<T: Serialize>(
     transaction: &Transaction<'_>,
     collection: &str,
@@ -903,6 +1120,13 @@ fn delete_entity(transaction: &Transaction<'_>, collection: &str, id: &str) -> R
             "DELETE FROM entities WHERE collection=?1 AND id=?2",
             params![collection, id],
         )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn delete_collection(transaction: &Transaction<'_>, collection: &str) -> Result<(), String> {
+    transaction
+        .execute("DELETE FROM entities WHERE collection=?1", [collection])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -967,6 +1191,47 @@ fn read_vec<T: DeserializeOwned + HasId>(
         values.push(value);
     }
     Ok(values)
+}
+
+fn read_history<T: DeserializeOwned + HasId + HistoryRecord>(
+    connection: &Connection,
+    collection: &str,
+) -> Result<History<T>, String> {
+    Ok(read_vec(connection, collection)?.into())
+}
+
+fn read_channels(connection: &Connection) -> Result<Vec<Channel>, String> {
+    let mut channels = read_vec::<Channel>(connection, "channels")?;
+    let known_collections = channels
+        .iter()
+        .map(|channel| channel_message_collection(&channel.id))
+        .collect::<HashSet<_>>();
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT collection FROM entities WHERE collection GLOB 'channel_messages:*'",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+    {
+        let collection = row.map_err(|error| error.to_string())?;
+        if !known_collections.contains(&collection) {
+            return Err(format!(
+                "SQLite channel message collection {collection} has no channel metadata."
+            ));
+        }
+    }
+    for channel in &mut channels {
+        if !channel.messages.is_empty() {
+            return Err(format!(
+                "SQLite channel {} has embedded messages in the normalized schema.",
+                channel.id
+            ));
+        }
+        channel.messages = read_history(connection, &channel_message_collection(&channel.id))?;
+    }
+    Ok(channels)
 }
 fn read_map<T: DeserializeOwned>(
     connection: &Connection,
@@ -1050,34 +1315,65 @@ fn write_all_usage(transaction: &Transaction<'_>, usage: &[RunUsageSample]) -> R
     }
     Ok(())
 }
-fn diff_usage_history(transaction: &Transaction<'_>, before: &History<RunUsageSample>, after: &History<RunUsageSample>) -> Result<(), String> {
+fn diff_usage_history(
+    transaction: &Transaction<'_>,
+    before: &History<RunUsageSample>,
+    after: &History<RunUsageSample>,
+) -> Result<(), String> {
     if let HistoryDelta::Incremental { changes, .. } = after.delta_since(before) {
         let mut touched = std::collections::BTreeSet::new();
         let mut truncate = None::<usize>;
         for change in changes {
             match change {
-                HistoryChange::Append { index } | HistoryChange::Update { index } => { touched.insert(index); }
-                HistoryChange::TruncateFrom { new_len } => { truncate = Some(truncate.map_or(new_len, |old| old.min(new_len))); }
+                HistoryChange::Append { index } | HistoryChange::Update { index } => {
+                    touched.insert(index);
+                }
+                HistoryChange::TruncateFrom { new_len } => {
+                    truncate = Some(truncate.map_or(new_len, |old| old.min(new_len)));
+                }
             }
         }
-        if touched.iter().all(|index| match (before.get(*index), after.get(*index)) {
-            (Some(old), Some(new)) => old.sample_id == new.sample_id || truncate.is_some_and(|start| *index >= start),
-            _ => true,
-        }) {
+        if touched
+            .iter()
+            .all(|index| match (before.get(*index), after.get(*index)) {
+                (Some(old), Some(new)) => {
+                    old.sample_id == new.sample_id || truncate.is_some_and(|start| *index >= start)
+                }
+                _ => true,
+            })
+        {
             if let Some(start) = truncate {
-                transaction.execute("DELETE FROM usage_samples WHERE position>=?1", [start as i64]).map_err(|error| error.to_string())?;
+                transaction
+                    .execute(
+                        "DELETE FROM usage_samples WHERE position>=?1",
+                        [start as i64],
+                    )
+                    .map_err(|error| error.to_string())?;
             }
             for index in touched {
-                let Some(sample) = after.get(index) else { continue; };
-                if after.index_of_id(&sample.sample_id).map_err(|error| error.to_string())? != Some(index) { return Err("Invalid usage identity index".into()); }
-                if before.get(index) != Some(sample) || truncate.is_some_and(|start| index >= start) {
+                let Some(sample) = after.get(index) else {
+                    continue;
+                };
+                if after
+                    .index_of_id(&sample.sample_id)
+                    .map_err(|error| error.to_string())?
+                    != Some(index)
+                {
+                    return Err("Invalid usage identity index".into());
+                }
+                if before.get(index) != Some(sample) || truncate.is_some_and(|start| index >= start)
+                {
                     put_usage(transaction, sample, index)?;
                 }
             }
             return Ok(());
         }
     }
-    diff_usage(transaction, &before.iter().cloned().collect::<Vec<_>>(), &after.iter().cloned().collect::<Vec<_>>())
+    diff_usage(
+        transaction,
+        &before.iter().cloned().collect::<Vec<_>>(),
+        &after.iter().cloned().collect::<Vec<_>>(),
+    )
 }
 
 fn diff_usage(
@@ -1258,6 +1554,31 @@ mod tests {
         })
     }
 
+    fn channel_message(id: &str, text: &str, created_at: i64) -> ChannelMessage {
+        ChannelMessage {
+            id: id.into(),
+            role: "user".into(),
+            agent_id: None,
+            text: text.into(),
+            created_at,
+            task_id: Some("task-channel".into()),
+        }
+    }
+
+    fn channel(id: &str, messages: Vec<ChannelMessage>) -> Channel {
+        Channel {
+            id: id.into(),
+            name: format!("Channel {id}"),
+            description: String::new(),
+            agent_ids: vec![],
+            messages: messages.into(),
+            agent_conversation_enabled: false,
+            agent_conversation_turn_limit: 6,
+            agent_conversation_turns_used: 0,
+            agent_conversation_paused: false,
+        }
+    }
+
     fn usage(id: &str) -> RunUsageSample {
         RunUsageSample {
             sample_id: id.into(),
@@ -1358,6 +1679,242 @@ mod tests {
     }
 
     #[test]
+    fn channel_append_writes_only_new_message_row() {
+        let (directory, path) = temp_path("channel-append");
+        let database = Database::create(&path).unwrap();
+        let mut before = default_snapshot();
+        before.channels = vec![channel(
+            "coordination",
+            (0..80)
+                .map(|index| channel_message(&format!("m{index}"), "existing", index))
+                .collect(),
+        )];
+        database.replace_all(state(&before), &[], None).unwrap();
+
+        let mut after = before.clone();
+        after.channels[0]
+            .messages
+            .push(channel_message("m80", "new", 80));
+        let changes_before = database.lock().unwrap().total_changes();
+        database
+            .apply_update(state(&before), state(&after), &[], &[], None)
+            .unwrap();
+        let changed = database.lock().unwrap().total_changes() - changes_before;
+        assert_eq!(changed, 1, "append touched {changed} durable rows");
+        assert_eq!(database.read_snapshot().unwrap().0, after);
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn channel_migration_preserves_messages_and_reopens() {
+        let (directory, path) = temp_path("channel-migration");
+        let database = Database::create(&path).unwrap();
+        let mut legacy = default_snapshot();
+        legacy.channels = vec![
+            channel(
+                "first",
+                vec![
+                    channel_message("a", "first body", 1),
+                    channel_message("b", "second body", 2),
+                ],
+            ),
+            channel("second", vec![channel_message("c", "third body", 3)]),
+        ];
+        database.replace_all(state(&legacy), &[], None).unwrap();
+
+        // Recreate the v1 shape to exercise the same payload layout the old
+        // application wrote: channel messages embedded in each channel row.
+        {
+            let connection = database.lock().unwrap();
+            for (position, channel) in legacy.channels.iter().enumerate() {
+                connection
+                    .execute(
+                        "UPDATE entities SET position=?1,payload=?2 WHERE collection='channels' AND id=?3",
+                        params![position as i64, serde_json::to_string(channel).unwrap(), channel.id],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "DELETE FROM entities WHERE collection=?1",
+                        [channel_message_collection(&channel.id)],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute("UPDATE meta SET value='1' WHERE key='schema_version'", [])
+                .unwrap();
+        }
+        drop(database);
+
+        let migrated = Database::open(&path).unwrap();
+        assert_eq!(migrated.read_snapshot().unwrap().0, legacy);
+        let raw = migrated.lock().unwrap();
+        let version: String = raw
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let metadata_payload: String = raw
+            .query_row(
+                "SELECT payload FROM entities WHERE collection='channels' AND id='first'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let metadata: Channel = serde_json::from_str(&metadata_payload).unwrap();
+        assert!(metadata.messages.is_empty());
+        drop(raw);
+        drop(migrated);
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(reopened.read_snapshot().unwrap().0, legacy);
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_legacy_channel_messages_rollback_migration() {
+        let (directory, path) = temp_path("channel-migration-rollback");
+        let database = Database::create(&path).unwrap();
+        let mut snapshot = default_snapshot();
+        snapshot.channels = vec![channel(
+            "legacy",
+            vec![channel_message("same", "original", 1)],
+        )];
+        database.replace_all(state(&snapshot), &[], None).unwrap();
+        {
+            let connection = database.lock().unwrap();
+            let duplicate_legacy = channel(
+                "legacy",
+                vec![
+                    channel_message("same", "one", 1),
+                    channel_message("same", "two", 2),
+                ],
+            );
+            connection
+                .execute(
+                    "UPDATE entities SET payload=?1 WHERE collection='channels' AND id='legacy'",
+                    [serde_json::to_string(&duplicate_legacy).unwrap()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "DELETE FROM entities WHERE collection=?1",
+                    [channel_message_collection("legacy")],
+                )
+                .unwrap();
+            connection
+                .execute("UPDATE meta SET value='1' WHERE key='schema_version'", [])
+                .unwrap();
+        }
+        drop(database);
+
+        assert!(Database::open(&path).is_err());
+        let raw = Connection::open(&path).unwrap();
+        let version: String = raw
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "1");
+        let payload: String = raw
+            .query_row(
+                "SELECT payload FROM entities WHERE collection='channels' AND id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Channel>(&payload).unwrap(),
+            channel(
+                "legacy",
+                vec![
+                    channel_message("same", "one", 1),
+                    channel_message("same", "two", 2),
+                ],
+            )
+        );
+        drop(raw);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn channel_point_edit_truncate_reorder_delete_and_recreate_are_durable() {
+        let (directory, path) = temp_path("channel-edits");
+        let database = Database::create(&path).unwrap();
+        let mut before = default_snapshot();
+        before.channels = vec![channel(
+            "coordination",
+            vec![
+                channel_message("a", "A", 1),
+                channel_message("b", "B", 2),
+                channel_message("c", "C", 3),
+            ],
+        )];
+        database.replace_all(state(&before), &[], None).unwrap();
+
+        let mut edited = before.clone();
+        edited.channels[0]
+            .messages
+            .update_by_id("b", |message| message.text = "edited B".into())
+            .unwrap();
+        database
+            .apply_update(state(&before), state(&edited), &[], &[], None)
+            .unwrap();
+        assert_eq!(database.read_snapshot().unwrap().0, edited);
+
+        let mut reordered = edited.clone();
+        let moved = reordered.channels[0].messages.remove(0);
+        reordered.channels[0].messages.insert(2, moved);
+        database
+            .apply_update(state(&edited), state(&reordered), &[], &[], None)
+            .unwrap();
+        assert_eq!(database.read_snapshot().unwrap().0, reordered);
+
+        let mut truncated = reordered.clone();
+        truncated.channels[0].messages.truncate(2);
+        database
+            .apply_update(state(&reordered), state(&truncated), &[], &[], None)
+            .unwrap();
+        assert_eq!(database.read_snapshot().unwrap().0, truncated);
+
+        let mut duplicate = truncated.clone();
+        duplicate.channels[0]
+            .messages
+            .push(channel_message("b", "duplicate", 4));
+        assert!(
+            database
+                .apply_update(state(&truncated), state(&duplicate), &[], &[], None)
+                .is_err()
+        );
+        assert_eq!(database.read_snapshot().unwrap().0, truncated);
+
+        let mut deleted = truncated.clone();
+        deleted.channels.clear();
+        database
+            .apply_update(state(&truncated), state(&deleted), &[], &[], None)
+            .unwrap();
+        assert_eq!(database.read_snapshot().unwrap().0, deleted);
+
+        let mut recreated = deleted.clone();
+        recreated.channels = vec![channel(
+            "coordination",
+            vec![channel_message("fresh", "fresh only", 5)],
+        )];
+        database
+            .apply_update(state(&deleted), state(&recreated), &[], &[], None)
+            .unwrap();
+        assert_eq!(database.read_snapshot().unwrap().0, recreated);
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn duplicate_input_rolls_back_the_whole_transaction() {
         let (directory, path) = temp_path("duplicate");
         let database = Database::create(&path).unwrap();
@@ -1366,9 +1923,11 @@ mod tests {
         database.replace_all(state(&before), &[], None).unwrap();
         let mut invalid = before.clone();
         invalid.events.push(event("one"));
-        assert!(database
-            .apply_update(state(&before), state(&invalid), &[], &[], None)
-            .is_err());
+        assert!(
+            database
+                .apply_update(state(&before), state(&invalid), &[], &[], None)
+                .is_err()
+        );
         assert_eq!(database.read_snapshot().unwrap().0, before);
         drop(database);
         fs::remove_dir_all(directory).unwrap();
@@ -1387,9 +1946,11 @@ mod tests {
             .events
             .update_by_id("seed-b", |row| Arc::make_mut(row).id = "seed-a".into())
             .unwrap();
-        assert!(database
-            .apply_update(state(&committed), state(&duplicate), &[], &[], None)
-            .is_err());
+        assert!(
+            database
+                .apply_update(state(&committed), state(&duplicate), &[], &[], None)
+                .is_err()
+        );
         assert_eq!(database.read_snapshot().unwrap().0, committed);
         assert_eq!(committed.events[1].id, "seed-b");
 
@@ -1475,7 +2036,7 @@ mod tests {
         {
             let connection = database.lock().unwrap();
             connection
-                .execute("UPDATE meta SET value='2' WHERE key='schema_version'", [])
+                .execute("UPDATE meta SET value='3' WHERE key='schema_version'", [])
                 .unwrap();
         }
         drop(database);
@@ -1488,7 +2049,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
         drop(raw);
         fs::remove_dir_all(directory).unwrap();
     }
