@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, setContext, tick, type Snippet } from 'svelte';
+  import { onMount, setContext, type Snippet } from 'svelte';
   import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import Check from "@lucide/svelte/icons/check";
   import CircleStop from "@lucide/svelte/icons/circle-stop";
@@ -230,7 +230,13 @@
     return showThinkingFallback(displayItems, true) || (latest?.type === 'reasoning-group' && latest.values.every(isBlankReasoning));
   });
   const usageExhausted = $derived(/(?:credits? exhausted|usage limit|rate limit|quota[^\n]*exhaust|limit reached|out of credits)/i.test(liveError));
-  function handleFollowChange(following: boolean) { transcriptBuffer.setFollowing(following); }
+  function handleFollowChange(following: boolean) {
+    transcriptBuffer.setFollowing(following);
+    // Paged rows are also retained in the bridge snapshot. Drop the detached
+    // display overlay on release so deleted history cannot be resurrected and
+    // updated history cannot be shadowed by an old page copy.
+    if (following && olderMessages.length) olderMessages = [];
+  }
   async function loadEarlierMessages() {
     if (!getTaskMessages || historyLoading || !hasEarlierMessages) return;
     const persistedMessages = display.conversationItems.flatMap(item => item.type === 'message' && item.value.taskId === task.id ? [item.value] : []);

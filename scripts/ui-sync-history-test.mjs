@@ -58,6 +58,15 @@ try {
         delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [updated], removedMessageIds: ['m099'], retainedChannelIds: ['kept-channel'], retainedSubagentTranscriptIds: ['retained'] } };
         state.snapshot = currentSnapshot();
       },
+      pushArchiveDelta() {
+        const fromRevision = revision;
+        revision = `rev-${Number(revision.split('-')[1]) + 1}`;
+        const updated = { ...messages.find(message => message.id === 'm022'), text: 'message-22-updated-live' };
+        messages[messages.findIndex(message => message.id === 'm022')] = updated;
+        messages.splice(messages.findIndex(message => message.id === 'm021'), 1);
+        delta = { revision, snapshot: null, delta: { fromRevision, metadata: metadata(), messages: [updated], removedMessageIds: ['m021'], retainedChannelIds: ['kept-channel'], retainedSubagentTranscriptIds: ['retained'] } };
+        state.snapshot = currentSnapshot();
+      },
       forceGap() { staleGap = true; revision = `rev-${Number(revision.split('-')[1]) + 1}`; state.snapshot = currentSnapshot(); },
     };
     window.__MONITTER_TEST_BRIDGE__ = {
@@ -127,7 +136,16 @@ try {
   assert.ok(Math.abs(restoredAnchorTop - anchorBefore.top) < 4, `prepend moves the reader anchor only ${Math.abs(restoredAnchorTop - anchorBefore.top)}px`);
   const detachedGap = await viewport.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop);
   assert.ok(detachedGap > 40, 'loading history while detached does not jump to the bottom');
+  await page.evaluate(() => window.__syncServer.pushArchiveDelta());
+  await page.evaluate(() => window.__syncQA.refresh());
+  const staleOverlay = await page.evaluate(() => window.__syncQA.state());
+  assert.equal(staleOverlay.messages.find(message => message.id === 'm021')?.text, 'message-21', 'an already-loaded deleted page row remains frozen while detached');
+  assert.equal(staleOverlay.messages.find(message => message.id === 'm022')?.text, 'message-22', 'an already-loaded updated page row remains frozen while detached');
   await page.getByRole('button', { name: 'Jump to latest message' }).click();
+  await expect.poll(() => page.evaluate(() => window.__syncQA.state().held)).toBe(false);
+  const released = await page.evaluate(() => window.__syncQA.state());
+  assert.equal(released.messages.some(message => message.id === 'm021'), false, 'releasing the reader does not resurrect a deleted older page row');
+  assert.equal(released.messages.find(message => message.id === 'm022')?.text, 'message-22-updated-live', 'releasing the reader shows updated text from the authoritative snapshot');
   await expect(page.locator('[data-message-id="m100"] [data-message-text]')).toHaveText('message-100-updated-live');
   await expect(page.locator('[data-message-id="m099"]')).toHaveCount(0);
   const retained = await page.evaluate(() => window.__syncQA.state().snapshot);

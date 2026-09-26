@@ -35,7 +35,10 @@
       if (anchor) await transcriptList?.restoreItemAnchor(anchor.key, anchor.offset);
     } finally { loading = false; }
   }
-  function followChange(following: boolean) { buffer.setFollowing(following); }
+  function followChange(following: boolean) {
+    buffer.setFollowing(following);
+    if (following && olderMessages.length) olderMessages = [];
+  }
   onMount(() => {
     void refresh();
     (window as unknown as { __syncQA: unknown }).__syncQA = {

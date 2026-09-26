@@ -50,6 +50,9 @@
 
   /** Restore a reader's exact item position after older rows change its index. */
   export async function restoreItemAnchor(key: string, offset: number): Promise<boolean> {
+    // The parent has just prepended page rows; flush Svelte's derived `items`
+    // and virtualizer options before resolving the stable key's new index.
+    await tick();
     const index = items.findIndex((item, itemIndex) => getKey(item, itemIndex) === key);
     if (index < 0 || !scrollParent) return false;
     instance().scrollToIndex(index, { align: 'start' });
