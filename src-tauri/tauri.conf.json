@@ -44,7 +44,8 @@
     "category": "DeveloperTool",
     "shortDescription": "Your agents, together.",
     "resources": {
-      "../build/": "lan-web/"
+      "../build/": "lan-web/",
+      "../scripts/agy-acp-bridge.mjs": "bin/agy-acp-bridge.mjs"
     },
     "macOS": {
       "minimumSystemVersion": "13.0",

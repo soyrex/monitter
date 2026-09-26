@@ -61,12 +61,19 @@ fn local_command(
     cwd: &str,
     inherited_path: Option<&OsStr>,
 ) -> Result<Command, String> {
+    if launch.command == "monitter-agy-acp" && !launch.args.is_empty() {
+        return Err("Monitter's AGY bridge does not accept custom launch arguments.".into());
+    }
     let executable = acp_discovery::resolve_command(&launch.command)?;
     let mut command = Command::new(&executable);
     command
         .args(&launch.args)
         .current_dir(cwd)
         .env("PATH", local_runtime_path(&executable, inherited_path)?);
+    if acp_discovery::is_managed_agy_bridge(launch) {
+        let agy = runner::resolve_local_provider("agy", "")?;
+        command.arg("--agy").arg(agy);
+    }
     Ok(command)
 }
 

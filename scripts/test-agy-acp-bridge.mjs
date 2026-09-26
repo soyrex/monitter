@@ -1,0 +1,47 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const root = await mkdtemp(join(tmpdir(), 'monitter-agy-bridge-'));
+const fake = join(root, 'fake-agy.mjs');
+await writeFile(fake, `#!/usr/bin/env node
+import readline from 'node:readline';
+const resumed=process.argv.indexOf('--conversation')>=0?process.argv[process.argv.indexOf('--conversation')+1]:null;
+const id=resumed||'fake-conversation'; console.log(JSON.stringify({event:'init',conversation_id:id,init:{}}));
+let n=0; readline.createInterface({input:process.stdin}).on('line',line=>{const x=JSON.parse(line); if(x.event!=='user')return; n++; if(x.message.content==='fail'){console.log(JSON.stringify({event:'result',result:{conversation_id:id,status:'ERROR',error:'fake failure'}}));return;} if(x.message.content==='tool'){console.log(JSON.stringify({event:'step_update',step_update:{step_type:'tool',step_index:2,state:'ACTIVE',tool_name:'write_to_file',tool_info:{parameters:{path:'smoke.txt'}}}}));console.log(JSON.stringify({event:'step_update',step_update:{step_type:'tool',step_index:2,state:'DONE',tool_name:'write_to_file',tool_info:{output:'written'}}}));} console.log(JSON.stringify({event:'step_update',step_update:{step_type:'agent_response',text_delta:'reply-'+n}})); console.log(JSON.stringify({event:'result',result:{conversation_id:id,status:'SUCCESS',response:'reply-'+n}}));});`);
+await chmod(fake, 0o755);
+const bridge = spawn(process.execPath, ['scripts/agy-acp-bridge.mjs', '--agy', fake], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'] });
+const lines = []; let pending = '';
+bridge.stdout.on('data', data => { pending += data; for (;;) { const i = pending.indexOf('\n'); if (i < 0) break; lines.push(JSON.parse(pending.slice(0, i))); pending = pending.slice(i + 1); } });
+bridge.stderr.on('data', () => {});
+const send = value => bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
+async function take(predicate) { for (let i = 0; i < 100; i += 1) { const at = lines.findIndex(predicate); if (at >= 0) return lines.splice(at, 1)[0]; await new Promise(r => setTimeout(r, 10)); } assert.fail('timed out waiting for bridge frame'); }
+send({ id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } });
+const init = await take(x => x.id === 1); assert.equal(init.result.protocolVersion, 1); assert.deepEqual(init.result.agentCapabilities, { loadSession: true });
+send({ id: 2, method: 'session/new', params: { cwd: root } }); const fresh = await take(x => x.id === 2); assert.equal(fresh.result.sessionId, 'fake-conversation');
+send({ id: 3, method: 'session/prompt', params: { sessionId: fresh.result.sessionId, prompt: [{ type: 'text', text: 'one' }] } });
+assert.equal((await take(x => x.method === 'session/update')).params.update.content.text, 'reply-1'); assert.equal((await take(x => x.id === 3)).result.stopReason, 'end_turn');
+send({ id: 4, method: 'session/prompt', params: { sessionId: fresh.result.sessionId, prompt: [{ type: 'text', text: 'two' }] } });
+assert.equal((await take(x => x.method === 'session/update')).params.update.content.text, 'reply-2'); await take(x => x.id === 4);
+send({ id: 5, method: 'session/prompt', params: { sessionId: fresh.result.sessionId, prompt: [{ type: 'text', text: 'fail' }] } }); assert.equal((await take(x => x.id === 5)).error.code, -32603);
+send({ id: 6, method: 'session/prompt', params: { sessionId: fresh.result.sessionId, prompt: [{ type: 'text', text: 'tool' }] } });
+const started = await take(x => x.params?.update?.sessionUpdate === 'tool_call');
+assert.equal(started.params.update.title, 'write_to_file');
+assert.equal(started.params.update.rawInput.path, 'smoke.txt');
+const finished = await take(x => x.params?.update?.sessionUpdate === 'tool_call_update');
+assert.equal(finished.params.update.toolCallId, started.params.update.toolCallId);
+assert.equal(finished.params.update.status, 'completed');
+await take(x => x.id === 6);
+bridge.stdin.end(); await new Promise(resolve => bridge.once('exit', resolve));
+const resumed = spawn(process.execPath, ['scripts/agy-acp-bridge.mjs', '--agy', fake], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'] });
+const resumeLines = []; let resumePending = '';
+resumed.stdout.on('data', data => { resumePending += data; for (;;) { const i = resumePending.indexOf('\n'); if (i < 0) break; resumeLines.push(JSON.parse(resumePending.slice(0, i))); resumePending = resumePending.slice(i + 1); } });
+resumed.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:1}})+'\n');
+for (let i = 0; i < 100 && !resumeLines.some(x => x.id === 1); i += 1) await new Promise(r => setTimeout(r, 10));
+resumed.stdin.write(JSON.stringify({jsonrpc:'2.0',id:2,method:'session/load',params:{sessionId:'fake-conversation',cwd:root}})+'\n');
+for (let i = 0; i < 100 && !resumeLines.some(x => x.id === 2); i += 1) await new Promise(r => setTimeout(r, 10));
+assert.equal(resumeLines.find(x => x.id === 2)?.result?.sessionId, 'fake-conversation'); resumed.stdin.end();
+await rm(root, { recursive: true, force: true });
+console.log('agy ACP bridge focused test passed');

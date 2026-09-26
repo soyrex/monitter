@@ -707,6 +707,20 @@ fields are never copied into the message.
 Agent settings offer searchable presets and a custom ACP launcher. The catalog
 is convenience metadata, not a restriction on which compatible executables can
 be used. Bridges (including Pi ACP) are labelled separately from native ACP.
+The local Gemini preset uses Monitter's bundled `monitter-agy-acp` bridge over
+the installed, authenticated `agy` CLI's resident headless stream. The bridge
+is local only, requires Node.js, retains the AGY conversation ID for ACP
+`session/load`, and does not advertise HTTP MCP or interactive approval support.
+New bridge profiles have collaboration and Jev Decisions MCP disabled. The
+normal permission level maps to AGY `accept-edits`; explicit Full access maps
+to AGY's skip-permissions flag. The catalog also offers Google's separate
+Antigravity ACP server (`agy_acp_server.par`, no arguments), which has its own
+authentication flow and supports richer ACP capabilities. Startup upgrades
+only local agent profiles with the exact old `gemini --acp` preset when the
+bundled bridge, AGY, and Node.js are available, clears their old model
+selection, and disables unsupported MCP opt-ins. Existing chats retain their
+pinned launcher and native session; start a new chat for AGY. Custom launchers
+and SSH agent profiles are not rewritten.
 Pi's native `--mode rpc` must never be treated as ACP. Existing OpenCode tasks
 remain on their prior adapter; OpenCode ACP is selected explicitly for new chats.
 Launcher paths/arguments remain owner-only and are omitted from shared-visitor

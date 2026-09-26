@@ -27,7 +27,7 @@ pub struct AcpCandidate {
 }
 
 pub fn catalog() -> Vec<AcpCandidate> {
-    // Reviewed against upstream documentation/package bin fields, 2026-09-13.
+    // Reviewed against upstream documentation/package bin fields, 2026-09-26.
     // In particular the Qwen npm package is qwen-code, but its binary is qwen.
     [
         (
@@ -40,13 +40,22 @@ pub fn catalog() -> Vec<AcpCandidate> {
             vec![],
         ),
         (
-            "gemini",
-            "Gemini CLI",
-            "Google's native ACP integration",
-            "https://geminicli.com/docs/cli/acp-mode/",
+            "agy-headless",
+            "AGY CLI (Monitter bridge)",
+            "Uses your existing AGY CLI sign-in for local chats; Monitter collaboration and live approvals are unavailable",
+            "https://antigravity.google/docs/cli/headless/",
+            "bridge",
+            "monitter-agy-acp",
+            vec![],
+        ),
+        (
+            "antigravity-acp",
+            "Google Antigravity",
+            "Google's official ACP server for AGY agents; install it separately",
+            "https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json",
             "native",
-            "gemini",
-            vec!["--acp"],
+            "agy_acp_server.par",
+            vec![],
         ),
         (
             "opencode",
@@ -166,6 +175,29 @@ fn executable(path: &Path) -> bool {
     }
 }
 
+pub fn is_managed_agy_bridge(launch: &AcpLaunch) -> bool {
+    launch.command == "monitter-agy-acp" && launch.args.is_empty()
+}
+
+fn bundled_agy_bridge() -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(macos) = executable.parent() {
+            candidates.push(macos.join("../Resources/bin/agy-acp-bridge.mjs"));
+        }
+    }
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/agy-acp-bridge.mjs"));
+    let bridge = candidates.into_iter().find(|path| executable(path)).ok_or(
+        "Monitter's AGY bridge was not found. Reinstall the current app build.".to_string(),
+    )?;
+    runner::resolve_local_provider("agy", "")?;
+    let node = local_dirs().into_iter().map(|dir| dir.join("node")).find(|path| executable(path));
+    if node.is_none() {
+        return Err("Monitter's AGY bridge requires a local Node.js executable.".into());
+    }
+    Ok(bridge)
+}
+
 fn local_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -193,6 +225,9 @@ fn local_dirs() -> Vec<PathBuf> {
 }
 
 pub fn resolve_command(command: &str) -> Result<PathBuf, String> {
+    if command == "monitter-agy-acp" {
+        return bundled_agy_bridge();
+    }
     if command.trim().is_empty() || command.chars().any(char::is_control) {
         return Err(
             "ACP executable must be a name or an absolute path without control characters.".into(),
@@ -267,7 +302,9 @@ pub fn discover(host: &Host) -> Result<Vec<AcpCandidate>, String> {
                     candidate.launch.command.as_str()
                 };
                 if let Ok(path) = resolve_command(command) {
-                    candidate.launch.command = path.to_string_lossy().into_owned();
+                    if candidate.id != "agy-headless" {
+                        candidate.launch.command = path.to_string_lossy().into_owned();
+                    }
                     candidate.detected = true;
                 }
             }
@@ -473,6 +510,22 @@ mod tests {
                 .launch
                 .command,
             "qwen"
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|c| c.id == "agy-headless")
+                .unwrap()
+                .launch,
+            AcpLaunch { command: "monitter-agy-acp".into(), args: vec![] }
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|c| c.id == "antigravity-acp")
+                .unwrap()
+                .launch,
+            AcpLaunch { command: "agy_acp_server.par".into(), args: vec![] }
         );
         assert_eq!(
             candidates

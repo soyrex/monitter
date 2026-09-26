@@ -7,7 +7,7 @@
 //! receive a JSON-RPC error instead of being mistaken for an approval.
 
 use crate::{
-    ApprovalDecision, CreateApprovalRequest, Service, acp_protocol,
+    ApprovalDecision, CreateApprovalRequest, Service, acp_discovery, acp_protocol,
     model::AssistantResponseMetadata,
     runner::{self, Parsed, RunControl},
 };
@@ -1142,6 +1142,12 @@ fn run(
         }
         fail(&service, &task_id, &control, error);
         return;
+    }
+    if host.kind == "local" && acp_discovery::is_managed_agy_bridge(launch) {
+        command.env(
+            "MONITTER_AGY_PERMISSION",
+            if task.sandbox == "yolo" { "yolo" } else { "accept-edits" },
+        );
     }
     let mut child = match command.spawn() {
         Ok(child) => child,

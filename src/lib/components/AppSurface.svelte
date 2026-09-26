@@ -134,6 +134,7 @@
     friendlyPermissionLabel,
     friendlyProviderName,
     getProviderOption,
+    isAgyHeadlessLaunch,
     isLevelSupported,
     NORMALIZED_PERMISSIONS,
     normalizeStoredSandbox,
@@ -5701,7 +5702,7 @@
                     role="switch"
                     aria-label={`Available for collaboration: ${agent.name}`}
                     checked={profile.collaborationEnabled !== false}
-                    disabled={busy}
+                    disabled={busy || isAgyHeadlessLaunch(profile.acp)}
                     onchange={(event) => {
                       const target = settingsAgents.find(item => item.id === agent.id);
                       if (target) (target as AgentProfile).collaborationEnabled = event.currentTarget.checked;
@@ -5895,6 +5896,9 @@
                   onclick={() => {
                     if (!agentDraft) return;
                     applyProviderChoice(agentDraft, option.key);
+                    if (option.key === 'gemini' && snapshot?.hosts.find(host => host.id === agentDraft?.hostId)?.kind === 'ssh') {
+                      agentDraft.acp = { command: 'agy_acp_server.par', args: [] };
+                    }
                     agentDraft.sandbox = denormalizePermission(agentDraft.provider, clampLevelToCapability(agentDraft, normalizeStoredSandbox(agentDraft)));
                     providerPickerOpen = false;
                     providerPickerQuery = '';
@@ -5949,7 +5953,8 @@
         <label>Expertise<textarea value={profileList((draft as AgentProfile).expertise)} oninput={(event) => { (draft as AgentProfile).expertise = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One area per line"></textarea></label>
         <label>Responsibilities<textarea value={profileList((draft as AgentProfile).responsibilities)} oninput={(event) => { (draft as AgentProfile).responsibilities = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One responsibility per line"></textarea></label>
         <label>Skills<textarea value={profileList((draft as AgentProfile).skills)} oninput={(event) => { (draft as AgentProfile).skills = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One skill per line"></textarea></label>
-        <label class="check-row"><input type="checkbox" role="switch" checked={(draft as AgentProfile).collaborationEnabled !== false} onchange={(event) => { (draft as AgentProfile).collaborationEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} /> Available for collaboration</label>
+        <label class="check-row"><input type="checkbox" role="switch" checked={(draft as AgentProfile).collaborationEnabled !== false} disabled={isAgyHeadlessLaunch(draft.acp)} onchange={(event) => { (draft as AgentProfile).collaborationEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} /> Available for collaboration</label>
+        {#if isAgyHeadlessLaunch(draft.acp)}<p class="hint">AGY CLI chats cannot receive Monitter collaboration tools. Choose Google's separately authenticated Antigravity ACP server in Advanced to use them.</p>{/if}
       </details>
       <label>Instructions<textarea
         bind:value={draft.instructions}
@@ -5958,7 +5963,7 @@
       ></textarea></label>
       <div class="form-grid">
         <label>Model<AgentModelPicker draft={draft} saved={settingsAgents.find(agent => agent.id === draft?.id) ?? null} disabled={busy} onchange={(model) => { if (agentDraft) { agentDraft.model = model; markAgentDirty(agentDraft.id); } }} /></label>
-        <label>Host<select bind:value={draft.hostId} onchange={(event) => { draft.hostId = event.currentTarget.value; if (snapshot?.hosts.find(host => host.id === draft.hostId)?.kind !== 'local' || draft.provider !== 'codex') draft.codexHome = null; markAgentDirty(draft.id); }}
+        <label>Host<select bind:value={draft.hostId} onchange={(event) => { draft.hostId = event.currentTarget.value; if (snapshot?.hosts.find(host => host.id === draft.hostId)?.kind !== 'local' || draft.provider !== 'codex') draft.codexHome = null; if (snapshot?.hosts.find(host => host.id === draft.hostId)?.kind === 'ssh' && isAgyHeadlessLaunch(draft.acp)) draft.acp = { command: 'agy_acp_server.par', args: [] }; markAgentDirty(draft.id); }}
           >{#each snapshot?.hosts ?? [] as host}<option value={host.id}>{host.name} · {host.kind}</option>{/each}</select></label>
         <label>Folder<input bind:value={draft.cwd} oninput={() => markAgentDirty(draft.id)} placeholder="/path/to/project" /></label>
         {#if draft.provider === 'codex' && draft.hostId === localHost?.id}
@@ -5989,7 +5994,7 @@
       </details>
       {#if !draft.internal}
         {@const jevDecisionsHost = snapshot?.hosts.find(host => host.id === draft.hostId)}
-        {@const jevDecisionsSupported = jevDecisionsHost?.kind === 'local' && ['codex', 'claude', 'acp'].includes(draft.provider)}
+        {@const jevDecisionsSupported = jevDecisionsHost?.kind === 'local' && ['codex', 'claude', 'acp'].includes(draft.provider) && !isAgyHeadlessLaunch(draft.acp)}
         <details class="agent-jev-decisions" open={draft.jevDecisionsEnabled === true}>
           <summary>Jev Decisions add-on <span class="optional">Optional</span></summary>
           <p>Provides separate <code>jev_choose</code> and <code>jev_assess</code> MCP tools for bounded choices and assessments, with guidance to treat their results as recommendations rather than authority. It requires <code>TYPESAFE_API_KEY</code> saved in Settings → Environment &amp; Secrets and applies to new sessions after saving. It does not grant or change agent permissions.</p>
@@ -6004,7 +6009,7 @@
       <details class="agent-advanced" open={showAdvancedDefault}>
         <summary><span><strong>Advanced</strong><small>Executable, arguments and presets. Most agents don\u2019t need this.</small></span></summary>
         {#if draft.provider === 'acp'}
-          <AcpAgentPicker hostId={draft.hostId} launch={draft.acp} disabled={busy} onchange={(launch, name) => { if (agentDraft) { agentDraft.acp = launch; if (!agentDraft.name.trim() && name) agentDraft.name = name; markAgentDirty(agentDraft.id); } }} />
+          <AcpAgentPicker hostId={draft.hostId} launch={draft.acp} disabled={busy} onchange={(launch, name) => { if (agentDraft) { agentDraft.acp = launch; if (isAgyHeadlessLaunch(launch)) { agentDraft.collaborationEnabled = false; agentDraft.jevDecisionsEnabled = false; } if (!agentDraft.name.trim() && name) agentDraft.name = name; markAgentDirty(agentDraft.id); } }} />
         {:else}
           <p class="hint">Nothing to configure for this provider.</p>
         {/if}

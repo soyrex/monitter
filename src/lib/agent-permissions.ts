@@ -56,6 +56,8 @@ export interface UiProviderOption {
    * selected. `null` for first-class providers that don't need a launch.
    */
   acpCommand: string | null;
+  /** Default ACP argv for this provider preset. */
+  acpArgs: readonly string[];
   /** Search keywords used by the extensible picker search. */
   searchTerms: readonly string[];
 }
@@ -72,6 +74,7 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     subtitle: 'by Anthropic',
     storedProvider: 'claude',
     acpCommand: null,
+    acpArgs: [],
     searchTerms: ['anthropic', 'claude'],
   },
   {
@@ -80,6 +83,7 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     subtitle: 'by OpenAI',
     storedProvider: 'codex',
     acpCommand: null,
+    acpArgs: [],
     searchTerms: ['openai', 'gpt', 'codex'],
   },
   {
@@ -88,6 +92,7 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     subtitle: 'open source',
     storedProvider: 'opencode',
     acpCommand: null,
+    acpArgs: [],
     searchTerms: ['opencode', 'oss'],
   },
   {
@@ -96,6 +101,7 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     subtitle: 'Monitter harness',
     storedProvider: 'acp',
     acpCommand: 'mona-acp',
+    acpArgs: [],
     searchTerms: ['mona', 'mona-acp', 'monitter', 'acp'],
   },
   {
@@ -104,6 +110,7 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     subtitle: 'by MiniMax',
     storedProvider: 'acp',
     acpCommand: 'mcode',
+    acpArgs: ['acp'],
     searchTerms: ['minimax', 'mcode', 'MiniMax'],
   },
   {
@@ -111,8 +118,9 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     friendlyName: 'Gemini',
     subtitle: 'by Google',
     storedProvider: 'acp',
-    acpCommand: 'gemini',
-    searchTerms: ['gemini', 'google'],
+    acpCommand: 'monitter-agy-acp',
+    acpArgs: [],
+    searchTerms: ['gemini', 'google', 'antigravity', 'agy'],
   },
 ];
 
@@ -145,7 +153,7 @@ export function detectProviderFromLaunch(launch: AcpLaunch | null | undefined): 
   if (!command) return 'opencode';
   if (/(?:^|[\W_])mona-acp(?:$|[\W_])/.test(command)) return 'mona';
   if (/(?:^|[\W_])(?:mcode|minimax)(?:$|[\W_])/.test(command)) return 'minimax';
-  if (/(?:^|[\W_])gemini(?:$|[\W_])/.test(command)) return 'gemini';
+  if (/(?:^|[\W_])(?:gemini|agy_acp_server|antigravity-acp|monitter-agy-acp)(?:\.par)?(?:$|[\W_])/.test(command)) return 'gemini';
   if (/(?:^|[\W_])claude(?:$|[\W_])/.test(command)) return 'claude-code';
   if (/(?:^|[\W_])codex(?:$|[\W_])/.test(command)) return 'codex';
   if (/(?:^|[\W_])opencode(?:$|[\W_])/.test(command)) return 'opencode';
@@ -310,14 +318,22 @@ export function applyProviderChoice(agent: Agent, key: ProviderKey): void {
   const option = getProviderOption(key);
   agent.provider = option.storedProvider;
   if (option.acpCommand) {
-    const existing = agent.acp ?? { command: '', args: [] };
-    agent.acp = { command: option.acpCommand, args: existing.args ?? [] };
+    agent.acp = { command: option.acpCommand, args: [...option.acpArgs] };
   } else if (agent.provider !== 'acp') {
     // Clear any stale ACP launch when switching to a first-class provider.
     agent.acp = null;
   }
   // Reset model so the user re-picks one for the new provider.
   agent.model = '';
+  if (key === 'gemini') {
+    // The local headless bridge cannot consume Monitter's HTTP MCP grants.
+    agent.collaborationEnabled = false;
+    agent.jevDecisionsEnabled = false;
+  }
+}
+
+export function isAgyHeadlessLaunch(launch: AcpLaunch | null | undefined): boolean {
+  return launch?.command === 'monitter-agy-acp' && launch.args.length === 0;
 }
 
 /** Friendly name for a stored agent. Used in the directory and pickers. */

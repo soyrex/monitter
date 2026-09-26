@@ -104,8 +104,7 @@ fn refresh_gemini(host: &Host, attempted_at: i64) -> SubscriptionUsageSource {
         }
     };
     let result = read_all_bounded_with_timeout(&mut child, AGY_PROBE_TIMEOUT)
-        .and_then(|bytes| std::str::from_utf8(&bytes).map_err(|_| ()))
-        .and_then(normalize_agy_gemini_usage);
+        .and_then(|bytes| normalize_agy_gemini_usage(std::str::from_utf8(&bytes).map_err(|_| ())?));
     stop_child(&mut child);
     match result {
         Ok(windows) => success(

@@ -30,6 +30,8 @@ mod admin_turn_integration_tests;
 #[cfg(test)]
 mod agent_identity_tests;
 #[cfg(test)]
+mod agy_migration_tests;
+#[cfg(test)]
 mod app_server_live_tests;
 mod app_server_service;
 #[cfg(test)]
@@ -650,6 +652,41 @@ fn ensure_internal_admin(snapshot: &mut Snapshot) -> InternalAdminState {
     InternalAdminState::Unconfigured
 }
 
+/// Upgrade only the exact retired Gemini CLI ACP preset on this Mac. Agent
+/// profiles govern new chats; existing tasks retain their pinned launcher and
+/// native session so AGY cannot claim a Gemini CLI session. The headless
+/// bridge has no HTTP MCP or live approval callback, so those opt-ins are
+/// disabled for newly created chats from this profile.
+fn upgrade_local_gemini_agent_profiles(snapshot: &mut Snapshot) -> bool {
+    let local_hosts = snapshot
+        .hosts
+        .iter()
+        .filter(|host| host.kind == "local")
+        .map(|host| host.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut changed = false;
+    for agent in &mut snapshot.agents {
+        let Some(launch) = agent.acp.as_ref() else { continue };
+        if agent.internal
+            || agent.provider != "acp"
+            || !local_hosts.contains(agent.host_id.as_str())
+            || launch.args != ["--acp"]
+            || Path::new(&launch.command).file_name().and_then(|name| name.to_str()) != Some("gemini")
+        {
+            continue;
+        }
+        agent.acp = Some(AcpLaunch { command: "monitter-agy-acp".into(), args: vec![] });
+        // Gemini CLI model IDs are not guaranteed to be AGY CLI model IDs.
+        // Let AGY use its configured default for new chats.
+        agent.model.clear();
+        agent.jev_model_tiers = model::JevModelTiers::default();
+        agent.collaboration_enabled = false;
+        agent.jev_decisions_enabled = false;
+        changed = true;
+    }
+    changed
+}
+
 impl Service {
     fn open(app: Option<AppHandle>, dir: PathBuf) -> Result<Arc<Self>, String> {
         let (store, mut snapshot, task_hosts, attachments) = store::Store::open(dir.clone())?;
@@ -661,11 +698,14 @@ impl Service {
         );
         let recovered_mail_batches = mail_triage::recover_interrupted_batches(&mut snapshot);
         let internal_admin_state = ensure_internal_admin(&mut snapshot);
+        let upgraded_gemini_profiles = acp_discovery::resolve_command("monitter-agy-acp")
+            .is_ok() && upgrade_local_gemini_agent_profiles(&mut snapshot);
         // The bootstrap may have appended the resident Monitter Admin agent.
         // Persist that change so the next launch sees it as a normal agent.
         if internal_admin_state == InternalAdminState::Created
             || pinned_legacy_codex_homes
             || recovered_mail_batches
+            || upgraded_gemini_profiles
         {
             store.save(&snapshot, &task_hosts, &attachments)?;
         }

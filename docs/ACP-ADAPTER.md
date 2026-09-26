@@ -140,3 +140,25 @@ CARGO_TARGET_DIR="$PWD/.cargo-target" cargo test --manifest-path src-tauri/Cargo
 opt-in, initialize-only installed-agent check without a session or model request.
 Gemini CLI 0.59.0 and OpenCode 1.18.30 completed that handshake during development;
 these checks do not establish authenticated model-turn or Pi-bridge compatibility.
+For local Gemini agents, the bundled `monitter-agy-acp` bridge starts the
+installed `agy` CLI in its documented resident stream-JSON mode. It uses AGY's
+existing sign-in and keeps the AGY conversation ID for subsequent turns and
+`session/load`. The bridge requires a local Node.js executable and an installed,
+authenticated AGY CLI. The normal Monitter permission level starts AGY with
+`--mode=accept-edits`; an explicitly selected Full access level starts it with
+`--dangerously-skip-permissions`. AGY's headless mode cannot relay interactive
+permission requests or accept Monitter's per-session HTTP MCP server. The local
+bridge therefore disables Monitter collaboration and Jev Decisions MCP for new
+Gemini profiles. AGY's own configured MCP servers and permission rules still
+govern its tools; shell commands that require approval may be denied in
+headless mode.
+
+Google's separate native `antigravity-acp` distribution remains available in
+the catalog: install its `agy_acp_server.par` and companion
+`localharness_external` from the [ACP Registry entry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json),
+then choose the Google Antigravity preset with an empty argument list. Its ACP
+Google authentication flow is separate from AGY CLI sign-in. An ACP initialize
+handshake does not establish a working authenticated session. Exact local
+legacy `gemini --acp` agent profiles move to the bundled bridge when AGY and
+Node are present; existing chats remain pinned to their prior Gemini CLI
+sessions. Custom launchers and SSH agents are untouched.
