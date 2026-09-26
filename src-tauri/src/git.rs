@@ -513,7 +513,8 @@ fn is_linked_worktree(host: &Host, cwd: &str) -> Result<bool, String> {
     if !output.status.is_some_and(|status| status.success()) {
         return Err(command_error("Git worktree check failed", &output.stderr));
     }
-    let values = String::from_utf8_lossy(&output.stdout)
+    let output_text = String::from_utf8_lossy(&output.stdout);
+    let values = output_text
         .lines()
         .map(str::trim)
         .filter(|value| !value.is_empty())

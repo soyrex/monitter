@@ -4,12 +4,13 @@ import { readFile } from 'node:fs/promises';
 import { chromium, expect } from '@playwright/test';
 
 const root = process.cwd();
-const [messagePane, thinkingStatus, virtualList, terminalRuntime, appSurface] = await Promise.all([
+const [messagePane, thinkingStatus, virtualList, terminalRuntime, appSurface, channelPane] = await Promise.all([
   readFile(`${root}/src/lib/components/MessagePane.svelte`, 'utf8'),
   readFile(`${root}/src/lib/components/ThinkingStatus.svelte`, 'utf8'),
   readFile(`${root}/src/lib/components/TranscriptVirtualList.svelte`, 'utf8'),
   readFile(`${root}/src/lib/terminal-runtime.ts`, 'utf8'),
   readFile(`${root}/src/lib/components/AppSurface.svelte`, 'utf8'),
+  readFile(`${root}/src/lib/components/ChannelTranscriptPane.svelte`, 'utf8'),
 ]);
 
 assert.doesNotMatch(messagePane, /setInterval\s*\(/, 'MessagePane must not retain a layout-repair poll');
@@ -33,8 +34,12 @@ assert.match(virtualList, /if \(transcriptChanged\) instance\(\)\.measure\(\)/,
   'a replacement transcript must clear cached measurements before rendering its range');
 assert.match(virtualList, /role="feed"/);
 assert.match(virtualList, /ResizeObserver/);
-assert.match(appSurface, /items=\{displayedChannelTranscript\.messages\}[\s\S]{0,180}active=\{embedded \? active : activePaneId === 'main'\}/,
+const channelOpening = appSurface.split('<ChannelTranscriptPane')[1]?.split('{#snippet')[0] ?? '';
+assert.match(channelOpening, /messages=\{displayedChannelTranscript\.messages\}/);
+assert.match(channelOpening, /active=\{embedded \? active : activePaneId === 'main'\}/,
   'visible channel panes must render transcript rows even when another split has focus');
+assert.match(channelPane.split('<TranscriptVirtualList')[1]?.split('{#snippet')[0] ?? '', /\{active\}/,
+  'channel wrapper must forward visibility to the bounded renderer');
 const taskTranscript = await readFile(`${root}/src/lib/components/TaskTranscript.svelte`, 'utf8');
 assert.match(taskTranscript.split('<TranscriptVirtualList')[1]?.split('{#snippet')[0] ?? '', /\{active\}/,
   'visible task panes must render transcript rows even when another split has focus');
@@ -46,7 +51,7 @@ assert.match(thinkingStatus, /label = labels\[0\];\s*labelBucket = 0;/,
   'new status must keep the initial Thinking label');
 assert.match(thinkingStatus, /nextBucket > labelBucket/,
   'label rotation must wait for a later five-second bucket');
-assert.match(appSurface, /<TranscriptVirtualList\s+items=\{displayedChannelTranscript\.messages\}/,
+assert.match(channelPane, /<TranscriptVirtualList[^>]*items=\{displayedMessages\}/,
   'channel histories must use the same bounded transcript renderer');
 
 function startVite() {

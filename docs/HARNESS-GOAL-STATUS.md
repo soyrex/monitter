@@ -1,6 +1,6 @@
 # Six harness architecture improvements
 
-All six improvements are implemented and validated on `goal/harness-six-20260926` in `/Users/alex/code/monitter-harness-goal-20260926`. This branch has not been merged into main, installed, or activated in the running application. Concurrent main edits and user data are preserved.
+All six improvements were implemented and validated on `goal/harness-six-20260926` in `/Users/alex/code/monitter-harness-goal-20260926`, then integrated with local main at the user's request. They have not been installed or activated in the running application. Concurrent uncommitted main edits and user data are preserved.
 
 | Improvement | Result |
 | --- | --- |
@@ -49,3 +49,9 @@ The larger store occupied 286,650,368 database bytes. Initial fixture seeding, f
 - Offline Jev corpus validation and CLI replay pass; both native service benchmark sizes pass.
 
 The final native library suite passes: **700 passed, zero failed, 12 ignored**, using `cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=2`. Ignored live-provider/manual checks remain opt-in; the ignored synthetic service benchmark was run separately at both sizes above. PTY fixtures use a controlled shell prompt; cleanup retries only the API's explicit stopping response within a deadline and still requires observed exit. Production terminal-close semantics are unchanged.
+
+## Local-main integration
+
+The combined tree includes main `bea1967` (git status/worktree display, mobile swipes and timeline readability). The sole merge conflict was the `TaskTranscript` import list; both paging and git-status types were retained. Integration fixed a temporary-string lifetime error in main's new linked-worktree detection and updated the transcript regression's structural assertion for the extracted channel component.
+
+Combined-tree checks pass: Svelte zero errors/26 warnings, task/channel paging fixture, MiniMax-to-Codex browser regression, command manifest (104 native/67 LAN), and all eight native git tests including linked-worktree detection. The 700-test result above belongs to the original completed harness tree; the focused integration run recompiled the combined native library and tested the subsequently changed git module. No push, build publication, installation or restart is part of this local merge.
