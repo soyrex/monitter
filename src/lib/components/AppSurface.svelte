@@ -3080,6 +3080,33 @@
     if (index < 0 || target < 0 || target >= tabs.length) return false;
     return selectVimTab({ kind: 'index', index: target + 1 });
   }
+  let mobileTabSwipeOrigin: { x: number; y: number; at: number } | null = null;
+  function blocksMobileTabSwipe(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return true;
+    if (target.closest('button, a, input, textarea, select, [contenteditable="true"], [role="button"], iframe, video, audio, .tab-picker, .composer, [data-no-tab-swipe]')) return true;
+    for (let element: Element | null = target; element && !element.matches('.workspace'); element = element.parentElement) {
+      const style = getComputedStyle(element);
+      if ((style.overflowX === 'auto' || style.overflowX === 'scroll') && element.scrollWidth > element.clientWidth + 2) return true;
+    }
+    return false;
+  }
+  function handleMobileTabSwipeStart(event: TouchEvent): void {
+    mobileTabSwipeOrigin = null;
+    if (!mobileSidebar || !mobileMain || event.touches.length !== 1 || blocksMobileTabSwipe(event.target)) return;
+    const touch = event.touches[0];
+    mobileTabSwipeOrigin = { x: touch.clientX, y: touch.clientY, at: Date.now() };
+  }
+  function handleMobileTabSwipeEnd(event: TouchEvent): void {
+    const start = mobileTabSwipeOrigin;
+    mobileTabSwipeOrigin = null;
+    if (!start || !mobileSidebar || !mobileMain || event.changedTouches.length !== 1) return;
+    const touch = event.changedTouches[0];
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    if (Date.now() - start.at > 1000 || Math.abs(deltaX) < 64 || Math.abs(deltaX) < Math.abs(deltaY) * 1.35) return;
+    selectRelativeTab(deltaX < 0 ? 1 : -1);
+  }
+  function handleMobileTabSwipeCancel(): void { mobileTabSwipeOrigin = null; }
   export function currentVimTab(): TabKey | null {
     if (pane === 'task') return currentDraftId ? {kind:'draft',id:currentDraftId} : selectedTaskId ? {kind:'task',id:selectedTaskId} : null;
     if (pane === 'channel' && selectedChannelId) return {kind:'channel',id:selectedChannelId};
@@ -4879,7 +4906,7 @@
 
 {#snippet workspaceView()}
   <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
-  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep}>
+  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
@@ -5269,6 +5296,8 @@
           clearingGoal={!!clearingGoalTaskId}
           {goalClearError}
           onClearGoal={() => { void clearSelectedGoal(); }}
+          gitStatus={gitState.status}
+          onOpenGit={() => { detailTab = 'git'; showDetail = true; }}
           computerTools={computerTools}
           {scrollRevision}
           {busy}
