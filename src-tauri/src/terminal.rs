@@ -265,11 +265,16 @@ fn build_command(
                 .unwrap_or_else(|| "/bin/zsh".into())
         });
         let mut command = CommandBuilder::new(shell);
-        command.arg("-l");
+        if test_shell.is_some() {
+            command.args(["--noprofile", "--norc", "-i", "+H"]);
+        } else {
+            command.arg("-l");
+        }
         command.cwd(cwd);
         if let Some((_, home)) = test_shell {
             command.env("HOME", home);
             command.env("PS1", "MONITTER_TEST_READY> ");
+            command.env("BASH_SILENCE_DEPRECATION_WARNING", "1");
         }
         return Ok(command);
     }
@@ -576,7 +581,7 @@ mod tests {
             80,
             24,
             None,
-            Some(("/bin/sh", &home)),
+            Some(("/bin/bash", &home)),
         )
         .unwrap();
         wait_for(&session, "MONITTER_TEST_READY>");

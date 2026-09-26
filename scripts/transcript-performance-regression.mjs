@@ -87,6 +87,7 @@ try {
     const qa = window.__MONITTER_QA__;
     const state = qa.snapshot();
     const now = Date.now();
+    state.settings.sidebarView = 'activity';
     state.agents.push({
       id: 'minimax-live', avatar: null, name: 'MiniMax live', description: 'Live MiniMax fixture', instructions: '',
       provider: 'acp', model: '', hostId: 'local', cwd: '/tmp/monitter-ui-test', color: '#a13c72', sandbox: 'read-only',
@@ -121,15 +122,15 @@ try {
   });
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90_000 });
   await page.waitForTimeout(1_000);
-  await expect(page.getByRole('button', { name: 'MiniMax running chat', exact: true })).toBeVisible({ timeout: 90_000 });
+  await expect(page.getByRole('button', { name: 'Open chat MiniMax running chat', exact: true })).toBeVisible({ timeout: 90_000 });
 
   const main = page.locator('.pane-leaf[data-pane-id="main"]');
-  await page.locator('.sidebar .task-select').filter({ hasText: 'MiniMax running chat' }).click();
+  await page.getByRole('button', { name: 'Open chat MiniMax running chat', exact: true }).click();
   const minimaxThinking = main.locator('.reasoning-pending');
   await expect(minimaxThinking).toBeVisible();
   await expect(minimaxThinking.locator('.message-avatar[title="MiniMax live"]')).toBeVisible();
 
-  await page.locator('.sidebar .task-select').filter({ hasText: 'Codex running chat' }).click();
+  await page.getByRole('button', { name: 'Open chat Codex running chat', exact: true }).click();
   await expect(main.locator('.task-title')).toContainText('Codex running chat');
   await expect(main.getByText('Codex final answer is already visible.', { exact: true })).toBeVisible();
   await expect(main.locator('.reasoning-pending')).toHaveCount(0);

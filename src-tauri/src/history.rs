@@ -802,6 +802,34 @@ mod tests {
     }
 
     #[test]
+    fn sibling_edits_are_not_equal_and_cousin_deltas_fall_back() {
+        let base = History::from_vec((0..3).map(|n| row(n, 0, n)).collect());
+        let mut parent_edit = base.clone();
+        parent_edit
+            .update_by_id("id-0", |record| record.value = 100)
+            .unwrap();
+        let mut descendant = parent_edit.clone();
+        descendant
+            .update_by_id("id-1", |record| record.value = 200)
+            .unwrap();
+        let mut sibling_edit = base.clone();
+        sibling_edit
+            .update_by_id("id-2", |record| record.value = 300)
+            .unwrap();
+
+        assert_ne!(parent_edit.version(), sibling_edit.version());
+        assert_ne!(descendant.version(), sibling_edit.version());
+        assert_ne!(parent_edit, sibling_edit);
+        assert_eq!(descendant.delta_since(&sibling_edit), HistoryDelta::Full);
+
+        let mut identical_sibling = base.clone();
+        identical_sibling
+            .update_by_id("id-0", |record| record.value = 100)
+            .unwrap();
+        assert_eq!(parent_edit, identical_sibling);
+    }
+
+    #[test]
     fn ids_scopes_and_duplicate_detection_survive_mutation() {
         let mut history = History::from_vec(vec![row(1, 7, 0), row(2, 7, 0), row(3, 8, 0)]);
         let before = history.clone();
