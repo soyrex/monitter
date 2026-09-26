@@ -1,38 +1,60 @@
-# Jev routing evaluation
+# Offline Jev routing evaluation
 
-`harness eval` is an offline replay. It never reads credentials, contacts TypeSafe, starts a coding agent, or reads local transcripts. By default it loads `src-tauri/evaluation/jev-routing-corpus-v1.json` and `src-tauri/evaluation/jev-routing-replay-v1.json` and prints a report whose provenance is `synthetic`. The checked-in replay intentionally leaves cost and latency absent; the report preserves those as `null` and excludes them from averages.
+`harness eval` is an offline replay and evidence summarizer. It does not call
+Jev, Codex, or another provider. The checked-in corpus and replay are
+`synthetic`; their classifier decisions exercise replay behavior but make no
+claim about live classifier quality or agent outcomes.
 
-Use `harness eval --corpus <corpus.json> --outcomes <outcomes.json>` to compare supplied outcomes. Both files use schema `monitter-routing-evaluation-v1`. The corpus has an explicit `provenance` (`synthetic` or `measured`) and labeled cases with a bounded prompt and expected minimum model tier. Outcomes are a JSON array containing a unique `runId`, known `caseId`, comparison `routeId`, provider and model names and optional versions, provenance, optional task completion and test evidence, optional cost, and optional latency. The importer limits corpus size, text lengths, run counts, numeric ranges, duplicate IDs, and test-count consistency. One report cannot mix synthetic and measured outcomes.
+The corpus labels each case with an expected minimum tier. The v2 replay
+records the typed classifier decision, its complete question probability
+distributions, classifier model/version, routing-policy version,
+question-schema version, repeat ID, and opaque evidence IDs. Replay invokes
+the same native eligibility function used by new-chat auto-routing. The report
+shows the selected tier only when that policy is eligible; otherwise it marks
+the decision as abstained/recommended. Eligible decisions are counted as
+underallocated, meeting the expected minimum, or above it. This is a review
+label comparison, not an execution permission or a claim of task quality.
+New TypeSafe Choice responses require a complete finite probability
+distribution for each question; older stored routing traces without these
+distributions remain deserializable for compatibility but cannot be imported
+as v2 replay decisions.
 
-An imported `measured` label is caller supplied. Monitter does not collect it or verify a remote run; the person preparing the file is responsible for recording actual observed evidence. The report includes provider/model versions and separate observation counts. Missing measurements remain `null`; no cost, latency, completion, or test result is inferred from a missing field. Keep an imported file's provenance `synthetic` when any values are illustrative.
+Outcome quality and performance fields (`taskCompleted`, `tests`, `costUsd`,
+and `latencyMs`) are optional observations. Missing values remain null and do
+not become successful completions or zero cost/latency. Route summaries report
+observation counts. Paired comparisons match only identical `caseId` and
+`repeatId` values across routes; the report shows unmatched counts, excludes
+unmatched rows from paired means, and defines each delta as left route minus
+right route. Synthetic fixture outcomes have all quality, cost, and latency
+fields unset.
 
-Example measured outcome shape (values below are placeholders, not real measurements):
+## Importing outcomes
 
-```json
-[
-  {
-    "schemaVersion": "monitter-routing-evaluation-v1",
-    "provenance": "measured",
-    "runId": "your-unique-run-id",
-    "caseId": "answer-explain-retry",
-    "routeId": "jev_route",
-    "provider": "your-provider",
-    "providerVersion": "your-provider-version",
-    "model": "your-model",
-    "modelVersion": "your-model-version",
-    "taskCompleted": true,
-    "tests": null,
-    "costUsd": null,
-    "latencyMs": null
-  }
-]
+Prepare a v2 JSON corpus and outcomes file from deliberately collected,
+authorized observations, then run:
+
+```sh
+harness eval --corpus ./corpus.json --outcomes ./outcomes.json
 ```
 
-Route traces carry `policyVersion` (`monitter-model-routing-v1`) and `questionSchemaVersion` (`monitter-jev-questions-v1`). `classifierEvidence.model` records the requested/returned model id and `classifierEvidence.modelVersion` retains an explicit version when TypeSafe supplies one; the native applied policy is retained in `autoRoutePolicy`. New live TypeSafe Choice responses must include a probability for every declared option. Each probability must be finite and within 0..1, and each distribution must sum to 1 within 0.025. These per-question distributions are kept beside the confidence values for calibration work. Old traces without probabilities or version fields remain deserializable and are marked `legacy-unspecified`.
+Files declare `provenance` as `synthetic` or `measured`; one report cannot mix
+the two. Outcome entries must use a supported `schemaVersion`, identify a
+policy and question-schema version, include one or more opaque `evidenceIds`,
+and provide a stable `repeatId`. A `jev_route` outcome must include the typed
+`classifierDecision`, complete finite probability distributions, and
+`classifierModel` plus `classifierModelVersion`. Non-classifier baselines use
+`routingPolicyVersion: "fixed-strong-baseline-v1"`,
+`questionSchemaVersion: "not_applicable"`, and a null decision. Unknown case
+IDs, duplicate route/case/repeat observations, malformed distributions,
+unsupported versions, inconsistent test counts, and out-of-range values are
+rejected. Corpus and outcome input files are bounded to 2 MiB and 8 MiB,
+respectively, before their bytes are read into memory.
 
-The routing confidence floor remains 0.30. Evaluation data is intended to inform a future deliberate policy review; this change does not alter routing thresholds or permission authority.
+Evidence IDs are caller-supplied references only. Do not include prompts,
+transcripts, secrets, or credentials in this evaluation format. This change
+adds an import path; it does not collect live runs or initiate billable calls.
 
-Validate the checked-in offline fixtures without a Rust build:
+Validate the checked-in fixtures without a Rust build:
 
 ```sh
 python3 scripts/check-jev-evaluation-fixtures.py

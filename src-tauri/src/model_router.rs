@@ -20,7 +20,8 @@ pub use evaluation::{
     bundled_corpus as bundled_evaluation_corpus, bundled_outcomes as bundled_evaluation_outcomes,
     load_corpus as load_evaluation_corpus, load_outcomes as load_evaluation_outcomes,
     report as evaluation_report, EvaluationReport, LabeledCase, LabeledCorpus, MetricSummary,
-    Provenance as EvaluationProvenance, RunOutcome as EvaluationRunOutcome, TestEvidence,
+    PairedComparison, Provenance as EvaluationProvenance, RouteReplay,
+    RunOutcome as EvaluationRunOutcome, TestEvidence, TierCoverage, TierCoverageSummary,
     EVALUATION_SCHEMA_VERSION,
 };
 
@@ -175,6 +176,12 @@ fn auto_route_policy(decision: &RoutingDecision) -> Option<JevAutoRoutePolicy> {
             basis,
         }
     })
+}
+
+/// Replay the same eligibility function used by new-chat auto-routing.
+/// Offline evaluation calls this accessor rather than duplicating policy.
+pub fn replay_auto_route_policy(decision: &RoutingDecision) -> Option<JevAutoRoutePolicy> {
+    auto_route_policy(decision)
 }
 
 /// The adapter contract. It deliberately carries model choice separately from

@@ -1,0 +1,1184 @@
+[
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-answer-explain-retry-jev_route",
+    "caseId": "answer-explain-retry",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-answer-explain-retry-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.74,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.82,
+        "model_tier": 0.81,
+        "reasoning_level": 0.74,
+        "execution_mode": 0.9,
+        "permission_tier": 0.88
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "investigate": 0.03000000000000001,
+          "localized_edit": 0.03000000000000001,
+          "bug_fix": 0.03000000000000001,
+          "refactor": 0.03000000000000001,
+          "architecture": 0.03000000000000001,
+          "production_sensitive": 0.03000000000000001,
+          "answer": 0.82
+        },
+        "model_tier": {
+          "balanced": 0.06333333333333331,
+          "strong": 0.06333333333333331,
+          "frontier": 0.06333333333333331,
+          "fast": 0.81
+        },
+        "reasoning_level": {
+          "medium": 0.08666666666666667,
+          "high": 0.08666666666666667,
+          "xhigh": 0.08666666666666667,
+          "low": 0.74
+        },
+        "execution_mode": {
+          "inspect": 0.04999999999999999,
+          "edit": 0.04999999999999999,
+          "answer": 0.9
+        },
+        "permission_tier": {
+          "workspace_write": 0.04,
+          "shell_and_tests": 0.04,
+          "human_review_required": 0.04,
+          "read_only": 0.88
+        }
+      },
+      "task_kind": "answer",
+      "model_tier": "fast",
+      "reasoning_level": "low",
+      "execution_mode": "answer",
+      "permission_tier": "read_only",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "fast",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-answer-explain-retry-fixed_strong",
+    "caseId": "answer-explain-retry",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-answer-explain-retry-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-answer-compare-config-jev_route",
+    "caseId": "answer-compare-config",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-answer-compare-config-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.3,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.76,
+        "model_tier": 0.3,
+        "reasoning_level": 0.65,
+        "execution_mode": 0.82,
+        "permission_tier": 0.86
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "investigate": 0.04,
+          "localized_edit": 0.04,
+          "bug_fix": 0.04,
+          "refactor": 0.04,
+          "architecture": 0.04,
+          "production_sensitive": 0.04,
+          "answer": 0.76
+        },
+        "model_tier": {
+          "balanced": 0.2333333333333333,
+          "strong": 0.2333333333333333,
+          "frontier": 0.2333333333333333,
+          "fast": 0.3
+        },
+        "reasoning_level": {
+          "low": 0.11666666666666665,
+          "high": 0.11666666666666665,
+          "xhigh": 0.11666666666666665,
+          "medium": 0.65
+        },
+        "execution_mode": {
+          "inspect": 0.09000000000000002,
+          "edit": 0.09000000000000002,
+          "answer": 0.82
+        },
+        "permission_tier": {
+          "workspace_write": 0.04666666666666667,
+          "shell_and_tests": 0.04666666666666667,
+          "human_review_required": 0.04666666666666667,
+          "read_only": 0.86
+        }
+      },
+      "task_kind": "answer",
+      "model_tier": "fast",
+      "reasoning_level": "medium",
+      "execution_mode": "answer",
+      "permission_tier": "read_only",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "fast",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-answer-compare-config-fixed_strong",
+    "caseId": "answer-compare-config",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-answer-compare-config-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-investigate-timeout-jev_route",
+    "caseId": "investigate-timeout",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-investigate-timeout-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.67,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.78,
+        "model_tier": 0.76,
+        "reasoning_level": 0.67,
+        "execution_mode": 0.84,
+        "permission_tier": 0.85
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.03666666666666666,
+          "localized_edit": 0.03666666666666666,
+          "bug_fix": 0.03666666666666666,
+          "refactor": 0.03666666666666666,
+          "architecture": 0.03666666666666666,
+          "production_sensitive": 0.03666666666666666,
+          "investigate": 0.78
+        },
+        "model_tier": {
+          "balanced": 0.08,
+          "strong": 0.08,
+          "frontier": 0.08,
+          "fast": 0.76
+        },
+        "reasoning_level": {
+          "low": 0.10999999999999999,
+          "high": 0.10999999999999999,
+          "xhigh": 0.10999999999999999,
+          "medium": 0.67
+        },
+        "execution_mode": {
+          "answer": 0.08000000000000002,
+          "edit": 0.08000000000000002,
+          "inspect": 0.84
+        },
+        "permission_tier": {
+          "workspace_write": 0.05000000000000001,
+          "shell_and_tests": 0.05000000000000001,
+          "human_review_required": 0.05000000000000001,
+          "read_only": 0.85
+        }
+      },
+      "task_kind": "investigate",
+      "model_tier": "fast",
+      "reasoning_level": "medium",
+      "execution_mode": "inspect",
+      "permission_tier": "read_only",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "fast",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-investigate-timeout-fixed_strong",
+    "caseId": "investigate-timeout",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-investigate-timeout-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-localized-copy-edit-jev_route",
+    "caseId": "localized-copy-edit",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-localized-copy-edit-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.71,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.74,
+        "model_tier": 0.79,
+        "reasoning_level": 0.71,
+        "execution_mode": 0.83,
+        "permission_tier": 0.77
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.043333333333333335,
+          "investigate": 0.043333333333333335,
+          "bug_fix": 0.043333333333333335,
+          "refactor": 0.043333333333333335,
+          "architecture": 0.043333333333333335,
+          "production_sensitive": 0.043333333333333335,
+          "localized_edit": 0.74
+        },
+        "model_tier": {
+          "fast": 0.06999999999999999,
+          "strong": 0.06999999999999999,
+          "frontier": 0.06999999999999999,
+          "balanced": 0.79
+        },
+        "reasoning_level": {
+          "low": 0.09666666666666668,
+          "high": 0.09666666666666668,
+          "xhigh": 0.09666666666666668,
+          "medium": 0.71
+        },
+        "execution_mode": {
+          "answer": 0.08500000000000002,
+          "inspect": 0.08500000000000002,
+          "edit": 0.83
+        },
+        "permission_tier": {
+          "read_only": 0.07666666666666666,
+          "shell_and_tests": 0.07666666666666666,
+          "human_review_required": 0.07666666666666666,
+          "workspace_write": 0.77
+        }
+      },
+      "task_kind": "localized_edit",
+      "model_tier": "balanced",
+      "reasoning_level": "medium",
+      "execution_mode": "edit",
+      "permission_tier": "workspace_write",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "balanced",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-localized-copy-edit-fixed_strong",
+    "caseId": "localized-copy-edit",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-localized-copy-edit-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-localized-css-edit-jev_route",
+    "caseId": "localized-css-edit",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-localized-css-edit-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.3,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.72,
+        "model_tier": 0.3,
+        "reasoning_level": 0.7,
+        "execution_mode": 0.8,
+        "permission_tier": 0.76
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.04666666666666667,
+          "investigate": 0.04666666666666667,
+          "bug_fix": 0.04666666666666667,
+          "refactor": 0.04666666666666667,
+          "architecture": 0.04666666666666667,
+          "production_sensitive": 0.04666666666666667,
+          "localized_edit": 0.72
+        },
+        "model_tier": {
+          "fast": 0.2333333333333333,
+          "strong": 0.2333333333333333,
+          "frontier": 0.2333333333333333,
+          "balanced": 0.3
+        },
+        "reasoning_level": {
+          "low": 0.10000000000000002,
+          "high": 0.10000000000000002,
+          "xhigh": 0.10000000000000002,
+          "medium": 0.7
+        },
+        "execution_mode": {
+          "answer": 0.09999999999999998,
+          "inspect": 0.09999999999999998,
+          "edit": 0.8
+        },
+        "permission_tier": {
+          "read_only": 0.08,
+          "shell_and_tests": 0.08,
+          "human_review_required": 0.08,
+          "workspace_write": 0.76
+        }
+      },
+      "task_kind": "localized_edit",
+      "model_tier": "balanced",
+      "reasoning_level": "medium",
+      "execution_mode": "edit",
+      "permission_tier": "workspace_write",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "balanced",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-localized-css-edit-fixed_strong",
+    "caseId": "localized-css-edit",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-localized-css-edit-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-bug-retry-loop-jev_route",
+    "caseId": "bug-retry-loop",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-bug-retry-loop-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.55,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.8,
+        "model_tier": 0.55,
+        "reasoning_level": 0.72,
+        "execution_mode": 0.79,
+        "permission_tier": 0.74
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.033333333333333326,
+          "investigate": 0.033333333333333326,
+          "localized_edit": 0.033333333333333326,
+          "refactor": 0.033333333333333326,
+          "architecture": 0.033333333333333326,
+          "production_sensitive": 0.033333333333333326,
+          "bug_fix": 0.8
+        },
+        "model_tier": {
+          "fast": 0.15,
+          "strong": 0.15,
+          "frontier": 0.15,
+          "balanced": 0.55
+        },
+        "reasoning_level": {
+          "low": 0.09333333333333334,
+          "medium": 0.09333333333333334,
+          "xhigh": 0.09333333333333334,
+          "high": 0.72
+        },
+        "execution_mode": {
+          "answer": 0.10499999999999998,
+          "inspect": 0.10499999999999998,
+          "edit": 0.79
+        },
+        "permission_tier": {
+          "read_only": 0.08666666666666667,
+          "shell_and_tests": 0.08666666666666667,
+          "human_review_required": 0.08666666666666667,
+          "workspace_write": 0.74
+        }
+      },
+      "task_kind": "bug_fix",
+      "model_tier": "balanced",
+      "reasoning_level": "high",
+      "execution_mode": "edit",
+      "permission_tier": "workspace_write",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "balanced",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-bug-retry-loop-fixed_strong",
+    "caseId": "bug-retry-loop",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-bug-retry-loop-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-bug-boundary-condition-jev_route",
+    "caseId": "bug-boundary-condition",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-bug-boundary-condition-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.29,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.75,
+        "model_tier": 0.29,
+        "reasoning_level": 0.69,
+        "execution_mode": 0.77,
+        "permission_tier": 0.73
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.041666666666666664,
+          "investigate": 0.041666666666666664,
+          "localized_edit": 0.041666666666666664,
+          "refactor": 0.041666666666666664,
+          "architecture": 0.041666666666666664,
+          "production_sensitive": 0.041666666666666664,
+          "bug_fix": 0.75
+        },
+        "model_tier": {
+          "fast": 0.23666666666666666,
+          "strong": 0.23666666666666666,
+          "frontier": 0.23666666666666666,
+          "balanced": 0.29
+        },
+        "reasoning_level": {
+          "low": 0.10333333333333335,
+          "medium": 0.10333333333333335,
+          "xhigh": 0.10333333333333335,
+          "high": 0.69
+        },
+        "execution_mode": {
+          "answer": 0.11499999999999999,
+          "inspect": 0.11499999999999999,
+          "edit": 0.77
+        },
+        "permission_tier": {
+          "read_only": 0.09000000000000001,
+          "shell_and_tests": 0.09000000000000001,
+          "human_review_required": 0.09000000000000001,
+          "workspace_write": 0.73
+        }
+      },
+      "task_kind": "bug_fix",
+      "model_tier": "balanced",
+      "reasoning_level": "high",
+      "execution_mode": "edit",
+      "permission_tier": "workspace_write",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "not_run_abstained",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-bug-boundary-condition-fixed_strong",
+    "caseId": "bug-boundary-condition",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-bug-boundary-condition-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-refactor-cache-module-jev_route",
+    "caseId": "refactor-cache-module",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-refactor-cache-module-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.67,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.77,
+        "model_tier": 0.67,
+        "reasoning_level": 0.71,
+        "execution_mode": 0.73,
+        "permission_tier": 0.68
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.03833333333333333,
+          "investigate": 0.03833333333333333,
+          "localized_edit": 0.03833333333333333,
+          "bug_fix": 0.03833333333333333,
+          "architecture": 0.03833333333333333,
+          "production_sensitive": 0.03833333333333333,
+          "refactor": 0.77
+        },
+        "model_tier": {
+          "fast": 0.10999999999999999,
+          "balanced": 0.10999999999999999,
+          "strong": 0.10999999999999999,
+          "frontier": 0.67
+        },
+        "reasoning_level": {
+          "low": 0.09666666666666668,
+          "medium": 0.09666666666666668,
+          "xhigh": 0.09666666666666668,
+          "high": 0.71
+        },
+        "execution_mode": {
+          "answer": 0.135,
+          "inspect": 0.135,
+          "edit": 0.73
+        },
+        "permission_tier": {
+          "read_only": 0.10666666666666665,
+          "shell_and_tests": 0.10666666666666665,
+          "human_review_required": 0.10666666666666665,
+          "workspace_write": 0.68
+        }
+      },
+      "task_kind": "refactor",
+      "model_tier": "frontier",
+      "reasoning_level": "high",
+      "execution_mode": "edit",
+      "permission_tier": "workspace_write",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "frontier",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-refactor-cache-module-fixed_strong",
+    "caseId": "refactor-cache-module",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-refactor-cache-module-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-refactor-api-boundary-jev_route",
+    "caseId": "refactor-api-boundary",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-refactor-api-boundary-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.71,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.72,
+        "model_tier": 0.83,
+        "reasoning_level": 0.79,
+        "execution_mode": 0.8,
+        "permission_tier": 0.71
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.04666666666666667,
+          "investigate": 0.04666666666666667,
+          "localized_edit": 0.04666666666666667,
+          "bug_fix": 0.04666666666666667,
+          "architecture": 0.04666666666666667,
+          "production_sensitive": 0.04666666666666667,
+          "refactor": 0.72
+        },
+        "model_tier": {
+          "fast": 0.05666666666666668,
+          "strong": 0.05666666666666668,
+          "frontier": 0.05666666666666668,
+          "balanced": 0.83
+        },
+        "reasoning_level": {
+          "low": 0.06999999999999999,
+          "medium": 0.06999999999999999,
+          "xhigh": 0.06999999999999999,
+          "high": 0.79
+        },
+        "execution_mode": {
+          "answer": 0.09999999999999998,
+          "inspect": 0.09999999999999998,
+          "edit": 0.8
+        },
+        "permission_tier": {
+          "read_only": 0.09666666666666668,
+          "shell_and_tests": 0.09666666666666668,
+          "human_review_required": 0.09666666666666668,
+          "workspace_write": 0.71
+        }
+      },
+      "task_kind": "refactor",
+      "model_tier": "balanced",
+      "reasoning_level": "high",
+      "execution_mode": "edit",
+      "permission_tier": "workspace_write",
+      "escalation_conditions": []
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "balanced",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-refactor-api-boundary-fixed_strong",
+    "caseId": "refactor-api-boundary",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-refactor-api-boundary-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-architecture-storage-jev_route",
+    "caseId": "architecture-storage",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-architecture-storage-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.8,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.8,
+        "model_tier": 0.88,
+        "reasoning_level": 0.85,
+        "execution_mode": 0.86,
+        "permission_tier": 0.9
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.033333333333333326,
+          "investigate": 0.033333333333333326,
+          "localized_edit": 0.033333333333333326,
+          "bug_fix": 0.033333333333333326,
+          "refactor": 0.033333333333333326,
+          "production_sensitive": 0.033333333333333326,
+          "architecture": 0.8
+        },
+        "model_tier": {
+          "fast": 0.04,
+          "balanced": 0.04,
+          "strong": 0.04,
+          "frontier": 0.88
+        },
+        "reasoning_level": {
+          "low": 0.05000000000000001,
+          "medium": 0.05000000000000001,
+          "high": 0.05000000000000001,
+          "xhigh": 0.85
+        },
+        "execution_mode": {
+          "answer": 0.07,
+          "edit": 0.07,
+          "inspect": 0.86
+        },
+        "permission_tier": {
+          "read_only": 0.033333333333333326,
+          "workspace_write": 0.033333333333333326,
+          "shell_and_tests": 0.033333333333333326,
+          "human_review_required": 0.9
+        }
+      },
+      "task_kind": "architecture",
+      "model_tier": "frontier",
+      "reasoning_level": "xhigh",
+      "execution_mode": "inspect",
+      "permission_tier": "human_review_required",
+      "escalation_conditions": [
+        "Human review required before any consequential effect."
+      ]
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "frontier",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-architecture-storage-fixed_strong",
+    "caseId": "architecture-storage",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-architecture-storage-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-sensitive-production-jev_route",
+    "caseId": "sensitive-production",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-sensitive-production-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.64,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.64,
+        "model_tier": 0.87,
+        "reasoning_level": 0.88,
+        "execution_mode": 0.91,
+        "permission_tier": 0.92
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.06,
+          "investigate": 0.06,
+          "localized_edit": 0.06,
+          "bug_fix": 0.06,
+          "refactor": 0.06,
+          "architecture": 0.06,
+          "production_sensitive": 0.64
+        },
+        "model_tier": {
+          "fast": 0.043333333333333335,
+          "balanced": 0.043333333333333335,
+          "strong": 0.043333333333333335,
+          "frontier": 0.87
+        },
+        "reasoning_level": {
+          "low": 0.04,
+          "medium": 0.04,
+          "high": 0.04,
+          "xhigh": 0.88
+        },
+        "execution_mode": {
+          "answer": 0.044999999999999984,
+          "edit": 0.044999999999999984,
+          "inspect": 0.91
+        },
+        "permission_tier": {
+          "read_only": 0.026666666666666655,
+          "workspace_write": 0.026666666666666655,
+          "shell_and_tests": 0.026666666666666655,
+          "human_review_required": 0.92
+        }
+      },
+      "task_kind": "production_sensitive",
+      "model_tier": "frontier",
+      "reasoning_level": "xhigh",
+      "execution_mode": "inspect",
+      "permission_tier": "human_review_required",
+      "escalation_conditions": [
+        "Human review required before any consequential effect."
+      ]
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "frontier",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-sensitive-production-fixed_strong",
+    "caseId": "sensitive-production",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-sensitive-production-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-sensitive-billing-jev_route",
+    "caseId": "sensitive-billing",
+    "repeatId": "repeat-1",
+    "routeId": "jev_route",
+    "routingPolicyVersion": "monitter-model-routing-v1",
+    "questionSchemaVersion": "monitter-jev-questions-v1",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-sensitive-billing-jev_route"
+    ],
+    "classifierDecision": {
+      "confidence": 0.28,
+      "rationale": "Synthetic labeled fixture decision; no live classifier call was made.",
+      "question_confidences": {
+        "task_kind": 0.28,
+        "model_tier": 0.9,
+        "reasoning_level": 0.91,
+        "execution_mode": 0.93,
+        "permission_tier": 0.94
+      },
+      "question_probabilities": {
+        "task_kind": {
+          "answer": 0.12,
+          "investigate": 0.12,
+          "localized_edit": 0.12,
+          "bug_fix": 0.12,
+          "refactor": 0.12,
+          "architecture": 0.12,
+          "production_sensitive": 0.28
+        },
+        "model_tier": {
+          "fast": 0.033333333333333326,
+          "balanced": 0.033333333333333326,
+          "strong": 0.033333333333333326,
+          "frontier": 0.9
+        },
+        "reasoning_level": {
+          "low": 0.02999999999999999,
+          "medium": 0.02999999999999999,
+          "high": 0.02999999999999999,
+          "xhigh": 0.91
+        },
+        "execution_mode": {
+          "answer": 0.034999999999999976,
+          "edit": 0.034999999999999976,
+          "inspect": 0.93
+        },
+        "permission_tier": {
+          "read_only": 0.020000000000000018,
+          "workspace_write": 0.020000000000000018,
+          "shell_and_tests": 0.020000000000000018,
+          "human_review_required": 0.94
+        }
+      },
+      "task_kind": "production_sensitive",
+      "model_tier": "frontier",
+      "reasoning_level": "xhigh",
+      "execution_mode": "inspect",
+      "permission_tier": "human_review_required",
+      "escalation_conditions": [
+        "Human review required before any consequential effect."
+      ]
+    },
+    "classifierModel": "synthetic-captured-decision",
+    "classifierModelVersion": "jev-fixture-captured-v1",
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "not_run_abstained",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  },
+  {
+    "schemaVersion": "monitter-routing-evaluation-v2",
+    "provenance": "synthetic",
+    "runId": "fixture-sensitive-billing-fixed_strong",
+    "caseId": "sensitive-billing",
+    "repeatId": "repeat-1",
+    "routeId": "fixed_strong",
+    "routingPolicyVersion": "fixed-strong-baseline-v1",
+    "questionSchemaVersion": "not_applicable",
+    "evidenceIds": [
+      "synthetic-fixture:fixture-sensitive-billing-fixed_strong"
+    ],
+    "classifierDecision": null,
+    "classifierModel": null,
+    "classifierModelVersion": null,
+    "provider": "synthetic_fixture",
+    "providerVersion": "fixture-v2",
+    "model": "strong",
+    "modelVersion": "tier-label-only-v1",
+    "taskCompleted": null,
+    "tests": null,
+    "costUsd": null,
+    "latencyMs": null
+  }
+]
