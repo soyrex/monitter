@@ -12,8 +12,8 @@ use std::{
     iter::FromIterator,
     ops::{Deref, DerefMut, Index, IndexMut},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -155,7 +155,9 @@ impl<T: HistoryRecord> History<T> {
         self.rows.get(index)
     }
 
-    pub fn first(&self) -> Option<&T> { self.rows.front() }
+    pub fn first(&self) -> Option<&T> {
+        self.rows.front()
+    }
 
     pub fn last(&self) -> Option<&T> {
         self.rows.back()
@@ -343,7 +345,12 @@ impl<T: HistoryRecord> History<T> {
     /// newest-first scoped paging without scanning other scopes.
     pub fn scope_ids(&self) -> Vec<String> {
         self.ensure_indexes();
-        self.scopes.lock().expect("history scope index poisoned").keys().cloned().collect()
+        self.scopes
+            .lock()
+            .expect("history scope index poisoned")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     pub fn scope_indices(&self, scope: &str) -> Vector<usize> {
@@ -584,7 +591,9 @@ impl<T: HistoryRecord> IndexMut<usize> for History<T> {
 impl<T: HistoryRecord> IntoIterator for History<T> {
     type Item = T;
     type IntoIter = im::vector::ConsumingIter<T>;
-    fn into_iter(self) -> Self::IntoIter { self.rows.into_iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.into_iter()
+    }
 }
 
 impl<'a, T: HistoryRecord> IntoIterator for &'a History<T> {
@@ -645,9 +654,6 @@ impl<T: HistoryRecord + PartialEq> PartialEq for History<T> {
             return false;
         }
         if Arc::ptr_eq(&self.lineage, &other.lineage) {
-            if self.version == other.version {
-                return true;
-            }
             if self.base_version == other.version && !self.full_change {
                 return related_rows_equal(&self.rows, &other.rows, &self.changes);
             }
@@ -821,6 +827,13 @@ mod tests {
         assert_ne!(descendant.version(), sibling_edit.version());
         assert_ne!(parent_edit, sibling_edit);
         assert_eq!(descendant.delta_since(&sibling_edit), HistoryDelta::Full);
+
+        // Equal version numbers are not enough to establish row equality if
+        // a future allocator regression creates a collision within a lineage.
+        let mut colliding_version = sibling_edit.clone();
+        colliding_version.version = parent_edit.version();
+        assert_eq!(colliding_version.version(), parent_edit.version());
+        assert_ne!(parent_edit, colliding_version);
 
         let mut identical_sibling = base.clone();
         identical_sibling
