@@ -1140,8 +1140,17 @@ The same Rust catalogue supplies the native harness tool allowlists:
 - `list_messages`: deliver queued messages to this active turn and return its durable inbox.
 - `cancel_delegation`: cancel an active delegation owned by this task.
 - `terminal_run`: open an interactive Monitter terminal tab and run a shell command in it.
-  Requires `command` (bounded to 4096 bytes); optional `cwd` defaults to the caller task's
-  saved folder. The shell stays interactive after the command finishes.
+  Requires the agent's independent `terminalExecutionEnabled` opt-in (default false, including
+  older saved agents), a live running turn, and a one-time native **Host terminal** approval
+  of the exact command. Read-only or unknown task sandbox modes cannot use this capability.
+  `command` is bounded to 4096 bytes without NUL; optional `cwd` must equal the task's saved
+  folder. The immutable task host/folder is used even if its agent profile has changed.
+  The approval explicitly covers ordinary host-shell execution outside the harness sandbox;
+  it cannot reuse provider tool rules or a session/always grant, including in YOLO mode.
+  At most one terminal approval may be pending per task, and it expires after two minutes,
+  cancellation, turn replacement, or capability revocation. Ownership and turn identity are
+  rechecked before execution. The shell stays interactive after the approved command finishes.
+  The result includes `approvalRequestId` to correlate its native approval receipt.
 - `mail_triage_help`: return the read-only Gmail workflow and its untrusted-content rules.
 - `present_mail_batch`: accept 0–20 normalized Gmail envelopes with bounded headers and snippets,
   never bodies. `sync_mode: snapshot` (the default) declares a complete current bounded result;

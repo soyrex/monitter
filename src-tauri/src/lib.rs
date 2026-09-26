@@ -638,6 +638,7 @@ fn ensure_internal_admin(snapshot: &mut Snapshot) -> InternalAdminState {
             responsibilities: vec![],
             skills: vec![],
             collaboration_enabled: false,
+            terminal_execution_enabled: false,
             jev_routing: model::JevRoutingMode::Off,
             jev_model_tiers: model::JevModelTiers::default(),
             jev_decisions_enabled: false,
@@ -2005,6 +2006,11 @@ impl Service {
         let scope = self.approval_scope(&input)?;
         let session_scope = approval_session_scope(&input);
         self.mutate(Some(input.task_id.clone()), |snapshot| {
+            if input.tool == "Host terminal" && snapshot.approval_requests.iter().any(|request| {
+                request.task_id == input.task_id && request.tool == "Host terminal" && request.status == "pending"
+            }) {
+                return Err("This task already has a host terminal command awaiting approval.".into());
+            }
             let task = snapshot
                 .tasks
                 .iter()

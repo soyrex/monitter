@@ -9,7 +9,7 @@ use crate::{
         finalize_subagent_sessions, id, now, sync_collaboration_subagent_sessions, Agent,
         Collaboration, CreateTaskInput, Message, RunEvent, Snapshot, Task, WorkPlan, WorkPlanItem,
     },
-    AcceptedTurn, Service,
+    AcceptedTurn, ApprovalDecision, CreateApprovalRequest, Service,
 };
 use serde_json::{json, Value};
 use std::{
@@ -30,6 +30,7 @@ const MAX_PER_TASK: usize = 24;
 const MAX_PER_ROOT: usize = 64;
 const MAX_ACTIVE: usize = 4;
 const MAX_TERMINAL_COMMAND: usize = 4096;
+const TERMINAL_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 const DELIVERY_UNCERTAIN: &str =
     "Delivery was interrupted by Monitter restarting; it was not replayed because delivery is uncertain.";
 const DELIVERED_TO_ACTIVE_TURN: &str =
@@ -212,31 +213,71 @@ impl Service {
         args: &serde_json::Map<String, Value>,
     ) -> Result<Value, String> {
         let command = required_string(args, "command")?;
-        if command.len() > MAX_TERMINAL_COMMAND {
-            return Err("command is too long.".into());
+        if command.len() > MAX_TERMINAL_COMMAND || command.contains('\0') {
+            return Err("command must be at most 4096 bytes without NUL characters.".into());
         }
-        let cwd = string_arg(args, "cwd")?.map(str::to_string);
-        let (task, _agent) = self.require_collaboration_caller(caller_task)?;
-        let target = if let Some(cwd) = cwd {
-            crate::terminal::TerminalTarget {
-                cwd: Some(cwd),
-                task_id: None,
-                agent_id: Some(task.agent_id.clone()),
-                host_id: None,
-                project_id: None,
-                command: Some(command),
-            }
-        } else {
-            crate::terminal::TerminalTarget {
-                cwd: None,
-                task_id: Some(caller_task.into()),
-                agent_id: None,
-                host_id: None,
-                project_id: None,
-                command: Some(command),
-            }
-        };
-        let session = self.open_terminal(target, 80, 24)?;
+        let (task, control) = self.terminal_execution_context(caller_task)?;
+        if string_arg(args, "cwd")?.is_some_and(|cwd| cwd != task.cwd) {
+            return Err("Agent terminal commands must use this task's saved folder.".into());
+        }
+        let run_id = control.current_run_id()?;
+        let (_, host) = self.task_and_host(caller_task)?;
+        let request = self.create_approval_request(CreateApprovalRequest {
+            task_id: task.id.clone(),
+            provider: task.provider.clone(),
+            run_id: format!("host-terminal:{run_id}:{}", id()),
+            tool: "Host terminal".into(),
+            summary: format!("Run a host terminal command on {}?", host.name),
+            detail: format!(
+                "Host: {}\nFolder: {}\n\n{}\n\nThis command runs in an ordinary host shell outside the agent sandbox. The terminal stays open afterward. This approval is for this command only.",
+                host.name, task.cwd, command
+            ),
+            risk: "high".into(),
+            // Host-shell authority cannot inherit remembered provider-tool
+            // rules or a broad session grant. Each command is reviewed once.
+            raw_input: None,
+        })?;
+        self.app_server_approvals
+            .lock()
+            .map_err(|_| "Approval ownership unavailable.".to_string())?
+            .insert(request.id.clone(), Arc::downgrade(&control));
+        let started = Instant::now();
+        let decision = self.wait_for_approval(&request.id, || {
+            started.elapsed() < TERMINAL_APPROVAL_TIMEOUT
+                && self.terminal_execution_is_current(&task, &control, &run_id)
+        });
+        if let Ok(mut waiters) = self.approval_waiters.lock() {
+            waiters.remove(&request.id);
+        }
+        if let Ok(mut owners) = self.app_server_approvals.lock() {
+            owners.remove(&request.id);
+        }
+        if decision.is_err() {
+            let _ = self.expire_approval_request(&request.id);
+        }
+        match decision? {
+            ApprovalDecision::ApproveOnce => {}
+            _ => return Err("Host terminal command was not approved.".into()),
+        }
+        // Settings, task ownership, and turn identity are checked again after
+        // the user responds; a grant never outlives a cancelled/replaced turn.
+        if !self.terminal_execution_is_current(&task, &control, &run_id) {
+            return Err("Host terminal approval expired before execution.".into());
+        }
+        let session = self.open_terminal(crate::terminal::TerminalTarget {
+            cwd: None,
+            task_id: Some(caller_task.into()),
+            agent_id: None,
+            host_id: None,
+            project_id: None,
+            command: Some(command),
+        }, 80, 24)?;
+        // Cancellation can race process creation. Close any newly registered
+        // terminal before returning it to an owner that has already ended.
+        if !self.terminal_execution_is_current(&task, &control, &run_id) {
+            let _ = self.close_terminal(&session.id);
+            return Err("The task ended while its approved terminal was starting.".into());
+        }
         self.changed(None);
         Ok(json!({
             "id": session.id,
@@ -244,7 +285,43 @@ impl Service {
             "cwd": session.cwd,
             "status": session.status,
             "exitCode": session.exit_code,
+            "approvalRequestId": request.id,
         }))
+    }
+
+    fn terminal_execution_context(
+        &self,
+        task_id: &str,
+    ) -> Result<(Task, Arc<crate::runner::RunControl>), String> {
+        let (task, agent) = self.require_collaboration_caller(task_id)?;
+        if !agent.terminal_execution_enabled {
+            return Err("Host terminal requests are disabled for this agent. Enable them in agent settings before requesting a command.".into());
+        }
+        if !matches!(task.sandbox.as_str(), "workspace-write" | "harness-configured" | "yolo") {
+            return Err("Read-only tasks cannot request host terminal execution.".into());
+        }
+        let control = self.runs.lock()
+            .map_err(|_| "Run registry unavailable.".to_string())?
+            .tasks.get(task_id).cloned()
+            .ok_or("Host terminal execution requires a live task runtime.")?;
+        if control.is_cancelled() || !control.is_active() {
+            return Err("Host terminal execution requires an active task turn.".into());
+        }
+        Ok((task, control))
+    }
+
+    fn terminal_execution_is_current(
+        &self,
+        expected: &Task,
+        control: &Arc<crate::runner::RunControl>,
+        run_id: &str,
+    ) -> bool {
+        self.terminal_execution_context(&expected.id).is_ok_and(|(task, current)| {
+            Arc::ptr_eq(&current, control)
+                && current.current_run_id().is_ok_and(|id| id == run_id)
+                && task.cwd == expected.cwd && task.host_id == expected.host_id
+                && task.sandbox == expected.sandbox && task.provider == expected.provider
+        })
     }
 
     fn queue_protocol(
@@ -1893,13 +1970,52 @@ mod tests {
         assert_eq!(compact_entries(&vec!["x".repeat(1_000); 12]).len(), 4);
     }
 
-    #[test]
-    fn terminal_run_opens_session_writes_command_and_enforces_bounds() {
+    fn terminal_fixture(enabled: bool, sandbox: &str) -> (Arc<Service>, PathBuf, Task, Arc<crate::runner::RunControl>) {
         let (service, dir) = service("terminal-run");
-        let caller = service.snapshot().unwrap().agents[0].clone();
+        let caller = service.mutate(None, |snapshot| {
+            let caller = &mut snapshot.agents[0];
+            caller.terminal_execution_enabled = enabled;
+            caller.sandbox = sandbox.into();
+            caller.cwd = dir.to_string_lossy().into_owned();
+            Ok(caller.clone())
+        }).unwrap();
         let root = task(&service, &caller, "Root", None, None);
         running(&service, &root.id);
-        let cwd = service.snapshot().unwrap().hosts[0].default_cwd.clone();
+        let control = service.reserve_run(&root.id).unwrap();
+        (service, dir, root, control)
+    }
+
+    fn await_terminal_approval(service: &Service, task_id: &str) -> crate::model::ApprovalRequest {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let approval = service.snapshot().unwrap().approval_requests.into_iter()
+                .find(|request| request.task_id == task_id && request.tool == "Host terminal" && request.status == "pending");
+            if let Some(approval) = approval {
+                if service.app_server_approvals.lock().unwrap().contains_key(&approval.id) {
+                    return approval;
+                }
+            }
+            assert!(Instant::now() < deadline, "Host terminal approval was not published");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn terminal_run_rejects_disabled_and_read_only_permissions_before_pty_creation() {
+        for (enabled, sandbox, expected) in [(false, "yolo", "disabled"), (true, "read-only", "Read-only")] {
+            let (service, dir, root, _) = terminal_fixture(enabled, sandbox);
+            let error = service.protocol(&root.id, "terminal_run", json!({"command":"printf denied"})).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(service.terminals.lock().unwrap().is_empty());
+            assert!(service.snapshot().unwrap().approval_requests.is_empty());
+            service.cleanup();
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn terminal_run_enforces_bounds_and_saved_task_folder() {
+        let (service, dir, root, _) = terminal_fixture(true, "workspace-write");
         let oversized = "x".repeat(MAX_TERMINAL_COMMAND + 1);
         assert!(service
             .protocol(
@@ -1911,19 +2027,78 @@ mod tests {
         assert!(service
             .protocol(&root.id, "terminal_run", json!({"command":"x","bogus":1}),)
             .is_err());
-        let response = service
-            .protocol(
-                &root.id,
-                "terminal_run",
-                json!({"command": "printf 'MCP_TERMINAL_OK\\n'"}),
-            )
-            .unwrap();
+        assert!(service.protocol(&root.id, "terminal_run", json!({"command":"x", "cwd":"/"})).unwrap_err().contains("saved folder"));
+        assert!(service.protocol(&root.id, "terminal_run", json!({"command":"x\u{0}"})).is_err());
+        assert!(service.terminals.lock().unwrap().is_empty());
+        assert!(service.snapshot().unwrap().approval_requests.is_empty());
+        service.cleanup();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn terminal_run_waits_for_one_time_native_approval_even_in_yolo() {
+        let (service, dir, root, _) = terminal_fixture(true, "yolo");
+        let worker = service.clone();
+        let task_id = root.id.clone();
+        let call = thread::spawn(move || worker.protocol(&task_id, "terminal_run", json!({"command":"printf approved > terminal-approved"})));
+        let approval = await_terminal_approval(&service, &root.id);
+        assert!(!approval.rememberable);
+        assert!(approval.session_scope.is_none());
+        assert!(approval.detail.contains("outside the agent sandbox"));
+        assert!(service.terminals.lock().unwrap().is_empty());
+        assert!(!dir.join("terminal-approved").exists());
+        assert!(service.resolve_approval_request(&approval.id, ApprovalDecision::ApproveAlways).is_err());
+        assert!(service.resolve_approval_request(&approval.id, ApprovalDecision::ApproveSession).is_err());
+        assert!(service.protocol(&root.id, "terminal_run", json!({"command":"printf duplicate"})).unwrap_err().contains("already has"));
+        service.resolve_approval_request(&approval.id, ApprovalDecision::ApproveOnce).unwrap();
+        let response = call.join().unwrap().unwrap();
         let id = response["id"].as_str().unwrap().to_string();
         assert!(!id.is_empty());
         assert_eq!(response["status"], "running");
-        assert_eq!(response["cwd"], cwd);
+        assert_eq!(response["cwd"], root.cwd);
+        assert_eq!(response["approvalRequestId"], approval.id);
         assert!(service.terminals.lock().unwrap().contains_key(&id));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fs::read_to_string(dir.join("terminal-approved")).unwrap_or_default() != "approved" {
+            assert!(Instant::now() < deadline, "Approved terminal command did not run");
+            thread::sleep(Duration::from_millis(10));
+        }
         service.close_terminal(&id).unwrap();
+        service.cleanup();
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn terminal_run_denial_revocation_and_cancellation_never_create_a_pty() {
+        for scenario in ["deny", "revoke", "cancel", "replace"] {
+            let (service, dir, root, control) = terminal_fixture(true, "workspace-write");
+            let worker = service.clone();
+            let task_id = root.id.clone();
+            let call = thread::spawn(move || worker.protocol(&task_id, "terminal_run", json!({"command":"printf forbidden > terminal-forbidden"})));
+            let approval = await_terminal_approval(&service, &root.id);
+            match scenario {
+                "deny" => { service.resolve_approval_request(&approval.id, ApprovalDecision::Deny).unwrap(); }
+                "revoke" => { service.mutate(None, |snapshot| {
+                    snapshot.agents.iter_mut().find(|agent| agent.id == root.agent_id).unwrap().terminal_execution_enabled = false;
+                    Ok(())
+                }).unwrap(); }
+                "cancel" => control.cancel(),
+                "replace" => {
+                    let replacement = crate::runner::RunControl::new(false);
+                    replacement.begin_run().unwrap();
+                    service.runs.lock().unwrap().tasks.insert(root.id.clone(), replacement);
+                    assert!(service.resolve_approval_request(&approval.id, ApprovalDecision::ApproveOnce).is_err());
+                }
+                _ => unreachable!(),
+            }
+            assert!(call.join().unwrap().is_err(), "{scenario}");
+            assert!(service.terminals.lock().unwrap().is_empty(), "{scenario}");
+            assert!(!dir.join("terminal-forbidden").exists(), "{scenario}");
+            assert!(service.approval_waiters.lock().unwrap().is_empty());
+            assert!(!service.app_server_approvals.lock().unwrap().contains_key(&approval.id));
+            assert_ne!(service.snapshot().unwrap().approval_requests.iter().find(|item| item.id == approval.id).unwrap().status, "pending");
+            service.cleanup();
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }

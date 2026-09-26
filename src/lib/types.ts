@@ -101,6 +101,8 @@ export interface Agent {
   color: string; sandbox: Sandbox;
   expertise: string[]; responsibilities: string[]; skills: string[];
   collaborationEnabled: boolean;
+  /** Separate host-shell capability. Each command needs native approval; unavailable in read-only tasks. */
+  terminalExecutionEnabled?: boolean;
   jevRouting?: JevRoutingMode;
   jevModelTiers?: JevModelTiers;
   /** Adds Jev's separate decision MCP tools to supported local harness launches. */

@@ -139,6 +139,10 @@ pub struct Agent {
     pub skills: Vec<String>,
     #[serde(default = "default_collaboration_enabled")]
     pub collaboration_enabled: bool,
+    /// Separate opt-in for requesting an ordinary host terminal through MCP.
+    /// Every command still needs native approval; read-only tasks cannot use it.
+    #[serde(default)]
+    pub terminal_execution_enabled: bool,
     /// Explicitly opt-in per harness. Older saved agents remain off.
     #[serde(default)]
     pub jev_routing: JevRoutingMode,
@@ -1657,6 +1661,7 @@ pub fn default_snapshot() -> Snapshot {
             responsibilities: vec![],
             skills: vec![],
             collaboration_enabled: true,
+            terminal_execution_enabled: false,
             jev_routing: JevRoutingMode::Off,
             jev_model_tiers: JevModelTiers::default(),
             jev_decisions_enabled: false,
@@ -2064,6 +2069,15 @@ mod task_migration_tests {
             serde_json::to_value(&snapshot).unwrap()["subagentSessions"][0]["collaborationId"],
             "delegation-1"
         );
+    }
+
+    #[test]
+    fn legacy_agents_do_not_receive_host_terminal_authority() {
+        let mut value = serde_json::to_value(&default_snapshot().agents[0]).unwrap();
+        value.as_object_mut().unwrap().remove("terminalExecutionEnabled");
+        let agent: Agent = serde_json::from_value(value).unwrap();
+        assert!(!agent.terminal_execution_enabled);
+        assert!(!default_snapshot().agents[0].terminal_execution_enabled);
     }
 
     #[test]

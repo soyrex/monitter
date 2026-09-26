@@ -5955,6 +5955,8 @@
         <label>Responsibilities<textarea value={profileList((draft as AgentProfile).responsibilities)} oninput={(event) => { (draft as AgentProfile).responsibilities = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One responsibility per line"></textarea></label>
         <label>Skills<textarea value={profileList((draft as AgentProfile).skills)} oninput={(event) => { (draft as AgentProfile).skills = parseProfileList(event.currentTarget.value); markAgentDirty(draft.id); }} placeholder="One skill per line"></textarea></label>
         <label class="check-row"><input type="checkbox" role="switch" checked={(draft as AgentProfile).collaborationEnabled !== false} disabled={isAgyHeadlessLaunch(draft.acp)} onchange={(event) => { (draft as AgentProfile).collaborationEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} /> Available for collaboration</label>
+        <label class="check-row"><input type="checkbox" role="switch" checked={draft.terminalExecutionEnabled === true} disabled={draft.internal || isAgyHeadlessLaunch(draft.acp)} onchange={(event) => { draft.terminalExecutionEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} /> Allow host terminal requests</label>
+        <p class="hint">Each terminal command needs your approval and runs with your host account's permissions. Read-only chats cannot request terminals.</p>
         {#if isAgyHeadlessLaunch(draft.acp)}<p class="hint">AGY CLI chats cannot receive Monitter collaboration tools. Choose Google's separately authenticated Antigravity ACP server in Advanced to use them.</p>{/if}
       </details>
       <label>Instructions<textarea

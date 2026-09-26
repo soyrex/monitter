@@ -215,7 +215,10 @@ pub fn open(
         thread::spawn(move || monitor_title(title_session));
     }
     if let Some(command) = initial_command {
-        let _ = session.write(format!("{command}\n").as_bytes());
+        if let Err(error) = session.write(format!("{command}\n").as_bytes()) {
+            let _ = session.close();
+            return Err(format!("Could not deliver the terminal command: {error}"));
+        }
     }
     Ok(session)
 }
