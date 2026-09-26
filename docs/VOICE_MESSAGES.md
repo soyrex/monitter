@@ -49,14 +49,14 @@ desktop app at `~/Library/Application Support/com.monitter.desktop/lan-tls.json`
 
 ```json
 {
-  "hostname": "lan.example.com",
+  "hostname": "lan.monitter.com",
   "certPath": "/absolute/path/to/fullchain.pem",
   "keyPath": "/absolute/path/to/privkey.pem"
 }
 ```
 
 Keep the private key readable only by the desktop user. Monitter loads the
-certificate and key at startup and advertises `https://lan.example.com:18437/`
+certificate and key at startup and advertises `https://lan.monitter.com:18437/`
 in Settings → LAN access. Restart Monitter after certificate renewal. If the
 configuration, certificate parsing or key loading fails, LAN startup reports
 an error and does not expose a plain HTTP owner interface. Browsers reject
@@ -66,3 +66,12 @@ legacy HTTP LAN interface remains available, but remote browser recording is
 blocked by browser secure-context rules. The LAN interface grants owner-level
 workspace control to trusted LAN users; HTTPS provides encryption, not a
 separate visitor permission level.
+
+For this installation, `lan.monitter.com` is the selected hostname. LAN clients
+need DNS to resolve it to the desktop's LAN address; a split DNS record on the
+LAN resolver keeps that address off public DNS. The address observed on the
+desktop at setup time was `192.168.10.110`, assigned by DHCP, so reserve it or
+update the record if the lease changes. The public DNS provider only needs to
+serve the DNS-01 TXT challenge for certificate issuance and renewal. Install
+`lan-tls.json` only after the certificate and key files exist: an incomplete
+configuration prevents the LAN server from starting.
