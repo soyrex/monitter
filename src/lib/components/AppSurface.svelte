@@ -5527,7 +5527,7 @@
         </button>
         <div class="statistics-body" id="sidebar-statistics-body" inert={!statisticsExpanded}>
           <div class="statistics-content">
-            <UsageRings usage={sidebarUsage} expanded={true} simple={true} showHeader={false}/>
+            <UsageRings usage={sidebarUsage} expanded={true} showHeader={false} iconOnly={true} class="rings-only"/>
             <SidebarClock expanded={statisticsExpanded} panel={true} bind:metricsModalOpen={statisticsModalOpen}/>
           </div>
         </div>

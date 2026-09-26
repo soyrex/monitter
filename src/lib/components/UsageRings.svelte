@@ -60,8 +60,9 @@
     expanded = $bindable(true),
     simple = false,
     showHeader = true,
+    iconOnly = false,
     class: className = '',
-  }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; simple?: boolean; showHeader?: boolean; class?: string } = $props();
+  }: { usage?: UsageRingMap; compact?: boolean; expanded?: boolean; simple?: boolean; showHeader?: boolean; iconOnly?: boolean; class?: string } = $props();
   let showAbsoluteResets = $state(false);
   let currentTime = $state(Date.now());
   let ringsOnly = $state(false);
@@ -286,7 +287,7 @@
   }
 </script>
 
-<section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class:simple class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
+<section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class:simple class:icon-only={iconOnly} class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
   {#if !compact && showHeader}
     <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" aria-label={toggleAction()} title={toggleAction()} onclick={toggle}>
       <span>MODEL USAGE</span>
@@ -324,7 +325,7 @@
                 stroke-dasharray="100"
                 stroke-dashoffset={active?.unlimited ? 0 : 100 - (percent(active?.usedPercent) ?? 0)}
               />
-              {#if !simple && weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
+              {#if weekly && !weekly.unlimited && (status === 'ready' || status === 'stale')}
                 <circle
                   class="ring-weekly"
                   cx="20" cy="20" r="11.5"
@@ -334,7 +335,9 @@
                 />
               {/if}
             </svg>
-            <span class="ring-value" aria-hidden="true">{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}</span>
+            <span class="ring-value" aria-hidden="true">
+              {#if iconOnly}<ProviderIcon provider={provider.id} size={15}/>{:else}{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}{/if}
+            </span>
           </div>
           {#if simple}
             <div class="usage-simple-copy">
@@ -349,7 +352,7 @@
                 {:else}{data?.message?.trim() || stateLabel(data)}{/if}
               </span>
             </div>
-            {#if sourceData?.accounts && sourceData.accounts.length > 1}
+            {#if !iconOnly && sourceData?.accounts && sourceData.accounts.length > 1}
               {@const accounts = sourceData.accounts}
               <div class="account-cycle simple-account-cycle" role="group" aria-label={`${provider.label} account`}>
                 <button type="button" class="account-cycle-arrow" aria-label="Previous account" onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, -1)}><ChevronLeft size={12}/></button>
@@ -357,7 +360,7 @@
               </div>
             {/if}
           {:else}
-          {#if sourceData?.accounts && sourceData.accounts.length > 1}
+          {#if !iconOnly && sourceData?.accounts && sourceData.accounts.length > 1}
             {@const accounts = sourceData.accounts}
             <div class="account-cycle" role="group" aria-label={`${provider.label} account`}>
               <button type="button" class="account-cycle-arrow" aria-label="Previous account" onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, -1)}><ChevronLeft size={12}/></button>
@@ -420,7 +423,7 @@
             {/if}
 
           </div>
-          <small class="usage-ring-label">{#if ringsOnly}<span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={11} /></span>{/if}<span class="usage-label-text">{provider.label}</span></small>
+          {#if !iconOnly}<small class="usage-ring-label">{#if ringsOnly}<span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={11} /></span>{/if}<span class="usage-label-text">{provider.label}</span></small>{/if}
           {/if}
         </article>
       {/each}
@@ -453,6 +456,7 @@
   .ring-active { stroke:var(--ring-active-color,var(--accent)); stroke-width:3; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
   .ring-weekly { stroke:color-mix(in srgb,var(--ring-weekly-color,var(--accent)) 45%,var(--muted)); stroke-width:1.5; transition:stroke-dashoffset .2s ease,stroke .2s ease; }
   .ring-value { position:absolute; inset:0; display:grid; place-items:center; color:var(--ink); font:700 9px var(--mono); line-height:1; pointer-events:none; }
+  .ring-value :global(.provider-icon) { width:15px; height:15px; }
   .usage-copy { display:grid; gap:1px; min-width:0; }
   .usage-heading,.usage-detail,.usage-weekly { display:flex; align-items:baseline; gap:6px; min-width:0; white-space:nowrap; }
   .usage-heading { align-items:center; }
@@ -504,6 +508,7 @@
   .rings-only .usage-ring-label .usage-provider-icon { width:13px; height:13px; }
   .rings-only .usage-ring-label .usage-provider-icon :global(.provider-icon) { width:9px; height:9px; }
   .rings-only .usage-label-text { overflow:hidden; text-overflow:ellipsis; }
+  .icon-only .ring-track,.icon-only .ring-active { stroke-width:3.75; }
   .horizontal {
     .usage-provider { align-items:start; }
     .usage-ring { margin-top:2px; }
