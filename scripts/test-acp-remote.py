@@ -60,6 +60,15 @@ class RemoteAcp(unittest.TestCase):
         self.assertEqual(ready["params"]["cwd"], self.folder.name)
         return process
 
+    def assert_clean_exit(self, process, expected=None):
+        code = process.wait(timeout=4)
+        diagnostics = process.stderr.read().decode("utf-8", errors="replace")
+        self.assertGreaterEqual(code, 0, diagnostics)
+        if expected is not None:
+            self.assertEqual(code, expected, diagnostics)
+        self.assertNotIn("Fatal Python error", diagnostics)
+        self.assertNotIn("_enter_buffered_busy", diagnostics)
+
     def test_argv_and_protocol_bytes_are_forwarded_without_shell_evaluation(self):
         code = """import json,os,sys
 request=json.loads(sys.stdin.buffer.readline())
@@ -74,7 +83,7 @@ sys.stdin.buffer.read()
         self.assertEqual(result["cwd"], os.path.realpath(self.folder.name))
         self.assertEqual(result["text"], "one\u2028two\u2029three")
         process.stdin.close()
-        process.wait(timeout=3)
+        self.assert_clean_exit(process)
 
     def test_disconnect_cleans_owned_resistant_process_group(self):
         code = """import json,os,signal,subprocess,sys,time
@@ -87,7 +96,7 @@ time.sleep(60)
         process = self.start(code)
         pids = frame(process)
         process.stdin.close()
-        process.wait(timeout=4)
+        self.assert_clean_exit(process)
         deadline = time.monotonic()+4
         while time.monotonic()<deadline and not all(gone(pid) for pid in pids.values()):
             time.sleep(0.025)
@@ -107,10 +116,15 @@ time.sleep(60)
         writer = threading.Thread(target=saturate, daemon=True)
         writer.start()
         process.terminate()
-        process.wait(timeout=4)
+        self.assert_clean_exit(process, 128 + signal.SIGTERM)
         writer.join(timeout=2)
         self.assertFalse(writer.is_alive())
         self.assertTrue(gone(pid))
+
+    def test_child_exit_with_open_stdin_does_not_abort_python(self):
+        process = self.start("import time;time.sleep(0.1)")
+        # Keep stdin open until tearDown, as a connected SSH client would.
+        self.assert_clean_exit(process, 0)
 
 
 if __name__ == "__main__":

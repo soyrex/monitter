@@ -3601,10 +3601,11 @@ pub(crate) struct SpawnedAppServer {
 
 // The first (and only) non-RPC frame supplies short-lived collaboration
 // credentials.  Once consumed, every byte is passed through unchanged between
-// SSH stdio and Codex app-server.  The input reader owns process-group cleanup
-// so EOF, disconnect and local cancellation cannot leave a remote daemon.
+// SSH stdio and Codex app-server. The main thread owns process-group cleanup;
+// the input reader reports EOF so a disconnect cannot leave a remote daemon.
 const REMOTE_APP_SERVER_BOOTSTRAP: &str = r#"import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -3612,10 +3613,27 @@ import threading
 import time
 
 PREFIX = b"MONITTER/CODEX-APP-SERVER/1 "
+# Use raw descriptors throughout: buffered bootstrap reads can read ahead into
+# protocol traffic, and a daemon holding a buffered I/O lock aborts CPython at
+# interpreter shutdown (notably Xcode's Python 3.9).
+def read_exact(size):
+    value = bytearray()
+    while len(value) < size:
+        chunk = os.read(sys.stdin.fileno(), size - len(value))
+        if not chunk:
+            break
+        value += chunk
+    return bytes(value)
+
+def write_all(fd, chunk):
+    pending = memoryview(chunk)
+    while pending:
+        pending = pending[os.write(fd, pending):]
+
 def limited_line(limit):
     value = bytearray()
     while len(value) <= limit:
-        byte = sys.stdin.buffer.read1(1)
+        byte = os.read(sys.stdin.fileno(), 1)
         if not byte:
             break
         value += byte
@@ -3632,7 +3650,7 @@ except ValueError:
     raise SystemExit("invalid Monitter Codex app-server bootstrap")
 if size < 2 or size > 64 * 1024:
     raise SystemExit("invalid Monitter Codex app-server bootstrap")
-payload = sys.stdin.buffer.read(size)
+payload = read_exact(size)
 if len(payload) != size:
     raise SystemExit("incomplete Monitter Codex app-server bootstrap")
 try:
@@ -3655,6 +3673,17 @@ process = None
 
 stopping = False
 stop_requested = threading.Event()
+relay_stopping = threading.Event()
+def signal_owned_group(sig):
+    try:
+        os.killpg(process.pid, sig)
+    except PermissionError:
+        # macOS reports EPERM for a group containing only an unreaped zombie.
+        # Reap our leader and retry; never skip surviving tool descendants.
+        if process.poll() is None:
+            raise
+        os.killpg(process.pid, sig)
+
 def stop_owned():
     global stopping
     if stopping or process is None:
@@ -3666,14 +3695,14 @@ def stop_owned():
         signal.signal(sig, signal.SIG_IGN)
     for sig, timeout in ((signal.SIGINT, 1), (signal.SIGTERM, 1), (signal.SIGKILL, 0)):
         try:
-            os.killpg(process.pid, sig)
+            signal_owned_group(sig)
         except ProcessLookupError:
             return
         if timeout:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
-                    os.killpg(process.pid, 0)
+                    signal_owned_group(0)
                 except ProcessLookupError:
                     return
                 time.sleep(0.05)
@@ -3684,28 +3713,28 @@ def handle_signal(signum, _frame):
 def forward_stderr():
     try:
         while True:
-            chunk = process.stderr.read1(8192)
+            chunk = os.read(process.stderr.fileno(), 8192)
             if not chunk:
                 return
-            sys.stderr.buffer.write(chunk)
-            sys.stderr.buffer.flush()
-    except BrokenPipeError:
+            write_all(sys.stderr.fileno(), chunk)
+    except OSError:
         return
 
 def forward_input():
     try:
-        while True:
-            chunk = sys.stdin.buffer.read1(8192)
+        while not relay_stopping.is_set():
+            if not select.select([sys.stdin.fileno()], [], [], 0.05)[0]:
+                continue
+            chunk = os.read(sys.stdin.fileno(), 8192)
             if not chunk:
                 break
-            process.stdin.write(chunk)
-            process.stdin.flush()
-    except BrokenPipeError:
+            write_all(process.stdin.fileno(), chunk)
+    except OSError:
         pass
     finally:
         try:
             process.stdin.close()
-        except BrokenPipeError:
+        except OSError:
             pass
         stop_requested.set()
 
@@ -3718,7 +3747,7 @@ try:
     process = subprocess.Popen(
         [program, "app-server", "--listen", "stdio://"], cwd=cwd,
         stdin=subprocess.PIPE, stdout=sys.stdout.buffer, stderr=subprocess.PIPE,
-        start_new_session=True,
+        start_new_session=True, bufsize=0,
     )
     assert process.stdin is not None
     assert process.stderr is not None
@@ -3731,12 +3760,15 @@ try:
         pass
     code = process.poll()
 finally:
+    relay_stopping.set()
     stop_owned()
     if process is not None:
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
+    if reader.ident is not None:
+        reader.join(timeout=0.2)
     if diagnostics.ident is not None:
         diagnostics.join(timeout=0.2)
 raise SystemExit(code if code is not None else process.returncode or 0)
@@ -4973,22 +5005,37 @@ for line in sys.stdin.buffer:
         (child, scratch)
     }
 
-    fn bootstrap_ready(child: &mut Child) {
+    fn bootstrap_ready(child: &mut Child) -> mpsc::Receiver<String> {
+        bootstrap_ready_with_input(child, b"")
+    }
+
+    fn bootstrap_ready_with_input(child: &mut Child, input: &[u8]) -> mpsc::Receiver<String> {
         let config = r#"{"endpoint":null,"token":null}"#;
         let stdin = child.stdin.as_mut().unwrap();
         stdin
             .write_all(format!("MONITTER/CODEX-APP-SERVER/1 {}\n", config.len()).as_bytes())
             .unwrap();
-        stdin.write_all(config.as_bytes()).unwrap();
+        // Fragment the bootstrap payload, then pipeline protocol bytes in its
+        // final write: switching between buffered and raw readers loses data.
+        let split = config.len() / 2;
+        stdin.write_all(&config.as_bytes()[..split]).unwrap();
         stdin.flush().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let mut tail = config.as_bytes()[split..].to_vec();
+        tail.extend_from_slice(input);
+        stdin.write_all(&tail).unwrap();
+        stdin.flush().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let (sender, receiver) = mpsc::channel();
+        let (diagnostics_sender, diagnostics_receiver) = mpsc::channel();
         thread::spawn(move || {
+            let mut stderr = BufReader::new(stderr);
             let mut line = String::new();
-            let result = BufReader::new(&mut stderr)
-                .read_line(&mut line)
-                .map(|_| line);
+            let result = stderr.read_line(&mut line).map(|_| line);
             let _ = sender.send(result);
+            let mut diagnostics = String::new();
+            let _ = stderr.read_to_string(&mut diagnostics);
+            let _ = diagnostics_sender.send(diagnostics);
         });
         assert!(
             receiver
@@ -4997,6 +5044,35 @@ for line in sys.stdin.buffer:
                 .unwrap()
                 .starts_with("__MONITTER_APP_SERVER_CWD__")
         );
+        diagnostics_receiver
+    }
+
+    fn bootstrap_exited(
+        child: &mut Child,
+        diagnostics: mpsc::Receiver<String>,
+        expected_code: Option<i32>,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("bootstrap did not exit within its cleanup deadline");
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        let diagnostics = diagnostics.recv_timeout(Duration::from_secs(2)).unwrap();
+        // A SIGABRT used to satisfy the SIGHUP test's mere exit check while
+        // macOS displayed a Python crash dialog. Inspect status AND stderr.
+        assert!(status.code().is_some(), "{status}: {diagnostics}");
+        if let Some(expected_code) = expected_code {
+            assert_eq!(status.code(), Some(expected_code), "{diagnostics}");
+        }
+        assert!(!diagnostics.contains("Fatal Python error"), "{diagnostics}");
+        assert!(!diagnostics.contains("_enter_buffered_busy"), "{diagnostics}");
     }
 
     fn fixture_grandchild(scratch: &BootstrapScratch) -> i32 {
@@ -6547,7 +6623,7 @@ for line in sys.stdin.buffer:
         // helper as a shell file. End-to-end SSH fixtures exercise the same
         // source through the host-scoped executable override.
         assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("limited_line(256)"));
-        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("read1(8192)"));
+        assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("os.read(sys.stdin.fileno(), 8192)"));
         assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("stderr=subprocess.PIPE"));
         assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("__MONITTER_APP_SERVER_CWD__"));
         assert!(REMOTE_APP_SERVER_BOOTSTRAP.contains("signal.SIGHUP"));
@@ -6558,7 +6634,7 @@ for line in sys.stdin.buffer:
     #[test]
     fn ssh_bootstrap_forwards_fragmented_jsonl_without_waiting_for_a_full_buffer() {
         let (mut child, _scratch) = bootstrap_fixture(false);
-        bootstrap_ready(&mut child);
+        let diagnostics = bootstrap_ready(&mut child);
         let stdout = child.stdout.take().unwrap();
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
@@ -6580,35 +6656,58 @@ for line in sys.stdin.buffer:
             "{\"method\":\"ping\"}\n"
         );
         drop(child.stdin.take());
-        let _ = child.wait().unwrap();
+        bootstrap_exited(&mut child, diagnostics, None);
     }
 
     #[test]
     fn ssh_bootstrap_eof_reaps_descendants_after_the_leader_exits() {
         let (mut child, scratch) = bootstrap_fixture(true);
-        bootstrap_ready(&mut child);
+        let diagnostics = bootstrap_ready(&mut child);
         let pid = fixture_grandchild(&scratch);
         child.stdin.as_mut().unwrap().write_all(b"{}\n").unwrap();
         child.stdin.as_mut().unwrap().flush().unwrap();
         drop(child.stdin.take());
-        assert!(child.wait().unwrap().success());
+        bootstrap_exited(&mut child, diagnostics, Some(0));
         assert_pid_gone(pid);
     }
 
     #[test]
     fn ssh_bootstrap_sighup_reaps_resistant_descendants() {
         let (mut child, scratch) = bootstrap_fixture(false);
-        bootstrap_ready(&mut child);
+        let diagnostics = bootstrap_ready(&mut child);
         let pid = fixture_grandchild(&scratch);
         assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGHUP) }, 0);
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while Instant::now() < deadline && child.try_wait().unwrap().is_none() {
-            thread::sleep(Duration::from_millis(25));
-        }
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "bootstrap did not exit after SIGHUP"
-        );
+        bootstrap_exited(&mut child, diagnostics, Some(128 + libc::SIGHUP));
+        assert_pid_gone(pid);
+    }
+
+    #[test]
+    fn ssh_bootstrap_child_exit_with_open_stdin_does_not_abort_python() {
+        let (mut child, scratch) = bootstrap_fixture(true);
+        let diagnostics = bootstrap_ready(&mut child);
+        let pid = fixture_grandchild(&scratch);
+        child.stdin.as_mut().unwrap().write_all(b"{}\n").unwrap();
+        // Deliberately retain the pipe while the child exits. The reader must
+        // stop without waiting for EOF or holding a buffered lock at shutdown.
+        bootstrap_exited(&mut child, diagnostics, Some(0));
+        assert_pid_gone(pid);
+    }
+
+    #[test]
+    fn ssh_bootstrap_preserves_protocol_bytes_pipelined_after_bootstrap() {
+        let (mut child, scratch) = bootstrap_fixture(true);
+        let input = "{\"text\":\"ping 🦘\"}\n";
+        let diagnostics = bootstrap_ready_with_input(&mut child, input.as_bytes());
+        let pid = fixture_grandchild(&scratch);
+        bootstrap_exited(&mut child, diagnostics, Some(0));
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        assert_eq!(output, input);
         assert_pid_gone(pid);
     }
 }
