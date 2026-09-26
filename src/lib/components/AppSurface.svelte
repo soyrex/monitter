@@ -1971,7 +1971,7 @@
   }
   async function processVoiceRecording(file:AttachmentFileData) {
     const key=currentDraftKey();
-    if(!key || !nativeRuntime || voiceProcessing[key]) return;
+    if(!key || !(nativeRuntime || (isLanBrowser() && !embedded)) || voiceProcessing[key]) return;
     const targets=attachmentTargets(), scope=attachmentScope;
     if(!targets.length) { voiceErrors[key]='Choose an agent to receive this voice message.'; return; }
     voiceProcessing[key]=true; voiceErrors[key]='';
@@ -4800,7 +4800,7 @@
 {/snippet}
 
 {#snippet voiceButton()}
-  {#if nativeRuntime}
+  {#if nativeRuntime || (isLanBrowser() && !embedded)}
     {#key `${currentDraftKey() ?? ''}:${attachmentScope}`}
       <VoiceRecorder disabled={busy || filesBusy || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
     {/key}

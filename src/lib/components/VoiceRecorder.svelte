@@ -5,6 +5,7 @@
   import X from "@lucide/svelte/icons/x";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import { audioBufferToWav16k } from '$lib/voice-wav';
+  import { isLanBrowser } from '$lib/lan';
 
   type RecordedFile = { filename: string; mimeType: string; dataBase64: string };
   let { disabled = false, onrecorded }: { disabled?: boolean; onrecorded: (file: RecordedFile) => Promise<void> } = $props();
@@ -40,8 +41,12 @@
     error = '';
     elapsed = 0;
     cancelled = false;
+    if (isLanBrowser() && typeof isSecureContext !== 'undefined' && !isSecureContext) {
+      error = 'Voice recording requires a secure context. Open Monitter over HTTPS or localhost.';
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined' || typeof AudioContext === 'undefined') {
-      error = 'Voice recording is not supported in this browser.';
+      error = 'Voice recording is not supported in this browser. Use a current browser over HTTPS or localhost.';
       return;
     }
     requesting = true;

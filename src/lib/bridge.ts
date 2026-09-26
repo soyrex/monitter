@@ -349,7 +349,10 @@ const nativeBridge: MonitterBridge = {
   previewTaskDeletion: taskId => invoke<TaskDeletionPreview>("preview_task_deletion", { taskId }),
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke<Snapshot>("delete_archived_task", { taskId, removeNativeFiles }),
   storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke<Attachment>("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}),
-  transcribeVoiceMessage: audioBase64 => isLanBrowser() ? desktopOnly() : invoke<VoiceTranscription>('transcribe_voice_message', { audioBase64 }),
+  // In LAN mode invoke() sends the bounded audio payload only to the local
+  // Monitter transcription command; the returned transcript is what enters
+  // the composer. It is never stored as an attachment or sent to a harness.
+  transcribeVoiceMessage: audioBase64 => invoke<VoiceTranscription>('transcribe_voice_message', { audioBase64 }),
   readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>("read_attachment_file", {sourcePath}),
   readAttachmentAudio: attachmentId => isLanBrowser() ? desktopOnly() : invoke<AttachmentFileData>('read_attachment_audio', { attachmentId }),
   readAttachmentImage: attachmentId => invoke<AttachmentFileData>('read_attachment_image', {attachmentId}),

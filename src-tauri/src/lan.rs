@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufReader, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
     sync::{
@@ -18,6 +18,7 @@ use std::{
 };
 
 pub const PORT: u16 = 18_436;
+pub const TLS_PORT: u16 = 18_437;
 const MAX_HEADER: usize = 16 * 1024;
 /// Attachments are accepted by the ordinary bridge and can be up to 20 MiB;
 /// base64 plus JSON needs headroom while still imposing a hard request cap.
@@ -45,62 +46,133 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn start(service: Arc<Service>, asset_roots: Vec<PathBuf>) -> Result<Self, String> {
-        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT))
-            .map_err(|e| format!("LAN server could not bind port {PORT}: {e}"))?;
+    pub fn start(
+        service: Arc<Service>,
+        asset_roots: Vec<PathBuf>,
+        tls_config_path: PathBuf,
+    ) -> Result<Self, String> {
+        let tls = TlsConfig::load(&tls_config_path)?;
+        let (listener, tls_listener) = if tls.is_some() {
+            let tls_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, TLS_PORT))
+                .map_err(|e| format!("LAN HTTPS server could not bind port {TLS_PORT}: {e}"))?;
+            // Plain HTTP remains available only to local developer tooling.
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).map_err(|e| {
+                format!("LAN developer bridge could not bind 127.0.0.1:{PORT}: {e}")
+            })?;
+            (listener, Some(tls_listener))
+        } else {
+            (
+                TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT))
+                    .map_err(|e| format!("LAN server could not bind port {PORT}: {e}"))?,
+                None,
+            )
+        };
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        if let Some(listener) = &tls_listener {
+            listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        }
         let token = random_token()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let urls = lan_addresses()
-            .into_iter()
-            .map(|ip| format!("http://{ip}:{PORT}/"))
-            .collect();
+        let urls = if let Some(config) = &tls {
+            vec![format!("https://{}:{TLS_PORT}/", config.hostname)]
+        } else {
+            lan_addresses()
+                .into_iter()
+                .map(|ip| format!("http://{ip}:{PORT}/"))
+                .collect()
+        };
         let info = Info {
             urls,
             token: token.clone(),
             access_code_required: REQUIRE_ACCESS_CODE,
             error: None,
         };
-        let thread_stop = Arc::clone(&stop);
         let active = Arc::new(AtomicUsize::new(0));
         let auth_limiter = Arc::new(Mutex::new(AuthRateLimiter::default()));
-        thread::Builder::new()
-            .name("monitter-lan".into())
-            .spawn(move || {
-                while !thread_stop.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((stream, peer)) => {
-                            if active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
-                                active.fetch_sub(1, Ordering::AcqRel);
-                                let _ = reply_busy(stream);
-                                continue;
+        let thread_tls = tls.as_ref().map(|config| Arc::clone(&config.server_config));
+        let thread_host = tls.as_ref().map(|config| config.hostname.clone());
+        let launch = |listener: TcpListener,
+                      tls_config: Option<Arc<rustls::ServerConfig>>,
+                      tls_host: Option<String>,
+                      name: &'static str| {
+            let thread_stop = Arc::clone(&stop);
+            let service = Arc::clone(&service);
+            let roots = asset_roots.clone();
+            let token = token.clone();
+            let active = Arc::clone(&active);
+            let auth_limiter = Arc::clone(&auth_limiter);
+            thread::Builder::new()
+                .name(name.into())
+                .spawn(move || {
+                    while !thread_stop.load(Ordering::Acquire) {
+                        match listener.accept() {
+                            Ok((stream, peer)) => {
+                                if active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+                                    active.fetch_sub(1, Ordering::AcqRel);
+                                    if tls_config.is_none() {
+                                        let _ = reply_busy(stream);
+                                    }
+                                    continue;
+                                }
+                                let token = token.clone();
+                                let roots = roots.clone();
+                                let service = Arc::clone(&service);
+                                let active = Arc::clone(&active);
+                                let auth_limiter = Arc::clone(&auth_limiter);
+                                let tls_config = tls_config.clone();
+                                let tls_host = tls_host.clone();
+                                thread::spawn(move || {
+                                    let _ = stream.set_nonblocking(false);
+                                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                                    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+                                    if let Some(config) = tls_config {
+                                        if let Ok(connection) =
+                                            rustls::ServerConnection::new(config)
+                                        {
+                                            let tls_stream =
+                                                rustls::StreamOwned::new(connection, stream);
+                                            handle(
+                                                tls_stream,
+                                                peer,
+                                                service,
+                                                &token,
+                                                &roots,
+                                                &auth_limiter,
+                                                REQUIRE_ACCESS_CODE,
+                                                tls_host.as_deref(),
+                                            );
+                                        }
+                                    } else {
+                                        handle(
+                                            stream,
+                                            peer,
+                                            service,
+                                            &token,
+                                            &roots,
+                                            &auth_limiter,
+                                            REQUIRE_ACCESS_CODE,
+                                            None,
+                                        );
+                                    }
+                                    active.fetch_sub(1, Ordering::AcqRel);
+                                });
                             }
-                            let service = Arc::clone(&service);
-                            let token = token.clone();
-                            let roots = asset_roots.clone();
-                            let active = Arc::clone(&active);
-                            let auth_limiter = Arc::clone(&auth_limiter);
-                            thread::spawn(move || {
-                                handle(
-                                    stream,
-                                    peer,
-                                    service,
-                                    &token,
-                                    &roots,
-                                    &auth_limiter,
-                                    REQUIRE_ACCESS_CODE,
-                                );
-                                active.fetch_sub(1, Ordering::AcqRel);
-                            });
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(40))
+                            }
+                            Err(_) => break,
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(40))
-                        }
-                        Err(_) => break,
                     }
-                }
-            })
-            .map_err(|e| format!("Could not start LAN server: {e}"))?;
+                })
+                .map_err(|e| format!("Could not start LAN server thread: {e}"))
+        };
+        launch(listener, None, None, "monitter-lan")?;
+        if let Some(listener) = tls_listener {
+            if let Err(error) = launch(listener, thread_tls, thread_host, "monitter-lan-https") {
+                stop.store(true, Ordering::Release);
+                return Err(error);
+            }
+        }
         Ok(Self { stop, info })
     }
     pub fn info(&self) -> Info {
@@ -109,6 +181,118 @@ impl Server {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TlsFileConfig {
+    hostname: String,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+}
+
+struct TlsConfig {
+    hostname: String,
+    server_config: Arc<rustls::ServerConfig>,
+}
+
+impl TlsConfig {
+    fn load(path: &Path) -> Result<Option<Self>, String> {
+        let env_values = [
+            "MONITTER_LAN_TLS_HOST",
+            "MONITTER_LAN_TLS_CERT",
+            "MONITTER_LAN_TLS_KEY",
+        ]
+        .map(std::env::var_os);
+        Self::load_with_env(path, env_values)
+    }
+
+    fn load_with_env(
+        path: &Path,
+        env_values: [Option<std::ffi::OsString>; 3],
+    ) -> Result<Option<Self>, String> {
+        let any_env = env_values.iter().any(Option::is_some);
+        let (hostname, cert_path, key_path) = if any_env {
+            let [host, cert, key] = env_values;
+            (
+                host.and_then(|v| v.into_string().ok()).ok_or("MONITTER_LAN_TLS_HOST must be valid UTF-8 when TLS environment settings are used.")?,
+                PathBuf::from(cert.ok_or("MONITTER_LAN_TLS_CERT is required when TLS environment settings are used.")?),
+                PathBuf::from(key.ok_or("MONITTER_LAN_TLS_KEY is required when TLS environment settings are used.")?),
+            )
+        } else if match fs::symlink_metadata(path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!(
+                    "Could not inspect LAN TLS config {}: {error}",
+                    path.display()
+                ));
+            }
+        } {
+            let contents = fs::read(path)
+                .map_err(|e| format!("Could not read LAN TLS config {}: {e}", path.display()))?;
+            let config: TlsFileConfig = serde_json::from_slice(&contents)
+                .map_err(|e| format!("Invalid LAN TLS config {}: {e}", path.display()))?;
+            let base = path.parent().unwrap_or_else(|| Path::new("."));
+            let cert_path = if config.cert_path.is_absolute() {
+                config.cert_path
+            } else {
+                base.join(config.cert_path)
+            };
+            let key_path = if config.key_path.is_absolute() {
+                config.key_path
+            } else {
+                base.join(config.key_path)
+            };
+            (config.hostname, cert_path, key_path)
+        } else {
+            return Ok(None);
+        };
+        if !valid_tls_hostname(&hostname) {
+            return Err("MONITTER_LAN_TLS_HOST / hostname must be a lowercase DNS hostname without a scheme, port, or trailing dot.".into());
+        }
+        let cert_file = fs::File::open(&cert_path).map_err(|e| {
+            format!(
+                "Could not open LAN TLS certificate {}: {e}",
+                cert_path.display()
+            )
+        })?;
+        let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Could not parse LAN TLS certificate: {e}"))?;
+        if certs.is_empty() {
+            return Err("LAN TLS certificate file contains no certificates.".into());
+        }
+        let key_file = fs::File::open(&key_path)
+            .map_err(|e| format!("Could not open LAN TLS key {}: {e}", key_path.display()))?;
+        let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
+            .map_err(|e| format!("Could not parse LAN TLS key: {e}"))?
+            .ok_or("LAN TLS key file contains no supported private key.")?;
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| format!("Invalid LAN TLS certificate/key: {e}"))?;
+        Ok(Some(Self {
+            hostname,
+            server_config: Arc::new(server_config),
+        }))
+    }
+}
+
+fn valid_tls_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host == host.to_ascii_lowercase()
+        && !host.ends_with('.')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 fn reply_busy(mut stream: TcpStream) -> Result<(), String> {
@@ -133,23 +317,16 @@ struct Invoke {
     args: Value,
 }
 
-fn handle(
-    mut stream: TcpStream,
+fn handle<S: Read + Write>(
+    mut stream: S,
     peer: SocketAddr,
     service: Arc<Service>,
     token: &str,
     roots: &[PathBuf],
     auth_limiter: &Mutex<AuthRateLimiter>,
     require_access_code: bool,
+    tls_host: Option<&str>,
 ) {
-    // BSD/macOS can inherit O_NONBLOCK from the listening socket. Each worker
-    // uses blocking read/write_all with timeouts, including multi-MiB snapshots.
-    // Leaving it nonblocking can truncate responses as soon as the buffer fills.
-    if stream.set_nonblocking(false).is_err() {
-        return;
-    }
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
     let result = (|| -> Result<(), String> {
         let request = read_request(&mut stream)?;
         if !local_ip(peer.ip()) {
@@ -157,7 +334,12 @@ fn handle(
         }
         // Host must be a literal local address. This avoids trusting a DNS name
         // that could be rebound after the browser has received the owner token.
-        if !valid_host(request.headers.get("host")) {
+        let valid_host = if let Some(expected) = tls_host {
+            valid_tls_request_host(request.headers.get("host"), expected)
+        } else {
+            valid_host(request.headers.get("host"))
+        };
+        if !valid_host {
             return reply(&mut stream, 421, "text/plain", b"Invalid Host", None);
         }
         let developer_bridge = request
@@ -176,11 +358,16 @@ fn handle(
             );
         }
         if request.method == "POST" && request.path == "/api/invoke" {
-            if !same_origin(
-                request.headers.get("origin"),
-                request.headers.get("host"),
-                developer_bridge,
-            ) {
+            let origin_valid = if let Some(expected) = tls_host {
+                same_tls_origin(request.headers.get("origin"), expected)
+            } else {
+                same_origin(
+                    request.headers.get("origin"),
+                    request.headers.get("host"),
+                    developer_bridge,
+                )
+            };
+            if !origin_valid {
                 return reply(
                     &mut stream,
                     403,
@@ -277,6 +464,14 @@ fn handle(
     }
 }
 
+fn valid_tls_request_host(host: Option<&String>, expected: &str) -> bool {
+    host.is_some_and(|host| host == &format!("{expected}:{TLS_PORT}"))
+}
+
+fn same_tls_origin(origin: Option<&String>, expected: &str) -> bool {
+    origin.is_some_and(|origin| origin == &format!("https://{expected}:{TLS_PORT}"))
+}
+
 enum AuthCheck {
     Authorized,
     Unauthorized,
@@ -329,7 +524,7 @@ struct Request {
     headers: std::collections::HashMap<String, String>,
     body: Vec<u8>,
 }
-fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
+fn read_request<S: Read>(stream: &mut S) -> Result<Request, String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 2048];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -390,8 +585,8 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
         body,
     })
 }
-fn reply(
-    stream: &mut TcpStream,
+fn reply<S: Write>(
+    stream: &mut S,
     status: u16,
     content_type: &str,
     body: &[u8],
@@ -560,6 +755,122 @@ mod tests {
         assert!(!valid_host(Some(&"evil.test:18436".into())));
         assert!(valid_host(Some(&"192.168.1.9:18436".into())));
         assert!(asset_file(&[PathBuf::from("/tmp")], "../x").is_none());
+    }
+
+    #[test]
+    fn https_host_and_origin_must_match_configured_authority_exactly() {
+        let host = "monitter.example.test:18437".to_string();
+        let origin = "https://monitter.example.test:18437".to_string();
+        assert!(valid_tls_request_host(Some(&host), "monitter.example.test"));
+        assert!(same_tls_origin(Some(&origin), "monitter.example.test"));
+        assert!(!valid_tls_request_host(
+            Some(&"192.168.1.9:18437".into()),
+            "monitter.example.test"
+        ));
+        assert!(!valid_tls_request_host(
+            Some(&"monitter.example.test".into()),
+            "monitter.example.test"
+        ));
+        assert!(!same_tls_origin(
+            Some(&"http://monitter.example.test:18437".into()),
+            "monitter.example.test"
+        ));
+        assert!(!same_tls_origin(
+            Some(&"https://evil.example.test:18437".into()),
+            "monitter.example.test"
+        ));
+        assert!(!same_tls_origin(None, "monitter.example.test"));
+    }
+
+    #[test]
+    fn rustls_server_completes_a_trusted_loopback_handshake() {
+        let generated = rcgen::generate_simple_self_signed(vec!["monitter.example.test".into()])
+            .expect("generate ephemeral test certificate");
+        let certificate = rustls::pki_types::CertificateDer::from(generated.cert.der().to_vec());
+        let key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der())
+                .into();
+        let server_config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate.clone()], key)
+                .expect("certificate and ephemeral key match"),
+        );
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("test certificate parses");
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut byte = [0; 1];
+            stream.read_exact(&mut byte).unwrap();
+            assert_eq!(byte, [b'x']);
+            stream.write_all(b"y").unwrap();
+        });
+        let socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let server_name = rustls::pki_types::ServerName::try_from("monitter.example.test").unwrap();
+        let connection = rustls::ClientConnection::new(client_config, server_name).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        stream.write_all(b"x").unwrap();
+        let mut response = [0; 1];
+        stream.read_exact(&mut response).unwrap();
+        assert_eq!(response, [b'y']);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tls_configuration_rejects_partial_environment_and_invalid_file_config() {
+        let missing = PathBuf::from(format!(
+            "/tmp/monitter-tls-missing-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let partial = [Some("monitter.example.test".into()), None, None];
+        assert!(
+            matches!(TlsConfig::load_with_env(&missing, partial), Err(error) if error.contains("MONITTER_LAN_TLS_CERT"))
+        );
+
+        let path =
+            std::env::temp_dir().join(format!("monitter-tls-config-{}.json", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"hostname":"https://evil.test","certPath":"cert.pem","keyPath":"key.pem"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(TlsConfig::load_with_env(&path, [None, None, None]), Err(error) if error.contains("lowercase DNS hostname"))
+        );
+        fs::write(
+            &path,
+            r#"{"hostname":"monitter.example.test","certPath":"absent-cert.pem","keyPath":"absent-key.pem"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(TlsConfig::load_with_env(&path, [None, None, None]), Err(error) if error.contains("Could not open LAN TLS certificate"))
+        );
+        let _ = fs::remove_file(path);
+
+        #[cfg(unix)]
+        {
+            let broken_link = std::env::temp_dir().join(format!(
+                "monitter-tls-broken-link-{}.json",
+                uuid::Uuid::new_v4()
+            ));
+            std::os::unix::fs::symlink(&missing, &broken_link).unwrap();
+            assert!(
+                matches!(TlsConfig::load_with_env(&broken_link, [None, None, None]), Err(error) if error.contains("Could not read LAN TLS config"))
+            );
+            let _ = fs::remove_file(broken_link);
+        }
     }
     #[test]
     fn token_compare_requires_full_match() {
@@ -818,7 +1129,13 @@ mod tests {
         let thread = thread::spawn(move || {
             let (stream, peer) = listener.accept().unwrap();
             // Reproduce the accepted socket flags on macOS explicitly on all OSes.
-            stream.set_nonblocking(true).unwrap();
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             handle(
                 stream,
                 peer,
@@ -827,6 +1144,7 @@ mod tests {
                 &[root],
                 &limiter,
                 require_access_code,
+                None,
             );
         });
         let mut client = TcpStream::connect(address).unwrap();
