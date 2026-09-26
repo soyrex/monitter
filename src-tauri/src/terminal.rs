@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn read_batches_large_output_and_drains_tail_before_exit() {
         let session = open_test_shell();
-        session.write(b"python3 -c 'import sys; sys.stdout.write(\"x\" * 300000 + \"TAIL_\" + \"MARKER\\n\")'\nexit\n").unwrap();
+        session.write(b"python3 -c 'import sys; sys.stdout.write(\"x\" * 300000 + \"TAIL_\" + \"MARKER\\n\")'; exit\n").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut after = 0;
         let mut all = Vec::new();
@@ -775,7 +775,7 @@ mod tests {
                     .ok()
             })
             .expect("foreground child PID");
-        session.close().unwrap();
+        close_test_shell(&session);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while std::time::Instant::now() < deadline {
             if session.snapshot().unwrap().status == "exited" {
@@ -807,7 +807,7 @@ mod tests {
         session.write(&[3]).unwrap();
         session.write(b"printf '%s%s\\n' SHELL_ ALIVE\n").unwrap();
         wait_for(&session, "SHELL_ALIVE");
-        session.close().unwrap();
+        close_test_shell(&session);
     }
 
     #[test]
@@ -852,6 +852,22 @@ mod tests {
             std::time::Duration::from_secs(20),
         );
         session.close().unwrap();
+    }
+
+    fn close_test_shell(session: &Session) {
+        // close() is deliberately bounded and leaves the session available for
+        // retry while its waiter publishes exit. Exercise that public contract
+        // under loaded test runners, without accepting any other close error.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match session.close() {
+                Ok(()) => break,
+                Err(error) if error == "Terminal is still stopping; try closing it again."
+                    && Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                Err(error) => panic!("Terminal did not close: {error}"),
+            }
+        }
+        assert_eq!(session.snapshot().unwrap().status, "exited");
     }
 
     fn wait_for_any_output(session: &Session, timeout: std::time::Duration) {
