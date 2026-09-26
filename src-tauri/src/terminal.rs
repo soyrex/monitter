@@ -140,6 +140,18 @@ pub fn open(
     rows: u16,
     initial_command: Option<String>,
 ) -> Result<Arc<Session>, String> {
+    open_with_shell(id, host, cwd, cols, rows, initial_command, None)
+}
+
+fn open_with_shell(
+    id: String,
+    host: &Host,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+    initial_command: Option<String>,
+    test_shell: Option<(&str, &str)>,
+) -> Result<Arc<Session>, String> {
     validate_size(cols, rows)?;
     if let Some(command) = initial_command.as_deref() {
         if command.is_empty() || command.len() > MAX_COMMAND_BYTES || command.contains('\0') {
@@ -160,7 +172,7 @@ pub fn open(
             pixel_height: 0,
         })
         .map_err(|e| format!("Could not open terminal PTY: {e}"))?;
-    let mut command = build_command(host, &cwd)?;
+    let mut command = build_command(host, &cwd, test_shell)?;
     command.env("TERM", "xterm-256color");
     let reader = pty
         .master
@@ -240,15 +252,25 @@ fn monitor_title(session: Arc<Session>) {
     }
 }
 
-fn build_command(host: &Host, cwd: &str) -> Result<CommandBuilder, String> {
+fn build_command(
+    host: &Host,
+    cwd: &str,
+    test_shell: Option<(&str, &str)>,
+) -> Result<CommandBuilder, String> {
     if host.kind == "local" {
-        let shell = std::env::var("SHELL")
-            .ok()
-            .filter(|path| Path::new(path).is_file())
-            .unwrap_or_else(|| "/bin/zsh".into());
+        let shell = test_shell.map(|(shell, _)| shell.to_owned()).unwrap_or_else(|| {
+            std::env::var("SHELL")
+                .ok()
+                .filter(|path| Path::new(path).is_file())
+                .unwrap_or_else(|| "/bin/zsh".into())
+        });
         let mut command = CommandBuilder::new(shell);
         command.arg("-l");
         command.cwd(cwd);
+        if let Some((_, home)) = test_shell {
+            command.env("HOME", home);
+            command.env("PS1", "MONITTER_TEST_READY> ");
+        }
         return Ok(command);
     }
     if host.kind != "ssh" {
@@ -542,6 +564,24 @@ mod tests {
             hermes_path: String::new(),
         }
     }
+    // These tests exercise PTY behavior after a known prompt without depending
+    // on a developer login profile. This fixture does not prove that production
+    // shells are ready when `open()` sends an initial command.
+    fn open_test_shell() -> Arc<Session> {
+        let home = format!("/tmp/monitter-empty-shell-home-{}", crate::model::id());
+        let session = open_with_shell(
+            "test".into(),
+            &local_host(),
+            "/tmp".into(),
+            80,
+            24,
+            None,
+            Some(("/bin/sh", &home)),
+        )
+        .unwrap();
+        wait_for(&session, "MONITTER_TEST_READY>");
+        session
+    }
     #[test]
     fn ssh_command_forces_pty_and_quotes_cwd() {
         let host = Host {
@@ -558,7 +598,7 @@ mod tests {
             opencode_path: String::new(),
             hermes_path: String::new(),
         };
-        let command = build_command(&host, "~/work/a b").unwrap();
+        let command = build_command(&host, "~/work/a b", None).unwrap();
         let args = command
             .get_argv()
             .iter()
@@ -656,7 +696,7 @@ mod tests {
 
     #[test]
     fn native_pty_projects_custom_and_auto_titles_through_exit() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
+        let session = open_test_shell();
         assert_eq!(session.snapshot().unwrap().title, "Terminal");
         session.set_auto_title("Terminal: zsh".into()).unwrap();
         session.rename("Build logs".into()).unwrap();
@@ -677,7 +717,7 @@ mod tests {
 
     #[test]
     fn read_batches_large_output_and_drains_tail_before_exit() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
+        let session = open_test_shell();
         session.write(b"python3 -c 'import sys; sys.stdout.write(\"x\" * 300000 + \"TAIL_\" + \"MARKER\\n\")'\nexit\n").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut after = 0;
@@ -713,7 +753,7 @@ mod tests {
 
     #[test]
     fn close_reaps_a_started_foreground_child() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
+        let session = open_test_shell();
         session
             .write(b"sleep 10 & child=$!; printf '%s%s\\n' CLOSE_ PID=$child; wait $child\n")
             .unwrap();
@@ -748,7 +788,7 @@ mod tests {
 
     #[test]
     fn local_pty_accepts_input_resize_and_interrupt() {
-        let session = open("test".into(), &local_host(), "/tmp".into(), 80, 24, None).unwrap();
+        let session = open_test_shell();
         session
             .write(b"printf '%s%s\\n' MONITTER_PTY_ MARKER\n")
             .unwrap();

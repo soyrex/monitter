@@ -3059,6 +3059,13 @@ impl RunControl {
     }
 
     pub(crate) fn matches_app_server_turn(&self, turn_id: &str) -> bool {
+        self.owns_app_server_turn(turn_id) && !self.is_cancelled()
+    }
+
+    /// Checks the exact active turn while allowing its owner to have been
+    /// cancelled. ACP uses this only to flush the mandatory cancelled
+    /// permission outcome before its session/cancel notification.
+    pub(crate) fn owns_app_server_turn(&self, turn_id: &str) -> bool {
         !turn_id.is_empty()
             && self
                 .app_server_turn
@@ -3067,7 +3074,6 @@ impl RunControl {
                 .and_then(|value| value.clone())
                 .as_deref()
                 == Some(turn_id)
-            && !self.is_cancelled()
     }
 
     /// Atomically fences this owner against reuse, but only while the exact
@@ -5003,8 +5009,12 @@ for line in sys.stdin.buffer:
         let path = scratch.0.join("grandchild.pid");
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if let Ok(value) = fs::read_to_string(&path) {
-                return value.trim().parse().unwrap();
+            if let Some(pid) = fs::read_to_string(&path)
+                .ok()
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                .filter(|pid| *pid > 0)
+            {
+                return pid;
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -5187,6 +5197,22 @@ for line in sys.stdin.buffer:
         assert!(!control.is_resident());
         assert!(control.abort_retirement());
         assert!(control.is_idle());
+    }
+
+    #[test]
+    fn cancelled_permission_reply_owns_only_its_original_turn() {
+        let control = RunControl::new(false);
+        control.set_app_server_turn("turn-old".into());
+        assert!(control.matches_app_server_turn("turn-old"));
+
+        control.cancel();
+        assert!(control.owns_app_server_turn("turn-old"));
+        assert!(!control.matches_app_server_turn("turn-old"));
+
+        control.clear_app_server_turn();
+        control.set_app_server_turn("turn-new".into());
+        assert!(!control.owns_app_server_turn("turn-old"));
+        assert!(control.owns_app_server_turn("turn-new"));
     }
 
     #[test]

@@ -498,6 +498,24 @@ fn send_protocol_response(
     }
 }
 
+/// A stopped ACP turn must receive its native cancelled outcome before the
+/// reader sends `session/cancel`. General reply delivery rejects cancelled
+/// owners; this narrow path still requires the exact original turn ID, so a
+/// delayed permission callback cannot write into a later turn.
+fn send_cancelled_permission_response(
+    control: &RunControl,
+    turn_id: &str,
+    value: Value,
+) {
+    if !control.is_cancelled() || !control.owns_app_server_turn(turn_id) {
+        eprintln!("ACP cancelled permission reply skipped after its turn fence changed.");
+        return;
+    }
+    if let Err(error) = send(control, value) {
+        eprintln!("ACP cancelled permission reply was not delivered: {error}");
+    }
+}
+
 /// Jev's reasoning choice is optional. Apply only an exact level advertised
 /// by this live ACP session; unsupported or malformed controls keep the
 /// harness default and update the route receipt accordingly.
@@ -917,13 +935,21 @@ fn handle_permission_request(
                 .unwrap_or_else(|_| acp_protocol::cancelled_permission()),
             Err(_) => acp_protocol::cancelled_permission(),
         };
-        send_protocol_response(
-            &service,
-            &task_id,
-            &control,
-            &turn,
-            acp_protocol::response(id, outcome),
-        );
+        if control.is_cancelled() {
+            send_cancelled_permission_response(
+                &control,
+                &turn,
+                acp_protocol::response(id, acp_protocol::cancelled_permission()),
+            );
+        } else {
+            send_protocol_response(
+                &service,
+                &task_id,
+                &control,
+                &turn,
+                acp_protocol::response(id, outcome),
+            );
+        }
         control.acp_permission_wait_finished();
     });
 }
