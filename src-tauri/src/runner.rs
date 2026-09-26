@@ -4,6 +4,7 @@ use crate::{
     model::{
         Host, SubagentSessionUpdate, Task, UsageContext, UsageTokens, valid_sandbox_for_provider,
     },
+    outbound_transport::{OutboundWriter, Priority as WritePriority},
 };
 use serde_json::Value;
 use std::{
@@ -1738,7 +1739,7 @@ pub struct RunControl {
     run_id: Mutex<String>,
     run_started_at: Mutex<i64>,
     child: Mutex<Option<Child>>,
-    control_stdin: Mutex<Option<ChildStdin>>,
+    control_stdin: Mutex<Option<OutboundWriter>>,
     // Codex app-server is a resident JSON-RPC transport.  Keep its thread and
     // current turn separate from the generic child handle so stale
     // notifications cannot mutate a later task turn.
@@ -1773,17 +1774,9 @@ pub struct RunControl {
     acp_steer_method: Mutex<Option<String>>,
     app_server_instance_id: String,
     acp_transport: AtomicBool,
-    acp_control: Mutex<Option<mpsc::SyncSender<AcpControlFrame>>>,
+    acp_control: Mutex<Option<OutboundWriter>>,
     auxiliary: Mutex<Vec<Child>>,
     remote_supervised: bool,
-}
-
-/// A control frame for the ACP-owned stdin writer.  Most frames only need
-/// queueing; cancellation can request a bounded flush acknowledgement before
-/// the reader tears down the transport.
-pub(crate) struct AcpControlFrame {
-    pub(crate) frame: String,
-    pub(crate) flushed: Option<mpsc::SyncSender<Result<(), String>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1941,39 +1934,30 @@ impl RunControl {
             return;
         }
         // Never hold a service/run lock behind a potentially blocked pipe
-        // write. Cancellation is invoked from UI-facing paths, so detach the
-        // owned stdin and let a short-lived writer attempt the advisory
-        // interrupt while process-group signalling proceeds immediately.
+        // write. Queue the advisory interrupt at priority, close admission,
+        // and signal the child immediately; process teardown is what interrupts
+        // a writer already blocked in the kernel.
         let thread_id = self
             .app_server_thread
             .try_lock()
             .ok()
             .and_then(|v| v.clone());
         let turn_id = self.app_server_turn.try_lock().ok().and_then(|v| v.clone());
-        let stdin = self
+        let writer = self
             .control_stdin
             .try_lock()
             .ok()
             .and_then(|mut slot| slot.take());
-        let acp_transport = self.acp_transport.load(Ordering::SeqCst);
-        if let Some(mut stdin) = stdin {
-            thread::spawn(move || {
-                if !acp_transport {
-                    if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
-                        let frame = serde_json::json!({
-                            "id": 0,
-                            "method": "turn/interrupt",
-                            "params": {"threadId": thread_id, "turnId": turn_id}
-                        });
-                        let _ = stdin
-                            .write_all(frame.to_string().as_bytes())
-                            .and_then(|_| stdin.write_all(b"\n"))
-                            .and_then(|_| stdin.flush());
-                    }
-                }
-                // EOF is intentional: cancellation ends this resident
-                // transport and its reader performs bounded owned teardown.
-            });
+        if let Some(writer) = writer {
+            if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
+                let frame = serde_json::json!({
+                    "id": 0,
+                    "method": "turn/interrupt",
+                    "params": {"threadId": thread_id, "turnId": turn_id}
+                });
+                let _ = writer.enqueue(&frame.to_string(), WritePriority::Control);
+            }
+            writer.close();
         }
         if self.remote_supervised {
             self.cleanup_auxiliary();
@@ -2420,34 +2404,24 @@ impl RunControl {
     /// another user prompt into a completed or unrelated process.
     pub(crate) fn send_control(&self, frame: &str) -> Result<(), String> {
         if self.acp_transport.load(Ordering::SeqCst) {
-            let sender = self
+            let writer = self
                 .acp_control
                 .lock()
                 .map_err(|_| "ACP control queue unavailable.".to_string())?
                 .clone()
                 .ok_or("ACP control channel is closed.")?;
-            return sender
-                .try_send(AcpControlFrame {
-                    frame: frame.into(),
-                    flushed: None,
-                })
-                .map_err(|_| "ACP control channel is busy or closed.".into());
+            return writer.send(frame, WritePriority::Normal, Duration::from_secs(5));
         }
         if self.cancelled.load(Ordering::SeqCst) {
             return Err("Task was stopped before the approval response could be sent.".into());
         }
-        let mut stdin = self
+        let writer = self
             .control_stdin
             .lock()
-            .map_err(|_| "Monitter provider control lock failed.".to_string())?;
-        let stdin = stdin
-            .as_mut()
+            .map_err(|_| "Monitter provider control lock failed.".to_string())?
+            .clone()
             .ok_or("This provider run has no interactive approval channel.")?;
-        stdin
-            .write_all(frame.as_bytes())
-            .and_then(|_| stdin.write_all(b"\n"))
-            .and_then(|_| stdin.flush())
-            .map_err(|error| format!("Could not send approval response to provider: {error}"))
+        writer.send(frame, WritePriority::Normal, Duration::from_secs(5))
     }
 
     /// Queue an ACP control frame and wait only for its writer to flush it.
@@ -2458,22 +2432,13 @@ impl RunControl {
         frame: &str,
         timeout: Duration,
     ) -> Result<(), String> {
-        let sender = self
+        let writer = self
             .acp_control
             .lock()
             .map_err(|_| "ACP control queue unavailable.".to_string())?
             .clone()
             .ok_or("ACP control channel is closed.")?;
-        let (flushed, receiver) = mpsc::sync_channel(1);
-        sender
-            .try_send(AcpControlFrame {
-                frame: frame.into(),
-                flushed: Some(flushed),
-            })
-            .map_err(|_| "ACP control channel is busy or closed.".to_string())?;
-        receiver
-            .recv_timeout(timeout)
-            .map_err(|_| "ACP cancellation frame was not flushed in time.".to_string())?
+        writer.send(frame, WritePriority::Control, timeout)
     }
 
     /// Start another turn on an already initialized app-server transport.  The
@@ -3036,9 +3001,9 @@ impl RunControl {
         self.acp_transport.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn set_acp_control(&self, sender: mpsc::SyncSender<AcpControlFrame>) {
+    pub(crate) fn set_acp_control(&self, writer: OutboundWriter) {
         if let Ok(mut slot) = self.acp_control.lock() {
-            *slot = Some(sender);
+            *slot = Some(writer);
         }
     }
 
@@ -3233,7 +3198,9 @@ impl RunControl {
     /// after the session/cancel frame has been flushed.
     pub(crate) fn close_acp_control(&self) {
         if let Ok(mut sender) = self.acp_control.lock() {
-            *sender = None;
+            if let Some(writer) = sender.take() {
+                writer.close();
+            }
         }
     }
 
@@ -3293,7 +3260,7 @@ impl RunControl {
         self.owned_process_group
             .store(child.id() as i32, Ordering::SeqCst);
         *slot = Some(child);
-        *stdin_slot = control_stdin;
+        *stdin_slot = control_stdin.map(OutboundWriter::spawn);
         drop(stdin_slot);
         drop(slot);
         if self.cancelled.load(Ordering::SeqCst) {
@@ -3386,14 +3353,14 @@ impl RunControl {
 
         // EOF is the graceful shutdown request for the persistent stdio
         // transports. Dropping all control senders closes ACP's writer queue.
-        self.control_stdin
+        if let Some(writer) = self.control_stdin
             .lock()
             .map_err(|_| "Monitter provider control lock failed.".to_string())?
-            .take();
-        self.acp_control
-            .lock()
-            .map_err(|_| "ACP control queue unavailable.".to_string())?
-            .take();
+            .take()
+        {
+            writer.close();
+        }
+        self.close_acp_control();
 
         let graceful_deadline = Instant::now() + Duration::from_secs(1);
         if self.wait_for_owned_exit_until(graceful_deadline, &baseline, false)? {
@@ -5049,6 +5016,17 @@ for line in sys.stdin.buffer:
 
     #[test]
     fn acp_steer_is_advertised_active_turn_only_and_preserves_correlation() {
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         let control = RunControl::new(false);
         control.set_app_server_thread("mona-session".into());
         control.set_app_server_turn("acp:41".into());
@@ -5064,16 +5042,14 @@ for line in sys.stdin.buffer:
                 "methods": ["mona/session/steer"]
             }}
         }));
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let captured = Arc::new(Mutex::new(Vec::new()));
         control.mark_acp_transport();
-        control.set_acp_control(sender);
+        control.set_acp_control(OutboundWriter::spawn(SharedWriter(captured.clone())));
         control
             .send_acp_steer("change course", "queued-follow-up".into())
             .unwrap();
 
-        let frame: Value =
-            serde_json::from_str(&receiver.recv_timeout(Duration::from_secs(1)).unwrap().frame)
-                .unwrap();
+        let frame: Value = serde_json::from_slice(&captured.lock().unwrap()).unwrap();
         assert_eq!(frame["method"], "mona/session/steer");
         assert_eq!(frame["params"]["sessionId"], "mona-session");
         assert_eq!(frame["params"]["text"], "change course");
@@ -5322,9 +5298,7 @@ for line in sys.stdin.buffer:
         let control = lazy_helper_control();
         control.begin_run().unwrap();
         control.mark_idle();
-        let mut stdin = control.control_stdin.lock().unwrap().take().unwrap();
-        stdin.write_all(b"ready\n").unwrap();
-        drop(stdin);
+        control.send_control("ready").unwrap();
         thread::sleep(Duration::from_millis(60));
 
         assert!(
@@ -5341,9 +5315,7 @@ for line in sys.stdin.buffer:
     fn active_turn_cannot_adopt_a_delayed_provider_helper() {
         let control = lazy_helper_control();
         control.begin_run().unwrap();
-        let mut stdin = control.control_stdin.lock().unwrap().take().unwrap();
-        stdin.write_all(b"ready\n").unwrap();
-        drop(stdin);
+        control.send_control("ready").unwrap();
         thread::sleep(Duration::from_millis(60));
 
         assert!(
@@ -5359,9 +5331,7 @@ for line in sys.stdin.buffer:
     #[test]
     fn tool_work_keeps_a_later_unknown_child_pinned() {
         let control = lazy_helper_control();
-        let mut stdin = control.control_stdin.lock().unwrap().take().unwrap();
-        stdin.write_all(b"tool\n").unwrap();
-        drop(stdin);
+        control.send_control("tool").unwrap();
         thread::sleep(Duration::from_millis(60));
 
         control.mark_tool_work_observed();

@@ -10,11 +10,12 @@ use crate::{
     ApprovalDecision, CreateApprovalRequest, Service, acp_discovery, acp_protocol,
     model::AssistantResponseMetadata,
     runner::{self, Parsed, RunControl},
+    outbound_transport::OutboundWriter,
 };
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufReader, Write},
+    io::BufReader,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -480,6 +481,20 @@ fn send(control: &RunControl, value: Value) -> Result<(), String> {
     control.send_control(&value.to_string())
 }
 
+fn send_permission_response(
+    service: &Arc<Service>,
+    task_id: &str,
+    control: &Arc<RunControl>,
+    value: Value,
+) {
+    if let Err(error) = send(control, value) {
+        let detail = format!("ACP permission response was not delivered: {error}");
+        service.record(task_id, "error", "ACP permission delivery failed", detail.clone());
+        service.complete_app_server_turn(task_id, control, None, "error", Some(detail));
+        control.cancel();
+    }
+}
+
 /// Jev's reasoning choice is optional. Apply only an exact level advertised
 /// by this live ACP session; unsupported or malformed controls keep the
 /// harness default and update the route receipt accordingly.
@@ -781,7 +796,9 @@ fn handle_permission_request(
     // Validate the opaque one-time options before showing a control. Invalid
     // or perpetual-only requests are cancelled rather than broadened.
     if acp_protocol::permission_outcome(&params, false).is_err() {
-        let _ = send(
+        send_permission_response(
+            &service,
+            &task_id,
             &control,
             acp_protocol::response(id, acp_protocol::cancelled_permission()),
         );
@@ -811,7 +828,7 @@ fn handle_permission_request(
                 acp_protocol::cancelled_permission()
             }
         };
-        let _ = send(&control, acp_protocol::response(id, outcome));
+        send_permission_response(&service, &task_id, &control, acp_protocol::response(id, outcome));
         return;
     }
     if pending
@@ -820,7 +837,9 @@ fn handle_permission_request(
         })
         .is_err()
     {
-        let _ = send(
+        send_permission_response(
+            &service,
+            &task_id,
             &control,
             acp_protocol::error_response(id, -32000, "Too many pending ACP permission requests."),
         );
@@ -887,7 +906,7 @@ fn handle_permission_request(
                 .unwrap_or_else(|_| acp_protocol::cancelled_permission()),
             Err(_) => acp_protocol::cancelled_permission(),
         };
-        let _ = send(&control, acp_protocol::response(id, outcome));
+        send_permission_response(&service, &task_id, &control, acp_protocol::response(id, outcome));
         control.acp_permission_wait_finished();
     });
 }
@@ -1295,7 +1314,6 @@ fn run(
         return;
     };
     let stderr = child.stderr.take();
-    let (control_tx, control_rx) = mpsc::sync_channel(64);
     if let Err((mut child, _)) = control.install(child, None) {
         runner::terminate_bounded(&mut child);
         if let Some(remote) = remote_collaboration.take() {
@@ -1308,23 +1326,7 @@ fn run(
         runner::attach_remote_collaboration(remote, &control);
     }
     control.mark_acp_transport();
-    control.set_acp_control(control_tx);
-    thread::spawn(move || {
-        let mut stdin = stdin;
-        while let Ok(control_frame) = control_rx.recv() {
-            let result = stdin
-                .write_all(control_frame.frame.as_bytes())
-                .and_then(|_| stdin.write_all(b"\n"))
-                .and_then(|_| stdin.flush())
-                .map_err(|error| format!("Could not flush ACP control frame: {error}"));
-            if let Some(flushed) = control_frame.flushed {
-                let _ = flushed.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
-            }
-            if result.is_err() {
-                break;
-            }
-        }
-    });
+    control.set_acp_control(OutboundWriter::spawn(stdin));
     control.mark_resident();
     if let Some(stderr) = stderr {
         let service = service.clone();

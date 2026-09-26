@@ -70,6 +70,7 @@ mod menu;
 pub mod model;
 pub mod model_router;
 mod models;
+mod outbound_transport;
 mod native_browser;
 #[cfg(any(target_os = "linux", windows))]
 mod native_browser_history_portable;

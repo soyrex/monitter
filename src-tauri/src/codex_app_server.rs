@@ -1000,13 +1000,20 @@ fn handle_server_request(
                 Ok(response) => {
                     let response_live = finish_request(&lifecycle, &rpc_id);
                     if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-                        let _ = send(&control, json!({"id":id,"result":response}));
+                        send_approval_response(
+                            &service,
+                            &task_id,
+                            &control,
+                            json!({"id":id,"result":response}),
+                        );
                     }
                 }
                 Err(error) => {
                     let response_live = finish_request(&lifecycle, &rpc_id);
                     if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-                        let _ = send(
+                        send_approval_response(
+                            &service,
+                            &task_id,
                             &control,
                             json!({"id":id,"error":{"code":-32000,"message":error}}),
                         );
@@ -1080,7 +1087,12 @@ fn handle_server_request(
             };
             let response_live = finish_request(&lifecycle, &rpc_id);
             if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-                let _ = send(&control, json!({"id":id,"result":result}));
+                send_approval_response(
+                    &service,
+                    &task_id,
+                    &control,
+                    json!({"id":id,"result":result}),
+                );
             }
             return;
         }
@@ -1186,7 +1198,12 @@ fn handle_server_request(
         };
         let response_live = finish_request(&lifecycle, &rpc_id);
         if response_live && control.app_server_turn_is_current(thread_id, turn_id) {
-            let _ = send(&control, json!({"id":id,"result":result}));
+            send_approval_response(
+                &service,
+                &task_id,
+                &control,
+                json!({"id":id,"result":result}),
+            );
         }
     });
 }
@@ -1713,6 +1730,20 @@ fn mcp_image(item: &Value) -> Option<&str> {
 
 fn send(control: &RunControl, value: Value) -> Result<(), String> {
     control.send_control(&value.to_string())
+}
+
+fn send_approval_response(
+    service: &Arc<Service>,
+    task_id: &str,
+    control: &Arc<RunControl>,
+    value: Value,
+) {
+    if let Err(error) = send(control, value) {
+        let detail = format!("Codex approval response was not delivered: {error}");
+        service.record(task_id, "error", "Codex approval delivery failed", detail.clone());
+        service.complete_app_server_turn(task_id, control, None, "error", Some(detail));
+        control.cancel();
+    }
 }
 fn initialize() -> Value {
     json!({"id":INITIALIZE_ID,"method":"initialize","params":{"clientInfo":{"name":"Monitter","version":"0.1"},"capabilities":{"experimentalApi":false,"requestAttestation":false,"mcpServerOpenaiFormElicitation":true,"extensions":{"openai/form":{}}}}})
