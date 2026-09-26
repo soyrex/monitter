@@ -4893,7 +4893,7 @@
             <div class="tab-entry task-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={currentDraftId === tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'draft',tab.id)} onpointerdown={event=>startTabPointer(event,'draft',tab.id)} onclick={() => selectTabPicker(() => openTaskDraft(draft))}><span class="tab-kind-icon" aria-hidden="true"><MessageSquare size={13}/><span class="tab-shortcut"></span></span><span>{draft.title || 'New chat'}</span></button><span class="tab-status" aria-label="Draft"><span class="dot idle"></span></span><button class="close-tab" aria-label="Close draft" onclick={() => {closeTaskDraft(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'task'}{@const task=snapshot?.tasks.find(item=>item.id===tab.id)}{#if task}
-            <div class="tab-entry task-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={selectedTaskId === tab.id}>
+            <div class="tab-entry task-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} data-tab-status={task.status} class:active={selectedTaskId === tab.id}>
               {#if task.status==='running'}<SparkleField active animation={snapshot?.settings.activityAnimation ?? 'sparkles'} mirror contained />{/if}
               <button class="tab" draggable="false" ondragstart={event=>dragTab(event,'task',tab.id)} onpointerdown={event=>startTabPointer(event,'task',tab.id)} aria-pressed={selectedTaskId === tab.id} onclick={() => selectTabPicker(() => openTask(task))} title={task.title}><span class="tab-kind-icon" aria-hidden="true"><MessageSquare size={13}/><span class="tab-shortcut"></span></span><span><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/></span></button>
 
@@ -7034,8 +7034,21 @@
     transition:transform .18s ease, margin-top .18s ease;
   }
   .pane-surface[data-pane-autohide="true"] { overflow:visible; }
-  .workspace.auto-hide-tabs > .topbar { margin-top:calc(-1 * var(--pane-tabbar-height)); transform:translateY(0); position:relative; z-index:10; }
+  .workspace.auto-hide-tabs > .topbar { margin-top:calc(-1 * var(--pane-tabbar-height) + 3px); transform:translateY(0); position:relative; z-index:10; }
   .workspace.auto-hide-tabs.tab-revealed > .topbar, .workspace.auto-hide-tabs > .topbar:hover, .workspace.auto-hide-tabs > .topbar:focus-within { margin-top:0; transform:translateY(0); }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry { border:0; border-radius:0; background:color-mix(in srgb,var(--tab-strip-color,var(--accent)) 52%,var(--sidebar)); }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry.active { background:var(--tab-strip-color,var(--accent)); }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry > * { visibility:hidden; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'] { --tab-strip-color:var(--muted); }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'][data-tab-status='running'] { --tab-strip-color:var(--accent); }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'][data-tab-status='error'] { --tab-strip-color:#c44c4c; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'][data-tab-status='completed'] { --tab-strip-color:#72957a; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='draft'] { --tab-strip-color:#8b91a0; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='channel'] { --tab-strip-color:#6d91cf; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='terminal'] { --tab-strip-color:var(--terminal-foreground,#aab4c0); }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='browser'] { --tab-strip-color:#63a7bb; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='settings'] { --tab-strip-color:#a284cd; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='empty'] { --tab-strip-color:#8b91a0; }
   @media (prefers-reduced-motion:reduce) { .topbar { transition:none; } }
   .workspace-context { display:grid; place-items:center; flex:none; width:var(--density-control-size); padding-bottom:var(--density-tabbar-inset); color:var(--muted); }
   .top-actions {
