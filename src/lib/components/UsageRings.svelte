@@ -3,6 +3,7 @@
   import ChevronLeft from "@lucide/svelte/icons/chevron-left";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import { onMount, tick } from 'svelte';
+  import { tooltip } from '$lib/tooltip';
   import ProviderIcon from './ProviderIcon.svelte';
 
   /**
@@ -277,6 +278,24 @@
     return [provider.label, state, windows, data?.message?.trim() ?? ''].filter(Boolean).join('. ');
   }
 
+  function exactPercentText(window: UsageRingWindow | null | undefined): string {
+    if (window?.unlimited) return 'Unlimited';
+    const value = window?.usedPercent;
+    return typeof value === 'number' && Number.isFinite(value) ? `${value}%` : 'Not reported';
+  }
+
+  function ringTooltip(provider: ProviderDefinition, data: UsageRingData | undefined, account?: { key: string; label: string }): string {
+    const title = account?.label?.trim() || account?.key;
+    const status = data?.status ? stateLabel(data) : data?.active || data?.weekly ? 'Available' : stateLabel(data);
+    const lines = [`${provider.label}${title ? ` · ${title}` : ''}`, `Status: ${status}`];
+    for (const window of [data?.active, data?.weekly]) {
+      if (!window) continue;
+      lines.push(`${window.label}: ${exactPercentText(window)} used · ${resetText(window)}`);
+    }
+    if (data?.message?.trim()) lines.push(data.message.trim());
+    return lines.join('\n');
+  }
+
   function showValue(data: UsageRingData | undefined): boolean {
     return (data?.status === 'ready' || data?.status === 'stale') && (data.active?.unlimited === true || percent(data.active?.usedPercent) !== null);
   }
@@ -316,14 +335,13 @@
           class:error={status === 'error'}
           class:codex-account-cycling={showCodexAccountArrows}
           aria-label={providerTitle(provider, data)}
-          title={providerTitle(provider, data)}
         >
           <div class="usage-ring-container" class:codex-account-arrows={showCodexAccountArrows}>
             {#if showCodexAccountArrows}
               {@const accounts = sourceData?.accounts ?? []}
               <button type="button" class="ring-account-arrow" aria-label="Previous Codex account" title={`Previous account${selectedAccount?.label ? ` from ${selectedAccount.label}` : ''}`} onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, -1)}><ChevronLeft size={13}/></button>
             {/if}
-            <div class="usage-ring-wrap">
+            <div class="usage-ring-wrap" role="group" tabindex="0" aria-label={ringTooltip(provider, data, selectedAccount)} use:tooltip={{ content: ringTooltip(provider, data, selectedAccount), side: 'above' }}>
               <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`} style={`--ring-active-color:${usageColor(active)};--ring-weekly-color:${usageColor(weekly)}`}>
                 <circle class="ring-track" cx="20" cy="20" r={radius} />
                 <circle
@@ -465,6 +483,7 @@
   .ring-account-arrow:hover { color:var(--ink); background:var(--soft); }
   .ring-account-arrow:focus-visible { outline:1px solid var(--accent); outline-offset:-2px; }
   .usage-ring-wrap { position:relative; display:grid; width:40px; height:40px; place-items:center; }
+  .usage-ring-wrap:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:50%; }
   .usage-ring { display:block; width:40px; height:40px; overflow:visible; }
   .usage-provider-icon { display:grid; flex:0 0 auto; width:14px; height:14px; place-items:center; color:var(--ink); }
   .usage-provider-icon :global(.provider-icon) { width:12px; height:12px; }

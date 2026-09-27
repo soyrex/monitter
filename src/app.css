@@ -73,6 +73,24 @@ svg.lucide { stroke-width: 1.5px; }
   box-shadow: 0 12px 40px rgba(0, 0, 0, var(--modal-shadow-opacity, .4)) !important;
 }
 
+/* Shared hover/focus tooltip, lifted above pane overflow by the floating action. */
+.monitter-tooltip {
+  position: fixed;
+  inset: auto;
+  z-index: 1000;
+  max-width: min(300px, calc(100vw - 16px));
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
+  font: 12px/1.45 var(--interface-font, system-ui, sans-serif);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
 /* Decorative control feedback stays brief and explicit; active tabs keep their stable surface. */
 :root {
   --motion-feedback: 120ms;
