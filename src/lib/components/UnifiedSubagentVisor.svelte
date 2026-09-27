@@ -45,7 +45,7 @@
     }));
   const transcriptEvents = $derived(selected?.transcriptEvents?.length ? selected.transcriptEvents : fallbackEvents);
   const activityItems = $derived(groupConversationActivity([], transcriptEvents, true));
-  const launchDetails = $derived([selected?.projectName ?? 'No project', selected?.model ?? 'Harness default', selected?.launchedAt ? `Launched ${time(selected.launchedAt)}` : 'Launch time unavailable'].join(' · '));
+  const launchDetails = $derived([selected?.projectName ?? 'No project', selected?.model ?? 'Model not reported', selected?.launchedAt ? `Launched ${time(selected.launchedAt)}` : 'Launch time unavailable'].join(' · '));
   function trackScroll() {
     if (panel) followTranscript = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 36;
   }

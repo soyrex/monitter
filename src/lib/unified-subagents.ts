@@ -174,6 +174,14 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
     const error = session.error ?? collaboration?.error ?? null;
     const title = task?.title || concise(prompt, agentName);
     const transcriptEvents = task ? events.filter(event => event.taskId === task.id && (event.kind === 'tool' || event.kind === 'reasoning')) : [];
+    const reportedModel = task ? messages
+      .filter(message => message.taskId === task.id && message.role === 'assistant')
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(message => message.responseMetadata?.model?.trim())
+      .find((value): value is string => !!value) : undefined;
+    const configuredModel = [session.model, task?.model, agent?.model]
+      .map(value => value?.trim())
+      .find((value): value is string => !!value && value.toLowerCase() !== 'default' && value.toLowerCase() !== 'harness default');
 
     return {
       id: session.id,
@@ -189,7 +197,9 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
       prompt,
       result,
       error,
-      model: session.model ?? task?.model ?? null,
+      // Prefer a model the child actually reported using; then retain the
+      // launched session/task selection and finally the assigned agent config.
+      model: reportedModel ?? configuredModel ?? null,
       reasoningEffort: session.reasoningEffort ?? task?.modelSettings?.reasoningEffort ?? null,
       transcript: task ? taskTranscript(task, messages, events) : [],
       transcriptEvents,
