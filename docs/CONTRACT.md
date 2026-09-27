@@ -1767,6 +1767,13 @@ claims; the approved transport key is the authority for the active visitor sessi
 ## Mobile controller
 
 `docs/MOBILE-CONTROLLER.md` describes the paired mobile clients and relay.
+The iOS shell also offers an owner LAN mode. That mode loads the desktop's live
+`/` site in WKWebView at an explicitly entered port-18436 address, so its narrow
+layout uses the same owner LAN command surface as a phone browser. The address
+is saved locally without an access code; LAN authentication, when required,
+remains in the web site. Its native QR bridge is accepted only from the separate
+loopback `/mobile` origin. The paired controller remains a distinct, limited
+mode and uses a stable local loopback origin for its saved pairing state.
 Remote control is opt-in. The versioned controller allowlist dispatches only
 approved encrypted sessions through the existing desktop bridge. Desktop and
 mobile navigation stay independent. Initial pairing uses QR invitations or one-use

@@ -1,10 +1,19 @@
 # Monitter iOS shell
 
-This is a small native SwiftUI container for Monitter's `/mobile` Svelte route.
-It bundles the static Svelte output and presents it in `WKWebView`; the web UI
-owns all product UI and navigation. A loopback-only native HTTP server maps
-`/mobile` to Svelte's SPA fallback. This lets the build keep its absolute asset
-URLs and gives WebKit a trustworthy `127.0.0.1` context for Web Crypto.
+This is a small native SwiftUI container with two connections:
+
+- **Owner LAN workspace** opens the same live responsive site as a phone browser.
+  Enter the address shown in desktop Settings → LAN access, such as
+  `http://192.168.1.20:18436/`. The Mac must be running and reachable on the
+  same network. The site and its owner permissions come from the desktop LAN
+  server, so its web updates appear here without an iOS rebuild.
+- **Paired controller** keeps the existing encrypted remote connection for use
+  away from the LAN. It bundles the `/mobile` Svelte route and presents it in
+  `WKWebView`. A loopback-only native HTTP server maps `/mobile` to the Svelte
+  SPA fallback; its stable loopback origin preserves local WebKit pairing state.
+
+The connection chooser saves only the LAN base address, never an access code.
+The native connection control lets you switch modes or change that address.
 
 ## Build the web bundle
 
@@ -14,9 +23,10 @@ From the repository root:
 ./mobile-ios/build.sh
 ```
 
-The script runs the normal static build, requires `build/index.html`, and
-copies the complete output to `mobile-ios/MonitterIOS/Web`. This keeps asset
-paths and SPA fallbacks identical to the desktop build.
+The script runs the static Vite build without publishing LAN assets, requires
+`build/index.html`, and copies the complete output to
+`mobile-ios/MonitterIOS/Web`. This keeps the paired controller's asset paths and
+SPA fallbacks identical to the desktop build.
 
 ## Build a simulator artifact without Xcode build
 
@@ -73,8 +83,10 @@ push-notification entitlement is required. The project uses automatic signing.
 4. Connect and trust your iPhone, enable Developer Mode when prompted, and select
    it as the run destination. Build the web assets with `./mobile-ios/build.sh`,
    then Run in Xcode.
-5. For pairing on a physical phone, use a reachable WSS relay in the desktop panel.
-   The default is `wss://api.monitter.com/relay`; both devices connect outbound.
+5. For the owner LAN workspace, enter one of the desktop's Settings → LAN access
+   addresses in the app. The phone must be on the same LAN. For paired mode,
+   use a reachable WSS relay in the desktop panel. The default is
+   `wss://api.monitter.com/relay`; both devices connect outbound.
 
 The signing identity and provisioning profile are created by Xcode after sign-in;
 no credentials should be entered into Monitter or stored in this repository.

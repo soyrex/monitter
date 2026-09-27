@@ -13,7 +13,7 @@ final class BundleWebServer {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(
             host: .ipv4(IPv4Address("127.0.0.1")!),
-            port: .any
+            port: NWEndpoint.Port(rawValue: 31977)!
         )
         listener = try NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] connection in
@@ -27,7 +27,7 @@ final class BundleWebServer {
             switch state {
             case .ready:
                 guard let port = self.listener.port,
-                      let url = URL(string: "http://127.0.0.1:\(port)/mobile") else {
+                      let url = URL(string: "http://127.0.0.1:\(port.rawValue)/mobile") else {
                     DispatchQueue.main.async { onFailure("The local server did not provide a port.") }
                     return
                 }
@@ -42,8 +42,10 @@ final class BundleWebServer {
     }
 
     deinit {
-        listener.cancel()
+        cancel()
     }
+
+    func cancel() { listener.cancel() }
 
     private func handle(_ connection: NWConnection) {
         connection.start(queue: queue)

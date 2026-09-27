@@ -8,7 +8,7 @@ destination_dir="$script_dir/MonitterIOS/Web"
 
 cd "$repo_dir"
 if [ "${MONITTER_SKIP_WEB_BUILD:-0}" != "1" ]; then
-  npm run build
+  npx vite build
 fi
 
 if [ ! -f "$source_dir/index.html" ]; then
