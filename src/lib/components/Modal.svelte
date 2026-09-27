@@ -29,18 +29,14 @@
 
   function escapeScrollContainers(node: HTMLElement, enabled: boolean) {
     if (!enabled) return;
-    const shell = node.closest<HTMLElement>(".app-shell");
-    const parent = node.parentNode;
-    if (!shell || !parent || parent === shell) return;
-    const placeholder = document.createComment("modal-layer");
-    parent.insertBefore(placeholder, node);
-    shell.appendChild(node);
+    // A transformed/clipped .app-shell is not a true global layer. Keep the
+    // modal owned by Svelte and let the Popover API place it in the window's
+    // top layer, so closing it always unmounts the same node cleanly.
+    node.setAttribute("popover", "manual");
+    node.showPopover();
     return {
       destroy() {
-        if (placeholder.parentNode) {
-          placeholder.parentNode.insertBefore(node, placeholder);
-          placeholder.remove();
-        }
+        if (node.matches(":popover-open")) node.hidePopover();
       },
     };
   }
@@ -179,7 +175,7 @@
     onclick={(event) => event.currentTarget === event.target && requestClose()}
   >
     <div
-      bind:this={dialog} use:activeModal
+      bind:this={dialog} use:activeModal={globalLayer}
       class="modal"
       class:wide
       data-motion-closing={closing ? 'true' : undefined}
@@ -210,6 +206,17 @@
     padding: 24px;
     background: rgba(0, 0, 0, 0.3);
     backdrop-filter: blur(3px);
+  }
+  .backdrop:popover-open {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 24px;
+    border: 0;
+    color: inherit;
+    background: rgba(0, 0, 0, 0.3);
   }
   .modal {
     width: min(620px, 100%);
