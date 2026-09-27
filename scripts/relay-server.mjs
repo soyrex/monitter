@@ -4,6 +4,8 @@ const port = Number(process.env.MONITTER_RELAY_PORT || 8789);
 const host = process.env.MONITTER_RELAY_HOST || '127.0.0.1';
 // Base64-encrypted 1 MiB controller responses require a larger wire ceiling.
 const maxFrameBytes = 2 * 1024 * 1024;
+const maxMessagesPerWindow = Number(process.env.MONITTER_RELAY_RATE_LIMIT || 0);
+const rateWindowMs = 10_000;
 const maxBufferedBytes = 2 * 1024 * 1024;
 const maxConnections = 64;
 const maxRooms = 32;
@@ -31,10 +33,17 @@ function send(socket, message) {
 wss.on('connection', socket => {
   if (wss.clients.size > maxConnections) return socket.close(1013, 'connection limit');
   socket.alive = true;
+  socket.rateWindowStartedAt = Date.now();
+  socket.messagesInWindow = 0;
   const joinTimer = setTimeout(() => socket.close(1008, 'join timeout'), joinTimeoutMs);
   socket.on('pong', () => { socket.alive = true; });
   socket.on('message', (raw, isBinary) => {
     if (isBinary || raw.length > maxFrameBytes) return socket.close(1009, 'frame too large');
+    if (maxMessagesPerWindow > 0) {
+      const now = Date.now();
+      if (now - socket.rateWindowStartedAt >= rateWindowMs) { socket.rateWindowStartedAt = now; socket.messagesInWindow = 0; }
+      if (++socket.messagesInWindow > maxMessagesPerWindow) return socket.close(1008, 'rate limit');
+    }
     let message; try { message = JSON.parse(raw.toString()); } catch { return socket.close(1008, 'invalid JSON'); }
     if (!socket.room) {
       if (!message || message.type !== 'join' || typeof message.room !== 'string' || !/^[A-Za-z0-9_-]{22,128}$/.test(message.room) || !['desktop', 'mobile'].includes(message.role)) return socket.close(1008, 'join required');

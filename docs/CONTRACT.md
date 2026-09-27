@@ -77,8 +77,11 @@ No fake conversations, progress, token counts, host connections or model replies
   `owner-workspace-v1` in its encrypted approval; an older desktop without that capability
   leaves the phone in limited paired mode with a visible update-required message rather
   than sending an unknown owner request or reconnecting in a loop. Encrypted requests and responses
-  use ordered 32 KiB chunks with a 32 MiB aggregate ceiling and 60-second transfer timeout;
-  ambiguous mutations are not replayed. The owner relay also carries two
+  use ordered 512 KiB chunks when both peers advertise `owner-chunks-512k-v1`,
+  otherwise ordered 32 KiB chunks. Both paths retain a 32 MiB aggregate ceiling,
+  2 MiB encrypted-frame ceiling, 60-second transfer timeout, and client pacing
+  below the public relay's 120-frames-per-10-seconds limit; ambiguous mutations
+  are not replayed. The owner relay also carries two
   small, validated presentation-only operations in the desktop renderer for app palette,
   surface tint and terminal palette, which are client-local rather than Snapshot fields.
 - `get_snapshot {}` -> Snapshot

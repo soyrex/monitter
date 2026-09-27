@@ -88,12 +88,18 @@ const MAX_CONCURRENT_DESKTOP_RPCS = 32;
 const SEND_RECEIPT_CAPABILITY = 'send-receipt-v1';
 const REMEMBERED_DEVICE_CAPABILITY = 'remembered-device-v1';
 const OWNER_WORKSPACE_CAPABILITY = 'owner-workspace-v1';
+const OWNER_LARGE_CHUNKS_CAPABILITY = 'owner-chunks-512k-v1';
 /** Owner RPC is deliberately separate from controller v1's 1 MiB protocol. */
 const MAX_OWNER_TRANSFER_BYTES = 32 * 1024 * 1024;
-// Base64 plus encrypted-envelope overhead stays below a 64 KiB relay frame.
-const OWNER_CHUNK_BYTES = 32 * 1024;
+// A 512 KiB payload double-base64s to below the relay's 2 MiB frame ceiling.
+// Keep the legacy size for peers that have not advertised large chunks.
+const LEGACY_OWNER_CHUNK_BYTES = 32 * 1024;
+const OWNER_CHUNK_BYTES = 512 * 1024;
 const OWNER_TRANSFER_TIMEOUT_MS = 60_000;
-const MAX_OWNER_CHUNKS = Math.ceil(MAX_OWNER_TRANSFER_BYTES / OWNER_CHUNK_BYTES);
+// The public relay permits 120 frames per 10 seconds. Leave headroom for
+// handshake and control frames even when multiple owner RPCs overlap.
+const MAX_SECURE_FRAMES_PER_WINDOW = 100;
+const SECURE_FRAME_WINDOW_MS = 10_000;
 
 interface OwnerTransfer { readonly id: string; readonly bytes: number; readonly chunks: Uint8Array[]; received: number; nextIndex: number; readonly timer: ReturnType<typeof setTimeout>; }
 
@@ -129,6 +135,7 @@ class PairingConnection {
   private readonly listeners = new Set<(state: RemoteConnectionState) => void>();
   private receiveQueue: Promise<void> = Promise.resolve();
   private sendQueue: Promise<void> = Promise.resolve();
+  private readonly sentSecureAt: number[] = [];
   private readonly pairingTimer: ReturnType<typeof setTimeout>;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private lastError: string | undefined;
@@ -166,8 +173,24 @@ class PairingConnection {
     this.socket.onclose = () => { this.closed = true; this.clearConnectTimer(); clearTimeout(this.pairingTimer); if (this.status !== 'rejected' && this.status !== 'error') this.setStatus('closed'); this.channel = null; this.peerNonce = null; this.onDisconnected(); };
   }
   protected sendRaw(value: unknown) { if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(value)); }
+  private async waitForRelayBudget() {
+    while (true) {
+      const now = Date.now();
+      while (this.sentSecureAt.length && this.sentSecureAt[0] <= now - SECURE_FRAME_WINDOW_MS) this.sentSecureAt.shift();
+      if (this.sentSecureAt.length < MAX_SECURE_FRAMES_PER_WINDOW) {
+        this.sentSecureAt.push(now);
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.max(1, this.sentSecureAt[0] + SECURE_FRAME_WINDOW_MS - now + 1)));
+    }
+  }
   protected sendSecure(value: unknown): Promise<void> {
-    const send = this.sendQueue.then(async () => { if (!this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Secure pairing has not completed.'); this.sendRaw(await this.channel.seal(value)); });
+    const send = this.sendQueue.then(async () => {
+      if (!this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Secure pairing has not completed.');
+      await this.waitForRelayBudget();
+      if (!this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Secure pairing has not completed.');
+      this.sendRaw(await this.channel.seal(value));
+    });
     this.sendQueue = send.catch(() => undefined);
     return send;
   }
@@ -256,6 +279,7 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
     private authorizationEpoch = 0;
     close() { this.approved = false; this.authorizationEpoch++; this.ownerWorkspaceState = 'none'; this.clearIncomingOwner(); super.close(); }
     private peerSupportsSendReceipt = false;
+    private peerSupportsLargeOwnerChunks = false;
     private ownerWorkspaceState: OwnerWorkspaceState = 'none';
     private readonly ownerWorkspaceListeners = new Set<() => void>();
     private readonly incomingOwner = new Map<string, OwnerTransfer>();
@@ -299,6 +323,7 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
           ...(this.peerSupportsSendReceipt ? [SEND_RECEIPT_CAPABILITY] : []),
           ...(options?.isTrustedController ? [REMEMBERED_DEVICE_CAPABILITY] : []),
           ...(!this.peer && options?.isTrustedOwnerWorkspace && options.onOwnerInvoke ? [OWNER_WORKSPACE_CAPABILITY] : []),
+          ...(!this.peer && options?.isTrustedOwnerWorkspace && options.onOwnerInvoke ? [OWNER_LARGE_CHUNKS_CAPABILITY] : []),
         ];
         await this.sendSecure({ type: 'approved', ...(capabilities.length ? { capabilities } : {}) });
         this.approved = true;
@@ -326,6 +351,7 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
           if (!this.peer) throw new Error('Invalid collaborator identity.');
         }
         this.peerSupportsSendReceipt = hasSendReceiptCapability(value.capabilities);
+        this.peerSupportsLargeOwnerChunks = !this.peer && hasCapability(value.capabilities, OWNER_LARGE_CHUNKS_CAPABILITY);
         this.setStatus('pending'); for (const listener of this.pendingListeners) listener();
         // Only controller sessions (never visitor/operator sessions) may resume
         // a remembered approval, and only after this connection's ECDH proof and
@@ -366,8 +392,9 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
     private appendOwnerRpc(value: Record<string, unknown>) {
       const transfer = typeof value.id === 'string' ? this.incomingOwner.get(value.id) : undefined;
       if (!transfer || !this.ownerAvailable()) throw new Error('Owner workspace request is unavailable.');
-      const chunk = decodeOwnerChunk(value, transfer.nextIndex);
-      if (!chunk || transfer.nextIndex >= MAX_OWNER_CHUNKS || transfer.received + chunk.byteLength > transfer.bytes) return this.failIncomingOwner(transfer.id, 'Owner request chunks are invalid or out of order.');
+      const chunkBytes = this.peerSupportsLargeOwnerChunks ? OWNER_CHUNK_BYTES : LEGACY_OWNER_CHUNK_BYTES;
+      const chunk = decodeOwnerChunk(value, transfer.nextIndex, chunkBytes);
+      if (!chunk || transfer.nextIndex >= Math.ceil(MAX_OWNER_TRANSFER_BYTES / chunkBytes) || transfer.received + chunk.byteLength > transfer.bytes) return this.failIncomingOwner(transfer.id, 'Owner request chunks are invalid or out of order.');
       transfer.chunks.push(chunk); transfer.received += chunk.byteLength; transfer.nextIndex += 1;
     }
     private finishOwnerRpc(value: Record<string, unknown>) {
@@ -386,10 +413,11 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
       const bytes = new TextEncoder().encode(response);
       if (bytes.byteLength > MAX_OWNER_TRANSFER_BYTES) return this.sendOwnerError(id, 'Owner response exceeds the 32 MiB relay transfer limit.');
       if (!stillApproved()) return;
+      const chunkBytes = this.peerSupportsLargeOwnerChunks ? OWNER_CHUNK_BYTES : LEGACY_OWNER_CHUNK_BYTES;
       await this.sendSecure({ type: 'owner-response-start', id, bytes: bytes.byteLength });
-      for (let index = 0, offset = 0; offset < bytes.byteLength; index += 1, offset += OWNER_CHUNK_BYTES) {
+      for (let index = 0, offset = 0; offset < bytes.byteLength; index += 1, offset += chunkBytes) {
         if (!stillApproved()) return;
-        await this.sendSecure({ type: 'owner-response-chunk', id, index, data: encodeBase64(bytes.subarray(offset, Math.min(offset + OWNER_CHUNK_BYTES, bytes.byteLength))) });
+        await this.sendSecure({ type: 'owner-response-chunk', id, index, data: encodeBase64(bytes.subarray(offset, Math.min(offset + chunkBytes, bytes.byteLength))) });
       }
       if (stillApproved()) await this.sendSecure({ type: 'owner-response-end', id });
     }
@@ -474,17 +502,18 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     private readonly incomingOwnerResponses = new Map<string, OwnerTransfer>();
     private rememberedDevices = false;
     private ownerWorkspaceSupported = false;
+    private ownerLargeChunksSupported = false;
     private ownerWorkspaceState: OwnerWorkspaceState = 'none';
     private ownerRequest: { resolve: () => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
     supportsRememberedDevices() { return this.rememberedDevices; }
     supportsOwnerWorkspace() { return this.ownerWorkspaceSupported; }
     getOwnerWorkspaceState() { return this.ownerWorkspaceState; }
     hasOwnerWorkspaceAccess() { return this.ownerWorkspaceState === 'approved'; }
-    protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request', capabilities: [SEND_RECEIPT_CAPABILITY] }); }
+    protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request', capabilities: [SEND_RECEIPT_CAPABILITY, OWNER_LARGE_CHUNKS_CAPABILITY] }); }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
       if (value.type === 'pair-request') return;
-      if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.ownerWorkspaceSupported = invitationData.version === 2 && hasCapability(value.capabilities, OWNER_WORKSPACE_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
+      if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.ownerWorkspaceSupported = invitationData.version === 2 && hasCapability(value.capabilities, OWNER_WORKSPACE_CAPABILITY); this.ownerLargeChunksSupported = this.ownerWorkspaceSupported && hasCapability(value.capabilities, OWNER_LARGE_CHUNKS_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
       if (value.type === 'rejected') { this.setStatus('rejected'); this.socket?.close(); return; }
       if (value.type === 'owner-workspace-approved') { this.ownerWorkspaceState = 'approved'; this.settleOwnerRequest(); return; }
       if (value.type === 'owner-workspace-rejected') { this.ownerWorkspaceState = 'rejected'; this.settleOwnerRequest(new Error('Desktop declined owner workspace access.')); return; }
@@ -536,8 +565,9 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       });
     }
     private async sendOwnerRequest(id: string, bytes: Uint8Array) {
+      const chunkBytes = this.ownerLargeChunksSupported ? OWNER_CHUNK_BYTES : LEGACY_OWNER_CHUNK_BYTES;
       await this.sendSecure({ type: 'owner-rpc-start', id, bytes: bytes.byteLength });
-      for (let index = 0, offset = 0; offset < bytes.byteLength; index += 1, offset += OWNER_CHUNK_BYTES) await this.sendSecure({ type: 'owner-rpc-chunk', id, index, data: encodeBase64(bytes.subarray(offset, Math.min(offset + OWNER_CHUNK_BYTES, bytes.byteLength))) });
+      for (let index = 0, offset = 0; offset < bytes.byteLength; index += 1, offset += chunkBytes) await this.sendSecure({ type: 'owner-rpc-chunk', id, index, data: encodeBase64(bytes.subarray(offset, Math.min(offset + chunkBytes, bytes.byteLength))) });
       await this.sendSecure({ type: 'owner-rpc-end', id });
     }
     private beginOwnerResponse(value: Record<string, unknown>) {
@@ -549,8 +579,9 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     private appendOwnerResponse(value: Record<string, unknown>) {
       const transfer = typeof value.id === 'string' ? this.incomingOwnerResponses.get(value.id) : undefined;
       if (!transfer) throw new Error('Owner response is unavailable.');
-      const chunk = decodeOwnerChunk(value, transfer.nextIndex);
-      if (!chunk || transfer.nextIndex >= MAX_OWNER_CHUNKS || transfer.received + chunk.byteLength > transfer.bytes) return this.failOwnerResponse(transfer.id, 'Owner response chunks are invalid or out of order.');
+      const chunkBytes = this.ownerLargeChunksSupported ? OWNER_CHUNK_BYTES : LEGACY_OWNER_CHUNK_BYTES;
+      const chunk = decodeOwnerChunk(value, transfer.nextIndex, chunkBytes);
+      if (!chunk || transfer.nextIndex >= Math.ceil(MAX_OWNER_TRANSFER_BYTES / chunkBytes) || transfer.received + chunk.byteLength > transfer.bytes) return this.failOwnerResponse(transfer.id, 'Owner response chunks are invalid or out of order.');
       transfer.chunks.push(chunk); transfer.received += chunk.byteLength; transfer.nextIndex += 1;
     }
     private finishOwnerResponse(value: Record<string, unknown>) {
@@ -640,11 +671,11 @@ function ownerTransferBytes(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_OWNER_TRANSFER_BYTES ? value : null;
 }
 /** Strictly ordered chunk parser; malformed, duplicate, and skipped chunks fail closed. */
-export function decodeOwnerChunk(value: Record<string, unknown>, expectedIndex: number): Uint8Array | null {
-  if (value.index !== expectedIndex || typeof value.data !== 'string' || value.data.length > Math.ceil(OWNER_CHUNK_BYTES / 3) * 4) return null;
+export function decodeOwnerChunk(value: Record<string, unknown>, expectedIndex: number, maxBytes = LEGACY_OWNER_CHUNK_BYTES): Uint8Array | null {
+  if (value.index !== expectedIndex || typeof value.data !== 'string' || value.data.length > Math.ceil(maxBytes / 3) * 4) return null;
   try {
     const bytes = decodeBase64(value.data);
-    return bytes.byteLength <= OWNER_CHUNK_BYTES && encodeBase64(bytes).replace(/=+$/, '') === value.data.replace(/=+$/, '') ? bytes : null;
+    return bytes.byteLength <= maxBytes && encodeBase64(bytes).replace(/=+$/, '') === value.data.replace(/=+$/, '') ? bytes : null;
   } catch { return null; }
 }
 function joinOwnerChunks(transfer: OwnerTransfer): Uint8Array {

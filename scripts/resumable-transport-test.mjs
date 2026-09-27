@@ -10,6 +10,9 @@ const ownerChunk = { index:0, data:'YQ==' };
 assert.equal(new TextDecoder().decode(decodeOwnerChunk(ownerChunk, 0)), 'a');
 assert.equal(decodeOwnerChunk(ownerChunk, 1), null, 'duplicate chunks fail because the next index has advanced');
 assert.equal(decodeOwnerChunk({ ...ownerChunk, index:2 }, 1), null, 'dropped/out-of-order chunks fail rather than reassemble');
+const largerChunk = { index:0, data:Buffer.alloc(40 * 1024).toString('base64') };
+assert.equal(decodeOwnerChunk(largerChunk, 0), null, 'legacy peers reject oversized chunks');
+assert.equal(decodeOwnerChunk(largerChunk, 0, 512 * 1024)?.byteLength, 40 * 1024, 'negotiated peers accept larger chunks');
 const wait = (predicate, ms = 5000, label = 'state') => new Promise((resolve, reject) => {
   let settled = false, stop = () => {};
   const timer = setTimeout(() => { if (!settled) reject(new Error(`timeout ${label}`)); }, ms);
@@ -20,7 +23,9 @@ const wait = (predicate, ms = 5000, label = 'state') => new Promise((resolve, re
 const ready = relay => new Promise((resolve, reject) => { relay.stdout.setEncoding('utf8'); relay.stdout.on('data', value => { const match = value.match(/(ws:\/\/127\.0\.0\.1:\d+)/); if (match) resolve(match[1]); }); setTimeout(() => reject(new Error('relay timeout')), 5000); });
 const snapshot = { hosts: [], agents: [], tasks: [], messages: [], events: [], channels: [], projects: [], collaborations: [], queuedMessages: [], approvalRequests: [], settings: { accent:'#000',theme:'dark',interfaceScale:125,showToolActivity:true,showReasoningSummaries:true,sendWithEnter:false,sidebarView:'standard' } };
 const task = '11111111-1111-4111-8111-111111111111';
-const relay = spawn(process.execPath, ['scripts/relay-server.mjs'], { cwd: process.cwd(), env: { ...process.env, MONITTER_RELAY_PORT:'0' }, stdio:['ignore','pipe','pipe'] });
+// Mirror the public relay's per-socket 120 frames / 10 s cap. The old 32 KiB
+// owner transfer exceeded this with an 8 MiB payload and cycled the phone.
+const relay = spawn(process.execPath, ['scripts/relay-server.mjs'], { cwd: process.cwd(), env: { ...process.env, MONITTER_RELAY_PORT:'0', MONITTER_RELAY_RATE_LIMIT:'120' }, stdio:['ignore','pipe','pipe'] });
 try {
   const relayUrl = await ready(relay), room = bytesToBase64url(randomBytes(18));
   const desktopIdentity = { keyPair: await generatePairingKeyPair(), room }, mobileIdentity = { keyPair: await generatePairingKeyPair() };

@@ -283,17 +283,16 @@ private struct WebContentView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.pairedMode = url?.host == "127.0.0.1"
-        // The paired bootstrap page navigates to the full owner workspace on
-        // this same private loopback origin after explicit desktop approval.
-        // A SwiftUI redraw must not send it back to the pairing screen.
-        let inOwnerWorkspace = url?.host == "127.0.0.1"
-            && url?.port == 31977
-            && uiView.url?.host == "127.0.0.1"
-            && uiView.url?.port == 31977
-            && uiView.url?.path == "/"
-            && uiView.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems?.contains(where: { $0.name == "monitter-owner-relay" && $0.value == "1" }) == true
-        if let url, uiView.url?.absoluteString != url.absoluteString && !inOwnerWorkspace { uiView.load(URLRequest(url: url)) }
-        else if let error, uiView.url == nil {
+        // SwiftUI can redraw while the paired page navigates from /mobile to
+        // the owner workspace at /. Reload only when the chosen connection
+        // changes, not whenever WebKit's current page differs from that entry.
+        if let url, context.coordinator.requestedURL != url {
+            context.coordinator.requestedURL = url
+            uiView.load(URLRequest(url: url))
+        } else if url == nil {
+            context.coordinator.requestedURL = nil
+        }
+        if let error, url == nil, uiView.url == nil {
             let escaped = error.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
             uiView.loadHTMLString("<main><h1>Monitter unavailable</h1><p>\(escaped)</p></main>", baseURL: nil)
         }
@@ -303,6 +302,7 @@ private struct WebContentView: UIViewRepresentable {
         private let requestScan: () -> Void
         private let navigationError: (String) -> Void
         var pairedMode = false
+        var requestedURL: URL?
         init(requestScan: @escaping () -> Void, navigationError: @escaping (String) -> Void) {
             self.requestScan = requestScan
             self.navigationError = navigationError
