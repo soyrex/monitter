@@ -5,6 +5,7 @@
   import { onMount, tick } from 'svelte';
   import { tooltip } from '$lib/tooltip';
   import ProviderIcon from './ProviderIcon.svelte';
+  import ProviderUsageModal from './ProviderUsageModal.svelte';
 
   /**
    * A display-only projection of provider allowance data. The owner is
@@ -37,8 +38,10 @@
     message?: string | null;
     /** Unix milliseconds of the last successful source read, if known. */
     updatedAt?: number | null;
+    /** The provider-reported local profile for a single-source ring. */
+    accountLabel?: string | null;
     /** Multiple local Codex profiles remain distinct in the expanded view. */
-    accounts?: { key: string; label: string; status?: UsageRingStatus; active?: UsageRingWindow | null; weekly?: UsageRingWindow | null; message?: string | null }[];
+    accounts?: { key: string; label: string; status?: UsageRingStatus; active?: UsageRingWindow | null; weekly?: UsageRingWindow | null; message?: string | null; updatedAt?: number | null }[];
   }
 
   export type UsageRingMap = Partial<Record<UsageRingProvider, UsageRingData>>;
@@ -74,6 +77,9 @@
   let pane = $state<HTMLElement>();
   let horizontal = $state(false);
   let selectedAccountKeys = $state<Record<string, string>>({});
+  let selectedRing = $state<{ provider: UsageRingProvider; accountKey?: string } | null>(null);
+  const modalSource = $derived(selectedRing ? usage[selectedRing.provider] : undefined);
+  const modalAccount = $derived(modalSource?.accounts?.find(account => account.key === selectedRing?.accountKey));
 
   /**
    * Measure the full form before switching layouts. Measuring the compact form
@@ -285,7 +291,7 @@
   }
 
   function ringTooltip(provider: ProviderDefinition, data: UsageRingData | undefined, account?: { key: string; label: string }): string {
-    const title = account?.label?.trim() || account?.key;
+    const title = account?.label?.trim() || data?.accountLabel?.trim() || account?.key;
     const status = data?.status ? stateLabel(data) : data?.active || data?.weekly ? 'Available' : stateLabel(data);
     const lines = [`${provider.label}${title ? ` · ${title}` : ''}`, `Status: ${status}`];
     for (const window of [data?.active, data?.weekly]) {
@@ -341,7 +347,7 @@
               {@const accounts = sourceData?.accounts ?? []}
               <button type="button" class="ring-account-arrow" aria-label="Previous Codex account" title={`Previous account${selectedAccount?.label ? ` from ${selectedAccount.label}` : ''}`} onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, -1)}><ChevronLeft size={13}/></button>
             {/if}
-            <div class="usage-ring-wrap" role="group" tabindex="0" aria-label={ringTooltip(provider, data, selectedAccount)} use:tooltip={{ content: ringTooltip(provider, data, selectedAccount), side: 'above' }}>
+            <button type="button" class="usage-ring-wrap" aria-label={`Show ${provider.label}${selectedAccount?.label || sourceData?.accountLabel ? ` · ${selectedAccount?.label || sourceData?.accountLabel}` : ''} usage details`} use:tooltip={{ content: ringTooltip(provider, data, selectedAccount), side: 'above' }} onclick={(event) => { event.stopPropagation(); selectedRing = { provider: provider.id, accountKey: selectedAccount?.key }; }}>
               <svg class="usage-ring" viewBox="0 0 40 40" role="img" aria-label={`${provider.label}: ${hasValue ? `${percentText(active?.usedPercent)} used in ${active?.label}` : stateLabel(data)}`} style={`--ring-active-color:${usageColor(active)};--ring-weekly-color:${usageColor(weekly)}`}>
                 <circle class="ring-track" cx="20" cy="20" r={radius} />
                 <circle
@@ -364,7 +370,7 @@
               <span class="ring-value" aria-hidden="true">
                 {#if iconOnly}<ProviderIcon provider={provider.id} size={15}/>{:else}{hasValue ? percentText(active?.usedPercent, active?.unlimited).replace('%', '') : provider.mark}{/if}
               </span>
-            </div>
+            </button>
             {#if showCodexAccountArrows}
               {@const accounts = sourceData?.accounts ?? []}
               <button type="button" class="ring-account-arrow" aria-label="Next Codex account" title={`Next account${selectedAccount?.label ? ` from ${selectedAccount.label}` : ''}`} onclick={() => cycleAccount(provider.id, accounts, selectedAccount?.key, 1)}><ChevronRight size={13}/></button>
@@ -462,6 +468,8 @@
   {/if}
 </section>
 
+<ProviderUsageModal open={selectedRing !== null} provider={selectedRing?.provider ?? 'codex'} data={modalAccount ?? modalSource} accountLabel={modalAccount?.label ?? modalSource?.accountLabel ?? undefined} onclose={() => selectedRing = null}/>
+
 <style>
   .usage-rings { min-width:0; max-width:100%; overflow:hidden; color:var(--ink); border:1px solid var(--line); border-radius:8px; background:color-mix(in srgb,var(--panel) 34%,transparent); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .account-cycle { display:flex; align-items:center; gap:2px; grid-column:1 / -1; grid-row:2; min-width:0; max-width:100%; margin:2px 0 4px; }
@@ -482,7 +490,7 @@
   .ring-account-arrow { display:grid; place-items:center; width:22px; height:30px; padding:0; border-radius:5px; color:var(--muted); }
   .ring-account-arrow:hover { color:var(--ink); background:var(--soft); }
   .ring-account-arrow:focus-visible { outline:1px solid var(--accent); outline-offset:-2px; }
-  .usage-ring-wrap { position:relative; display:grid; width:40px; height:40px; place-items:center; }
+  .usage-ring-wrap { position:relative; display:grid; width:40px; height:40px; place-items:center; padding:0; border:0; background:transparent; cursor:pointer; }
   .usage-ring-wrap:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:50%; }
   .usage-ring { display:block; width:40px; height:40px; overflow:visible; }
   .usage-provider-icon { display:grid; flex:0 0 auto; width:14px; height:14px; place-items:center; color:var(--ink); }

@@ -1,13 +1,14 @@
 import type { SubscriptionUsageSource, UsageOverview } from './types';
 
 type UsageRingWindow = { label: string; usedPercent: number | null; unlimited?: boolean; resetsAt?: number | null };
-type UsageRingAccount = { key: string; label: string; status: 'ready' | 'loading' | 'unavailable' | 'error' | 'stale'; active?: UsageRingWindow | null; weekly?: UsageRingWindow | null; message?: string | null };
+type UsageRingAccount = { key: string; label: string; status: 'ready' | 'loading' | 'unavailable' | 'error' | 'stale'; active?: UsageRingWindow | null; weekly?: UsageRingWindow | null; message?: string | null; updatedAt?: number | null };
 type UsageRingData = {
   status: 'ready' | 'loading' | 'unavailable' | 'error' | 'stale';
   active?: UsageRingWindow | null;
   weekly?: UsageRingWindow | null;
   message?: string | null;
   updatedAt?: number | null;
+  accountLabel?: string | null;
   accounts?: UsageRingAccount[];
 };
 type UsageRingProvider = 'codex' | 'claude' | 'gemini' | 'minimax' | 'opencode-go';
@@ -53,6 +54,7 @@ function ring(source: SubscriptionUsageSource | undefined, loading: boolean, req
       ? 'Claude does not expose an on-demand quota read.'
       : null),
     updatedAt: source.fetchedAt,
+    accountLabel: source.accountLabel,
   };
 }
 
@@ -75,6 +77,7 @@ export function usageRingMap(
         active: accountData.active,
         weekly: accountData.weekly,
         message: accountData.message,
+        updatedAt: accountData.updatedAt,
       };
     });
     return mapped;
