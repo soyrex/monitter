@@ -607,6 +607,14 @@
   let taskMenu = $state(false);
   let sidebarCollapsed = $state(false);
   let statisticsModalOpen = $state(false);
+
+  function openStatistics(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+    // The resource modal is rendered beneath this footer in the component
+    // tree. Its backdrop must not bubble back here and reopen itself.
+    if (target.closest('button,a,input,select,textarea,[role="button"],.backdrop,[role="dialog"]')) return;
+    statisticsModalOpen = true;
+  }
   let mobileSidebar = $state(false);
   const desktopInterfaceScale = interfaceScaleStore('desktop');
   const mobileInterfaceScale = interfaceScaleStore('mobile');
@@ -5560,7 +5568,7 @@
       </div>
     {:else}
       <!-- svelte-ignore a11y_click_events_have_key_events (the footer opens Statistics from its non-control surface) -->
-      <section class="sidebar-statistics" aria-label="Statistics" onclick={(event)=>{const target=event.target as HTMLElement;if(target.closest('button,a,input,select,textarea,[role="button"]'))return;statisticsModalOpen=true}}>
+      <section class="sidebar-statistics" aria-label="Statistics" onclick={openStatistics}>
         <div class="statistics-body" id="sidebar-statistics-body">
           <div class="statistics-content">
             <UsageRings usage={sidebarUsage} expanded={true} showHeader={false} iconOnly={true} class="rings-only"/>

@@ -10,7 +10,10 @@ export function tooltip(node: HTMLElement, initial: string | TooltipOptions) {
   let options = normalize(initial);
   let popup: HTMLDivElement | undefined;
   let floatingHandle: ReturnType<typeof floating> | undefined;
-  const id = `monitter-tooltip-${crypto.randomUUID()}`;
+  // The LAN UI can run from an HTTP IP address, where randomUUID() is not
+  // exposed because the page is not a secure context. Tooltips are installed
+  // during hydration, so keep their IDs usable on local HTTP as well.
+  const id = `monitter-tooltip-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`;
   const originalDescribedBy = node.getAttribute('aria-describedby');
 
   function normalize(value: string | TooltipOptions): TooltipOptions {
