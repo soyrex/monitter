@@ -488,7 +488,7 @@
   .context-cleared-event time { flex:none; }
   .optimistic-message .message-bubble { border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); }
   .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color:var(--muted); font:calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
-  .delivery-status.sent-check { position:absolute; right:2px; bottom:2px; display:flex; width:13px; height:13px; align-items:center; justify-content:center; margin:0; transform:scale(.8); transform-origin:bottom right; }
+  .delivery-status.sent-check, :global(.message-bubble .delivery-status[data-delivery-status="sending"]), :global(.message-bubble .delivery-status[data-delivery-status="sent"]) { position:absolute; right:2px; bottom:2px; display:flex; width:13px; height:13px; align-items:center; justify-content:center; margin:0; transform:scale(.8); transform-origin:bottom right; }
   .steering-status { display:inline-flex; align-items:center; margin-left:auto; padding:2px 6px; border:1px solid color-mix(in srgb,var(--accent) 38%,var(--line)); border-radius:999px; color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,var(--panel)); font:600 calc(9px * var(--interface-font-ratio,1)) var(--mono); text-transform:uppercase; letter-spacing:.04em; }
   .steering-status[data-steering-status="queued"] { color:var(--muted); border-color:var(--line); background:var(--panel); }
   .steering-status[data-steering-status="error"] { color:#bd655b; border-color:color-mix(in srgb,#bd655b 38%,var(--line)); background:color-mix(in srgb,#bd655b 7%,var(--panel)); }

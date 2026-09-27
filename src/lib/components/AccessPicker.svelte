@@ -1,6 +1,5 @@
 <script lang="ts">
   import Check from "@lucide/svelte/icons/check";
-  import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Shield from "@lucide/svelte/icons/shield";
   import X from "@lucide/svelte/icons/x";
@@ -82,7 +81,6 @@
   <button class="access-trigger" bind:this={anchor} aria-label={`Permissions: ${value.label}`} aria-haspopup="dialog" aria-expanded={open} title={title} onclick={() => { open = !open; }}>
     {#if saving}<LoaderCircle size={14} class="spin"/>{:else}<Shield size={14}/>{/if}
     <span>{value.label}</span>
-    <ChevronDown size={12}/>
   </button>
   {#if open && anchor}
     <div bind:this={panel} class="access-menu" role="dialog" aria-label="Permissions" tabindex="-1" use:floating={{anchor,side:'above'}}>
