@@ -406,7 +406,7 @@
         <span>{gitStatus.files.length}{gitStatus.truncated ? '+' : ''} {gitStatus.files.length === 1 ? 'file changed' : 'files changed'}</span>
       </button>
     {/if}
-  <div class="composer-area">
+  <div class="composer-area" class:git-docked={gitStatus?.repository === true}>
     {#if !inboxView || !displayMailInboxes.length}
       {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
       {@render composer()}
@@ -433,7 +433,8 @@
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .composer-area { position:relative; flex-shrink:0; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }
-  .git-changes-bar { display:flex; align-items:center; gap:7px; width:min(calc(var(--chat-content-max-width, 900px) - 16px), calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 16px)); box-sizing:border-box; margin:0 auto -1px; padding:6px 9px; overflow:hidden; border:1px solid var(--line); border-bottom-left-radius:0; border-bottom-right-radius:0; border-top-left-radius:7px; border-top-right-radius:7px; color:var(--muted); background:color-mix(in srgb, var(--panel) 92%, var(--ink)); font:500 calc(10px * var(--interface-font-ratio, 1)) / 1.2 var(--mono); text-align:left; }
+  .composer-area.git-docked :global(.composer-box) { border-top-left-radius:0; border-top-right-radius:0; }
+  .git-changes-bar { display:flex; align-items:center; gap:7px; width:min(var(--chat-content-max-width, 900px), calc(100% - (2 * var(--density-composer-margin-inline, 12px)))); box-sizing:border-box; margin:0 auto -1px; padding:6px 9px; overflow:hidden; border:1px solid var(--line); border-bottom-left-radius:0; border-bottom-right-radius:0; border-top-left-radius:7px; border-top-right-radius:7px; color:var(--muted); background:color-mix(in srgb, var(--panel) 92%, var(--ink)); font:500 calc(10px * var(--interface-font-ratio, 1)) / 1.2 var(--mono); text-align:left; }
   .git-changes-bar:hover { color:var(--ink); border-color:color-mix(in srgb, var(--accent) 42%, var(--line)); background:color-mix(in srgb, var(--panel) 82%, var(--accent)); }
   .git-changes-bar :global(svg) { flex:none; color:var(--accent-ink, var(--accent)); }
   .git-changes-bar code { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:inherit; }
