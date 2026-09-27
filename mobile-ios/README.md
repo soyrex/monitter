@@ -7,10 +7,14 @@ This is a small native SwiftUI container with two connections:
   `http://192.168.1.20:18436/`. The Mac must be running and reachable on the
   same network. The site and its owner permissions come from the desktop LAN
   server, so its web updates appear here without an iOS rebuild.
-- **Paired controller** keeps the existing encrypted remote connection for use
-  away from the LAN. It bundles the `/mobile` Svelte route and presents it in
-  `WKWebView`. A loopback-only native HTTP server maps `/mobile` to the Svelte
-  SPA fallback; its stable loopback origin preserves local WebKit pairing state.
+- **Owner workspace over relay** uses the existing end-to-end encrypted Monitter
+  relay away from the LAN. The bundled `/mobile` route handles pairing, then
+  opens the same responsive root workspace used by LAN after a separate,
+  explicit full-workspace approval on the desktop. A loopback-only native HTTP
+  server gives both routes a stable origin for WebKit pairing state. Existing
+  limited controller grants are not automatically upgraded. An older desktop
+  without the `owner-workspace-v1` capability is reported as needing an update,
+  without repeatedly disconnecting the paired connection.
 
 The connection chooser saves only the LAN base address, never an access code.
 The native connection control lets you switch modes or change that address.
@@ -25,7 +29,7 @@ From the repository root:
 
 The script runs the static Vite build without publishing LAN assets, requires
 `build/index.html`, and copies the complete output to
-`mobile-ios/MonitterIOS/Web`. This keeps the paired controller's asset paths and
+`mobile-ios/MonitterIOS/Web`. This keeps the relay workspace's asset paths and
 SPA fallbacks identical to the desktop build.
 
 ## Build a simulator artifact without Xcode build
@@ -84,9 +88,11 @@ push-notification entitlement is required. The project uses automatic signing.
    it as the run destination. Build the web assets with `./mobile-ios/build.sh`,
    then Run in Xcode.
 5. For the owner LAN workspace, enter one of the desktop's Settings → LAN access
-   addresses in the app. The phone must be on the same LAN. For paired mode,
-   use a reachable WSS relay in the desktop panel. The default is
-   `wss://api.monitter.com/relay`; both devices connect outbound.
+   addresses in the app. The phone must be on the same LAN. For the remote
+   owner workspace, use a reachable WSS relay in the desktop panel. The default
+   is `wss://api.monitter.com/relay`; both devices connect outbound. Approve
+   both the limited phone pairing and the separate owner workspace request on
+   the desktop.
 
 The signing identity and provisioning profile are created by Xcode after sign-in;
 no credentials should be entered into Monitter or stored in this repository.

@@ -74,6 +74,10 @@ export interface CommandArgs {
   basePath?: string | null;
   };
   "get_lan_server_info": {  };
+  "owner_relay_invoke": {
+  command: string;
+  args: JsonValue;
+  };
   "resolve_approval": {
   approvalId: string;
   decision: ApprovalDecision;
@@ -386,6 +390,7 @@ export interface CommandResults {
   "get_task_event_detail": EventDetailChunk;
   "read_markdown_file": MarkdownDocument;
   "get_lan_server_info": LanServerInfo;
+  "owner_relay_invoke": JsonValue;
   "resolve_approval": Snapshot;
   "revoke_approval_rule": Snapshot;
   "resolve_input": Snapshot;

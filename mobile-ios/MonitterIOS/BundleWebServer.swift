@@ -27,7 +27,7 @@ final class BundleWebServer {
             switch state {
             case .ready:
                 guard let port = self.listener.port,
-                      let url = URL(string: "http://127.0.0.1:\(port.rawValue)/mobile") else {
+                      let url = URL(string: "http://127.0.0.1:\(port.rawValue)/mobile?owner=1") else {
                     DispatchQueue.main.async { onFailure("The local server did not provide a port.") }
                     return
                 }

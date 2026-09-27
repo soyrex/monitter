@@ -88,9 +88,9 @@
    * the labels to fit a short sidebar.
    */
   $effect(() => {
-    usage; compact; expanded; simple; layoutPhase; pane;
-    ringsOnly = !simple && !compact && expanded && (layoutPhase === 1 || layoutPhase === 3);
-    if (simple || compact || !expanded || !pane || layoutPhase !== null) { horizontal = false; return; }
+    usage; compact; expanded; simple; iconOnly; layoutPhase; pane;
+    ringsOnly = iconOnly || (!simple && !compact && expanded && (layoutPhase === 1 || layoutPhase === 3));
+    if (simple || compact || iconOnly || !expanded || !pane || layoutPhase !== null) { horizontal = false; return; }
     let cancelled = false;
     async function measure() {
       horizontal = false;
@@ -108,7 +108,7 @@
 
   onMount(() => {
     try {
-      if (simple) {
+      if (simple || iconOnly) {
         expanded = true;
       } else {
         const stored = localStorage.getItem(storageKey);

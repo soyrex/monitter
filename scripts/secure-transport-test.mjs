@@ -3,6 +3,7 @@ import { mock } from 'node:test';
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
 import { createDesktopSession, createMobileSession } from '../src/lib/controller/remote-client.ts';
+import { controllerSnapshot } from '../src/lib/controller/dispatcher.ts';
 import { SecureChannel, bytesToBase64url, deriveDirectionalKeys, pairingCommitment, randomBytes } from '../src/lib/controller/secure-session.ts';
 
 globalThis.WebSocket = WebSocket;
@@ -124,6 +125,8 @@ try {
   assert.equal(sends, 0);
   await desktop.approve();
   await once(callback => mobile.subscribe(state => { if (state.status === 'connected') callback(state); }));
+  assert.equal(mobile.supportsOwnerWorkspace(), false);
+  await assert.rejects(() => mobile.requestOwnerWorkspace(), /Update Monitter on the desktop/);
   await mobile.sendMessage('11111111-1111-4111-8111-111111111111', 'encrypted request');
   assert.equal(sends, 1);
   const desktopClosed = once(callback => desktop.subscribe(state => { if (state.status === 'closed') callback(state); }));
@@ -155,7 +158,7 @@ try {
   const stalledReadOutcome = stalledRead.then(() => null, reason => reason);
   await snapshotStartedPromise;
   const cancellation = await stalledMobile.cancelTask('11111111-1111-4111-8111-111111111111');
-  assert.deepEqual(cancellation, snapshot);
+  assert.deepEqual(cancellation, controllerSnapshot(snapshot));
   const receipt = await stalledMobile.sendMessage('11111111-1111-4111-8111-111111111111', 'receipt first');
   assert.deepEqual(receipt, { accepted: true });
   assert.equal(delayedCancels, 1); assert.equal(delayedSends, 1);

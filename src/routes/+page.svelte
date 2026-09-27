@@ -7,7 +7,8 @@
   import ShareControl from "$lib/components/ShareControl.svelte";
   import AppSurface from "$lib/components/AppSurface.svelte";
   import LanGate from '$lib/components/LanGate.svelte';
-  import { isLanBrowser } from '$lib/lan';
+  import OwnerRelayGate from '$lib/components/OwnerRelayGate.svelte';
+  import { isLanBrowser, isOwnerRelayBrowser } from '$lib/lan';
   import { remoteControlOpen, workspaceShareOpen, workspaceShareTaskId } from '$lib/workspace-panels';
 
   let hotUi = $state(false);
@@ -50,6 +51,9 @@
 {#if devUiError}
   <div class="dev-ui-error" role="alert"><span>{devUiError}</span><button type="button" aria-label="Dismiss developer interface error" onclick={()=>devUiError=''}>×</button></div>
 {/if}
+{#if isOwnerRelayBrowser()}
+<OwnerRelayGate><AppSurface /></OwnerRelayGate>
+{:else}
 <LanGate>
 <AppSurface />
 
@@ -58,6 +62,7 @@
 <ShareControl bind:open={$workspaceShareOpen} taskId={$workspaceShareTaskId} />
 {/if}
 </LanGate>
+{/if}
 
 <style>
   .dev-ui-badge { position:fixed; right:10px; bottom:10px; z-index:10000; display:flex; align-items:center; gap:8px; padding:5px 6px 5px 9px; border:1px solid color-mix(in srgb,var(--accent) 55%,var(--line)); border-radius:8px; background:color-mix(in srgb,var(--panel) 94%,transparent); color:var(--ink); box-shadow:0 5px 18px #0003; backdrop-filter:blur(12px); font:600 9px var(--mono); letter-spacing:.05em; }

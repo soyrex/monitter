@@ -2,6 +2,7 @@ import {
   createDesktopSession, createMobileSession,
   type DesktopBridge, type DesktopSession, type MobileSession,
   type PersistentDesktopIdentity, type PersistentMobileIdentity, type RemoteConnectionState,
+  type OwnerInvoke, type OwnerWorkspaceState,
 } from './remote-client';
 import type { ControllerSendReceipt } from './protocol';
 import type { Snapshot, TerminalRead, TerminalSession } from '../types';
@@ -12,6 +13,9 @@ export interface ResumableDesktopOptions {
   readonly identity: PersistentDesktopIdentity;
   readonly isTrustedController?: (publicKey: string) => boolean | Promise<boolean>;
   readonly onControllerAccess?: (publicKey: string) => void | Promise<void>;
+  readonly isTrustedOwnerWorkspace?: (publicKey: string) => boolean | Promise<boolean>;
+  readonly onOwnerWorkspaceAccess?: (publicKey: string) => void | Promise<void>;
+  readonly onOwnerInvoke?: OwnerInvoke;
 }
 export interface ResumableMobileOptions { readonly invitation: string; readonly identity: PersistentMobileIdentity; }
 export interface ResumableDesktopSession extends DesktopSession { reconnectNow(): Promise<void>; }
@@ -22,11 +26,11 @@ export async function createResumableDesktopSession(options: ResumableDesktopOpt
   let current: DesktopSession | null = null, permanentlyClosed = false, attempt = 0, opening: Promise<void> | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null, generation = 0;
   let lastState: RemoteConnectionState = { status: 'connecting' };
-  let unsubscribeState: (() => void) | null = null, unsubscribePending: (() => void) | null = null;
-  const listeners = new Set<(state: RemoteConnectionState) => void>(), pending = new Set<() => void>();
+  let unsubscribeState: (() => void) | null = null, unsubscribePending: (() => void) | null = null, unsubscribeOwnerRequest: (() => void) | null = null;
+  const listeners = new Set<(state: RemoteConnectionState) => void>(), pending = new Set<() => void>(), ownerRequests = new Set<() => void>();
   const notify = (state: RemoteConnectionState) => { lastState = state; listeners.forEach(listener => listener(state)); };
   const cancelRetry = () => { if (retryTimer) clearTimeout(retryTimer); retryTimer = null; };
-  const detach = () => { unsubscribeState?.(); unsubscribePending?.(); unsubscribeState = null; unsubscribePending = null; };
+  const detach = () => { unsubscribeState?.(); unsubscribePending?.(); unsubscribeOwnerRequest?.(); unsubscribeState = null; unsubscribePending = null; unsubscribeOwnerRequest = null; };
   const scheduleRetry = (ownedGeneration: number) => {
     if (permanentlyClosed || retryTimer || ownedGeneration !== generation) return;
     const wait = Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5));
@@ -44,7 +48,7 @@ export async function createResumableDesktopSession(options: ResumableDesktopOpt
     if (opening) return opening;
     const ownedGeneration = ++generation;
     opening = (async () => {
-      const next = await createDesktopSession(options.relayUrl, options.bridge, { identity: options.identity, isTrustedController: options.isTrustedController, onControllerAccess: options.onControllerAccess });
+      const next = await createDesktopSession(options.relayUrl, options.bridge, { identity: options.identity, isTrustedController: options.isTrustedController, onControllerAccess: options.onControllerAccess, isTrustedOwnerWorkspace: options.isTrustedOwnerWorkspace, onOwnerWorkspaceAccess: options.onOwnerWorkspaceAccess, onOwnerInvoke: options.onOwnerInvoke });
       if (permanentlyClosed || ownedGeneration !== generation) return next.close();
       const previous = current;
       detach(); current = null; previous?.close(); current = next;
@@ -55,6 +59,7 @@ export async function createResumableDesktopSession(options: ResumableDesktopOpt
         else if (state.status === 'closed' || state.status === 'error') scheduleRetry(ownedGeneration);
       });
       unsubscribePending = next.onPendingPeer(() => { if (ownedGeneration === generation) pending.forEach(listener => listener()); });
+      unsubscribeOwnerRequest = next.onOwnerWorkspaceRequest(() => { if (ownedGeneration === generation) ownerRequests.forEach(listener => listener()); });
     })().finally(() => { opening = null; });
     return opening;
   };
@@ -65,10 +70,16 @@ export async function createResumableDesktopSession(options: ResumableDesktopOpt
     get invitation() { return invitation; },
     getStatus: () => current?.getStatus() ?? 'closed', getVerificationCode: () => current?.getVerificationCode() ?? null,
     getPeer: () => current?.getPeer() ?? null, getPeerControllerPublicKey: () => current?.getPeerControllerPublicKey() ?? null,
+    getOwnerWorkspaceState: (): OwnerWorkspaceState => current?.getOwnerWorkspaceState() ?? 'none',
+    hasOwnerWorkspaceAccess: () => current?.hasOwnerWorkspaceAccess() ?? false,
     subscribe(listener) { listeners.add(listener); listener(lastState); return () => listeners.delete(listener); },
     onPendingPeer(listener) { pending.add(listener); return () => pending.delete(listener); },
+    onOwnerWorkspaceRequest(listener) { ownerRequests.add(listener); return () => ownerRequests.delete(listener); },
     approve: () => current?.approve() ?? Promise.reject(new Error('Controller connection is unavailable.')),
     reject: () => current?.reject() ?? Promise.reject(new Error('Controller connection is unavailable.')),
+    approveOwnerWorkspace: () => current?.approveOwnerWorkspace() ?? Promise.reject(new Error('Controller connection is unavailable.')),
+    rejectOwnerWorkspace: () => current?.rejectOwnerWorkspace() ?? Promise.reject(new Error('Controller connection is unavailable.')),
+    revokeOwnerWorkspace: () => current?.revokeOwnerWorkspace() ?? Promise.resolve(),
     reconnectNow: async () => {
       cancelRetry();
       // Visibility and pageshow may request the same foreground reconnect in
@@ -123,6 +134,9 @@ export async function createResumableMobileSession(options: ResumableMobileOptio
   return {
     getStatus: () => current?.getStatus() ?? 'closed', getVerificationCode: () => current?.getVerificationCode() ?? null,
     supportsRememberedDevices: () => current?.supportsRememberedDevices() ?? false,
+    supportsOwnerWorkspace: () => current?.supportsOwnerWorkspace() ?? false,
+    getOwnerWorkspaceState: () => current?.getOwnerWorkspaceState() ?? 'none',
+    hasOwnerWorkspaceAccess: () => current?.hasOwnerWorkspaceAccess() ?? false,
     subscribe(listener) { listeners.add(listener); listener(lastState); return () => listeners.delete(listener); },
     reconnectNow: async () => {
       cancelRetry();
@@ -131,6 +145,7 @@ export async function createResumableMobileSession(options: ResumableMobileOptio
     },
     close: () => { permanentlyClosed = true; generation += 1; cancelRetry(); unsubscribeState?.(); unsubscribeState = null; const previous = current; current = null; previous?.close(); notify({ status: 'closed' }); },
     getSnapshot: () => requireCurrent().getSnapshot(), sendMessage: (id, text) => requireCurrent().sendMessage(id, text) as Promise<Snapshot | ControllerSendReceipt>,
+    requestOwnerWorkspace: () => requireCurrent().requestOwnerWorkspace(), invokeOwner: (command, args) => requireCurrent().invokeOwner(command, args),
     cancelTask: id => requireCurrent().cancelTask(id), resumeTask: id => requireCurrent().resumeTask(id), listTerminals: () => requireCurrent().listTerminals(), readTerminal: (id, seq) => requireCurrent().readTerminal(id, seq),
   };
 }

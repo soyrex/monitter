@@ -5572,7 +5572,7 @@
       <section class="sidebar-statistics" aria-label="Statistics" onclick={openStatistics}>
         <div class="statistics-body" id="sidebar-statistics-body">
           <div class="statistics-content">
-            <UsageRings usage={sidebarUsage} expanded={true} showHeader={false} iconOnly={true} class="rings-only"/>
+            <UsageRings usage={sidebarUsage} expanded={true} showHeader={false} iconOnly={true}/>
             <SidebarClock expanded={true} panel={true} bind:metricsModalOpen={statisticsModalOpen}/>
           </div>
         </div>

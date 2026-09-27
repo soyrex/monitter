@@ -39,6 +39,8 @@
     "test:hermes-bridge": "python3 scripts/test-hermes-bridge.py",
     "test:controller": "node scripts/controller-protocol-test.mjs",
     "test:remote": "node scripts/secure-transport-run.mjs",
+    "test:owner-appearance": "node scripts/owner-appearance-run.mjs",
+    "test:owner-relay-ui": "node scripts/owner-relay-ui-run.mjs",
     "relay": "node scripts/relay-server.mjs",
     "build:ios:web": "sh mobile-ios/build.sh",
     "test:mobile": "node scripts/mobile-ui-test.mjs",

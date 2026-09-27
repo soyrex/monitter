@@ -448,6 +448,30 @@
         "native"
       ]
     },
+    "owner_relay_invoke": {
+      "arguments": [
+        {
+          "name": "command",
+          "rustName": "command",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "args",
+          "rustName": "args",
+          "rustType": "serde_json::Value",
+          "tsType": "JsonValue",
+          "optional": false
+        }
+      ],
+      "resultRustType": "serde_json::Value",
+      "resultTsType": "JsonValue",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "resolve_approval": {
       "arguments": [
         {

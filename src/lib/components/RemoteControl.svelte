@@ -4,20 +4,23 @@
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import QRCode from 'qrcode';
   import { getBridge } from '$lib/bridge';
+  import { invokeCommand } from '$lib/command-invoke';
   import { createResumableDesktopSession, type ResumableDesktopSession } from '$lib/controller/resumable-session';
   import type { DesktopBridge, RemoteConnectionState } from '$lib/controller/remote-client';
-  import { clearDesktopPairing, deviceExpiresAt, isRememberedController, MAX_INACTIVITY_DAYS, newDesktopPairing, saveDesktopPairing, loadDesktopPairing, type DesktopPairingRecord, type RememberedController } from '$lib/controller/pairing-store';
+  import { clearDesktopPairing, deviceExpiresAt, isRememberedController, isRememberedOwnerWorkspace, MAX_INACTIVITY_DAYS, newDesktopPairing, saveDesktopPairing, loadDesktopPairing, type DesktopPairingRecord, type RememberedController } from '$lib/controller/pairing-store';
   import { DEFAULT_RELAY, registerPairingCode, revokePairingCode, type PairingRegistration } from '$lib/controller/pairing-code';
   import { remoteControlTarget } from '$lib/workspace-panels';
+  import { applyOwnerAppearance, currentOwnerAppearance } from '$lib/owner-appearance';
+  import type { JsonValue } from '$lib/types';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
   let relay=$state(DEFAULT_RELAY), qr=$state(''), status=$state('off'), error=$state(''), verificationCode=$state(''), creating=$state(false), now=$state(Date.now()), policyInput=$state('');
-  let registration=$state<PairingRegistration|null>(null), session=$state<ResumableDesktopSession|null>(null), unsubscribe:(()=>void)|undefined;
+  let registration=$state<PairingRegistration|null>(null), session=$state<ResumableDesktopSession|null>(null), unsubscribe:(()=>void)|undefined, unsubscribeOwner:(()=>void)|undefined;
   let connectionError='',pairingError='';
   let record=$state.raw<DesktopPairingRecord|null>(null), generation=0, loaded=$state(false), saving=$state(false), writesPending=0, revision=0;
   const timer=setInterval(()=>now=Date.now(),1000);
   const key=$derived(registration && registration.expiresAt>now ? registration.code.match(/.{3}/g)?.join(' ') : '');
-  const devices=$derived(record?.devices??[]);
+  const devices=$derived(record?.devices??[]), ownerDevices=$derived(record?.ownerDevices??[]), ownerPending=$derived.by(()=>{now;return session?.getOwnerWorkspaceState()==='requested';});
   function portal(node:HTMLElement,target:HTMLElement|null){
     const fallback=node.parentElement!;
     let current:HTMLElement|null=null,observer:MutationObserver|undefined;
@@ -34,7 +37,7 @@
   }
   function statusLabel(value:string){return ({connecting:error?'Reconnecting to the relay…':'Connecting to the relay…',waiting_for_peer:'Ready for a phone',pending:'Waiting for phone approval',connected:'Phone connected',closed:'Listener stopped',rejected:'Phone pairing rejected',error:'Remote access needs attention'} as Record<string,string>)[value]??value.replaceAll('_',' ');}
   function clearRegistration(){const old=registration;registration=null;if(old)void revokePairingCode(relay,old).catch(()=>{});}
-  function clone(source:DesktopPairingRecord):DesktopPairingRecord{return {version:1,relayUrl:source.relayUrl,enabled:source.enabled,inactivityDays:source.inactivityDays,identity:{room:source.identity.room,keyPair:source.identity.keyPair},devices:source.devices.map(device=>({...device}))};}
+  function clone(source:DesktopPairingRecord):DesktopPairingRecord{return {version:2,relayUrl:source.relayUrl,enabled:source.enabled,inactivityDays:source.inactivityDays,identity:{room:source.identity.room,keyPair:source.identity.keyPair},devices:source.devices.map(device=>({...device})),ownerDevices:source.ownerDevices.map(device=>({...device}))};}
   // General mobile control deliberately excludes visitor-only file upload.
   function controllerBridge():DesktopBridge{
     const bridge=getBridge();
@@ -61,9 +64,16 @@
     }finally{writesPending--;saving=writesPending>0;}
   }
   function trusted(publicKey:string){return !!record&&isRememberedController(record,publicKey,Date.now());}
+  function trustedOwner(publicKey:string){return !!record&&isRememberedOwnerWorkspace(record,publicKey,Date.now());}
   function access(publicKey:string,current:number){
     if(current!==generation||!record||!trusted(publicKey))return;
     const next=clone(record),device=next.devices.find(item=>item.publicKey===publicKey);
+    if(!device)return;device.lastAccessAt=Date.now();
+    void persist(next,current).catch(()=>{});
+  }
+  function accessOwner(publicKey:string,current:number){
+    if(current!==generation||!record||!trustedOwner(publicKey))return;
+    const next=clone(record),device=next.ownerDevices.find(item=>item.publicKey===publicKey);
     if(!device)return;device.lastAccessAt=Date.now();
     void persist(next,current).catch(()=>{});
   }
@@ -76,8 +86,16 @@
     if(['pending','connected','closed','error','rejected'].includes(value.status))clearRegistration();
   }
   async function startListener(existing?:DesktopPairingRecord){
-    if(creating)return;unsubscribe?.();session?.close();session=null;const current=++generation;creating=true;error='';
-    try{if(!getBridge().available)throw new Error('Open Remote control inside the Monitter desktop app.');const nextRecord=existing??await newDesktopPairing(relay);nextRecord.enabled=true;nextRecord.relayUrl=relay;await persist(nextRecord,current);if(current!==generation)return;relay=nextRecord.relayUrl;policyInput=nextRecord.inactivityDays===null?'':String(nextRecord.inactivityDays);const next=await createResumableDesktopSession({relayUrl:nextRecord.relayUrl,bridge:controllerBridge(),identity:nextRecord.identity,isTrustedController:publicKey=>current===generation&&trusted(publicKey),onControllerAccess:publicKey=>access(publicKey,current)});if(current!==generation){next.close();return;}session=next;unsubscribe=next.subscribe(value=>connectionChanged(value,current));status=next.getStatus();}
+    if(creating)return;unsubscribe?.();unsubscribeOwner?.();session?.close();session=null;const current=++generation;creating=true;error='';
+    try{if(!getBridge().available)throw new Error('Open Remote control inside the Monitter desktop app.');const nextRecord=existing??await newDesktopPairing(relay);nextRecord.enabled=true;nextRecord.relayUrl=relay;await persist(nextRecord,current);if(current!==generation)return;relay=nextRecord.relayUrl;policyInput=nextRecord.inactivityDays===null?'':String(nextRecord.inactivityDays);const next=await createResumableDesktopSession({relayUrl:nextRecord.relayUrl,bridge:controllerBridge(),identity:nextRecord.identity,isTrustedController:publicKey=>current===generation&&trusted(publicKey),onControllerAccess:publicKey=>access(publicKey,current),isTrustedOwnerWorkspace:publicKey=>current===generation&&trustedOwner(publicKey),onOwnerWorkspaceAccess:publicKey=>accessOwner(publicKey,current),onOwnerInvoke:(command,args)=>{
+      // Presentation state lives in the desktop renderer, not the Rust Snapshot.
+      // These two tiny, validated operations are the only owner relay UI exception;
+      // every workspace command still passes through Rust's LAN allow-list.
+      if(command==='get_owner_appearance')return Promise.resolve(currentOwnerAppearance());
+      if(command==='set_owner_appearance')return Promise.resolve(applyOwnerAppearance(args));
+      // `args` came from the authenticated JSON transfer parser in remote-client.
+      return invokeCommand('owner_relay_invoke',{command,args:args as JsonValue});
+    }});if(current!==generation){next.close();return;}session=next;unsubscribe=next.subscribe(value=>connectionChanged(value,current));unsubscribeOwner=next.onOwnerWorkspaceRequest(()=>{if(current===generation)now=Date.now();});status=next.getStatus();}
     catch(reason){if(current===generation){error=String(reason);status='error';}}finally{if(current===generation)creating=false;}
   }
   async function createPairingCode(){
@@ -94,10 +112,13 @@
     }catch(reason){if(current===generation&&ownedSession.getStatus()==='waiting_for_peer'){pairingError=reason instanceof Error?reason.message:String(reason);error=pairingError;}}
     finally{if(current===generation)creating=false;}
   }
-  function closeRuntime(){generation++;unsubscribe?.();unsubscribe=undefined;session?.close();session=null;clearRegistration();qr='';status='off';verificationCode='';creating=false;}
+  function closeRuntime(){generation++;unsubscribe?.();unsubscribe=undefined;unsubscribeOwner?.();unsubscribeOwner=undefined;session?.close();session=null;clearRegistration();qr='';status='off';verificationCode='';creating=false;}
   async function approve(){if(!session||!record||saving)return;const publicKey=session.getPeerControllerPublicKey(),peer=session.getPeer();if(peer!==null){error='This is a shared visitor connection. Use sharing controls instead of remembering it as a phone.';await session.reject().catch(()=>{});return;}if(!publicKey){error='The phone identity was unavailable. Reject it and create a fresh pairing code.';return;}const current=generation,next=clone(record),timestamp=Date.now(),existing=next.devices.find(device=>device.publicKey===publicKey);if(existing){existing.approvedAt=timestamp;existing.lastAccessAt=timestamp;}else{if(next.devices.length>=32){error='You can remember up to 32 phones. Revoke one before approving another.';return;}next.devices.push({publicKey,name:'Phone '+(next.devices.length+1),approvedAt:timestamp,lastAccessAt:timestamp});}try{await persist(next,current);if(current!==generation||!trusted(publicKey))return;await session?.approve();}catch(reason){if(current===generation)error='Phone was not approved: '+String(reason);}}
   async function reject(){try{await session?.reject();}catch(reason){error=String(reason);}}
-  async function revokeDevice(publicKey:string){if(!record)return;const current=generation,next=clone(record);next.devices=next.devices.filter(device=>device.publicKey!==publicKey);record=next;const active=session?.getPeerControllerPublicKey()===publicKey?session:null;const rejection=active?.reject().catch(()=>{});try{await persist(next,current);await rejection;if(current!==generation)return;if(active===session)await active?.reconnectNow();}catch{}}
+  async function approveOwner(){if(!session||!record||saving)return;const publicKey=session.getPeerControllerPublicKey();if(!publicKey){error='The phone identity was unavailable. Reject the owner request and pair again.';return;}const current=generation,next=clone(record),timestamp=Date.now(),existing=next.ownerDevices.find(device=>device.publicKey===publicKey);if(existing){existing.approvedAt=timestamp;existing.lastAccessAt=timestamp;}else{if(next.ownerDevices.length>=32){error='You can grant owner workspace access to up to 32 phones. Revoke one first.';return;}next.ownerDevices.push({publicKey,name:'Phone '+(next.ownerDevices.length+1),approvedAt:timestamp,lastAccessAt:timestamp});}try{await persist(next,current);if(current!==generation||!trustedOwner(publicKey))return;await session.approveOwnerWorkspace();}catch(reason){if(current===generation)error='Owner workspace access was not approved: '+String(reason);}}
+  async function rejectOwner(){try{await session?.rejectOwnerWorkspace();}catch(reason){error=String(reason);}}
+  async function revokeDevice(publicKey:string){if(!record)return;const current=generation,next=clone(record);next.devices=next.devices.filter(device=>device.publicKey!==publicKey);next.ownerDevices=next.ownerDevices.filter(device=>device.publicKey!==publicKey);record=next;const active=session?.getPeerControllerPublicKey()===publicKey?session:null;const rejection=active?.reject().catch(()=>{});try{await persist(next,current);await rejection;if(current!==generation)return;if(active===session)await active?.reconnectNow();}catch{}}
+  async function revokeOwnerDevice(publicKey:string){if(!record)return;const current=generation,next=clone(record);next.ownerDevices=next.ownerDevices.filter(device=>device.publicKey!==publicKey);record=next;const active=session?.getPeerControllerPublicKey()===publicKey?session:null;try{await persist(next,current);if(active===session)await active?.revokeOwnerWorkspace();}catch{}}
   async function revokeAll(){
     const current=++generation,previous=session;
     clearRegistration();unsubscribe?.();unsubscribe=undefined;session=null;record=null;revision++;
@@ -146,13 +167,15 @@
     <button class="primary" disabled={saving} onclick={approve}>Numbers match — approve phone</button>
     <button onclick={reject}>Reject</button>
   {/if}
+  {#if ownerPending}<section class="owner-request"><h3>Owner workspace requested</h3><p>This phone is asking for the full owner workspace. Its remembered phone approval does not grant this. Only approve if you intend to allow the explicit desktop owner command set.</p><button class="primary" disabled={saving} onclick={approveOwner}>Approve owner workspace</button><button onclick={rejectOwner}>Keep limited phone access</button></section>{/if}
   <button onclick={closeRuntime}>Stop listener</button>
 {/if}
 <section class="devices"><h3>Saved phones</h3>{#each devices as device (device.publicKey)}<article><div><strong>{device.name}</strong><small class:connected={deviceState(device)==='connected'} class:expired={deviceState(device)==='expired'}>{deviceState(device)} · Last access {stamp(device.lastAccessAt)}{#if expiry(device)!==null} · Expires {stamp(expiry(device)!)}{/if}</small></div><button class="danger" aria-label={'Revoke '+device.name} onclick={()=>revokeDevice(device.publicKey)}><ArchiveX size={15}/>Revoke</button></article>{:else}<p class="empty">No phones are remembered yet.</p>{/each}</section>
+<section class="devices"><h3>Owner workspace grants</h3><small>Separate explicit grants for the full owner workspace. Removing phone access also removes its owner grant.</small>{#each ownerDevices as device (device.publicKey)}<article><div><strong>{device.name}</strong><small class:connected={session?.getPeerControllerPublicKey()===device.publicKey&&session?.hasOwnerWorkspaceAccess()} class:expired={expiry(device)!==null&&expiry(device)!<=now}>{session?.getPeerControllerPublicKey()===device.publicKey&&session?.hasOwnerWorkspaceAccess()?'active':'inactive'} · Last owner use {stamp(device.lastAccessAt)}{#if expiry(device)!==null} · Expires {stamp(expiry(device)!)}{/if}</small></div><button class="danger" aria-label={'Revoke owner workspace for '+device.name} onclick={()=>revokeOwnerDevice(device.publicKey)}><ArchiveX size={15}/>Revoke</button></article>{:else}<p class="empty">No owner workspace grants.</p>{/each}</section>
 {#if devices.length||record}<button class="danger revoke-all" onclick={revokeAll}><ShieldCheck size={15}/>Revoke all saved access</button>{/if}
 {#if error}<p role="alert">{error}</p>{/if}
-<small>One-time pairing codes expire after five minutes. Stopping the listener does not forget saved phones.</small>
+<small>One-time pairing codes expire after five minutes. Stopping the listener does not forget saved phones or owner grants.</small>
 </div></div>{/if}
 <style>
-.remote-control-fallback{display:none}.device-key{display:block;font:600 28px var(--mono,monospace);letter-spacing:3px;margin:12px 0;color:var(--accent-ink,var(--accent))}.remote-panel{width:100%;box-sizing:border-box;min-width:0;padding-top:4px;color:var(--ink);font:14px var(--interface-font,'IBM Plex Sans',sans-serif)}.remote-panel header,.devices article{display:flex;align-items:center;justify-content:space-between;gap:12px}.remote-panel h2{font-size:20px;margin:0}.remote-panel h3{font-size:14px;margin:0 0 8px}.remote-panel p{line-height:1.5}.remote-panel label{display:block;margin:12px 0}.remote-panel input{box-sizing:border-box;width:100%;margin-top:6px;border:1px solid var(--line);background:var(--paper);color:inherit;border-radius:8px;padding:10px;font:inherit}.remote-panel button{display:inline-flex;align-items:center;gap:6px;padding:10px;border:0;border-radius:8px;background:var(--soft);color:inherit;cursor:pointer;margin:4px}.remote-panel button:disabled{opacity:.5;cursor:default}.remote-panel button.primary{background:var(--accent);color:var(--on-accent)}.remote-panel img{display:block;width:min(280px,100%);height:auto;margin:12px auto;border-radius:10px}.remote-panel small{display:block;color:var(--muted);line-height:1.5;margin-top:5px}.policy,.devices{border-top:1px solid var(--line);margin-top:16px;padding-top:14px}.devices article{padding:10px 0;border-bottom:1px solid var(--line)}.devices article strong{display:block}.connected{color:var(--accent-ink)!important}.expired{color:#a13a2a!important}:global(:root[data-theme="dark"]) .expired{color:#f0a48e!important}.danger{background:#5a302b!important;color:#fff!important}.revoke-all{margin-top:14px}.empty{color:var(--muted)}
+.remote-control-fallback{display:none}.device-key{display:block;font:600 28px var(--mono,monospace);letter-spacing:3px;margin:12px 0;color:var(--accent-ink,var(--accent))}.remote-panel{width:100%;box-sizing:border-box;min-width:0;padding-top:4px;color:var(--ink);font:14px var(--interface-font,'IBM Plex Sans',sans-serif)}.remote-panel header,.devices article{display:flex;align-items:center;justify-content:space-between;gap:12px}.remote-panel h2{font-size:20px;margin:0}.remote-panel h3{font-size:14px;margin:0 0 8px}.remote-panel p{line-height:1.5}.remote-panel label{display:block;margin:12px 0}.remote-panel input{box-sizing:border-box;width:100%;margin-top:6px;border:1px solid var(--line);background:var(--paper);color:inherit;border-radius:8px;padding:10px;font:inherit}.remote-panel button{display:inline-flex;align-items:center;gap:6px;padding:10px;border:0;border-radius:8px;background:var(--soft);color:inherit;cursor:pointer;margin:4px}.remote-panel button:disabled{opacity:.5;cursor:default}.remote-panel button.primary{background:var(--accent);color:var(--on-accent)}.remote-panel img{display:block;width:min(280px,100%);height:auto;margin:12px auto;border-radius:10px}.remote-panel small{display:block;color:var(--muted);line-height:1.5;margin-top:5px}.policy,.devices,.owner-request{border-top:1px solid var(--line);margin-top:16px;padding-top:14px}.devices article{padding:10px 0;border-bottom:1px solid var(--line)}.devices article strong{display:block}.connected{color:var(--accent-ink)!important}.expired{color:#a13a2a!important}:global(:root[data-theme="dark"]) .expired{color:#f0a48e!important}.danger{background:#5a302b!important;color:#fff!important}.revoke-all{margin-top:14px}.empty{color:var(--muted)}
 </style>

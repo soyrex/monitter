@@ -68,14 +68,30 @@ No fake conversations, progress, token counts, host connections or model replies
   permission: Tauri ACLs and native resource/actor checks still apply. Controller and visitor action
   mappings remain separate restricted protocols. `use_packaged_ui` retains its narrow origin-specific
   bootstrap exception. See `docs/COMMAND-CONTRACT.md` for generation and validation.
+- `owner_relay_invoke { command: string, args: JSON }` -> JSON. Bundled desktop renderer only;
+  it dispatches through the existing explicit owner-LAN command allow-list, not the broader
+  native Tauri command set. The paired iOS client can reach it only through a separately
+  remembered, explicitly desktop-approved owner-workspace E2E relay grant. Controller-only
+  trust never implies this grant; visitor/operator sessions cannot request it. Revocation and
+  inactivity policy are rechecked for each relayed request. The desktop advertises
+  `owner-workspace-v1` in its encrypted approval; an older desktop without that capability
+  leaves the phone in limited paired mode with a visible update-required message rather
+  than sending an unknown owner request or reconnecting in a loop. Encrypted requests and responses
+  use ordered 32 KiB chunks with a 32 MiB aggregate ceiling and 60-second transfer timeout;
+  ambiguous mutations are not replayed. The owner relay also carries two
+  small, validated presentation-only operations in the desktop renderer for app palette,
+  surface tint and terminal palette, which are client-local rather than Snapshot fields.
 - `get_snapshot {}` -> Snapshot
 - `get_ui_snapshot { revision?: string }` -> `{ revision: string, snapshot: Snapshot | null }`
   Shared desktop/LAN UI projection. An unchanged launch-scoped revision returns null; changed
   snapshots contain at most 300 recent activity events (60 per task), omit output/log payloads,
   and bound details to 1,000 bytes (300 for error summaries) rather than full diagnostic history.
-  Task/channel messages remain complete for legacy consumers. Owner-side controller/visitor v1
-  adapters use an unbased full read because their wire protocols do not support history paging;
-  this does not replace the desktop's paged cache or bypass visitor projection/revocation checks.
+  Task/channel messages remain complete for legacy consumers. The owner-side controller v1
+  adapter uses a bounded compatibility projection because its wire protocol does not support
+  history paging: it retains task/agent identities, recent chronological conversation tails,
+  and a visible per-task desktop-history notice while measuring the serialized response below
+  its 1 MiB ceiling. This does not replace the desktop's paged cache or bypass visitor
+  projection/revocation checks.
 - `get_ui_delta { revision?: string }` -> `UiDeltaResponse`.
   Native and owner-LAN only. Initial reads or expired, foreign, oversized or unrepresentable journal
   revisions reset with a compact snapshot containing the latest 64 messages per task and channel. Incremental

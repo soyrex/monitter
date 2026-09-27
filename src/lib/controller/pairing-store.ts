@@ -7,13 +7,15 @@ export interface RememberedController {
   lastAccessAt: number;
 }
 export interface DesktopPairingRecord {
-  version: 1;
+  version: 2;
   relayUrl: string;
   identity: { keyPair: CryptoKeyPair; room: string };
   enabled: boolean;
   /** Sliding inactivity timeout. Null means remembered until explicitly revoked. */
   inactivityDays: number | null;
   devices: RememberedController[];
+  /** Deliberately separate from controller access; never inferred from devices. */
+  ownerDevices: RememberedController[];
 }
 export interface MobilePairingRecord {
   version: 1;
@@ -37,11 +39,17 @@ export function isRememberedController(record: DesktopPairingRecord, publicKey: 
   const expiry = deviceExpiresAt(device, record.inactivityDays);
   return expiry === null || now < expiry;
 }
+export function isRememberedOwnerWorkspace(record: DesktopPairingRecord, publicKey: string, now = Date.now()): boolean {
+  const device = record.ownerDevices.find(item => item.publicKey === publicKey);
+  if (!record.enabled || !device) return false;
+  const expiry = deviceExpiresAt(device, record.inactivityDays);
+  return expiry === null || now < expiry;
+}
 export async function newDesktopPairing(relayUrl: string): Promise<DesktopPairingRecord> {
   return {
-    version: 1, relayUrl,
+    version: 2, relayUrl,
     identity: { keyPair: await generatePairingKeyPair(), room: bytesToBase64url(randomBytes(18)) },
-    enabled: true, inactivityDays: null, devices: [],
+    enabled: true, inactivityDays: null, devices: [], ownerDevices: [],
   };
 }
 
@@ -55,17 +63,20 @@ function validKeys(value: unknown): value is CryptoKeyPair {
     && pair.publicKey.type === 'public' && pair.publicKey.algorithm.name === 'ECDH'
     && (pair.publicKey.algorithm as EcKeyAlgorithm).namedCurve === 'P-256';
 }
+function validDevices(value: unknown): value is RememberedController[] {
+  return Array.isArray(value) && value.length <= 32
+    && value.every(device => typeof device.publicKey === 'string' && /^[A-Za-z0-9_-]{87}$/.test(device.publicKey)
+      && typeof device.name === 'string' && device.name.length <= 80
+      && Number.isFinite(device.approvedAt) && Number.isFinite(device.lastAccessAt));
+}
 function validateDesktop(value: unknown): asserts value is DesktopPairingRecord {
   const record = value as DesktopPairingRecord | undefined;
-  if (!record || record.version !== 1 || typeof record.relayUrl !== 'string'
+  if (!record || record.version !== 2 || typeof record.relayUrl !== 'string'
     || !validKeys(record.identity?.keyPair) || typeof record.identity.room !== 'string'
     || !/^[A-Za-z0-9_-]{22,128}$/.test(record.identity.room)
     || typeof record.enabled !== 'boolean'
     || !(record.inactivityDays === null || Number.isInteger(record.inactivityDays) && record.inactivityDays >= 1 && record.inactivityDays <= MAX_INACTIVITY_DAYS)
-    || !Array.isArray(record.devices) || record.devices.length > 32
-    || record.devices.some(device => typeof device.publicKey !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(device.publicKey)
-      || typeof device.name !== 'string' || device.name.length > 80
-      || !Number.isFinite(device.approvedAt) || !Number.isFinite(device.lastAccessAt))) {
+    || !validDevices(record.devices) || !validDevices(record.ownerDevices)) {
     throw new Error('Saved desktop pairing is invalid. Revoke saved devices and pair again.');
   }
 }
@@ -116,8 +127,13 @@ function writeRecord(key: string, value?: unknown): Promise<void> {
   return operation;
 }
 export async function loadDesktopPairing(): Promise<DesktopPairingRecord | null> {
-  const value = await readRecord('desktop');
+  let value = await readRecord('desktop');
   if (value === undefined) return null;
+  // v1 had only controller trust. Migration intentionally grants no owner scope.
+  if ((value as { version?: unknown }).version === 1) {
+    const legacy = value as Omit<DesktopPairingRecord, 'version' | 'ownerDevices'>;
+    value = { ...legacy, version: 2, ownerDevices: [] };
+  }
   validateDesktop(value); return value;
 }
 export async function loadMobilePairing(): Promise<MobilePairingRecord | null> {
@@ -129,9 +145,10 @@ export function saveDesktopPairing(record: DesktopPairingRecord): Promise<void> 
   validateDesktop(record);
   // Copy ordinary fields so Svelte proxies never reach structured clone.
   return writeRecord('desktop', {
-    version: 1, relayUrl: record.relayUrl, enabled: record.enabled, inactivityDays: record.inactivityDays,
+    version: 2, relayUrl: record.relayUrl, enabled: record.enabled, inactivityDays: record.inactivityDays,
     identity: { room: record.identity.room, keyPair: { privateKey: record.identity.keyPair.privateKey, publicKey: record.identity.keyPair.publicKey } },
     devices: record.devices.map(device => ({ publicKey: device.publicKey, name: device.name, approvedAt: device.approvedAt, lastAccessAt: device.lastAccessAt })),
+    ownerDevices: record.ownerDevices.map(device => ({ publicKey: device.publicKey, name: device.name, approvedAt: device.approvedAt, lastAccessAt: device.lastAccessAt })),
   });
 }
 export function saveMobilePairing(record: MobilePairingRecord): Promise<void> {

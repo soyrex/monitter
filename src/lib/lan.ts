@@ -2,10 +2,21 @@ import { invokeCommand } from './command-invoke';
 import { createCommandGuard } from './command-protocol';
 export type { LanServerInfo } from './types';
 
+/** The installed iOS shell serves its bundled UI only from this private loopback origin. */
+export const isIOSBundleOrigin = () => typeof window !== 'undefined' &&
+  window.location.origin === 'http://127.0.0.1:31977';
+/** The bundled root is always an owner-relay workspace, even if WebKit drops the query. */
+export const isOwnerRelayBrowser = () => isIOSBundleOrigin() && window.location.pathname === '/';
+
 export const isLanBrowser = () => typeof document !== 'undefined' && (
   (import.meta.env.DEV && (import.meta.env.MODE === 'monitter-web' || import.meta.env.MODE === 'monitter-app-ui')) ||
-  document.documentElement.hasAttribute('data-monitter-lan') || !!document.querySelector('meta[name="monitter-lan"]')
+  document.documentElement.hasAttribute('data-monitter-lan') || !!document.querySelector('meta[name="monitter-lan"]') ||
+  isOwnerRelayBrowser()
 );
+type OwnerRelayInvoker = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+let ownerRelayInvoker: OwnerRelayInvoker | null = null;
+/** Only the owner relay gate registers this provider after an approved session. */
+export function setOwnerRelayInvoker(invoke: OwnerRelayInvoker | null): void { ownerRelayInvoker = invoke; }
 const storageKey = 'monitter.lan.access';
 export function accessKey(): string { return sessionStorage.getItem(storageKey) ?? ''; }
 export function setAccessKey(key: string) { sessionStorage.setItem(storageKey, key.trim()); }
@@ -15,6 +26,10 @@ export async function lanInvoke<T>(command: string, args: Record<string, unknown
   return lanRequest<T>(command, args);
 }
 async function lanRequest<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  if (isOwnerRelayBrowser()) {
+    if (!ownerRelayInvoker) throw new Error('The owner relay is not connected. Reconnect this phone to the desktop.');
+    return ownerRelayInvoker(command, args) as Promise<T>;
+  }
   const response = await fetch('/api/invoke', {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessKey()}` },
     body: JSON.stringify({ command, args }),

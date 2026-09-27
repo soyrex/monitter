@@ -6,6 +6,9 @@ import type { ControllerClient } from './protocol';
 
 export type RemoteConnectionStatus = 'connecting' | 'waiting_for_peer' | 'pending' | 'awaiting_approval' | 'connected' | 'rejected' | 'closed' | 'error';
 export interface RemoteConnectionState { readonly status: RemoteConnectionStatus; readonly error?: string; readonly verificationCode?: string; }
+export type OwnerWorkspaceState = 'none' | 'requested' | 'approved' | 'rejected';
+export interface OwnerInvokeContext { readonly publicKey: string; }
+export type OwnerInvoke = (command: string, args: unknown, context: OwnerInvokeContext) => unknown | Promise<unknown>;
 export interface CollaboratorIdentity { readonly name: string; readonly role: 'visitor'; }
 export interface ControllerInvitationV1 { readonly version: 1; readonly relayUrl: string; readonly room: string; readonly secret: string; }
 export interface ControllerInvitationV2 { readonly version: 2; readonly relayUrl: string; readonly room: string; readonly publicKey: string; }
@@ -19,6 +22,11 @@ export interface PersistentDesktopSessionOptions {
   readonly isTrustedController?: (publicKey: string) => boolean | Promise<boolean>;
   /** Called for authenticated approved-controller activity; callers persist policy state. */
   readonly onControllerAccess?: (publicKey: string) => void | Promise<void>;
+  /** Separate remembered full-workspace scope; controller trust never implies this. */
+  readonly isTrustedOwnerWorkspace?: (publicKey: string) => boolean | Promise<boolean>;
+  readonly onOwnerWorkspaceAccess?: (publicKey: string) => void | Promise<void>;
+  /** Transport hook only. The desktop owner chooses the explicit command allowlist. */
+  readonly onOwnerInvoke?: OwnerInvoke;
 }
 export interface PersistentMobileSessionOptions { readonly identity: PersistentMobileIdentity; }
 export interface DesktopSession {
@@ -30,6 +38,12 @@ export interface DesktopSession {
   getPeerControllerPublicKey(): string | null;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   onPendingPeer(listener: () => void): () => void;
+  getOwnerWorkspaceState(): OwnerWorkspaceState;
+  hasOwnerWorkspaceAccess(): boolean;
+  onOwnerWorkspaceRequest(listener: () => void): () => void;
+  approveOwnerWorkspace(): Promise<void>;
+  rejectOwnerWorkspace(): Promise<void>;
+  revokeOwnerWorkspace(): Promise<void>;
   approve(): Promise<void>;
   reject(): Promise<void>;
   close(): void;
@@ -39,6 +53,8 @@ export interface MobileSession {
   getVerificationCode(): string | null;
   /** True only when this connected desktop advertised durable device trust. */
   supportsRememberedDevices(): boolean;
+  /** The peer advertised the separate full owner workspace extension. */
+  supportsOwnerWorkspace(): boolean;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   getSnapshot(): Promise<Snapshot>;
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | ControllerSendReceipt>;
@@ -46,6 +62,10 @@ export interface MobileSession {
   resumeTask(taskId: string): Promise<Snapshot>;
   listTerminals(): Promise<TerminalSession[]>;
   readTerminal(id: string, afterSeq: number): Promise<TerminalRead>;
+  getOwnerWorkspaceState(): OwnerWorkspaceState;
+  hasOwnerWorkspaceAccess(): boolean;
+  requestOwnerWorkspace(): Promise<void>;
+  invokeOwner(command: string, args: unknown): Promise<unknown>;
   close(): void;
 }
 /** Collaboration visitors never negotiate controller send receipts. */
@@ -67,6 +87,15 @@ const RELAY_CONNECT_TIMEOUT_MS = 15_000;
 const MAX_CONCURRENT_DESKTOP_RPCS = 32;
 const SEND_RECEIPT_CAPABILITY = 'send-receipt-v1';
 const REMEMBERED_DEVICE_CAPABILITY = 'remembered-device-v1';
+const OWNER_WORKSPACE_CAPABILITY = 'owner-workspace-v1';
+/** Owner RPC is deliberately separate from controller v1's 1 MiB protocol. */
+const MAX_OWNER_TRANSFER_BYTES = 32 * 1024 * 1024;
+// Base64 plus encrypted-envelope overhead stays below a 64 KiB relay frame.
+const OWNER_CHUNK_BYTES = 32 * 1024;
+const OWNER_TRANSFER_TIMEOUT_MS = 60_000;
+const MAX_OWNER_CHUNKS = Math.ceil(MAX_OWNER_TRANSFER_BYTES / OWNER_CHUNK_BYTES);
+
+interface OwnerTransfer { readonly id: string; readonly bytes: number; readonly chunks: Uint8Array[]; received: number; nextIndex: number; readonly timer: ReturnType<typeof setTimeout>; }
 
 function uuid(): string { return crypto.randomUUID(); }
 function validRelayUrl(value: string): boolean {
@@ -225,9 +254,13 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
   const session = new class extends PairingConnection {
     private approved = false;
     private authorizationEpoch = 0;
-    close() { this.approved = false; this.authorizationEpoch++; super.close(); }
+    close() { this.approved = false; this.authorizationEpoch++; this.ownerWorkspaceState = 'none'; this.clearIncomingOwner(); super.close(); }
     private peerSupportsSendReceipt = false;
+    private ownerWorkspaceState: OwnerWorkspaceState = 'none';
+    private readonly ownerWorkspaceListeners = new Set<() => void>();
+    private readonly incomingOwner = new Map<string, OwnerTransfer>();
     private pendingRpcs = 0;
+    private pendingOwnerRpcs = 0;
     private peer: CollaboratorIdentity | null = null;
     private readonly pendingListeners = new Set<() => void>();
     private readonly dispatcher = new ControllerDispatcher(bridge);
@@ -235,12 +268,37 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
     getPeer() { return this.peer; }
     getPeerControllerPublicKey() { return this.peerPublicKey ? bytesToBase64url(this.peerPublicKey) : null; }
     onPendingPeer(listener: () => void) { this.pendingListeners.add(listener); return () => this.pendingListeners.delete(listener); }
+    getOwnerWorkspaceState() { return this.ownerWorkspaceState; }
+    hasOwnerWorkspaceAccess() { return this.ownerWorkspaceState === 'approved'; }
+    onOwnerWorkspaceRequest(listener: () => void) { this.ownerWorkspaceListeners.add(listener); return () => this.ownerWorkspaceListeners.delete(listener); }
+    private setOwnerWorkspaceState(state: OwnerWorkspaceState) { this.ownerWorkspaceState = state; }
+    async approveOwnerWorkspace() {
+      const publicKey = !this.peer && this.peerPublicKey ? bytesToBase64url(this.peerPublicKey) : null;
+      if (!publicKey || this.status !== 'connected' || this.ownerWorkspaceState !== 'requested') throw new Error('No pending owner workspace request to approve.');
+      await this.sendSecure({ type: 'owner-workspace-approved' });
+      this.setOwnerWorkspaceState('approved');
+      await options?.onOwnerWorkspaceAccess?.(publicKey);
+      // Approval may race a revocation/write. Never retain a scope that no
+      // longer passes the separate owner policy.
+      if (options?.isTrustedOwnerWorkspace && !(await options.isTrustedOwnerWorkspace(publicKey))) await this.revokeOwnerWorkspace();
+    }
+    async rejectOwnerWorkspace() {
+      if (this.ownerWorkspaceState !== 'requested') throw new Error('No pending owner workspace request to reject.');
+      this.setOwnerWorkspaceState('rejected'); await this.sendSecure({ type: 'owner-workspace-rejected' });
+    }
+    async revokeOwnerWorkspace() {
+      if (this.ownerWorkspaceState === 'none') return;
+      this.setOwnerWorkspaceState('none');
+      this.clearIncomingOwner();
+      if (this.channel && this.status === 'connected') await this.sendSecure({ type: 'owner-workspace-revoked' });
+    }
     async approve() {
       if (!this.channel || this.status !== 'pending') throw new Error('No pending paired device to approve.');
       try {
         const capabilities = [
           ...(this.peerSupportsSendReceipt ? [SEND_RECEIPT_CAPABILITY] : []),
           ...(options?.isTrustedController ? [REMEMBERED_DEVICE_CAPABILITY] : []),
+          ...(!this.peer && options?.isTrustedOwnerWorkspace && options.onOwnerInvoke ? [OWNER_WORKSPACE_CAPABILITY] : []),
         ];
         await this.sendSecure({ type: 'approved', ...(capabilities.length ? { capabilities } : {}) });
         this.approved = true;
@@ -250,7 +308,7 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
       catch (reason) { this.approved = false; this.close(); throw reason; }
     }
     async reject() {
-      this.approved = false; this.authorizationEpoch++;
+      this.approved = false; this.authorizationEpoch++; this.ownerWorkspaceState = 'none'; this.clearIncomingOwner();
       if (!this.channel) throw new Error('No pending paired device to reject.');
       await this.sendSecure({ type: 'rejected' });
       // Let the peer receive and acknowledge the terminal state by closing its
@@ -259,6 +317,7 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
       this.setStatus('rejected');
     }
     protected async onChannelReady() { /* A valid encrypted pair-request proves invitation-secret possession. */ }
+    protected onDisconnected() { this.ownerWorkspaceState = 'none'; this.clearIncomingOwner(); }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value) throw new Error('Invalid paired message.');
       if (value.type === 'pair-request' && !this.approved) {
@@ -277,11 +336,87 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
         }
         return;
       }
+      if (value.type === 'owner-workspace-request') {
+        if (this.peer || !options?.isTrustedOwnerWorkspace || !options.onOwnerInvoke || !this.approved || this.status !== 'connected' || this.ownerWorkspaceState === 'approved') throw new Error('Owner workspace request is unavailable.');
+        this.setOwnerWorkspaceState('requested');
+        for (const listener of this.ownerWorkspaceListeners) listener();
+        const publicKey = this.peerPublicKey ? bytesToBase64url(this.peerPublicKey) : null;
+        // Only an explicit, separately stored owner scope can resume. A normal
+        // remembered controller always remains limited until the desktop grants it.
+        if (publicKey && options?.isTrustedOwnerWorkspace && await options.isTrustedOwnerWorkspace(publicKey)
+          && this.ownerWorkspaceState === 'requested' && this.status === 'connected') await this.approveOwnerWorkspace();
+        return;
+      }
+      if (value.type === 'owner-rpc-start') { this.beginOwnerRpc(value); return; }
+      if (value.type === 'owner-rpc-chunk') { this.appendOwnerRpc(value); return; }
+      if (value.type === 'owner-rpc-end') { this.finishOwnerRpc(value); return; }
       if (value.type !== 'rpc' || !this.approved || this.status !== 'connected' || typeof value.json !== 'string') throw new Error('Unapproved controller request.');
       // Keep authenticated opening and sealing ordered, but do not let a slow
       // bridge read (notably a Snapshot) prevent a later cancel, send, or close
       // frame from being decrypted and acted upon.
       this.startRpc(value.json);
+    }
+    private ownerAvailable() { return this.approved && this.status === 'connected' && this.ownerWorkspaceState === 'approved'; }
+    private beginOwnerRpc(value: Record<string, unknown>) {
+      const id = ownerTransferId(value.id), bytes = ownerTransferBytes(value.bytes);
+      if (!id || bytes === null || !this.ownerAvailable() || this.incomingOwner.has(id) || this.incomingOwner.size >= 8 || ownerReservedBytes(this.incomingOwner) + bytes > MAX_OWNER_TRANSFER_BYTES) throw new Error('Owner workspace request is unavailable.');
+      const timer = setTimeout(() => this.failIncomingOwner(id, 'Owner request transfer timed out.'), OWNER_TRANSFER_TIMEOUT_MS);
+      this.incomingOwner.set(id, { id, bytes, chunks: [], received: 0, nextIndex: 0, timer });
+    }
+    private appendOwnerRpc(value: Record<string, unknown>) {
+      const transfer = typeof value.id === 'string' ? this.incomingOwner.get(value.id) : undefined;
+      if (!transfer || !this.ownerAvailable()) throw new Error('Owner workspace request is unavailable.');
+      const chunk = decodeOwnerChunk(value, transfer.nextIndex);
+      if (!chunk || transfer.nextIndex >= MAX_OWNER_CHUNKS || transfer.received + chunk.byteLength > transfer.bytes) return this.failIncomingOwner(transfer.id, 'Owner request chunks are invalid or out of order.');
+      transfer.chunks.push(chunk); transfer.received += chunk.byteLength; transfer.nextIndex += 1;
+    }
+    private finishOwnerRpc(value: Record<string, unknown>) {
+      const transfer = typeof value.id === 'string' ? this.incomingOwner.get(value.id) : undefined;
+      if (!transfer || transfer.received !== transfer.bytes) { if (typeof value.id === 'string') this.failIncomingOwner(value.id, 'Owner request transfer is incomplete.'); return; }
+      this.incomingOwner.delete(transfer.id); clearTimeout(transfer.timer);
+      this.startOwnerRpc(transfer.id, new TextDecoder().decode(joinOwnerChunks(transfer)));
+    }
+    private failIncomingOwner(id: string, error: string) {
+      const transfer = this.incomingOwner.get(id); if (transfer) { clearTimeout(transfer.timer); this.incomingOwner.delete(id); }
+      if (this.ownerAvailable()) void this.sendOwnerError(id, error).catch(() => void this.revokeOwnerWorkspace());
+    }
+    private clearIncomingOwner() { for (const transfer of this.incomingOwner.values()) clearTimeout(transfer.timer); this.incomingOwner.clear(); }
+    private async sendOwnerError(id: string, error: string) { await this.sendSecure({ type: 'owner-response-error', id, error: error.slice(0, 512) }); }
+    private async sendOwnerResponse(id: string, response: string, stillApproved: () => boolean) {
+      const bytes = new TextEncoder().encode(response);
+      if (bytes.byteLength > MAX_OWNER_TRANSFER_BYTES) return this.sendOwnerError(id, 'Owner response exceeds the 32 MiB relay transfer limit.');
+      if (!stillApproved()) return;
+      await this.sendSecure({ type: 'owner-response-start', id, bytes: bytes.byteLength });
+      for (let index = 0, offset = 0; offset < bytes.byteLength; index += 1, offset += OWNER_CHUNK_BYTES) {
+        if (!stillApproved()) return;
+        await this.sendSecure({ type: 'owner-response-chunk', id, index, data: encodeBase64(bytes.subarray(offset, Math.min(offset + OWNER_CHUNK_BYTES, bytes.byteLength))) });
+      }
+      if (stillApproved()) await this.sendSecure({ type: 'owner-response-end', id });
+    }
+    private startOwnerRpc(expectedId: string, json: string) {
+      if (!this.ownerAvailable()) return;
+      if (this.pendingOwnerRpcs >= 8) { void this.sendOwnerError(expectedId, 'Too many owner workspace requests are pending.'); return; }
+      this.pendingOwnerRpcs += 1;
+      const authorizationEpoch = this.authorizationEpoch;
+      void (async () => {
+        const publicKey = this.peerPublicKey ? bytesToBase64url(this.peerPublicKey) : null;
+        if (!publicKey || !options?.onOwnerInvoke || options.isTrustedOwnerWorkspace && !(await options.isTrustedOwnerWorkspace(publicKey))) { await this.revokeOwnerWorkspace(); return; }
+        let request: { id: string; command: string; args: unknown };
+        try {
+          const parsed = JSON.parse(json) as Record<string, unknown>;
+          if (!parsed || parsed.id !== expectedId || typeof parsed.command !== 'string' || !/^[a-z][a-z0-9_.-]{0,127}$/i.test(parsed.command) || !Object.hasOwn(parsed, 'args')) throw new Error();
+          request = { id: parsed.id, command: parsed.command, args: parsed.args };
+        } catch { throw new Error('Invalid owner workspace request.'); }
+        await options.onOwnerWorkspaceAccess?.(publicKey);
+        if (authorizationEpoch !== this.authorizationEpoch || this.ownerWorkspaceState !== 'approved' || options.isTrustedOwnerWorkspace && !(await options.isTrustedOwnerWorkspace(publicKey))) { await this.revokeOwnerWorkspace(); return; }
+        let response: string;
+        try { response = JSON.stringify({ id: request.id, ok: true, result: await options.onOwnerInvoke(request.command, request.args, { publicKey }) }); }
+        catch (reason) { response = JSON.stringify({ id: request.id, ok: false, error: reason instanceof Error ? reason.message.slice(0, 512) : 'Owner command failed.' }); }
+        const stillApproved = () => authorizationEpoch === this.authorizationEpoch && this.ownerWorkspaceState === 'approved' && this.status === 'connected';
+        if (stillApproved() && options.isTrustedOwnerWorkspace && !(await options.isTrustedOwnerWorkspace(publicKey))) { await this.revokeOwnerWorkspace(); return; }
+        if (stillApproved()) await this.sendOwnerResponse(request.id, response, stillApproved);
+      })().catch(() => { if (this.status === 'connected') void this.revokeOwnerWorkspace(); })
+        .finally(() => { this.pendingOwnerRpcs -= 1; });
     }
     private startRpc(json: string) {
       if (this.pendingRpcs >= MAX_CONCURRENT_DESKTOP_RPCS) {
@@ -335,14 +470,29 @@ export async function createMobileSession(invitation: string, operator?: Collabo
   const expectedPeerPublicKey = invitationData.version === 2 ? base64urlToBytes(invitationData.publicKey) : undefined;
   const session = new class extends PairingConnection {
     private readonly pending = new Map<string, { resolve: (value: ControllerResult) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    private readonly pendingOwner = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    private readonly incomingOwnerResponses = new Map<string, OwnerTransfer>();
     private rememberedDevices = false;
+    private ownerWorkspaceSupported = false;
+    private ownerWorkspaceState: OwnerWorkspaceState = 'none';
+    private ownerRequest: { resolve: () => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
     supportsRememberedDevices() { return this.rememberedDevices; }
+    supportsOwnerWorkspace() { return this.ownerWorkspaceSupported; }
+    getOwnerWorkspaceState() { return this.ownerWorkspaceState; }
+    hasOwnerWorkspaceAccess() { return this.ownerWorkspaceState === 'approved'; }
     protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request', capabilities: [SEND_RECEIPT_CAPABILITY] }); }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
       if (value.type === 'pair-request') return;
-      if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
+      if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.ownerWorkspaceSupported = invitationData.version === 2 && hasCapability(value.capabilities, OWNER_WORKSPACE_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
       if (value.type === 'rejected') { this.setStatus('rejected'); this.socket?.close(); return; }
+      if (value.type === 'owner-workspace-approved') { this.ownerWorkspaceState = 'approved'; this.settleOwnerRequest(); return; }
+      if (value.type === 'owner-workspace-rejected') { this.ownerWorkspaceState = 'rejected'; this.settleOwnerRequest(new Error('Desktop declined owner workspace access.')); return; }
+      if (value.type === 'owner-workspace-revoked') { this.ownerWorkspaceState = 'none'; this.rejectOwnerRequests(new Error('Owner workspace access was revoked.')); return; }
+      if (value.type === 'owner-response-error') { this.failOwnerResponse(value.id, typeof value.error === 'string' ? value.error : 'Owner transfer failed.'); return; }
+      if (value.type === 'owner-response-start') { this.beginOwnerResponse(value); return; }
+      if (value.type === 'owner-response-chunk') { this.appendOwnerResponse(value); return; }
+      if (value.type === 'owner-response-end') { this.finishOwnerResponse(value); return; }
       if (value.type !== 'response' || typeof value.json !== 'string') throw new Error('Unexpected paired response.');
       const response = JSON.parse(value.json) as ControllerResponse;
       const id = response && typeof response === 'object' && typeof response.id === 'string' ? response.id : null;
@@ -360,6 +510,63 @@ export async function createMobileSession(invitation: string, operator?: Collabo
         this.pending.set(id, { resolve, reject, timer });
         this.sendSecure({ type: 'rpc', json }).catch(reason => { const request = this.pending.get(id); if (request) { clearTimeout(request.timer); this.pending.delete(id); } reject(reason instanceof Error ? reason : new Error('Connection failed.')); });
       });
+    }
+    async requestOwnerWorkspace(): Promise<void> {
+      if (this.status !== 'connected') throw new Error('Desktop approval and a live encrypted connection are required.');
+      if (!this.ownerWorkspaceSupported) throw new Error('Update Monitter on the desktop to use the owner workspace through the relay.');
+      if (this.ownerWorkspaceState === 'approved') return Promise.resolve();
+      if (this.ownerRequest) return new Promise((resolve, reject) => { const previous = this.ownerRequest!; const originalResolve = previous.resolve, originalReject = previous.reject; previous.resolve = () => { originalResolve(); resolve(); }; previous.reject = reason => { originalReject(reason); reject(reason); }; });
+      this.ownerWorkspaceState = 'requested';
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => this.settleOwnerRequest(new Error('Owner workspace approval timed out.')), 5 * 60_000);
+        this.ownerRequest = { resolve, reject, timer };
+        this.sendSecure({ type: 'owner-workspace-request' }).catch(reason => { this.ownerWorkspaceState = 'none'; this.settleOwnerRequest(reason instanceof Error ? reason : new Error('Connection failed.')); });
+      });
+    }
+    invokeOwner(command: string, args: unknown): Promise<unknown> {
+      if (this.ownerWorkspaceState !== 'approved') return Promise.reject(new Error('Explicit desktop owner workspace approval is required.'));
+      if (typeof command !== 'string' || !/^[a-z][a-z0-9_.-]{0,127}$/i.test(command)) return Promise.reject(new Error('Owner command is invalid.'));
+      const id = uuid(); let json: string; try { json = JSON.stringify({ id, command, args }); } catch { return Promise.reject(new Error('Owner request must be JSON serializable.')); }
+      const bytes = new TextEncoder().encode(json);
+      if (bytes.byteLength > MAX_OWNER_TRANSFER_BYTES) return Promise.reject(new Error('Owner request exceeds the 32 MiB relay transfer limit.'));
+      return new Promise<unknown>((resolve, reject) => {
+        const timer = setTimeout(() => { this.pendingOwner.delete(id); reject(new Error('Owner command timed out.')); }, OWNER_TRANSFER_TIMEOUT_MS);
+        this.pendingOwner.set(id, { resolve, reject, timer });
+        this.sendOwnerRequest(id, bytes).catch(reason => { const pending = this.pendingOwner.get(id); if (pending) { clearTimeout(pending.timer); this.pendingOwner.delete(id); } reject(reason instanceof Error ? reason : new Error('Connection failed.')); });
+      });
+    }
+    private async sendOwnerRequest(id: string, bytes: Uint8Array) {
+      await this.sendSecure({ type: 'owner-rpc-start', id, bytes: bytes.byteLength });
+      for (let index = 0, offset = 0; offset < bytes.byteLength; index += 1, offset += OWNER_CHUNK_BYTES) await this.sendSecure({ type: 'owner-rpc-chunk', id, index, data: encodeBase64(bytes.subarray(offset, Math.min(offset + OWNER_CHUNK_BYTES, bytes.byteLength))) });
+      await this.sendSecure({ type: 'owner-rpc-end', id });
+    }
+    private beginOwnerResponse(value: Record<string, unknown>) {
+      const id = ownerTransferId(value.id), bytes = ownerTransferBytes(value.bytes);
+      if (!id || bytes === null || !this.pendingOwner.has(id) || this.incomingOwnerResponses.has(id) || ownerReservedBytes(this.incomingOwnerResponses) + bytes > MAX_OWNER_TRANSFER_BYTES) throw new Error('Owner response is invalid.');
+      const timer = setTimeout(() => this.failOwnerResponse(id, 'Owner response transfer timed out.'), OWNER_TRANSFER_TIMEOUT_MS);
+      this.incomingOwnerResponses.set(id, { id, bytes, chunks: [], received: 0, nextIndex: 0, timer });
+    }
+    private appendOwnerResponse(value: Record<string, unknown>) {
+      const transfer = typeof value.id === 'string' ? this.incomingOwnerResponses.get(value.id) : undefined;
+      if (!transfer) throw new Error('Owner response is unavailable.');
+      const chunk = decodeOwnerChunk(value, transfer.nextIndex);
+      if (!chunk || transfer.nextIndex >= MAX_OWNER_CHUNKS || transfer.received + chunk.byteLength > transfer.bytes) return this.failOwnerResponse(transfer.id, 'Owner response chunks are invalid or out of order.');
+      transfer.chunks.push(chunk); transfer.received += chunk.byteLength; transfer.nextIndex += 1;
+    }
+    private finishOwnerResponse(value: Record<string, unknown>) {
+      const transfer = typeof value.id === 'string' ? this.incomingOwnerResponses.get(value.id) : undefined;
+      if (!transfer || transfer.received !== transfer.bytes) { if (typeof value.id === 'string') this.failOwnerResponse(value.id, 'Owner response transfer is incomplete.'); return; }
+      this.incomingOwnerResponses.delete(transfer.id); clearTimeout(transfer.timer);
+      let response: Record<string, unknown>; try { response = JSON.parse(new TextDecoder().decode(joinOwnerChunks(transfer))) as Record<string, unknown>; } catch { this.failOwnerResponse(transfer.id, 'Owner response could not be decoded.'); return; }
+      const callback = response.id === transfer.id ? this.pendingOwner.get(transfer.id) : undefined;
+      if (!callback) return;
+      this.pendingOwner.delete(transfer.id); clearTimeout(callback.timer);
+      response.ok === true ? callback.resolve(response.result) : callback.reject(new Error(typeof response.error === 'string' ? response.error : 'Owner command failed.'));
+    }
+    private failOwnerResponse(id: unknown, error: string) {
+      if (typeof id !== 'string') return;
+      const transfer = this.incomingOwnerResponses.get(id); if (transfer) { clearTimeout(transfer.timer); this.incomingOwnerResponses.delete(id); }
+      const callback = this.pendingOwner.get(id); if (callback) { clearTimeout(callback.timer); this.pendingOwner.delete(id); callback.reject(new Error(error)); }
     }
     async getSnapshot() { return this.call('getSnapshot', {}) as Promise<Snapshot>; }
     async sendMessage(taskId: string, text: string, attachmentIds?: string[]) { return this.call('sendMessage', { taskId, text, ...(attachmentIds?.length ? { attachmentIds } : {}) }) as Promise<Snapshot | ControllerSendReceipt>; }
@@ -380,7 +587,9 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     async resumeTask(taskId: string) { return this.call('resumeTask', { taskId }) as Promise<Snapshot>; }
     async listTerminals() { return this.call('listTerminals', {}) as Promise<TerminalSession[]>; }
     async readTerminal(id: string, afterSeq: number) { return this.call('readTerminal', { id, afterSeq }) as Promise<TerminalRead>; }
-    protected onDisconnected() { for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); } this.pending.clear(); }
+    private settleOwnerRequest(reason?: Error) { const request = this.ownerRequest; if (!request) return; this.ownerRequest = null; clearTimeout(request.timer); reason ? request.reject(reason) : request.resolve(); }
+    private rejectOwnerRequests(reason: Error) { for (const transfer of this.incomingOwnerResponses.values()) clearTimeout(transfer.timer); this.incomingOwnerResponses.clear(); for (const callback of this.pendingOwner.values()) { clearTimeout(callback.timer); callback.reject(reason); } this.pendingOwner.clear(); }
+    protected onDisconnected() { this.ownerWorkspaceState = 'none'; this.settleOwnerRequest(new Error('Connection closed.')); for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); } this.pending.clear(); this.rejectOwnerRequests(new Error('Connection closed.')); }
     close() { this.onDisconnected(); super.close(); }
   }(invitationData, 'mobile', keyPair ? { privateKey: keyPair.privateKey, publicKey, expectedPeerPublicKey } : {});
   return session as MobileSession | CollaboratorMobileSession;
@@ -422,6 +631,29 @@ function encodeBase64(bytes: Uint8Array): string {
   let binary = '';
   for (let index = 0; index < bytes.byteLength; index += 1) binary += String.fromCharCode(bytes[index]);
   return btoa(binary);
+}
+
+function ownerTransferId(value: unknown): string | null {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : null;
+}
+function ownerTransferBytes(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_OWNER_TRANSFER_BYTES ? value : null;
+}
+/** Strictly ordered chunk parser; malformed, duplicate, and skipped chunks fail closed. */
+export function decodeOwnerChunk(value: Record<string, unknown>, expectedIndex: number): Uint8Array | null {
+  if (value.index !== expectedIndex || typeof value.data !== 'string' || value.data.length > Math.ceil(OWNER_CHUNK_BYTES / 3) * 4) return null;
+  try {
+    const bytes = decodeBase64(value.data);
+    return bytes.byteLength <= OWNER_CHUNK_BYTES && encodeBase64(bytes).replace(/=+$/, '') === value.data.replace(/=+$/, '') ? bytes : null;
+  } catch { return null; }
+}
+function joinOwnerChunks(transfer: OwnerTransfer): Uint8Array {
+  const bytes = new Uint8Array(transfer.bytes); let offset = 0;
+  for (const chunk of transfer.chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+function ownerReservedBytes(transfers: ReadonlyMap<string, OwnerTransfer>): number {
+  let total = 0; for (const transfer of transfers.values()) total += transfer.bytes; return total;
 }
 
 function validPreview(value: string): boolean {

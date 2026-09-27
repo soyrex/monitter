@@ -3,6 +3,7 @@ import { ControllerDispatcher, type ControllerClient } from '../src/lib/controll
 
 import { controllerSnapshot } from '../src/lib/controller/dispatcher.ts';
 import { sharedSnapshot } from '../src/lib/operator-sharing.ts';
+import { CONTROLLER_MAX_RESPONSE_BYTES } from '../src/lib/controller/protocol.ts';
 import type { Snapshot, Task, ApprovalRequest } from '../src/lib/types.ts';
 
 const task = '11111111-1111-4111-8111-111111111111';
@@ -29,7 +30,25 @@ assert.ok(projected.events.every(event => event.detail.length < 4100));
 assert.equal(sourceSnapshot.events.length, 120);
 assert.equal(sourceSnapshot.events[0].createdAt, 0);
 assert.equal(sourceSnapshot.events[119].detail.length, 5000);
-assert.equal(projected.messages, sourceSnapshot.messages);
+assert.deepEqual(projected.messages, sourceSnapshot.messages);
+assert.notEqual(projected.messages, sourceSnapshot.messages);
+
+const hugeHistory: Snapshot = { ...sourceSnapshot,
+  tasks: Array.from({ length: 8 }, (_, taskIndex) => ({ id:`task-${taskIndex}`,agentId:`agent-${taskIndex}`,title:`Task ${taskIndex}`,nativeSessionId:null,archived:false,status:'idle' as const,createdAt:0,updatedAt:0,parentTaskId:null,channelId:null,projectId:null,hostId:'host',cwd:'/workspace',provider:'codex' as const,model:'model',sandbox:'workspace-write' as const })),
+  agents: Array.from({ length: 8 }, (_, agentIndex) => ({ id:`agent-${agentIndex}`,name:`Agent ${agentIndex}`,description:'',instructions:'',avatar:null,provider:'codex' as const,model:'model',hostId:'host',cwd:'/workspace',color:'#000',sandbox:'workspace-write' as const,expertise:[],responsibilities:[],skills:[],collaborationEnabled:true })),
+  messages: Array.from({ length: 1600 }, (_, index) => ({ id:`huge-message-${index}`,taskId:`task-${index % 8}`,role:'assistant' as const,text:`${index}:${'x'.repeat(80_000)}`,createdAt:index })),
+};
+const hugeProjected = controllerSnapshot(hugeHistory);
+assert.ok(hugeProjected.messages.length < hugeHistory.messages.length);
+assert.ok(hugeProjected.messages.some(message => message.text === '[Earlier messages are available on the desktop.]'));
+assert.ok(new TextEncoder().encode(JSON.stringify({ version: 1, id: '00000000-0000-4000-8000-000000000000', ok: true, result: hugeProjected })).byteLength <= CONTROLLER_MAX_RESPONSE_BYTES);
+const manyTaskMessages = Array.from({ length: 650 }, (_, taskIndex) => ({ id:`many-${taskIndex}`,taskId:`${taskIndex.toString(16).padStart(8,'0')}-0000-4000-8000-000000000000`,role:'assistant' as const,text:'Message',createdAt:taskIndex }));
+const manyTaskProjected = controllerSnapshot({ ...sourceSnapshot, messages: manyTaskMessages });
+assert.equal(manyTaskProjected.messages.filter(message => message.text === '[Earlier messages are available on the desktop.]').length, 50);
+const byteHeavyMessages = Array.from({ length: 600 }, (_, taskIndex) => ({ id:`byte-heavy-${taskIndex}`,taskId:`${taskIndex.toString(16).padStart(8,'0')}-0001-4000-8000-000000000000`,role:'assistant' as const,text:'z'.repeat(80_000),createdAt:taskIndex }));
+const byteHeavyProjected = controllerSnapshot({ ...sourceSnapshot, messages: byteHeavyMessages });
+for (const message of byteHeavyMessages) assert.ok(byteHeavyProjected.messages.some(item => item.taskId === message.taskId), `Task ${message.taskId} must retain content or a history notice.`);
+assert.ok(new TextEncoder().encode(JSON.stringify({ version: 1, id: '00000000-0000-4000-8000-000000000000', ok: true, result: byteHeavyProjected })).byteLength <= CONTROLLER_MAX_RESPONSE_BYTES);
 
 // Shared visitors may see selected conversations, never owner-only approval
 // payloads (which can contain local paths or secrets), including on shared tasks.
@@ -101,7 +120,7 @@ const negotiatedReceipt = JSON.parse(await new ControllerDispatcher(receiptClien
 assert.deepEqual(negotiatedReceipt.result, { accepted: true });
 
 // Mobile protocol v1 cannot request older pages. Its reads and legacy send
-// acknowledgements must use the full owner-side compatibility projection.
+// acknowledgements use the same bounded compatibility projection.
 const fullHistory: Snapshot = { ...sourceSnapshot, messages: Array.from({ length: 105 }, (_, i) => ({
   id: `legacy-message-${i}`, taskId: task, role: 'assistant', text: `History ${i}`, createdAt: i,
 })) };
@@ -115,11 +134,12 @@ const pagedClient: ControllerClient = {
 const legacyDispatcher = new ControllerDispatcher(pagedClient);
 const fullRead = JSON.parse(await legacyDispatcher.dispatchJson(request('10101010-1010-4010-8010-101010101010', 'getSnapshot', {}), context));
 assert.equal(fullRead.ok, true);
-assert.equal(fullRead.result.messages.length, 105);
+assert.equal(fullRead.result.messages.length, 33);
+assert.equal(fullRead.result.messages[0].text, '[Earlier messages are available on the desktop.]');
 const legacySendRequest = request('20202020-2020-4020-8020-202020202020', 'sendMessage', { taskId: task, text: 'Legacy send' });
 const fullReceipt = JSON.parse(await legacyDispatcher.dispatchJson(legacySendRequest, context));
-assert.equal(fullReceipt.result.messages.length, 105);
-assert.equal(JSON.parse(await legacyDispatcher.dispatchJson(legacySendRequest, context)).result.messages.length, 105);
+assert.equal(fullReceipt.result.messages.length, 33);
+assert.equal(JSON.parse(await legacyDispatcher.dispatchJson(legacySendRequest, context)).result.messages.length, 33);
 assert.equal(legacySends, 1, 'Compatibility reads must not replay a mutation.');
 assert.equal(legacyReads, 2);
 

@@ -32,6 +32,33 @@ one-use creation or claim. Scanning a QR still requires a working relay connecti
 - Disconnect blocks future controller requests. Already accepted desktop work
   continues. A failed/uncertain send is never automatically resubmitted.
 
+## iOS owner workspace over relay (in progress)
+
+The iOS paired bootstrap requests a separate **full owner workspace** grant after
+ordinary controller pairing. The desktop displays a distinct approval and stores
+owner trust separately from remembered controller devices; a previously paired
+test phone does not gain owner commands until that approval. Revoking phone access
+also removes its owner grant, while revoking the owner grant alone leaves limited
+controller pairing intact. Visitor/operator sessions cannot request owner scope.
+The desktop must advertise `owner-workspace-v1` during its encrypted pairing
+approval; otherwise the phone reports that the desktop needs an update and does
+not send an unsupported request or loop reconnecting.
+
+After owner approval, the same bundled root `AppSurface` used by the responsive
+LAN site loads from the iOS shell's private loopback server. Its commands travel
+encrypted through the existing Monitter relay to the desktop and are dispatched
+only through the desktop's explicit owner-LAN allow-list. The relay is not an HTTP
+proxy and does not receive plaintext workspace data. Owner command payloads are
+bounded to 32 MiB in ordered encrypted 32 KiB chunks; uncertain mutations are not
+automatically retried. LAN mode continues to load
+live desktop-served assets when reachable; the bundled relay mode needs an iOS
+rebuild for web UI updates. Theme mode, density, fonts and other shared Settings
+come from the desktop Snapshot. The app palette, surface tint and terminal palette
+are mirrored over the approved owner session because those are browser-local
+preferences; mobile interface scale remains device-local. Voice remains a separate
+iOS-specific parity item. This path must be signed, installed and functionally
+verified on the physical iPhone before being described as complete.
+
 
 ## Architecture decision
 
@@ -132,9 +159,16 @@ client integration passed against the live endpoint with certificate verificatio
 No paid upgrade was enabled. Native device signing and real-device end-to-end
 verification remain completion gates for the iOS first pass.
 
-Mobile snapshots retain conversations but limit diagnostic events to the most
-recent 100, with 4,000 characters of detail each. Desktop history is unchanged.
-Larger conversation histories still need pagination before broader release.
+Mobile snapshots are controller-only projections: they retain task and agent
+identities plus recent chronological conversation tails (32 messages per task,
+600 non-notice messages total plus one visible marker for each truncated task)
+and cap diagnostic events at the most recent 100 with
+4,000 characters of detail each. Strings and retained history are measured
+against a conservative sub-1 MiB serialized budget; oldest retained messages,
+channel messages, and events are removed deterministically until it fits. A
+system message tells the phone when a task's earlier history remains available
+on desktop. Desktop history is unchanged. Protocol v1 still needs transcript
+pagination before broader release.
 
 The encrypted transport opens and seals frames in sequence, but executes up to
 32 authenticated RPCs concurrently. A delayed snapshot therefore cannot block a

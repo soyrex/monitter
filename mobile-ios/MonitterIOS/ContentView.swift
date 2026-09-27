@@ -47,9 +47,9 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if case .paired = mode, let pairedError {
                         VStack(spacing: 12) {
-                            Text("Paired mode unavailable").font(.headline)
+                            Text("Relay workspace unavailable").font(.headline)
                             Text(pairedError).font(.callout).multilineTextAlignment(.center)
-                            Button("Retry paired mode") { retryPairedMode() }
+                            Button("Retry relay workspace") { retryPairedMode() }
                             Button("Change connection") { editingAddress = true }
                         }
                         .padding(20)
@@ -106,13 +106,16 @@ struct ContentView: View {
                     Button("Connect to owner workspace") { connectToLAN() }
                         .disabled(LANAddress.parse(address) == nil)
                 }
-                Section("Paired controller") {
-                    Button("Use paired mode") { usePairedMode() }
+                Section("Owner workspace via Monitter relay") {
+                    Text("Use the same responsive workspace away from your local network. Your desktop must separately approve full-workspace access for this phone.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Connect through relay") { usePairedMode() }
                 }
                 if let startError {
                     Section("Connection status") {
                         Text(startError).foregroundStyle(.red)
-                        Button("Retry paired mode") { startServerIfNeeded() }
+                        Button("Retry relay workspace") { startServerIfNeeded() }
                     }
                 }
             }
@@ -280,7 +283,16 @@ private struct WebContentView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.pairedMode = url?.host == "127.0.0.1"
-        if let url, uiView.url?.absoluteString != url.absoluteString { uiView.load(URLRequest(url: url)) }
+        // The paired bootstrap page navigates to the full owner workspace on
+        // this same private loopback origin after explicit desktop approval.
+        // A SwiftUI redraw must not send it back to the pairing screen.
+        let inOwnerWorkspace = url?.host == "127.0.0.1"
+            && url?.port == 31977
+            && uiView.url?.host == "127.0.0.1"
+            && uiView.url?.port == 31977
+            && uiView.url?.path == "/"
+            && uiView.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems?.contains(where: { $0.name == "monitter-owner-relay" && $0.value == "1" }) == true
+        if let url, uiView.url?.absoluteString != url.absoluteString && !inOwnerWorkspace { uiView.load(URLRequest(url: url)) }
         else if let error, uiView.url == nil {
             let escaped = error.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
             uiView.loadHTMLString("<main><h1>Monitter unavailable</h1><p>\(escaped)</p></main>", baseURL: nil)

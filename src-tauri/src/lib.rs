@@ -7161,6 +7161,21 @@ fn get_lan_server_info(state: State<'_, AppState>) -> lan::Info {
     state.0.lan_info()
 }
 
+/// Desktop-side endpoint for an explicitly approved owner relay session.
+/// It deliberately reuses the owner LAN command allow-list instead of exposing
+/// the broader native Tauri surface to a paired phone.
+#[tauri::command]
+async fn owner_relay_invoke(
+    state: State<'_, AppState>,
+    command: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.lan_invoke(&command, args))
+        .await
+        .map_err(|error| format!("Owner relay worker failed: {error}"))?
+}
+
 #[tauri::command]
 async fn resolve_approval(
     state: State<'_, AppState>,
@@ -9466,6 +9481,7 @@ pub fn run() {
             get_task_event_detail,
             read_markdown_file,
             get_lan_server_info,
+            owner_relay_invoke,
             resolve_approval,
             revoke_approval_rule,
             resolve_input,

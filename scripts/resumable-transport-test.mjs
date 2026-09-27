@@ -2,9 +2,14 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
 import { createResumableDesktopSession, createResumableMobileSession } from '../src/lib/controller/resumable-session.ts';
+import { decodeOwnerChunk } from '../src/lib/controller/remote-client.ts';
 import { generatePairingKeyPair, exportPairingPublicKey, bytesToBase64url, randomBytes } from '../src/lib/controller/secure-session.ts';
 
 globalThis.WebSocket = WebSocket;
+const ownerChunk = { index:0, data:'YQ==' };
+assert.equal(new TextDecoder().decode(decodeOwnerChunk(ownerChunk, 0)), 'a');
+assert.equal(decodeOwnerChunk(ownerChunk, 1), null, 'duplicate chunks fail because the next index has advanced');
+assert.equal(decodeOwnerChunk({ ...ownerChunk, index:2 }, 1), null, 'dropped/out-of-order chunks fail rather than reassemble');
 const wait = (predicate, ms = 5000, label = 'state') => new Promise((resolve, reject) => {
   let settled = false, stop = () => {};
   const timer = setTimeout(() => { if (!settled) reject(new Error(`timeout ${label}`)); }, ms);
@@ -20,19 +25,47 @@ try {
   const relayUrl = await ready(relay), room = bytesToBase64url(randomBytes(18));
   const desktopIdentity = { keyPair: await generatePairingKeyPair(), room }, mobileIdentity = { keyPair: await generatePairingKeyPair() };
   const mobileKey = bytesToBase64url(await exportPairingPublicKey(mobileIdentity.keyPair.publicKey));
-  const trusted = new Set([mobileKey]); let approvals = 0, sends = 0, accesses = 0, releaseSlowSend = () => {};
+  const trusted = new Set([mobileKey]), ownerTrusted = new Set(); let approvals = 0, sends = 0, accesses = 0, ownerInvokes = 0, releaseSlowSend = () => {};
   let delayAccess = false, accessStarted = false, releaseDelayedAccess = () => {};
   let delayedAccess = Promise.resolve();
   const onControllerAccess = async () => { accesses++; if (delayAccess) { accessStarted = true; await delayedAccess; } };
   const slowSend = new Promise(resolve => { releaseSlowSend = resolve; });
   const bridge = { getSnapshot: async()=>snapshot, sendMessage: async(_taskId,text)=>{ sends++; if(text==='slow') await slowSend; return { accepted:true }; }, cancelTask:async()=>snapshot,resumeTask:async()=>snapshot,listTerminals:async()=>[],readTerminal:async()=>({chunks:[],nextSeq:0,status:'exited',exitCode:0,truncated:false}) };
-  let desktop = await createResumableDesktopSession({ relayUrl, bridge, identity: desktopIdentity, isTrustedController:key=>trusted.has(key), onControllerAccess });
+  let ownerStarted = false, releaseOwner = () => {};
+  const ownerOptions = { isTrustedOwnerWorkspace:key=>ownerTrusted.has(key), onOwnerWorkspaceAccess:()=>{}, onOwnerInvoke:async(command,args)=>{ ownerInvokes++; if(command==='workspace.large') return { requestBytes:args.payload.length, payload:'r'.repeat(8 * 1024 * 1024) }; if(command==='workspace.blocked'){ownerStarted=true;await new Promise(resolve=>{releaseOwner=resolve;});} return { command,args }; } };
+  let desktop = await createResumableDesktopSession({ relayUrl, bridge, identity: desktopIdentity, isTrustedController:key=>trusted.has(key), onControllerAccess, ...ownerOptions });
   const invitation = desktop.invitation;
   let mobile = await createResumableMobileSession({ invitation, identity: mobileIdentity });
   await wait(done=>desktop.subscribe(s=>{if(s.status==='connected')done(s)}),5000,'desktop initial');
   await wait(done=>mobile.subscribe(s=>{if(s.status==='connected')done(s)}),5000,'mobile initial');
   assert.equal(mobile.supportsRememberedDevices(), true);
+  assert.equal(mobile.supportsOwnerWorkspace(), true);
   assert.equal(approvals, 0); assert.equal(desktop.getPeerControllerPublicKey(), mobileKey);
+  // Controller trust is intentionally insufficient for the owner surface.
+  const ownerRequested = wait(done=>desktop.onOwnerWorkspaceRequest(done), 5000, 'owner scope request');
+  const ownerApproval = mobile.requestOwnerWorkspace();
+  await ownerRequested;
+  assert.equal(desktop.getOwnerWorkspaceState(), 'requested');
+  assert.equal(mobile.hasOwnerWorkspaceAccess(), false);
+  ownerTrusted.add(mobileKey); await desktop.approveOwnerWorkspace(); await ownerApproval;
+  assert.equal(mobile.hasOwnerWorkspaceAccess(), true);
+  assert.deepEqual(await mobile.invokeOwner('workspace.read', { bounded:true }), { command:'workspace.read', args:{ bounded:true } });
+  assert.equal(ownerInvokes, 1);
+  // Owner frames stay small while the logical request and response cross the
+  // former 16/64 KiB limits by orders of magnitude.
+  const large = await mobile.invokeOwner('workspace.large', { payload:'q'.repeat(8 * 1024 * 1024) });
+  assert.equal(large.requestBytes, 8 * 1024 * 1024); assert.equal(large.payload.length, 8 * 1024 * 1024);
+  // Revocation while a command is running discards the pending response.
+  const blocked = mobile.invokeOwner('workspace.blocked', {});
+  await wait(done=>{const timer=setInterval(()=>{if(ownerStarted){clearInterval(timer);done();}},5);return()=>clearInterval(timer);},5000,'owner invocation');
+  ownerTrusted.delete(mobileKey); await mobile.invokeOwner('workspace.read', {}).catch(()=>{}); releaseOwner();
+  await assert.rejects(blocked, /revoked|Connection closed|approval/);
+  ownerTrusted.add(mobileKey);
+  // Separate scope is rechecked for every owner RPC and revocation does not
+  // revoke the limited controller session.
+  ownerTrusted.delete(mobileKey);
+  await assert.rejects(mobile.invokeOwner('workspace.read', {}), /revoked|Connection closed|approval/);
+  assert.equal(ownerInvokes, 3); assert.equal(mobile.getStatus(), 'connected');
   await mobile.sendMessage(task, 'one'); assert.equal(sends, 1); assert.ok(accesses > 0);
   // A phone process restart uses the same identity; the desktop trusts it without a new approval.
   mobile.close(); mobile = await createResumableMobileSession({ invitation, identity: mobileIdentity });
@@ -41,7 +74,7 @@ try {
   // Recreating the desktop facade with its persisted identity preserves the
   // invitation and lets the same phone reconnect without another approval.
   desktop.close();
-  desktop = await createResumableDesktopSession({ relayUrl, bridge, identity: desktopIdentity, isTrustedController:key=>trusted.has(key), onControllerAccess });
+  desktop = await createResumableDesktopSession({ relayUrl, bridge, identity: desktopIdentity, isTrustedController:key=>trusted.has(key), onControllerAccess, ...ownerOptions });
   assert.equal(desktop.invitation, invitation);
   await wait(done=>desktop.subscribe(s=>{if(s.status==='connected')done(s)}),5000,'desktop recreation');
   await wait(done=>mobile.subscribe(s=>{if(s.status==='connected')done(s)}),5000,'mobile after desktop recreation');
