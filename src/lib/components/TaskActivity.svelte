@@ -54,9 +54,9 @@
      long description the scrolling region. This keeps the card border visible
      instead of scrolling the whole card out of view. */
   .task-activity:has(details[open]) { max-height: none; overflow: visible; }
-  /* Keep the goal dock 16px inside the Git dock (32px inside the composer),
+  /* Keep the goal dock 8px inside the Git dock (16px inside the composer),
      and meet the immediately following Git dock or composer cleanly. */
-  .task-activity.docked { position:relative; z-index:0; width:min(calc(var(--chat-content-max-width,900px) - 32px),calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 32px)); box-sizing:border-box; margin:0 auto; }
+  .task-activity.docked { position:relative; z-index:0; width:min(calc(var(--chat-content-max-width,900px) - 16px),calc(100% - (2 * var(--density-composer-margin-inline, 12px)) - 16px)); box-sizing:border-box; margin:0 auto; }
   .docked .goal-card { border-bottom:0; border-bottom-left-radius:0; border-bottom-right-radius:0; }
   section { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 10px 12px; }
   section + section { margin-top: 8px; }
