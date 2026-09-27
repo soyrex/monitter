@@ -203,6 +203,7 @@
   import SavedApprovalRules from '$lib/components/SavedApprovalRules.svelte';
   import {readBrowserFile,thumbnail,nativeBlob} from '$lib/attachment-files';
   import { floating } from "$lib/floating";
+  import { tooltip } from "$lib/tooltip";
   import { loadWorkspaceSet, remapTerminalIds, saveWorkspaceSet, taskBelongsToWorkspace, workspaceForTask, type PersistedWorkspace, type PersistedWorkspaceSet, type WorkspaceKey } from '$lib/workspace-persistence';
   import { activeTasksForWorkspace, activityTasksForWorkspace, createSnapshotIndexes, type SnapshotIndexes } from '$lib/snapshot-indexes';
   import { createWorkspaceSaveScheduler } from '$lib/workspace-save-scheduler';
@@ -5546,11 +5547,11 @@
       <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
       <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
     </nav>{:else}<nav use:motionView={{key:"rail-activity",initial:motionReady,x:-4,y:0,duration:160}} class="activity-rail" aria-label="Activity">
-      <div class="sidebar-rail-tabs" role="tablist" aria-label="Sidebar views"><button class="icon sidebar-rail-view" type="button" role="tab" aria-selected="true" aria-label="Activity view" title="Expand Activity sidebar" onclick={()=>sidebarCollapsed=false}><Activity size={16}/></button></div>
-      {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button class="workspace-approval" data-approval-task={item.task.id} title={`Approval · ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
-      {#each activityTasks as task (task.id)}{@const taskAgent = indexes?.agentById.get(task.agentId)}<button class="rail-activity" class:current={selectedTask?.id === task.id} aria-label={`Open activity chat ${task.title}`} title={task.title} onclick={()=>routeTaskWorkspace(task)}>{#if taskAgent}<span class="avatar">{@render avatarVisual(taskAgent, 14)}</span>{:else}<MessageSquare size={16}/>{/if}{#if task.status==='running'}<span class="rail-running" aria-label="Running"></span>{/if}</button>{/each}
-      <button class="icon" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
-      <button class="icon" aria-label="Switch channel, chat or agent" title={`Switch channel, chat or agent (${modifierLabel}K)`} onclick={()=>palette='switch'}><Search size={16}/></button>
+      <div class="sidebar-rail-tabs" role="tablist" aria-label="Sidebar views"><button use:tooltip={{content:'Expand Activity sidebar',side:'right'}} class="icon sidebar-rail-view" type="button" role="tab" aria-selected="true" aria-label="Activity view" onclick={()=>sidebarCollapsed=false}><Activity size={16}/></button></div>
+      {#if globalPendingApprovals.length}<div class="rail-approvals" aria-label="Pending approvals across workspaces">{#each globalPendingApprovals as item (item.request.id)}<button use:tooltip={{content:`Approval · ${item.task.title}`,side:'right'}} class="workspace-approval" data-approval-task={item.task.id} aria-label={`Approval for ${item.task.title}`} onclick={()=>routeTaskWorkspace(item.task)}><span class="dot running"></span></button>{/each}</div>{/if}
+      {#each activityTasks as task (task.id)}{@const taskAgent = indexes?.agentById.get(task.agentId)}<button use:tooltip={{content:task.title,side:'right'}} class="rail-activity" class:current={selectedTask?.id === task.id} aria-label={`Open activity chat ${task.title}`} onclick={()=>routeTaskWorkspace(task)}>{#if taskAgent}<span class="avatar">{@render avatarVisual(taskAgent, 14)}</span>{:else}<MessageSquare size={16}/>{/if}{#if task.status==='running'}<span class="rail-running" aria-label="Running"></span>{/if}</button>{/each}
+      <button use:tooltip={{content:'New chat',side:'right'}} class="icon" aria-label="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><Plus size={17}/></button>
+      <button use:tooltip={{content:`Switch channel, chat or agent (${modifierLabel}K)`,side:'right'}} class="icon" aria-label="Switch channel, chat or agent" onclick={()=>palette='switch'}><Search size={16}/></button>
     </nav>{/if}{/if}
     {#if railAgent && railAnchor}<div class="rail-chats floating-panel" role="dialog" aria-label={`${railAgent.name} chats`} use:floating={{anchor:railAnchor,side:'right'}}>
       <header><strong>{railAgent.name}</strong><button class="icon" aria-label="Close agent chats" onclick={()=>railAgentId=null}><X size={14}/></button></header>
