@@ -3766,16 +3766,41 @@ impl Service {
             // resident control. This is the only place the task enters the
             // running state.
             self.mark_internal_admin_task_running(&task_id)?;
-            (self.reserve_run(&task_id)?, true)
+            let control = match self.reserve_run(&task_id) {
+                Ok(control) => control,
+                Err(error) => {
+                    // Marking the task running is durable; reservation can
+                    // still lose a shutdown/ownership race. Restore a
+                    // terminal hidden-task state before releasing its slot.
+                    let _ = self.finalise_internal_admin_turn(&task_id, "error", None);
+                    return Err(error);
+                }
+            };
+            (control, true)
         };
         let request_id = id();
         let deadline = Instant::now() + ADMIN_TURN_TIMEOUT;
-        let receiver = self.admin_turn_broker.try_register(
+        let receiver = match self.admin_turn_broker.try_register(
             request_id.clone(),
             task_id.clone(),
             std::sync::Arc::downgrade(&control),
             deadline,
-        )?;
+        ) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                // Admission can lose the cleanup shutdown fence after this
+                // task has been marked running. A first-turn reservation has
+                // no adapter-owned drop guard yet, so remove it explicitly;
+                // an existing resident is terminated and reaped first.
+                control.terminate_owned();
+                if is_first_turn {
+                    self.release_run_if_current(&task_id, &control);
+                }
+                let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
+                let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
+                return Err(error);
+            }
+        };
         // Watchdog: times out the request, terminates the resident transport,
         // and refuses to replay a late reply. The closure runs only after the
         // broker entry has been closed with [`AdminTurnReply::Timeout`], so

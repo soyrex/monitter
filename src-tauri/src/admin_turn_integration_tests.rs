@@ -44,6 +44,23 @@ fn fixture(name: &str) -> ServiceFixture {
 }
 
 #[test]
+fn admin_shutdown_before_launch_does_not_leave_a_running_hidden_task() {
+    let fixture = fixture("shutdown-before-launch");
+    // Model shutdown becoming visible after admission but before a provider
+    // starts. The reserve_run fence must reject without leaking running state.
+    fixture.service.stopping.store(true, std::sync::atomic::Ordering::Release);
+    let error = fixture.service.send_admin_turn("Never launch this prompt".into()).unwrap_err();
+    assert!(error.contains("shutting down"));
+    assert!(fixture.service.runs.lock().unwrap().tasks.is_empty());
+    assert!(fixture.service.admin_turn_broker.active_task_id().is_none());
+    let snapshot = fixture.service.snapshot().unwrap();
+    let admin_id = fixture.service.internal_admin().unwrap().id;
+    assert!(snapshot.tasks.iter().filter(|task| task.agent_id == admin_id)
+        .all(|task| task.status != "running"));
+    assert!(snapshot.messages.is_empty());
+}
+
+#[test]
 fn ensure_internal_admin_task_returns_a_single_task_across_repeated_calls() {
     let fixture = fixture("lazy-single");
     let first = fixture
