@@ -18,7 +18,7 @@ try {
   await page.getByRole('button', { name: 'New terminal', exact: true }).click();
   await expect(shell).toHaveClass(/mobile-main/);
   await expect(page.locator('.terminal-pane')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Open chats menu' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Back to chats' })).toBeVisible();
   expect(errors).toEqual([]);
   console.log('WebKit mobile controls palette opens a terminal from the sidebar.');
 } finally {

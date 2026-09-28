@@ -18,12 +18,12 @@ try {
   await expect(page.locator('[data-tab-kind="draft"]')).toHaveCount(1);
   await expect(page.locator('.tab-picker-trigger')).toBeVisible();
   await expect(page.getByRole('complementary', { name: 'Agents and tasks' })).toBeHidden();
-  await page.getByRole('button', { name: 'Open chats menu' }).click();
+  await page.getByRole('button', { name: 'Back to chats' }).click();
   await expect(page.getByRole('complementary', { name: 'Agents and tasks' })).toBeVisible();
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expect(page.locator('.pane-grid').first()).toHaveCSS('transition-duration', '0s');
   await page.getByRole('button', { name: 'Preferences', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Open chats menu' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Back to chats' })).toBeVisible();
   await page.setViewportSize({ width: 1200, height: 900 });
   await expect(shell).not.toHaveClass(/sidebar-collapsed/);
   const resize = page.getByRole('separator', { name: 'Resize main sidebar' });
