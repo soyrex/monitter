@@ -49,6 +49,7 @@
   import Clock from "@lucide/svelte/icons/clock";
   import Check from "@lucide/svelte/icons/check";
   import ChartPie from "@lucide/svelte/icons/chart-pie";
+  import Cog from "@lucide/svelte/icons/cog";
   import CornerDownLeft from "@lucide/svelte/icons/corner-down-left";
   import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import GitFork from "@lucide/svelte/icons/git-fork";
@@ -5419,7 +5420,8 @@
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null;railProjectId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
-      {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Create">
+      {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Sidebar actions">
+        {#if mobileSidebar}<button class="icon brand-action" type="button" aria-label="Open Settings" title="Open Settings" onclick={()=>routeSettings()}><Cog size={18}/></button>{/if}
         <button class="icon brand-action" type="button" aria-label={terminalBusy?'Opening terminal':'New terminal'} title="New terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
         <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
       </div>{/if}
