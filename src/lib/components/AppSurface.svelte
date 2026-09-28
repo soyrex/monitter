@@ -5690,6 +5690,7 @@
   }}
   {@const myAgents = visibleAgents.filter(agent => !localHost || agent.hostId === localHost.id)}
   {@const peerAgents = localHost ? visibleAgents.filter(agent => agent.hostId !== localHost.id) : []}
+  {@const adminAgents = settingsAgents.filter(agent => agent.internal && (!localHost || agent.hostId === localHost.id))}
   <div class="agent-directory-shell">
     <header class="agent-directory-header">
       <label class="agent-directory-search">
@@ -5711,7 +5712,7 @@
     </header>
     {#if visibleAgents.length === 0}
       <section class="agent-directory-empty">
-        <h2>No agents yet</h2>
+        <h2>No configured agents yet</h2>
         <p>Add your first agent to start a chat with it.</p>
         <button
           type="button"
@@ -5821,6 +5822,33 @@
           {/if}
         </section>
       {/if}
+    {/if}
+    {#if adminAgents.length}
+      {@const adminMatches = adminAgents.filter(agent => haystack(agent).includes(directoryQuery.trim().toLowerCase()))}
+      <section class="agent-directory-section" aria-label="Monitter Admin">
+        <h2 class="agent-directory-section-title">Monitter Admin</h2>
+        {#if adminMatches.length === 0}
+          <p class="hint">No system agents match your search.</p>
+        {:else}
+          <ul class="agent-directory-list">
+            {#each adminMatches as agent (agent.id)}
+              <li class="agent-row">
+                <button type="button" class="agent-row-edit" aria-label={`Edit ${agent.name}`} onclick={() => routeAgentSettings({ ...agent })}>
+                  <span class="avatar">{@render avatarVisual(agent, 16)}</span>
+                  <span class="agent-row-body">
+                    <strong>{agent.name}</strong>
+                    <small>{agent.description || 'Handles Monitter interface requests'}</small>
+                    <small class="agent-row-meta">{friendlyProviderName(agent)}{agent.model ? ` · ${agent.model}` : ''}</small>
+                  </span>
+                </button>
+                <div class="agent-row-actions">
+                  <button type="button" class="icon" aria-label={`Open ${agent.name} settings`} title="Edit agent" onclick={() => routeAgentSettings({ ...agent })}><MoreHorizontal size={15} /></button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     {/if}
   </div>
 {/snippet}
