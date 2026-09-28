@@ -3146,7 +3146,39 @@
     if (index < 0 || target < 0 || target >= tabs.length) return false;
     return selectVimTab({ kind: 'index', index: target + 1 });
   }
+  const mobileEdgeSwipeWidth = 24;
+  const mobileEdgeSwipeDistance = 56;
+  let mobileEdgeSwipeOrigin: { edge: 'left' | 'right'; x: number; y: number; at: number } | null = null;
   let mobileTabSwipeOrigin: { x: number; y: number; at: number } | null = null;
+  let mobileTabSwipeMotionKey = $state(0);
+  let mobileTabSwipeMotionX = $state(0);
+  const canRevealMobileDetails = $derived(compactDetail && ((pane === 'task' && !!selectedTask) || (pane === 'channel' && !!activeChannel)));
+  function handleMobileEdgeSwipeStart(event: TouchEvent): void {
+    mobileEdgeSwipeOrigin = null;
+    if (embedded || !mobileSidebar || !mobileMain || modal || palette || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const edge = touch.clientX <= mobileEdgeSwipeWidth ? 'left'
+      : touch.clientX >= window.innerWidth - mobileEdgeSwipeWidth ? 'right' : null;
+    if (edge) mobileEdgeSwipeOrigin = { edge, x: touch.clientX, y: touch.clientY, at: Date.now() };
+  }
+  function handleMobileEdgeSwipeEnd(event: TouchEvent): void {
+    const start = mobileEdgeSwipeOrigin;
+    mobileEdgeSwipeOrigin = null;
+    if (!start || !mobileSidebar || !mobileMain || event.changedTouches.length !== 1) return;
+    const touch = event.changedTouches[0];
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    if (Date.now() - start.at > 900 || Math.abs(deltaX) < mobileEdgeSwipeDistance || Math.abs(deltaX) < Math.abs(deltaY) * 1.35) return;
+    if (start.edge === 'left' && deltaX > 0) {
+      tabPickerOpen = false;
+      showDetail = false;
+      backToChats();
+    } else if (start.edge === 'right' && deltaX < 0 && canRevealMobileDetails) {
+      tabPickerOpen = false;
+      showDetail = true;
+    }
+  }
+  function handleMobileEdgeSwipeCancel(): void { mobileEdgeSwipeOrigin = null; }
   function blocksMobileTabSwipe(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return true;
     if (target.closest('button, a, input, textarea, select, [contenteditable="true"], [role="button"], iframe, video, audio, .tab-picker, .composer, [data-no-tab-swipe]')) return true;
@@ -3160,6 +3192,7 @@
     mobileTabSwipeOrigin = null;
     if (!mobileSidebar || !mobileMain || event.touches.length !== 1 || blocksMobileTabSwipe(event.target)) return;
     const touch = event.touches[0];
+    if (touch.clientX <= mobileEdgeSwipeWidth || touch.clientX >= window.innerWidth - mobileEdgeSwipeWidth) return;
     mobileTabSwipeOrigin = { x: touch.clientX, y: touch.clientY, at: Date.now() };
   }
   function handleMobileTabSwipeEnd(event: TouchEvent): void {
@@ -3170,7 +3203,12 @@
     const deltaX = touch.clientX - start.x;
     const deltaY = touch.clientY - start.y;
     if (Date.now() - start.at > 1000 || Math.abs(deltaX) < 64 || Math.abs(deltaX) < Math.abs(deltaY) * 1.35) return;
-    selectRelativeTab(deltaX < 0 ? 1 : -1);
+    const tabDirection = deltaX < 0 ? 1 : -1;
+    if (selectRelativeTab(tabDirection)) {
+      // The next tab enters from the edge being revealed by the finger.
+      mobileTabSwipeMotionX = tabDirection > 0 ? 26 : -26;
+      mobileTabSwipeMotionKey += 1;
+    }
   }
   function handleMobileTabSwipeCancel(): void { mobileTabSwipeOrigin = null; }
   export function currentVimTab(): TabKey | null {
@@ -4982,7 +5020,7 @@
 
 {#snippet workspaceView()}
   <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
-  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
+  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:motionView={{key:mobileTabSwipeMotionKey,x:mobileTabSwipeMotionX,y:0,duration:180,opacity:0.9,enabled:mobileTabSwipeMotionKey>0}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Open chats menu" title="Open chats menu" onclick={()=>{tabPickerOpen=false;backToChats();}}><Menu size={20}/></button>
@@ -5478,7 +5516,7 @@
 {#if !embedded}<RootSurfaceLifecycle start={startRootLifecycle}/>{/if}
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
-  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:mobile-task-chat={mobileSidebar && pane === 'task' && !currentDraftId} class:embedded class="app-shell" inert={!embedded && !snapshot}>
+  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:mobile-task-chat={mobileSidebar && pane === 'task' && !currentDraftId} class:embedded class="app-shell" inert={!embedded && !snapshot} ontouchstart={handleMobileEdgeSwipeStart} ontouchend={handleMobileEdgeSwipeEnd} ontouchcancel={handleMobileEdgeSwipeCancel}>
   {#if !embedded}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the sidebar delegates arrow navigation among its focusable controls) -->
   <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
@@ -7172,7 +7210,7 @@
   .mobile-navigation .agent-row, .mobile-navigation .task-row, .mobile-navigation .channel-row, .mobile-navigation .project-row { min-height:44px; }
   .mobile-navigation .compact-tabs .tab-picker-list > .tab-entry,
   .mobile-navigation .compact-tabs .tab-picker-list > .tab-entry > .tab { min-height:44px; }
-  .mobile-navigation .mobile-back { flex:none; width:44px; height:44px; padding:0; color:var(--accent-ink); }
+  .mobile-navigation .mobile-back { flex:none; width:44px; height:44px; padding:0; color:#fff; }
   .mobile-navigation .topbar > .tabs { align-self:stretch; }
   .mobile-navigation .topbar > .top-actions { padding:0; gap:0; }
   .mobile-navigation .top-actions > .icon { width:44px; height:44px; }
@@ -7599,6 +7637,8 @@
   .modern-tabs:not(.compact-tabs) .tab-entry { border:0; border-right:1px solid var(--line); border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:first-child { border-left:0; }
   .modern-tabs:not(.compact-tabs) > .topbar:has(> .workspace-context) .tab-entry:first-child { border-left:1px solid var(--line); }
+  .mobile-navigation .workspace.modern-tabs:not(.compact-tabs) > .topbar { border-top:1px solid var(--line); }
+  .mobile-navigation .modern-tabs:not(.compact-tabs) > .topbar:has(> .mobile-back) .tab-entry:first-child { border-left:1px solid var(--line); }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { background:var(--soft); }
   .modern-tabs:not(.compact-tabs) .tab-entry:hover { box-shadow:inset 0 -1px 0 var(--line); }
