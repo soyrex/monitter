@@ -290,7 +290,7 @@
     {:else if activeCategory === "agents"}
       <div class="section-stack">{#if agentEditor}{@render agentEditor()}{/if}</div>
     {:else if activeCategory === "extensions"}
-      <ExtensionsSettings {agents}/>
+      <ExtensionsSettings {agents} {hosts}/>
     {:else if activeCategory === "environment"}
       <EnvironmentSecretsSettings />
     {:else if activeCategory === "approvals"}

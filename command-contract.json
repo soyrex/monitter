@@ -112,6 +112,144 @@
         "native"
       ]
     },
+    "mail_get_config": {
+      "arguments": [],
+      "resultRustType": "mail::MailConfig",
+      "resultTsType": "MailConfig",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
+    "mail_configure_gmail": {
+      "arguments": [
+        {
+          "name": "revision",
+          "rustName": "revision",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "clientId",
+          "rustName": "client_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "clientSecret",
+          "rustName": "client_secret",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "mail::MailConfig",
+      "resultTsType": "MailConfig",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
+    "mail_start_connect": {
+      "arguments": [],
+      "resultRustType": "mail::MailConnectStart",
+      "resultTsType": "MailConnectStart",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
+    "mail_connect_status": {
+      "arguments": [
+        {
+          "name": "attemptId",
+          "rustName": "attempt_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "mail::MailConnectStatus",
+      "resultTsType": "MailConnectStatus",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
+    "mail_cancel_connect": {
+      "arguments": [
+        {
+          "name": "attemptId",
+          "rustName": "attempt_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
+    "mail_set_account_agents": {
+      "arguments": [
+        {
+          "name": "revision",
+          "rustName": "revision",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "accountId",
+          "rustName": "account_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "agentIds",
+          "rustName": "agent_ids",
+          "rustType": "Vec<String>",
+          "tsType": "string[]",
+          "optional": false
+        }
+      ],
+      "resultRustType": "mail::MailConfig",
+      "resultTsType": "MailConfig",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
+    "mail_disconnect": {
+      "arguments": [
+        {
+          "name": "revision",
+          "rustName": "revision",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "accountId",
+          "rustName": "account_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "mail::MailConfig",
+      "resultTsType": "MailConfig",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "get_extension_config": {
       "arguments": [],
       "resultRustType": "extensions::ExtensionConfig",
@@ -2361,6 +2499,9 @@
       "JevCommandPlan",
       "JevRoutePlan",
       "LanServerInfo",
+      "MailConfig",
+      "MailConnectStart",
+      "MailConnectStatus",
       "MailDetail",
       "MailDetailRequestResult",
       "MarkdownDocument",

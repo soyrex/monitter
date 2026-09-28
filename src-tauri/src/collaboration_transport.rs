@@ -1,5 +1,5 @@
 //! Loopback-only, stateless Streamable HTTP transport for collaboration MCP.
-use crate::{collaboration_mcp, jev_decisions_mcp};
+use crate::{collaboration_mcp, jev_decisions_mcp, mail_mcp};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -36,6 +36,7 @@ pub struct Broker {
 enum Catalogue {
     Collaboration,
     JevDecisions,
+    Mail,
 }
 impl Broker {
     pub fn start(handler: Arc<Handler>) -> Result<Self, String> {
@@ -46,6 +47,9 @@ impl Broker {
     }
     pub(crate) fn start_jev_decisions(handler: Arc<Handler>) -> Result<Self, String> {
         Self::start_with_catalogue(handler, Catalogue::JevDecisions, None)
+    }
+    pub(crate) fn start_mail(handler: Arc<Handler>) -> Result<Self, String> {
+        Self::start_with_catalogue(handler, Catalogue::Mail, None)
     }
     fn start_with_catalogue(handler: Arc<Handler>, catalogue: Catalogue, guidance: Option<Arc<GuidanceProvider>>) -> Result<Self, String> {
         let socket = TcpListener::bind("127.0.0.1:0")
@@ -187,6 +191,7 @@ fn serve(
     let supports_version = |version: &str| match catalogue {
         Catalogue::Collaboration => collaboration_mcp::supported_protocol_version(version),
         Catalogue::JevDecisions => jev_decisions_mcp::supported_protocol_version(version),
+        Catalogue::Mail => mail_mcp::supported_protocol_version(version),
     };
     if req.protocol_version.as_deref().is_some_and(|version| !supports_version(version)) {
         let _ = write_response(
@@ -224,6 +229,7 @@ fn serve(
                     collaboration_mcp::dispatch_with_guidance(&task, &*handler, v.clone(), &board_guidance)
                 }
                 Catalogue::JevDecisions => jev_decisions_mcp::dispatch(&task, &*handler, v.clone()),
+                Catalogue::Mail => mail_mcp::dispatch(&task, &*handler, v.clone()),
             }).collect();
             if replies.is_empty() {
                 None
@@ -238,6 +244,7 @@ fn serve(
                 collaboration_mcp::dispatch_with_guidance(&task, &*handler, parsed, &board_guidance)
             }
             Catalogue::JevDecisions => jev_decisions_mcp::dispatch(&task, &*handler, parsed),
+            Catalogue::Mail => mail_mcp::dispatch(&task, &*handler, parsed),
         }
     };
     let _ = write_response(s, if out.is_some() { 200 } else { 202 }, out);

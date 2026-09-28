@@ -66,6 +66,9 @@ mod ui_sync;
 mod history;
 mod markdown;
 mod mail_triage;
+mod mail;
+mod mail_mcp;
+mod mail_runtime;
 mod menu;
 pub mod model;
 pub mod model_router;
@@ -362,6 +365,9 @@ pub(crate) struct Service {
     extensions: extensions::ExtensionStore,
     extension_writes: Mutex<()>,
     environment_secrets: environment_secrets::EnvironmentSecretsStore,
+    mail: Arc<mail::MailService>,
+    mail_broker: Mutex<Option<collaboration_transport::Broker>>,
+    mail_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     // Initial Jev decisions are retained locally for audit. They contain a
     // prompt fingerprint, never the prompt itself or the Jev credential.
     router_trace_dir: PathBuf,
@@ -764,6 +770,12 @@ impl Service {
             extensions,
             extension_writes: Mutex::new(()),
             environment_secrets: environment_secrets::EnvironmentSecretsStore::new(),
+            #[cfg(not(test))]
+            mail: Arc::new(mail::MailService::new()),
+            #[cfg(test)]
+            mail: Arc::new(mail::MailService::for_test()),
+            mail_broker: Mutex::new(None),
+            mail_grants: Mutex::new(HashMap::new()),
             router_trace_dir: dir.join("router-traces"),
             state_writes: Mutex::new(()),
             data: Mutex::new(Arc::new(ServiceData {
@@ -3194,6 +3206,7 @@ impl Service {
     fn release_run(&self, task_id: &str) {
         self.revoke_collaboration_grant(task_id);
         self.revoke_jev_decisions_grant(task_id);
+        self.revoke_mail_grant(task_id);
         if let Ok(mut runs) = self.runs.lock() {
             runs.tasks.remove(task_id);
             runs.native_sessions.retain(|_, owner| owner != task_id);
@@ -6327,6 +6340,11 @@ impl Service {
         if let Ok(mut grants) = self.jev_decisions_grants.lock() {
             grants.clear();
         }
+        self.mail.cancel_all_connects();
+        if let Ok(mut grants) = self.mail_grants.lock() {
+            grants.clear();
+            if let Ok(mut broker) = self.mail_broker.lock() { broker.take(); }
+        }
         self.admin_turn_broker.reset();
         let controls = self
             .runs
@@ -6990,6 +7008,52 @@ async fn list_system_fonts() -> Result<Vec<SystemFontFamily>, String> {
     tauri::async_runtime::spawn_blocking(load_system_font_families)
         .await
         .map_err(|error| format!("System font worker failed: {error}"))
+}
+
+// Mail account administration is owner-desktop-only, never LAN/controller/visitor.
+#[tauri::command]
+async fn mail_get_config(state: State<'_, AppState>) -> Result<mail::MailConfig, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.config()).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_configure_gmail(state: State<'_, AppState>, revision: String, client_id: String, client_secret: Option<String>) -> Result<mail::MailConfig, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.configure_gmail(revision, client_id, client_secret)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_start_connect(state: State<'_, AppState>) -> Result<mail::MailConnectStart, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let mail = state.0.mail.clone();
+    let app = state.0.app.clone().ok_or("Gmail connection requires the native desktop.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let start = mail.start_connect()?;
+        if app.opener().open_url(start.authorization_url.clone(), None::<&str>).is_err() {
+            let _ = mail.cancel_connect(&start.attempt_id);
+            return Err("Could not open the system browser for Gmail sign-in. Try again.".into());
+        }
+        Ok(start)
+    }).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_connect_status(state: State<'_, AppState>, attempt_id: String) -> Result<mail::MailConnectStatus, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.connect_status(&attempt_id)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_cancel_connect(state: State<'_, AppState>, attempt_id: String) -> Result<(), String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.cancel_connect(&attempt_id)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_set_account_agents(state: State<'_, AppState>, revision: String, account_id: String, agent_ids: Vec<String>) -> Result<mail::MailConfig, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.set_mail_account_agents(revision, account_id, agent_ids)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_disconnect(state: State<'_, AppState>, revision: String, account_id: String) -> Result<mail::MailConfig, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.disconnect(revision, account_id)).await.map_err(|_| "Mail worker failed.".to_string())?
 }
 
 /// Native desktop only. This command is deliberately absent from the LAN
@@ -9451,6 +9515,13 @@ pub fn run() {
             plan_jev_command,
             get_process_metrics,
             list_system_fonts,
+            mail_get_config,
+            mail_configure_gmail,
+            mail_start_connect,
+            mail_connect_status,
+            mail_cancel_connect,
+            mail_set_account_agents,
+            mail_disconnect,
             get_extension_config,
             save_extension_config,
             list_environment_secrets,

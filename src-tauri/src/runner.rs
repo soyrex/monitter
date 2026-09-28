@@ -4368,7 +4368,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             crate::acp_runtime::start(service, task_id, prompt, control);
             return;
         }
-        let mut extensions = match service.runtime_extensions_for_agent(&task.agent_id) {
+        let mut extensions = match service.runtime_extensions_for_task(&task_id) {
             Ok(extensions) => extensions,
             Err(error) => {
                 service.finish(&task_id, "error", Some(error));
