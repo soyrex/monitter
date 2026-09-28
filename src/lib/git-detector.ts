@@ -1,8 +1,9 @@
 import type { MonitterBridge } from '$lib/bridge';
+import { isOwnerRelayDisconnectedError } from './owner-relay-error.js';
 import type { TaskGitStatus } from '$lib/types';
 
 type Subscriber = (status: TaskGitStatus) => void;
-type Entry = { status?: TaskGitStatus; watching: boolean; probe?: Promise<TaskGitStatus>; subscribers: Set<Subscriber> };
+type Entry = { status?: TaskGitStatus; watching: boolean; probe?: Promise<TaskGitStatus | null>; subscribers: Set<Subscriber> };
 const entries = new Map<string, Entry>();
 const detectorSession = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 
@@ -27,12 +28,18 @@ export function observeGit(bridge: Pick<MonitterBridge, 'getTaskGitStatus' | 'wa
 
 async function probe(bridge: Pick<MonitterBridge, 'getTaskGitStatus' | 'waitForTaskGitMarker'>, taskId: string, key: string, entry: Entry) {
   if (entry.probe) return entry.probe;
-  entry.probe = bridge.getTaskGitStatus(taskId, detectorSession).catch(() => ({ repository: false } as TaskGitStatus));
-  entry.status = await entry.probe;
+  entry.probe = bridge.getTaskGitStatus(taskId, detectorSession).catch(reason => {
+    // A transport failure gives no new evidence about the repository. Resolve
+    // the shared probe quietly without publishing a missing repository.
+    return isOwnerRelayDisconnectedError(reason) ? null : ({ repository: false } as TaskGitStatus);
+  });
+  const status = await entry.probe;
   entry.probe = undefined;
+  if (status === null) return entry.status;
+  entry.status = status;
   publish(entry);
-  if (!entry.status.repository) watchForMarker(bridge, taskId, key, entry);
-  return entry.status;
+  if (!status.repository) watchForMarker(bridge, taskId, key, entry);
+  return status;
 }
 
 function watchForMarker(bridge: Pick<MonitterBridge, 'getTaskGitStatus' | 'waitForTaskGitMarker'>, taskId: string, key: string, entry: Entry) {
@@ -48,7 +55,14 @@ function watchForMarker(bridge: Pick<MonitterBridge, 'getTaskGitStatus' | 'waitF
 
 export async function refreshGit(bridge: Pick<MonitterBridge, 'getTaskGitStatus' | 'waitForTaskGitMarker'>, taskId: string, probeKey: string): Promise<TaskGitStatus> {
   const entry = entryFor(probeKey);
-  const status = await bridge.getTaskGitStatus(taskId, detectorSession).catch(() => ({ repository: false } as TaskGitStatus));
+  let status: TaskGitStatus;
+  try { status = await bridge.getTaskGitStatus(taskId, detectorSession); }
+  catch (reason) {
+    // GitPane can retain its cached selection/diff and decide whether a user
+    // initiated refresh should show this actionable transport error.
+    if (isOwnerRelayDisconnectedError(reason)) throw reason;
+    status = { repository: false } as TaskGitStatus;
+  }
   entry.status = status;
   publish(entry);
   if (!status.repository) watchForMarker(bridge, taskId, probeKey, entry);

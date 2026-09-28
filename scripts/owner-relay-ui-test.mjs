@@ -42,10 +42,14 @@ try {
   const ownerCommands = [];
   let limitedSnapshotCalls = 0;
   const snapshot = {
-    hosts: [], agents: [], tasks: [], messages: [], events: [], channels: [], projects: [],
+    hosts: [],
+    agents: [{ id: 'test-agent', name: 'Recovery test agent', provider: 'codex', model: '', hostId: 'local', cwd: '/tmp', sandbox: 'workspace-write', color: '#00A8F0', description: '', instructions: '', avatar: null, expertise: [], responsibilities: [], skills: [], collaborationEnabled: false }],
+    tasks: [{ id: 'test-task', agentId: 'test-agent', title: 'Recovery reading test', nativeSessionId: null, archived: false, status: 'idle', createdAt: Date.now(), updatedAt: Date.now(), parentTaskId: null, channelId: null, projectId: null, hostId: 'local', cwd: '/tmp', provider: 'codex', model: '', sandbox: 'workspace-write' }],
+    messages: [{ id: 'test-message', taskId: 'test-task', role: 'assistant', text: 'Keep this conversation readable while reconnecting.', createdAt: Date.now() }],
+    events: [], channels: [], projects: [],
     collaborations: [], queuedMessages: [], approvalRequests: [], settings: { theme: 'dark', accent: '#00A8F0' },
   };
-  desktop = await createResumableDesktopSession({
+  const desktopOptions = {
     relayUrl,
     identity: { keyPair: await generatePairingKeyPair(), room: bytesToBase64url(randomBytes(18)) },
     bridge: {
@@ -63,11 +67,14 @@ try {
         version: 1, appTheme: { light: 'monitter', dark: 'monitter', accent: null, contrast: 0 },
         surfaceTint: 3, terminalTheme: 'monitter',
       };
-      if (command === 'get_command_capabilities') return { protocolVersion: 1, commands: ['get_snapshot'] };
-      if (command === 'get_snapshot') return snapshot;
+      if (command === 'get_command_capabilities') return { protocolVersion: 1, commands: ['get_snapshot', 'get_usage_overview', 'list_codex_accounts', 'send_message', 'get_task_git_status', 'get_task_goal', 'list_terminals', 'get_task_model_settings', 'get_task_slash_commands'] };
+      if (command === 'get_snapshot' || command === 'send_message') return snapshot;
+      if (command === 'list_codex_accounts' || command === 'list_terminals' || command === 'get_task_slash_commands') return [];
+      if (command === 'get_usage_overview') return { generatedAt: Date.now(), capturedSince: null, subscriptions: [], providerTotals: [], recentRuns: [] };
       return null;
     },
-  });
+  };
+  desktop = await createResumableDesktopSession(desktopOptions);
 
   browser = await webkit.launch();
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
@@ -91,7 +98,55 @@ try {
   await expect.poll(() => ownerCommands.includes('get_snapshot')).toBe(true);
   await expect(phone.locator('.app-shell')).not.toHaveAttribute('inert', '');
   assert.equal(limitedSnapshotCalls, 0, 'iOS owner bootstrap fell back to the limited controller after approval');
-  console.log('WebKit owner relay: separate approval, root navigation, and full AppSurface handoff passed.');
+  // iOS can report native resume, online and pageshow together. Exercise the
+  // real owner route, including a currently-connected socket, and retain the
+  // page and saved owner trust while the encrypted session is replaced once.
+  await phone.waitForTimeout(500);
+  const snapshotsBeforeResume = ownerCommands.filter(command => command === 'get_snapshot').length;
+  let resumedConnections = 0;
+  const stopResume = desktop.subscribe(state => { if (state.status === 'connected') resumedConnections++; });
+  resumedConnections = 0;
+  await phone.evaluate(() => {
+    window.__networkRecoveryPage = 'same-page';
+    for (const type of ['monitter:resume', 'online', 'pageshow']) window.dispatchEvent(new Event(type));
+  });
+  await expect.poll(() => resumedConnections).toBe(1);
+  await expect(phone.locator('.app-shell')).toHaveCount(1);
+  await expect.poll(() => ownerCommands.filter(command => command === 'get_snapshot').length).toBeGreaterThan(snapshotsBeforeResume);
+  assert.equal(desktop.getPeerControllerPublicKey(), phoneKey);
+  assert.equal(desktop.getOwnerWorkspaceState(), 'approved');
+  assert.equal(await phone.evaluate(() => window.__networkRecoveryPage), 'same-page', 'resume reloaded the page');
+  await phone.waitForTimeout(750);
+  assert.equal(resumedConnections, 1, 'lifecycle hints produced duplicate reconnects');
+  stopResume();
+  // Keep a real chat/draft mounted during a sustained outage. Background
+  // snapshot polling must not report the drop before an attempted action.
+  await phone.getByRole('button', { name: 'Open chat Recovery reading test', exact: true }).click();
+  await expect(phone.getByText('Keep this conversation readable while reconnecting.', { exact: true })).toBeVisible();
+  const composer = phone.getByRole('textbox', { name: 'Task message', exact: true });
+  await composer.fill('Preserve this unsent draft');
+  await phone.evaluate(() => { window.__networkRecoveryShell = document.querySelector('.app-shell'); });
+  desktop.close();
+  await expect(phone.getByTestId('connection-recovery-spinner')).toBeVisible();
+  await phone.waitForTimeout(2_000); // Cross the actual background snapshot poll.
+  await expect(phone.locator('.alert.error')).toHaveCount(0);
+  await expect(phone.getByText('Keep this conversation readable while reconnecting.', { exact: true })).toBeVisible();
+  assert.equal(await phone.evaluate(() => window.__networkRecoveryShell === document.querySelector('.app-shell')), true, 'outage remounted the workspace');
+  assert.equal(await composer.evaluate(node => !!node.closest('[inert]')), false, 'outage blocked the composer');
+  assert.equal(await phone.locator('.owner-relay-content').evaluate(node => !!node.closest('[inert]')), false, 'outage blocked the workspace');
+  assert.equal(await phone.getByTestId('connection-recovery-spinner').evaluate(node => getComputedStyle(node).pointerEvents), 'none');
+  await phone.getByRole('button', { name: 'Send task message', exact: true }).click();
+  await expect(phone.locator('.alert.error')).toContainText('Reconnecting to your desktop. Try again once connected.');
+  await expect(composer).toHaveValue('Preserve this unsent draft');
+  assert.equal(ownerCommands.includes('send_message'), false, 'offline send was dispatched');
+  desktop = await createResumableDesktopSession(desktopOptions);
+  await expect(phone.getByTestId('connection-recovery-spinner')).toHaveCount(0);
+  await expect.poll(() => desktop.getOwnerWorkspaceState()).toBe('approved');
+  assert.equal(desktop.getPeerControllerPublicKey(), phoneKey);
+  assert.equal(await phone.evaluate(() => window.__networkRecoveryShell === document.querySelector('.app-shell')), true, 'reconnect remounted the workspace');
+  await expect(composer).toHaveValue('Preserve this unsent draft');
+  assert.equal(ownerCommands.includes('send_message'), false, 'reconnect replayed an unsent draft');
+  console.log('WebKit owner relay: approval, foreground recovery, quiet readable outage, and explicit send feedback passed.');
 } finally {
   desktop?.close();
   await browser?.close();

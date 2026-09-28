@@ -4,37 +4,40 @@
   import FileText from "@lucide/svelte/icons/file-text";
   import { getBridge } from '$lib/bridge';
   import { observeGit, refreshGit } from '$lib/git-detector';
+  import { isOwnerRelayDisconnectedError, isOwnerRelayReconnecting } from '$lib/lan';
   import type { GitDiffScope, TaskGitDiff, TaskGitStatus } from '$lib/types';
 
   type GitPaneStatus = { repository: boolean | null; error: string; loading: boolean; status: TaskGitStatus | null };
   let { taskId, probeKey = taskId, active = false, statusOnly = false, onRepository, onStatus }: { taskId: string; probeKey?: string; active?: boolean; statusOnly?: boolean; onRepository?: (repository: boolean) => void; onStatus?: (status: GitPaneStatus) => void } = $props();
   const bridge = getBridge();
   let status = $state<TaskGitStatus | null>(null), loading = $state(false), error = $state('');
-  let selected = $state<{ path: string; scope: GitDiffScope } | null>(null), diff = $state<TaskGitDiff | null>(null), diffLoading = $state(false), diffError = $state('');
+  let selected = $state<{ path: string; scope: GitDiffScope } | null>(null), diff = $state<TaskGitDiff | null>(null), diffSelection = $state<{ path: string; scope: GitDiffScope } | null>(null), diffLoading = $state(false), diffError = $state('');
   let generation = 0, statusRevision = 0, diffRevision = 0, timer: ReturnType<typeof setInterval> | undefined;
   function publish() { onStatus?.({ repository: status?.repository ?? null, error, loading, status }); }
   export function refreshStatus() { return refresh(); }
-  async function loadDiff(selection = selected, expectedGeneration = generation) {
+  async function loadDiff(selection = selected, expectedGeneration = generation, notify = false) {
+    if (!notify && isOwnerRelayReconnecting()) return;
     if (!selection) return; const current = ++diffRevision; diffLoading = true; diffError = '';
-    try { const next = await bridge.getTaskGitDiff(taskId, selection.path, selection.scope); if (expectedGeneration === generation && current === diffRevision) diff = next.repository ? next : null; }
-    catch (reason) { if (expectedGeneration === generation && current === diffRevision) diffError = reason instanceof Error ? reason.message : String(reason); }
+    try { const next = await bridge.getTaskGitDiff(taskId, selection.path, selection.scope); if (expectedGeneration === generation && current === diffRevision) { diff = next.repository ? next : null; diffSelection = next.repository ? selection : null; } }
+    catch (reason) { if (expectedGeneration === generation && current === diffRevision && (!isOwnerRelayDisconnectedError(reason) || notify)) diffError = reason instanceof Error ? reason.message : String(reason); }
     finally { if (current === diffRevision) diffLoading = false; }
   }
-  async function refresh() {
+  async function refresh(notify = false) {
+    if (!notify && isOwnerRelayReconnecting()) return;
     const expectedGeneration = generation, current = ++statusRevision; loading = true; error = ''; publish();
     try {
       const next = await refreshGit(bridge, taskId, probeKey);
       if (expectedGeneration !== generation || current !== statusRevision) return;
       status = next; onRepository?.(next.repository); publish();
-      if (!next.repository) { selected = null; diff = null; }
-      else if (selected) { const file = next.files.find(file => file.path === selected?.path); const valid = file && (selected.scope === 'staged' ? !!file.indexStatus.trim() && !file.untracked : selected.scope === 'untracked' ? file.untracked : !!file.worktreeStatus.trim() && !file.untracked); if (valid) void loadDiff(selected, expectedGeneration); else { selected = null; diff = null; } }
-    } catch { if (expectedGeneration === generation && current === statusRevision) { status = null; selected = null; diff = null; publish(); } }
+      if (!next.repository) { selected = null; diff = null; diffSelection = null; }
+      else if (selected) { const file = next.files.find(file => file.path === selected?.path); const valid = file && (selected.scope === 'staged' ? !!file.indexStatus.trim() && !file.untracked : selected.scope === 'untracked' ? file.untracked : !!file.worktreeStatus.trim() && !file.untracked); if (valid) void loadDiff(selected, expectedGeneration); else { selected = null; diff = null; diffSelection = null; } }
+    } catch (reason) { if (expectedGeneration === generation && current === statusRevision) { if (isOwnerRelayDisconnectedError(reason)) { if (notify) error = reason instanceof Error ? reason.message : String(reason); } else { status = null; selected = null; diff = null; diffSelection = null; error = reason instanceof Error ? reason.message : String(reason); } publish(); } }
     finally { if (current === statusRevision) { loading = false; publish(); } }
   }
-  async function choose(path: string, scope: GitDiffScope) { selected = { path, scope }; diff = null; await loadDiff(selected); }
+  async function choose(path: string, scope: GitDiffScope) { selected = { path, scope }; await loadDiff(selected, generation, true); }
   $effect(() => {
     const id = taskId, key = probeKey; void id; void key;
-    generation++; statusRevision++; diffRevision++; status = null; error = ''; loading = false; diffLoading = false; selected = null; diff = null; diffError = ''; untrack(publish);
+    generation++; statusRevision++; diffRevision++; status = null; error = ''; loading = false; diffLoading = false; selected = null; diff = null; diffSelection = null; diffError = ''; untrack(publish);
     const expectedGeneration = generation;
     const unsubscribe = untrack(() => observeGit(bridge, taskId, probeKey, next => {
       if (expectedGeneration !== generation) return;
@@ -51,9 +54,10 @@
 
 {#if status?.repository && !statusOnly}
 <section class="git-pane" aria-label="Git changes">
-  <header><span>{status?.repository && status.branch ? status.branch : 'Git'}</span><button class="icon" aria-label="Refresh Git status" title="Refresh" onclick={refresh} disabled={loading}><RefreshCw class={loading ? 'spin' : ''} size={14}/></button></header>
+  <header><span>{status?.repository && status.branch ? status.branch : 'Git'}</span><button class="icon" aria-label="Refresh Git status" title="Refresh" onclick={()=>void refresh(true)} disabled={loading}><RefreshCw class={loading ? 'spin' : ''} size={14}/></button></header>
   <div class="git-body"><aside class="git-files">
     <small>{status.root}</small>
+    {#if error}<p class="git-note error">{error}</p>{/if}
     {#each [['staged','Staged'],['unstaged','Changes'],['untracked','Untracked']] as [scope,label]}
       {@const entries = group(scope as GitDiffScope)}
       {#if entries.length}<h4>{label} <span>{entries.length}</span></h4>{#each entries as file}<button class:chosen={selected?.path===file.path && selected?.scope===scope} onclick={()=>choose(file.path, scope as GitDiffScope)}><FileText size={12}/><code>{file.path}</code></button>{/each}{/if}
@@ -64,8 +68,8 @@
     {#if !selected}<p class="git-note">Select a changed file to inspect its diff.</p>
     {:else if diffLoading}<p class="git-note">Loading diff…</p>
     {:else if diffError}<p class="git-note error">{diffError}</p>
-    {:else if diff && diff.repository && diff.binary}<p class="git-note">This file is binary and cannot be shown as a text diff.</p>
-    {:else if diff && diff.repository}<pre>{#each diff.text.split('\n') as line}<span class:plus={line.startsWith('+') && !line.startsWith('+++')} class:minus={line.startsWith('-') && !line.startsWith('---')}>{line || ' '}</span>{/each}</pre>{#if diff.truncated}<p class="git-note">Diff truncated.</p>{/if}{:else}<p class="git-note">The repository or change is no longer available. Refresh to check again.</p>{/if}
+    {:else if diff && diffSelection?.path===selected.path && diffSelection.scope===selected.scope && diff.repository && diff.binary}<p class="git-note">This file is binary and cannot be shown as a text diff.</p>
+    {:else if diff && diffSelection?.path===selected.path && diffSelection.scope===selected.scope && diff.repository}<pre>{#each diff.text.split('\n') as line}<span class:plus={line.startsWith('+') && !line.startsWith('+++')} class:minus={line.startsWith('-') && !line.startsWith('---')}>{line || ' '}</span>{/each}</pre>{#if diff.truncated}<p class="git-note">Diff truncated.</p>{/if}{:else}<p class="git-note">The repository or change is no longer available. Refresh to check again.</p>{/if}
   </article></div>
 </section>
 {/if}

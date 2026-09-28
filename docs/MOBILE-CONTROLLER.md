@@ -15,6 +15,45 @@ is bounded to 15 seconds and remembered sessions retry with backoff; HTTP pairin
 requests show readable timeout/network failures and never automatically retry a
 one-use creation or claim. Scanning a QR still requires a working relay connection.
 
+### Network-independent recovery
+
+The paired connection uses public outbound WSS from both devices. It needs no
+desktop IP address, VPN, or shared LAN. Device identities and their approvals stay
+the same when either device moves networks. The iOS app starts in paired mode for
+new installations; an explicitly saved manual LAN preference remains available.
+
+Updated relays and clients negotiate a small transport heartbeat. Clients detect
+an unresponsive path within 10 seconds of a probe (probes repeat every 15 seconds),
+and the relay frees a stale negotiated socket after 45 seconds without heartbeats.
+New connections cannot replace a live peer merely by knowing its room ID. The
+Cloudflare heartbeat uses hibernation auto-response, so idle pings do not wake the
+Durable Object. Lease alarms perform bounded cleanup. Existing clients remain
+compatible; existing relays must be updated to enable the new liveness behaviour.
+
+Browser lifecycle and native iOS foreground/network hints coalesce into a fresh
+connection. Outstanding calls fail promptly and uncertain mutations are never
+automatically sent again. A disconnected or sleeping desktop remains unavailable
+until it returns; the relay does not run the desktop's agents.
+
+`node scripts/network-recovery-run.mjs` uses real encrypted client sessions through
+a local fault proxy. It drops both traffic and close notifications independently
+for the phone and Mac, checks saved-identity recovery and no mutation replay, then
+restarts the relay. `npm test --prefix relay-cloudflare` checks the actual local
+Worker's negotiation, live role reservation, lease expiry, and compatibility.
+These tests do not substitute for physical iPhone Wi-Fi/cellular and lock/unlock
+verification with matching installed builds.
+
+Release the relay before the new desktop and mobile bundles. Older peers continue
+using the previous join protocol; new clients enable heartbeat frames only after
+the relay advertises support. Building this source does not deploy the relay or
+install either application.
+
+After the first connection, automatic recovery keeps the workspace and drafts in
+place with a small spinner. Reading, scrolling, and local navigation remain usable.
+Connection feedback appears when an action needs the desktop; an offline Send keeps
+the draft, and reconnection never resubmits it. The WebKit owner-relay test covers
+this outage and recovery behaviour as well as foreground resume.
+
 - `npm run relay`: starts the opaque development relay on 127.0.0.1:8789.
 - Open Remote control in desktop Monitter, create a QR invitation, scan it on mobile, or enter the nine-digit one-use device key, then compare
   the six-digit verification numbers and approve on desktop. V2 invitations contain a room and desktop public key. Version 0.4.0 and its matching desktop build remember approved phones across app closure and reconnect automatically.

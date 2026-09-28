@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+await mkdir(join(root, 'artifacts'), { recursive: true });
 const directory = await mkdtemp(join(root, 'artifacts/owner-relay-ui-test-'));
 try {
   const output = join(directory, 'test.mjs');

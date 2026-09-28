@@ -8,7 +8,12 @@ type Attachment = {
   room: string;
   role: Role;
   joined: boolean;
+  heartbeatNegotiated: boolean;
+  // A departed socket may remain visible while its close handshake finishes.
+  // This flag makes that later close/error a no-op for any replacement peer.
+  departed: boolean;
   openedAt: number;
+  pendingSinceAt: number;
   rateWindowStartedAt: number;
   messagesInWindow: number;
 };
@@ -18,6 +23,10 @@ const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGES_PER_WINDOW = 120;
 const RATE_WINDOW_MS = 10_000;
 const JOIN_TIMEOUT_MS = 10_000;
+const HEARTBEAT_CAPABILITY = 'relay-heartbeat-v1';
+const HEARTBEAT_PING = '{"type":"ping"}';
+const HEARTBEAT_PONG = '{"type":"pong"}';
+const HEARTBEAT_LEASE_MS = 45_000;
 // The DO only owns the rendezvous deadline. The encrypted protocol owns approval.
 const PAIRING_TTL_MS = 5 * 60_000;
 const PAIRING_REQUEST_BYTES = 4 * 1024;
@@ -149,7 +158,14 @@ function attachment(socket: WebSocket): Attachment | null {
     (state.role !== 'desktop' && state.role !== 'mobile') ||
     typeof state.joined !== 'boolean' || typeof state.openedAt !== 'number' ||
     typeof state.rateWindowStartedAt !== 'number' || typeof state.messagesInWindow !== 'number') return null;
-  return state as Attachment;
+  // Attachments from the pre-heartbeat worker remain valid legacy sockets
+  // across a rolling deployment. Defaults are persisted on their next update.
+  return {
+    ...state,
+    heartbeatNegotiated: state.heartbeatNegotiated === true,
+    departed: state.departed === true,
+    pendingSinceAt: typeof state.pendingSinceAt === 'number' ? state.pendingSinceAt : state.openedAt,
+  } as Attachment;
 }
 
 function send(socket: WebSocket, value: object): void {
@@ -163,6 +179,9 @@ export function openSockets(sockets: WebSocket[]): WebSocket[] {
 export class RelayRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // Exact JSON avoids waking a hibernating Durable Object for a negotiated
+    // client heartbeat. The timestamp is used below as the lease proof.
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(HEARTBEAT_PING, HEARTBEAT_PONG));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -176,7 +195,8 @@ export class RelayRoom extends DurableObject<Env> {
       return new Response('Invalid relay route.', { status: 400 });
     }
 
-    const sockets = openSockets(this.ctx.getWebSockets());
+    await this.pruneExpiredSockets();
+    const sockets = this.activeSockets();
     if (sockets.length >= 2) return new Response('Room unavailable.', { status: 409 });
     // A role is reserved as soon as its WebSocket is upgraded. This prevents a
     // concurrent duplicate from racing the later join message.
@@ -185,7 +205,7 @@ export class RelayRoom extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     const now = Date.now();
-    server.serializeAttachment({ room, role, joined: false, openedAt: now, rateWindowStartedAt: now, messagesInWindow: 0 } satisfies Attachment);
+    server.serializeAttachment({ room, role, joined: false, heartbeatNegotiated: false, departed: false, openedAt: now, pendingSinceAt: now, rateWindowStartedAt: now, messagesInWindow: 0 } satisfies Attachment);
     this.ctx.acceptWebSocket(server);
     await this.scheduleDeadline();
     return new Response(null, { status: 101, webSocket: client });
@@ -194,6 +214,7 @@ export class RelayRoom extends DurableObject<Env> {
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const state = attachment(socket);
     if (!state) return close(socket, 1008, 'invalid connection');
+    if (state.departed) return close(socket, 1008, 'connection departed');
     if (typeof message !== 'string' || new TextEncoder().encode(message).byteLength > MAX_FRAME_BYTES) {
       return close(socket, 1009, 'frame too large');
     }
@@ -213,15 +234,19 @@ export class RelayRoom extends DurableObject<Env> {
       if (frame.type !== 'join' || frame.room !== state.room || frame.role !== state.role) {
         return close(socket, 1008, 'join required');
       }
+      const capabilities = frame.capabilities;
+      if (capabilities !== undefined && (!Array.isArray(capabilities) || capabilities.length > 8 || capabilities.some(value => typeof value !== 'string' || value.length > 128))) {
+        return close(socket, 1008, 'invalid join capabilities');
+      }
       state.joined = true;
+      state.heartbeatNegotiated = Array.isArray(capabilities) && capabilities.includes(HEARTBEAT_CAPABILITY);
       socket.serializeAttachment(state);
-      send(socket, { type: 'joined' });
+      send(socket, state.heartbeatNegotiated ? { type: 'joined', capabilities: [HEARTBEAT_CAPABILITY] } : { type: 'joined' });
       const peers = this.joinedSockets();
       if (peers.length === 2) {
         for (const peer of peers) send(peer, { type: 'peer' });
-        await this.ctx.storage.deleteAlarm();
       }
-      else await this.scheduleDeadline();
+      await this.scheduleDeadline();
       return;
     }
     // Frame contents remain opaque: only the envelope shape and size are checked.
@@ -234,40 +259,84 @@ export class RelayRoom extends DurableObject<Env> {
   }
 
   async webSocketClose(socket: WebSocket): Promise<void> {
-    const departed = attachment(socket);
-    if (!departed) return;
-    for (const peer of this.joinedSockets()) if (peer !== socket) send(peer, { type: 'peer_left' });
+    await this.depart(socket);
     await this.scheduleDeadline();
   }
 
   async webSocketError(socket: WebSocket, _error: unknown): Promise<void> {
-    // A hibernatable socket error is terminal for this connection. Notify the
-    // peer without recording the error or any protocol payload.
-    for (const peer of this.joinedSockets()) if (peer !== socket) send(peer, { type: 'peer_left' });
+    // A hibernatable socket error is terminal for this connection. `depart`
+    // records it before closing so a later close cannot affect a replacement.
+    await this.depart(socket);
     close(socket, 1011, 'socket error');
     await this.scheduleDeadline();
   }
 
   async alarm(): Promise<void> {
-    const now = Date.now();
-    for (const socket of openSockets(this.ctx.getWebSockets())) {
-      const state = attachment(socket);
-      if (!state) { close(socket, 1008, 'invalid connection'); continue; }
-      const deadline = state.joined ? state.openedAt + PAIRING_TTL_MS : state.openedAt + JOIN_TIMEOUT_MS;
-      if (deadline <= now) close(socket, 1008, state.joined ? 'pairing timeout' : 'join timeout');
-    }
+    await this.pruneExpiredSockets();
     await this.scheduleDeadline();
   }
 
   private joinedSockets(): WebSocket[] {
-    return openSockets(this.ctx.getWebSockets()).filter(socket => attachment(socket)?.joined);
+    return this.activeSockets().filter(socket => attachment(socket)?.joined);
+  }
+
+  private activeSockets(): WebSocket[] {
+    return openSockets(this.ctx.getWebSockets()).filter(socket => !attachment(socket)?.departed);
+  }
+
+  private heartbeatDeadline(socket: WebSocket, state: Attachment): number {
+    const heartbeat = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0;
+    return Math.max(state.openedAt, heartbeat) + HEARTBEAT_LEASE_MS;
+  }
+
+  private deadline(socket: WebSocket, state: Attachment): number | null {
+    if (!state.joined) return state.openedAt + JOIN_TIMEOUT_MS;
+    if (state.heartbeatNegotiated) return this.heartbeatDeadline(socket, state);
+    // A completed legacy pair retains its historic long-lived behaviour.
+    if (this.joinedSockets().length === 2) return null;
+    // Once a peer leaves, give the survivor a fresh pairing window rather than
+    // scheduling an alarm in the past from its original connection time.
+    return state.pendingSinceAt + PAIRING_TTL_MS;
+  }
+
+  private async pruneExpiredSockets(): Promise<void> {
+    const now = Date.now();
+    for (const socket of this.activeSockets()) {
+      const state = attachment(socket);
+      if (!state) { close(socket, 1008, 'invalid connection'); continue; }
+      const deadline = this.deadline(socket, state);
+      if (deadline !== null && deadline <= now) {
+        await this.depart(socket);
+        close(socket, 1008, state.joined ? (state.heartbeatNegotiated ? 'heartbeat timeout' : 'pairing timeout') : 'join timeout');
+      }
+    }
+  }
+
+  private async depart(socket: WebSocket): Promise<void> {
+    const state = attachment(socket);
+    if (!state || state.departed) return;
+    state.departed = true;
+    socket.serializeAttachment(state);
+    if (!state.joined) return;
+    const now = Date.now();
+    for (const peer of this.joinedSockets()) {
+      if (peer === socket) continue;
+      const peerState = attachment(peer);
+      if (!peerState) continue;
+      peerState.pendingSinceAt = now;
+      peer.serializeAttachment(peerState);
+      send(peer, { type: 'peer_left' });
+    }
   }
 
   private async scheduleDeadline(): Promise<void> {
-    const states = openSockets(this.ctx.getWebSockets()).map(socket => attachment(socket)).filter((state): state is Attachment => state !== null);
-    if (states.length === 2 && states.every(state => state.joined)) return this.ctx.storage.deleteAlarm();
-    if (states.length === 0) return this.ctx.storage.deleteAlarm();
-    const deadline = Math.min(...states.map(state => state.openedAt + (state.joined ? PAIRING_TTL_MS : JOIN_TIMEOUT_MS)));
+    const deadlines = this.activeSockets().flatMap(socket => {
+      const state = attachment(socket);
+      const deadline = state ? this.deadline(socket, state) : null;
+      return deadline === null ? [] : [deadline];
+    });
+    if (deadlines.length === 0) return this.ctx.storage.deleteAlarm();
+    const deadline = Math.min(...deadlines);
     await this.ctx.storage.setAlarm(deadline);
   }
 }

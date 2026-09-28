@@ -2,6 +2,7 @@
   import { onMount, type Snippet } from 'svelte';
   import { loadMobilePairing } from '$lib/controller/pairing-store';
   import { createResumableMobileSession, type ResumableMobileSession } from '$lib/controller/resumable-session';
+  import { watchReconnectEvents } from '$lib/controller/reconnect-events';
   import { setOwnerRelayInvoker } from '$lib/lan';
   import { appTheme } from '$lib/app-theme';
   import { surfaceTint } from '$lib/surface-tint';
@@ -10,6 +11,9 @@
 
   let { children }: { children: Snippet } = $props();
   let ready = $state(false);
+  let everReady = $state(false);
+  let reconnecting = $state(false);
+  let permanentProblem = $state(false);
   let status = $state('Connecting to your desktop…');
   let error = $state('');
 
@@ -18,6 +22,7 @@
     let session: ResumableMobileSession | null = null;
     let stop: (() => void) | undefined;
     let authorizing = false;
+    let authorizationEpoch = 0;
     let applyingAppearance = false;
     let appearanceWrites = 0;
     let appearanceWriteChain: Promise<void> = Promise.resolve();
@@ -62,22 +67,30 @@
       if (!current.supportsOwnerWorkspace()) {
         status = 'Desktop update required';
         error = 'Update Monitter on your desktop to use the full workspace through the relay. Your existing LAN connection still works.';
+        permanentProblem = true;
+        everReady = false;
+        reconnecting = false;
         return;
       }
       authorizing = true;
+      const authorization = ++authorizationEpoch;
       status = 'Waiting for full-workspace approval on your desktop…';
       try {
-        await current.requestOwnerWorkspace();
-        if (closed || session !== current || current.getStatus() !== 'connected') return;
+        // Only request an owner grant when this current transport session does
+        // not already have one. The desktop remains authoritative for grants.
+        if (!current.hasOwnerWorkspaceAccess()) await current.requestOwnerWorkspace();
+        if (closed || authorization !== authorizationEpoch || session !== current || current.getStatus() !== 'connected') return;
         await refreshAppearance(current);
-        if (closed || session !== current || current.getStatus() !== 'connected') return;
+        if (closed || authorization !== authorizationEpoch || session !== current || current.getStatus() !== 'connected') return;
         setOwnerRelayInvoker((command, args) => current.invokeOwner(command, args));
         ready = true;
+        everReady = true;
+        reconnecting = false;
         watchAppearance();
         error = '';
       } catch (reason) {
-        if (!closed && session === current) error = reason instanceof Error ? reason.message : String(reason);
-      } finally { authorizing = false; }
+        if (!closed && authorization === authorizationEpoch && session === current) error = reason instanceof Error ? reason.message : String(reason);
+      } finally { if (authorization === authorizationEpoch) authorizing = false; }
     };
     void (async () => {
       try {
@@ -91,10 +104,19 @@
           if (closed) return;
           if (state.status === 'connected') void connected(current);
           else {
+            authorizationEpoch += 1;
+            authorizing = false;
             ready = false;
             setOwnerRelayInvoker(null);
             status = state.status === 'awaiting_approval' ? 'Approve this phone on your desktop…' : 'Reconnecting to your desktop…';
-            if (state.error) error = state.error;
+            if (everReady && state.status !== 'rejected') reconnecting = true;
+            else if (state.error) error = state.error;
+            if (state.status === 'rejected') {
+              everReady = false;
+              reconnecting = false;
+              permanentProblem = true;
+              error = state.error || 'This phone was revoked by the desktop. Pair it again to reconnect.';
+            }
           }
         });
       } catch (reason) {
@@ -104,19 +126,36 @@
     const appearancePoll = setInterval(() => {
       if (session && ready) void refreshAppearance(session).catch(reason => { if (!closed) error = `Could not refresh appearance: ${String(reason)}`; });
     }, 10_000);
-    return () => { closed = true; ready = false; setOwnerRelayInvoker(null); if (appearanceTimer) clearTimeout(appearanceTimer); clearInterval(appearancePoll); appearanceStops.forEach(stop => stop()); stop?.(); session?.close(); };
+    const stopReconnectEvents = watchReconnectEvents(() => {
+      const current = session;
+      // Reopen even apparently-connected transports: Wi-Fi/cellular changes
+      // can leave a WebSocket blackholed until an application heartbeat lands.
+      if (!closed && current) {
+        void current.reconnectNow().catch(reason => {
+          if (!closed && session === current) error = String(reason);
+        });
+      }
+    });
+    return () => { closed = true; ready = false; setOwnerRelayInvoker(null); if (appearanceTimer) clearTimeout(appearanceTimer); stopReconnectEvents(); clearInterval(appearancePoll); appearanceStops.forEach(stop => stop()); stop?.(); session?.close(); };
   });
 </script>
 
-{#if ready}
-  {@render children()}
+{#if everReady}
+  <div class="owner-relay-content" aria-busy={!ready}>
+    {@render children()}
+  </div>
+  {#if reconnecting}
+    <div class="connection-recovery-spinner" data-testid="connection-recovery-spinner" role="status" aria-live="polite">
+      <span class="connection-spinner" aria-hidden="true"></span>
+    </div>
+  {/if}
 {:else}
   <main class="owner-relay-wait">
     <div>
       <h1>Monitter</h1>
       <p role="status">{status}</p>
       {#if error}<p role="alert">{error}</p>{/if}
-      <button type="button" onclick={() => window.location.assign('/mobile?owner=1')}>Pair or reconnect</button>
+      {#if permanentProblem}<button type="button" onclick={() => window.location.assign('/mobile?owner=1')}>Pair or reconnect</button>{/if}
     </div>
   </main>
 {/if}
@@ -128,4 +167,7 @@
   p { line-height: 1.5; }
   [role=alert] { color: #e99b91; }
   button { margin-top: 14px; padding: 11px 15px; border: 1px solid var(--line, #555); border-radius: 8px; background: var(--panel, #222); color: inherit; font: inherit; }
+  .connection-recovery-spinner { position:fixed; right:16px; bottom:calc(16px + env(safe-area-inset-bottom)); z-index:10000; pointer-events:none; color:var(--ink, #eee); }
+  .connection-spinner { display:block; width:18px; height:18px; border:2px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color:currentColor; border-radius:50%; animation:connection-spin .8s linear infinite; }
+  @keyframes connection-spin { to { transform:rotate(360deg); } }
 </style>

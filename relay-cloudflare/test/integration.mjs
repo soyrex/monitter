@@ -19,6 +19,12 @@ if (testResolveIp && (!externalRelayUrl || isIP(testResolveIp) === 0)) throw new
 const relayUrl = externalRelayUrl ?? `ws://127.0.0.1:${port}/relay`;
 const httpOrigin = `http://127.0.0.1:${port}`;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const debug = (...values) => { if (process.env.MONITTER_TEST_DEBUG) console.error(...values); };
+const within = (promise, ms, label) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}.`)), ms);
+  promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+});
+const testIntervals = new Set();
 const opens = url => new Promise((resolve, reject) => {
   const socket = new WebSocket(url);
   socket.once('open', () => resolve(socket));
@@ -27,6 +33,28 @@ const opens = url => new Promise((resolve, reject) => {
 });
 const closes = socket => new Promise(resolve => socket.once('close', (code, reason) => resolve({ code, reason: String(reason) })));
 const messages = socket => new Promise(resolve => socket.once('message', value => resolve(JSON.parse(String(value)))));
+const inbox = socket => {
+  const frames = [];
+  const listeners = new Set();
+  socket.on('message', value => {
+    frames.push(JSON.parse(String(value)));
+    for (const listener of listeners) listener();
+  });
+  const take = predicate => within(new Promise(resolve => {
+    const check = () => {
+      const index = frames.findIndex(predicate);
+      if (index < 0) return;
+      listeners.delete(check);
+      resolve(frames.splice(index, 1)[0]);
+    };
+    listeners.add(check);
+    check();
+  }), 8_000, 'relay frame');
+  return {
+    next: () => take(() => true),
+    nextMatching: predicate => take(predicate),
+  };
+};
 const waitForStatus = (session, expected, ms = 8_000) => new Promise((resolve, reject) => {
   let unsubscribe = () => {};
   let settled = false;
@@ -114,7 +142,106 @@ try {
     const timeout = await opens(`${relayUrl}?room=${'C'.repeat(22)}&role=mobile`);
     // Miniflare may expose an alarm-driven server close as 1006 even though
     // the edge runtime emits its policy close code. Closure is the invariant.
+    debug('waiting for unjoined timeout');
     assert.ok([1006, 1008].includes((await closes(timeout)).code));
+    debug('unjoined timeout closed');
+
+    // The hibernating auto-response is negotiated, exact, and lease-backed.
+    // These run together so the real 45-second lease costs one local wait.
+    const staleRoom = 'S'.repeat(22);
+    const staleDesktop = await opens(`${relayUrl}?room=${staleRoom}&role=desktop`);
+    const staleDesktopInbox = inbox(staleDesktop);
+    staleDesktop.send(JSON.stringify({ type: 'join', room: staleRoom, role: 'desktop', capabilities: ['relay-heartbeat-v1'] }));
+    assert.deepEqual(await staleDesktopInbox.next(), { type: 'joined', capabilities: ['relay-heartbeat-v1'] });
+    const staleMobile = await opens(`${relayUrl}?room=${staleRoom}&role=mobile`);
+    const staleMobileInbox = inbox(staleMobile);
+    const staleMobileClosed = closes(staleMobile);
+    let staleMobilePeerLeft = 0;
+    const staleMobilePongs = [];
+    staleMobile.on('message', value => {
+      const frame = JSON.parse(String(value));
+      if (frame.type === 'peer_left') staleMobilePeerLeft += 1;
+      if (frame.type === 'pong') staleMobilePongs.push(Date.now());
+    });
+    staleMobile.send(JSON.stringify({ type: 'join', room: staleRoom, role: 'mobile', capabilities: ['relay-heartbeat-v1'] }));
+    assert.deepEqual(await staleMobileInbox.next(), { type: 'joined', capabilities: ['relay-heartbeat-v1'] });
+    assert.deepEqual(await staleDesktopInbox.next(), { type: 'peer' });
+    assert.deepEqual(await staleMobileInbox.next(), { type: 'peer' });
+    staleMobile.send('{"type":"ping"}');
+    assert.deepEqual(await staleMobileInbox.next(), { type: 'pong' });
+    const staleMobileKeepAlive = setInterval(() => staleMobile.send('{"type":"ping"}'), 15_000);
+    testIntervals.add(staleMobileKeepAlive);
+    const staleClosed = closes(staleDesktop);
+
+    const liveRoom = 'L'.repeat(22);
+    const liveDesktop = await opens(`${relayUrl}?room=${liveRoom}&role=desktop`);
+    const liveDesktopInbox = inbox(liveDesktop);
+    liveDesktop.send(JSON.stringify({ type: 'join', room: liveRoom, role: 'desktop', capabilities: ['relay-heartbeat-v1'] }));
+    assert.deepEqual(await liveDesktopInbox.next(), { type: 'joined', capabilities: ['relay-heartbeat-v1'] });
+    const liveMobile = await opens(`${relayUrl}?room=${liveRoom}&role=mobile`);
+    const liveMobileInbox = inbox(liveMobile);
+    liveMobile.send(JSON.stringify({ type: 'join', room: liveRoom, role: 'mobile', capabilities: ['relay-heartbeat-v1'] }));
+    assert.deepEqual(await liveMobileInbox.next(), { type: 'joined', capabilities: ['relay-heartbeat-v1'] });
+    assert.deepEqual(await liveDesktopInbox.next(), { type: 'peer' });
+    assert.deepEqual(await liveMobileInbox.next(), { type: 'peer' });
+    liveDesktop.send('{"type":"ping"}');
+    assert.deepEqual(await liveDesktopInbox.next(), { type: 'pong' });
+    const keepAlive = setInterval(() => liveDesktop.send('{"type":"ping"}'), 15_000);
+    testIntervals.add(keepAlive);
+
+    const legacyRoom = 'G'.repeat(22);
+    const legacyDesktop = await opens(`${relayUrl}?room=${legacyRoom}&role=desktop`);
+    const legacyDesktopInbox = inbox(legacyDesktop);
+    legacyDesktop.send(JSON.stringify({ type: 'join', room: legacyRoom, role: 'desktop' }));
+    assert.deepEqual(await legacyDesktopInbox.next(), { type: 'joined' });
+    const legacyMobile = await opens(`${relayUrl}?room=${legacyRoom}&role=mobile`);
+    const legacyMobileInbox = inbox(legacyMobile);
+    legacyMobile.send(JSON.stringify({ type: 'join', room: legacyRoom, role: 'mobile' }));
+    assert.deepEqual(await legacyMobileInbox.next(), { type: 'joined' });
+    assert.deepEqual(await legacyDesktopInbox.next(), { type: 'peer' });
+    assert.deepEqual(await legacyMobileInbox.next(), { type: 'peer' });
+
+    // The 15-second production cadence must have received two scheduled pongs
+    // before the desktop's initial 45-second lease reaches its alarm.
+    await delay(35_000);
+    assert.ok(staleMobilePongs.length >= 3, `expected initial plus two 15s pongs, received ${staleMobilePongs.length}: ${staleMobilePongs.join(',')}`);
+
+    // A negotiated stale reservation is removed by its alarm. A live role
+    // cannot be displaced, while a fully legacy pair is still long-lived.
+    debug('waiting for negotiated stale close');
+    assert.ok([1006, 1008].includes((await within(staleClosed, 60_000, 'negotiated stale close')).code));
+    debug('negotiated stale socket closed');
+    const departure = await within(Promise.race([
+      staleMobileInbox.nextMatching(frame => frame.type === 'peer_left').then(frame => ({ kind: 'peer_left', frame })),
+      staleMobileClosed.then(close => ({ kind: 'closed', close })),
+    ]), 8_000, 'stale peer departure');
+    assert.equal(departure.kind, 'peer_left', `heartbeat peer closed instead of receiving peer_left after pongs ${JSON.stringify(staleMobilePongs)}: ${JSON.stringify(departure)}`);
+    assert.deepEqual(departure.frame, { type: 'peer_left' });
+    // The stale socket's close event and its peer's message are independent
+    // WebSocket deliveries. Give the already-received frame one event turn
+    // before asserting the observer count below.
+    await delay(0);
+    assert.equal(staleMobilePeerLeft, 1);
+    clearInterval(keepAlive);
+    testIntervals.delete(keepAlive);
+    const replacement = await opens(`${relayUrl}?room=${staleRoom}&role=desktop`);
+    const replacementInbox = inbox(replacement);
+    replacement.send(JSON.stringify({ type: 'join', room: staleRoom, role: 'desktop', capabilities: ['relay-heartbeat-v1'] }));
+    assert.deepEqual(await replacementInbox.next(), { type: 'joined', capabilities: ['relay-heartbeat-v1'] });
+    assert.deepEqual(await staleMobileInbox.nextMatching(frame => frame.type === 'peer'), { type: 'peer' });
+    await delay(250);
+    assert.equal(staleMobilePeerLeft, 1);
+    clearInterval(staleMobileKeepAlive);
+    testIntervals.delete(staleMobileKeepAlive);
+    replacement.close();
+    staleMobile.close();
+    await assert.rejects(opens(`${relayUrl}?room=${liveRoom}&role=desktop`), /409/);
+    assert.equal(legacyDesktop.readyState, WebSocket.OPEN);
+    assert.equal(legacyMobile.readyState, WebSocket.OPEN);
+    liveDesktop.close();
+    liveMobile.close();
+    legacyDesktop.close();
+    legacyMobile.close();
   }
 
   const temporary = await mkdtemp(join(tmpdir(), 'monitter-cloudflare-client-'));
@@ -177,6 +304,7 @@ try {
   }
   console.log('Cloudflare Durable Object relay integration assertions passed.');
 } finally {
+  for (const interval of testIntervals) clearInterval(interval);
   worker?.kill();
   if (worker) await new Promise(resolve => worker.once('exit', resolve));
   if (workerState) await rm(workerState, { recursive: true, force: true });

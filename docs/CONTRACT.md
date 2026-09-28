@@ -1859,6 +1859,37 @@ automatically. Explicit Disconnect forgets the phone's saved pairing. Mutation
 receipts remain session-local, so uncertain sends are never automatically retried.
 Older desktops remain compatible but cannot remember approval until upgraded.
 
+The network address of either device is not part of its pairing identity: both
+connect outbound to the invitation's public WSS relay. Reconnection retains the
+room and pinned keys and derives a fresh encrypted session. The relay's join
+handshake may negotiate `relay-heartbeat-v1`: a client offers it in `join.capabilities`
+and enables it only when `joined.capabilities` advertises it back. Negotiated
+clients send the exact frame `{"type":"ping"}` immediately after joining and
+15 seconds after each exact `{"type":"pong"}` reply. A missing reply for 10 seconds
+closes the local session, rejects outstanding operations, and enters the existing
+bounded reconnect loop. These transport acknowledgements never grant device or
+owner-workspace approval and do not renew the device's authenticated-access policy.
+Legacy relays receive no new heartbeat frames; legacy clients retain their existing
+pairing behaviour. The relay expires negotiated sockets after 45 seconds without a
+heartbeat, including apparently open stale sockets, before allowing a new socket to
+occupy the role. A room ID alone cannot displace a live peer. Cloudflare uses its
+hibernation auto-response timestamp for this lease; application payloads remain opaque.
+
+Desktop, mobile bootstrap, and owner-workspace routes coalesce foreground, online,
+pageshow, and native `monitter:resume` signals before reconnecting. iOS emits the
+native hint for foreground and satisfied network-path changes only into its trusted
+bundled paired page. Reconnection never clears saved trust or replays an uncertain
+mutation. Physical device handoff testing is separate from local fault-proxy tests.
+
+Once connected, the phone keeps its mounted workspace, readable history, navigation,
+and drafts during recovery. Only a small noninteractive spinner indicates automatic
+reconnection; background polling does not display transient connection errors.
+An attempted network action reports that reconnection is in progress. A send made
+while already disconnected retains the draft and is not queued or automatically
+replayed. If a connection fails during an already-dispatched send, its existing
+unconfirmed-send handling remains in effect. Initial pairing, explicit revocation,
+and incompatible desktop versions still show actionable setup information.
+
 ## Shared operators
 
 Workspace sharing is a separate, opt-in capability built on the same ephemeral,

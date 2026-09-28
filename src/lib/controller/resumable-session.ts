@@ -33,7 +33,7 @@ export async function createResumableDesktopSession(options: ResumableDesktopOpt
   const detach = () => { unsubscribeState?.(); unsubscribePending?.(); unsubscribeOwnerRequest?.(); unsubscribeState = null; unsubscribePending = null; unsubscribeOwnerRequest = null; };
   const scheduleRetry = (ownedGeneration: number) => {
     if (permanentlyClosed || retryTimer || ownedGeneration !== generation) return;
-    const wait = Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5));
+    const wait = Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5)) * (0.8 + Math.random() * 0.4);
     retryTimer = setTimeout(() => {
       retryTimer = null;
       if (!permanentlyClosed && ownedGeneration === generation) void open().catch(reason => {
@@ -101,7 +101,7 @@ export async function createResumableMobileSession(options: ResumableMobileOptio
   const cancelRetry = () => { if (retryTimer) clearTimeout(retryTimer); retryTimer = null; };
   const scheduleRetry = (ownedGeneration: number) => {
     if (permanentlyClosed || retryTimer || ownedGeneration !== generation) return;
-    const wait = Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5));
+    const wait = Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5)) * (0.8 + Math.random() * 0.4);
     retryTimer = setTimeout(() => {
       retryTimer = null;
       if (!permanentlyClosed && ownedGeneration === generation) void open().catch(reason => {

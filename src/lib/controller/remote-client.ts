@@ -84,6 +84,10 @@ const MAX_RELAY_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_INVITATION_BYTES = 1024;
 const PAIRING_TIMEOUT_MS = 5 * 60_000;
 const RELAY_CONNECT_TIMEOUT_MS = 15_000;
+const RELAY_HEARTBEAT_CAPABILITY = 'relay-heartbeat-v1';
+const RELAY_HEARTBEAT_INTERVAL_MS = 15_000;
+const RELAY_HEARTBEAT_TIMEOUT_MS = 10_000;
+const RELAY_PONG = '{"type":"pong"}';
 const MAX_CONCURRENT_DESKTOP_RPCS = 32;
 const SEND_RECEIPT_CAPABILITY = 'send-receipt-v1';
 const REMEMBERED_DEVICE_CAPABILITY = 'remembered-device-v1';
@@ -143,6 +147,10 @@ class PairingConnection {
   private readonly sentSecureAt: number[] = [];
   private readonly pairingTimer: ReturnType<typeof setTimeout>;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatDeadline: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatEnabled = false;
+  private joined = false;
   private lastError: string | undefined;
   private closed = false;
   private verification: string | null = null;
@@ -156,8 +164,35 @@ class PairingConnection {
   getStatus() { return this.status; }
   getVerificationCode() { return this.verification; }
   subscribe(listener: (state: RemoteConnectionState) => void) { this.listeners.add(listener); listener({ status: this.status, ...(this.lastError ? { error: this.lastError } : {}), ...(this.verification ? { verificationCode: this.verification } : {}) }); return () => this.listeners.delete(listener); }
-  protected setStatus(status: RemoteConnectionStatus, error?: string) { if (this.status === status && !error) return; this.status = status; this.lastError = error; for (const listener of this.listeners) listener({ status, ...(error ? { error } : {}), ...(this.verification ? { verificationCode: this.verification } : {}) }); }
+  protected setStatus(status: RemoteConnectionStatus, error?: string) { if (this.closed && !['closed', 'error', 'rejected'].includes(status)) return; if (this.status === status && !error) return; this.status = status; this.lastError = error; for (const listener of this.listeners) listener({ status, ...(error ? { error } : {}), ...(this.verification ? { verificationCode: this.verification } : {}) }); }
   private clearConnectTimer() { if (this.connectTimer) clearTimeout(this.connectTimer); this.connectTimer = null; }
+  private clearHeartbeat() {
+    if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
+    if (this.heartbeatDeadline) clearTimeout(this.heartbeatDeadline);
+    this.heartbeatTimer = null; this.heartbeatDeadline = null; this.heartbeatEnabled = false;
+  }
+  private pingRelay() {
+    if (this.closed || !this.heartbeatEnabled) return;
+    this.heartbeatTimer = null;
+    this.heartbeatDeadline = setTimeout(() => {
+      this.heartbeatDeadline = null;
+      this.fail('The relay connection stopped responding.');
+    }, RELAY_HEARTBEAT_TIMEOUT_MS);
+    try { this.sendRaw({ type: 'ping' }); }
+    catch { this.fail('The relay connection was interrupted.'); }
+  }
+  private receivePong() {
+    if (this.closed || !this.heartbeatEnabled || !this.heartbeatDeadline) return;
+    clearTimeout(this.heartbeatDeadline); this.heartbeatDeadline = null;
+    this.heartbeatTimer = setTimeout(() => this.pingRelay(), RELAY_HEARTBEAT_INTERVAL_MS);
+  }
+  protected disconnect() {
+    this.closed = true; this.clearConnectTimer(); this.clearHeartbeat(); clearTimeout(this.pairingTimer);
+    this.channel = null; this.peerNonce = null;
+    // Reject pending operations immediately, even when a blackholed socket
+    // cannot complete its close handshake. Reconnection never replays them.
+    this.onDisconnected();
+  }
   protected connect() {
     try {
       const endpoint = new URL(this.invitationData.relayUrl);
@@ -172,12 +207,17 @@ class PairingConnection {
     this.connectTimer = setTimeout(() => {
       if (!this.closed) this.fail(`Could not connect to the pairing relay at ${new URL(this.invitationData.relayUrl).hostname}. Check your network connection and try again.`);
     }, RELAY_CONNECT_TIMEOUT_MS);
-    this.socket.onopen = () => { if (!this.closed) this.sendRaw({ type: 'join', room: this.invitationData.room, role: this.role }); };
-    this.socket.onmessage = event => { this.receiveQueue = this.receiveQueue.then(() => this.receive(event.data)).catch(() => this.fail()); };
+    this.socket.onopen = () => { if (!this.closed) this.sendRaw({ type: 'join', room: this.invitationData.room, role: this.role, capabilities: [RELAY_HEARTBEAT_CAPABILITY] }); };
+    this.socket.onmessage = event => {
+      // A slow authenticated bridge operation must not hide transport liveness.
+      // This is a relay-only acknowledgement and grants no peer authority.
+      if (event.data === RELAY_PONG && this.heartbeatEnabled) { this.receivePong(); return; }
+      this.receiveQueue = this.receiveQueue.then(() => this.receive(event.data)).catch(() => this.fail());
+    };
     this.socket.onerror = () => { if (!this.closed) this.fail('The secure connection to the pairing relay failed. Check your network connection and try again.'); };
-    this.socket.onclose = () => { this.closed = true; this.clearConnectTimer(); clearTimeout(this.pairingTimer); if (this.status !== 'rejected' && this.status !== 'error') this.setStatus('closed'); this.channel = null; this.peerNonce = null; this.onDisconnected(); };
+    this.socket.onclose = () => { if (this.closed) return; this.disconnect(); if (this.status !== 'rejected' && this.status !== 'error') this.setStatus('closed'); };
   }
-  protected sendRaw(value: unknown) { if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(value)); }
+  protected sendRaw(value: unknown) { if (!this.closed && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(value)); }
   private async waitForRelayBudget() {
     while (true) {
       const now = Date.now();
@@ -191,10 +231,12 @@ class PairingConnection {
   }
   protected sendSecure(value: unknown): Promise<void> {
     const send = this.sendQueue.then(async () => {
-      if (!this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Secure pairing has not completed.');
+      if (this.closed || !this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Secure pairing has not completed.');
       await this.waitForRelayBudget();
-      if (!this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Secure pairing has not completed.');
-      this.sendRaw(await this.channel.seal(value));
+      if (this.closed || !this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Secure pairing has not completed.');
+      const frame = await this.channel.seal(value);
+      if (this.closed || this.socket?.readyState !== WebSocket.OPEN) throw new Error('Connection closed.');
+      this.sendRaw(frame);
     });
     this.sendQueue = send.catch(() => undefined);
     return send;
@@ -206,7 +248,15 @@ class PairingConnection {
     if (typeof raw !== 'string' || raw.length > MAX_RELAY_FRAME_BYTES) return this.fail();
     let message: unknown; try { message = JSON.parse(raw); } catch { return this.fail(); }
     const data = asObject(message); if (!data || typeof data.type !== 'string') return this.fail();
-    if (data.type === 'joined') { this.clearConnectTimer(); this.setStatus('waiting_for_peer'); return; }
+    if (data.type === 'joined') {
+      if (this.joined) return this.fail();
+      this.joined = true;
+      this.clearConnectTimer(); this.setStatus('waiting_for_peer');
+      // Do not send new frame types to legacy relays during a rolling upgrade.
+      this.heartbeatEnabled = hasCapability(data.capabilities, RELAY_HEARTBEAT_CAPABILITY);
+      if (this.heartbeatEnabled) this.pingRelay();
+      return;
+    }
     if (data.type === 'peer') {
       if (this.invitationData.version === 1) this.sendRaw({ type: 'hello', nonce: bytesToBase64url(this.nonce) });
       else await this.sendV2Commit();
@@ -216,7 +266,10 @@ class PairingConnection {
     if (data.type === 'hello') { await this.receiveHello(data); return; }
     if (data.type === 'secure') {
       if (!this.channel || typeof data.seq !== 'number' || typeof data.ciphertext !== 'string') return this.fail();
-      try { await this.onSecure(await this.channel.open(data as unknown as SecureEnvelope)); } catch { this.fail(); }
+      try {
+        const opened = await this.channel.open(data as unknown as SecureEnvelope);
+        if (!this.closed) await this.onSecure(opened);
+      } catch { this.fail(); }
       return;
     }
     this.fail();
@@ -264,12 +317,12 @@ class PairingConnection {
       await this.onChannelReady();
     } catch { this.fail(); }
   }
-  protected fail(error?: string) { this.closed = true; this.clearConnectTimer(); clearTimeout(this.pairingTimer); this.channel = null; this.peerNonce = null; this.setStatus('error', error); this.socket?.close(); this.onDisconnected(); }
+  protected fail(error?: string) { if (this.closed) return; this.disconnect(); this.setStatus('error', error); this.socket?.close(); }
   protected async onChannelReady(): Promise<void> {}
   protected async onSecure(_message: unknown): Promise<void> {}
   protected onDisconnected(): void {}
   protected completePairing() { clearTimeout(this.pairingTimer); }
-  close() { this.closed = true; this.clearConnectTimer(); clearTimeout(this.pairingTimer); this.setStatus('closed'); this.socket?.close(); }
+  close() { if (this.closed) return; this.disconnect(); this.setStatus('closed'); this.socket?.close(); }
 }
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean { if (left.byteLength !== right.byteLength) return false; let mismatch = 0; for (let i = 0; i < left.byteLength; i += 1) mismatch |= left[i] ^ right[i]; return mismatch === 0; }
 
@@ -522,7 +575,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
       if (value.type === 'pair-request') return;
       if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.ownerWorkspaceSupported = invitationData.version === 2 && hasCapability(value.capabilities, OWNER_WORKSPACE_CAPABILITY); this.ownerLargeChunksSupported = this.ownerWorkspaceSupported && hasCapability(value.capabilities, OWNER_LARGE_CHUNKS_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
-      if (value.type === 'rejected') { this.setStatus('rejected'); this.socket?.close(); return; }
+      if (value.type === 'rejected') { this.disconnect(); this.setStatus('rejected'); this.socket?.close(); return; }
       if (value.type === 'owner-workspace-approved') { this.ownerWorkspaceState = 'approved'; this.settleOwnerRequest(); return; }
       if (value.type === 'owner-workspace-rejected') { this.ownerWorkspaceState = 'rejected'; this.settleOwnerRequest(new Error('Desktop declined owner workspace access.')); return; }
       if (value.type === 'owner-workspace-revoked') { this.ownerWorkspaceState = 'none'; this.rejectOwnerRequests(new Error('Owner workspace access was revoked.')); return; }
@@ -675,7 +728,6 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       this.queuedOwnerBytes = 0;
     }
     protected onDisconnected() { this.ownerWorkspaceState = 'none'; this.settleOwnerRequest(new Error('Connection closed.')); for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); } this.pending.clear(); this.rejectOwnerRequests(new Error('Connection closed.')); }
-    close() { this.onDisconnected(); super.close(); }
   }(invitationData, 'mobile', keyPair ? { privateKey: keyPair.privateKey, publicKey, expectedPeerPublicKey } : {});
   return session as MobileSession | CollaboratorMobileSession;
 }

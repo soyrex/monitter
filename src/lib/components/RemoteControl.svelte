@@ -6,6 +6,7 @@
   import { getBridge } from '$lib/bridge';
   import { invokeCommand } from '$lib/command-invoke';
   import { createResumableDesktopSession, type ResumableDesktopSession } from '$lib/controller/resumable-session';
+  import { watchReconnectEvents } from '$lib/controller/reconnect-events';
   import type { DesktopBridge, RemoteConnectionState } from '$lib/controller/remote-client';
   import { clearDesktopPairing, deviceExpiresAt, isRememberedController, isRememberedOwnerWorkspace, MAX_INACTIVITY_DAYS, newDesktopPairing, saveDesktopPairing, loadDesktopPairing, type DesktopPairingRecord, type RememberedController } from '$lib/controller/pairing-store';
   import { DEFAULT_RELAY, registerPairingCode, revokePairingCode, type PairingRegistration } from '$lib/controller/pairing-code';
@@ -133,6 +134,9 @@
   function deviceState(device:RememberedController){const expires=expiry(device);if(expires!==null&&expires<=now)return'expired';return session?.getPeerControllerPublicKey()===device.publicKey&&status==='connected'?'connected':'offline';}
   function stamp(value:number){return new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(value);}
   onMount(()=>{
+    const stopRecovery=watchReconnectEvents(()=>{
+      if(session)void session.reconnectNow().catch(reason=>{error='Could not reconnect remote access: '+String(reason);});
+    });
     const current=generation;
     void(async()=>{
       try{
@@ -142,6 +146,7 @@
       }catch(reason){if(current===generation)error='Could not restore remote access: '+String(reason);}
       finally{loaded=true;}
     })();
+    return stopRecovery;
   });
   onDestroy(()=>{clearInterval(timer);closeRuntime();});
 </script>

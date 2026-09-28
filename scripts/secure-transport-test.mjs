@@ -8,8 +8,10 @@ import { SecureChannel, bytesToBase64url, deriveDirectionalKeys, pairingCommitme
 
 globalThis.WebSocket = WebSocket;
 const once = (predicate, ms = 5_000) => new Promise((resolve, reject) => {
-  const timer = setTimeout(() => reject(new Error('Timed out waiting for transport state.')), ms);
-  const stop = predicate(value => { clearTimeout(timer); stop(); resolve(value); });
+  const origin = new Error('Timed out waiting for transport state.');
+  let stop = () => {};
+  const timer = setTimeout(() => { stop(); reject(origin); }, ms);
+  stop = predicate(value => { clearTimeout(timer); queueMicrotask(() => stop()); resolve(value); });
 });
 const relayReady = relay => new Promise((resolve, reject) => {
   let output = '';
@@ -92,7 +94,44 @@ try {
   assert.equal(healthy.getStatus(),'waiting_for_peer');
   mock.timers.tick(15000);
   assert.equal(healthy.getStatus(),'waiting_for_peer');
+  assert.equal(healthySocket.sent.length,1,'legacy relays never receive a new heartbeat frame');
   healthy.close();
+
+  const heartbeat=await createDesktopSession('wss://relay.example/relay',{});
+  const heartbeatSocket=stalledSockets.at(-1);
+  heartbeatSocket.readyState=1;heartbeatSocket.onopen();
+  assert.ok(JSON.parse(heartbeatSocket.sent[0]).capabilities.includes('relay-heartbeat-v1'));
+  heartbeatSocket.onmessage({data:JSON.stringify({type:'joined',capabilities:['relay-heartbeat-v1']})});
+  await Promise.resolve();
+  assert.deepEqual(JSON.parse(heartbeatSocket.sent.at(-1)),{type:'ping'});
+  // A transport acknowledgement is not pairing or desktop approval.
+  heartbeatSocket.onmessage({data:'{"type":"pong"}'});
+  assert.equal(heartbeat.getStatus(),'waiting_for_peer');
+  mock.timers.tick(14999);
+  assert.equal(heartbeatSocket.sent.length,2);
+  mock.timers.tick(1);
+  assert.equal(heartbeatSocket.sent.length,3);
+  // Model an OPEN socket whose path and close handshake are blackholed.
+  heartbeatSocket.close=()=>{heartbeatSocket.readyState=2;};
+  mock.timers.tick(9999);
+  assert.equal(heartbeat.getStatus(),'waiting_for_peer');
+  mock.timers.tick(1);
+  assert.equal(heartbeat.getStatus(),'error');
+  heartbeatSocket.onmessage({data:'{"type":"pong"}'});
+  heartbeatSocket.onmessage({data:'{"type":"joined"}'});
+  await Promise.resolve();
+  mock.timers.tick(60000);
+  assert.equal(heartbeat.getStatus(),'error','late events cannot revive a dead session');
+  assert.equal(heartbeatSocket.sent.length,3,'dead sessions stop sending heartbeats');
+
+  const stopped=await createDesktopSession('wss://relay.example/relay',{});
+  const stoppedSocket=stalledSockets.at(-1);
+  stoppedSocket.readyState=1;stoppedSocket.onopen();
+  stoppedSocket.onmessage({data:'{"type":"joined","capabilities":["relay-heartbeat-v1"]}'});
+  await Promise.resolve();
+  stopped.close();
+  mock.timers.tick(60000);
+  assert.equal(stopped.getStatus(),'closed','intentional close cancels heartbeat deadlines');
 } finally {mock.timers.reset();globalThis.WebSocket=WebSocket;}
 
 // Directional keys must decrypt only in their intended direction and refuse replay.
@@ -178,6 +217,51 @@ try {
   await sharingDesktop.approve();
   await once(callback => visitor.subscribe(state => { if (state.status === 'connected') callback(state); }));
   visitor.close(); sharingDesktop.close();
+
+  // WebCrypto can complete after a network failure or an explicit close. A
+  // dropped approval must reject its caller, and a late decrypted rejection
+  // cannot overwrite the state of an already-disconnected session.
+  const sealingDesktop = await createDesktopSession(relayUrl, bridge);
+  const sealingPending = once(callback => sealingDesktop.subscribe(state => { if (state.status === 'pending') callback(state); }));
+  const sealingMobile = await createMobileSession(sealingDesktop.invitation);
+  await sealingPending;
+  const originalSeal = SecureChannel.prototype.seal;
+  let sealStarted, releaseSeal;
+  const sealingStarted = new Promise(resolve => { sealStarted = resolve; });
+  const sealingGate = new Promise(resolve => { releaseSeal = resolve; });
+  SecureChannel.prototype.seal = async function(value) {
+    const encrypted = await originalSeal.call(this, value);
+    if (value.type === 'approved') { sealStarted(); await sealingGate; }
+    return encrypted;
+  };
+  try {
+    const approving = sealingDesktop.approve();
+    const outcome = approving.then(() => null, error => error);
+    await sealingStarted;
+    sealingDesktop.close(); releaseSeal();
+    assert.match(String(await outcome), /Connection closed/);
+    assert.equal(sealingDesktop.getStatus(), 'closed');
+  } finally { releaseSeal(); SecureChannel.prototype.seal = originalSeal; sealingDesktop.close(); sealingMobile.close(); }
+
+  const decryptingDesktop = await createDesktopSession(relayUrl, bridge);
+  const decryptingPending = once(callback => decryptingDesktop.subscribe(state => { if (state.status === 'pending') callback(state); }));
+  const decryptingMobile = await createMobileSession(decryptingDesktop.invitation);
+  await decryptingPending;
+  const originalOpen = SecureChannel.prototype.open;
+  let decryptStarted, releaseDecrypt;
+  const decryptingStarted = new Promise(resolve => { decryptStarted = resolve; });
+  const decryptingGate = new Promise(resolve => { releaseDecrypt = resolve; });
+  SecureChannel.prototype.open = async function(value) {
+    const decrypted = await originalOpen.call(this, value);
+    if (decrypted.type === 'rejected') { decryptStarted(); await decryptingGate; }
+    return decrypted;
+  };
+  try {
+    await decryptingDesktop.reject(); await decryptingStarted;
+    decryptingMobile.close(); releaseDecrypt();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(decryptingMobile.getStatus(), 'closed', 'late decrypted frames cannot change terminal state');
+  } finally { releaseDecrypt(); SecureChannel.prototype.open = originalOpen; decryptingMobile.close(); decryptingDesktop.close(); }
 
   // v1 descriptors remain accepted for mobile compatibility with existing sessions.
   const legacy = await createMobileSession(JSON.stringify({ version: 1, relayUrl, room: 'abcdefghijklmnopqrstuv', secret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }));

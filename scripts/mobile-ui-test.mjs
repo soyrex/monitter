@@ -100,8 +100,22 @@ try {
   expect(Math.abs(mobileBounds.width-390)).toBeLessThan(1);
   expect(Math.abs(mobileBounds.height-844)).toBeLessThan(1);
   await phone.screenshot({path:'verification/mobile-chat-test.png'});
+  await phone.getByRole('button',{name:'Workspace',exact:true}).click();
+  await phone.getByRole('button',{name:'Controller test'}).click();
+  await phone.getByLabel('Message',{exact:true}).fill('Draft while offline');
+  await host.evaluate(()=>window.desktop.close());
+  await expect(phone.getByTestId('connection-recovery-spinner')).toBeVisible();
+  await expect(phone.locator('header strong')).toHaveText('Controller test');
+  await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Draft while offline');
+  // Let the normal two-second background refresh fire while the relay is down.
+  await phone.waitForTimeout(2200);
+  await expect(phone.locator('.error')).toHaveCount(0);
+  await phone.getByRole('button',{name:'Send message'}).click();
+  await expect(phone.locator('.error')).toHaveText('Reconnecting to your desktop. Try again once connected.');
+  await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Draft while offline');
+  expect(await host.evaluate(()=>window.testSends)).toBe(1);
   await phone.getByRole('button',{name:'Disconnect',exact:true}).click();
   await expect(phone.getByRole('button',{name:'Connect to desktop'})).toBeVisible();
   if(errors.length)throw Error(errors.join('\n'));
-  console.log('WebKit phone UI: approval, chat, single send, disconnect passed (test bridge).');
+  console.log('WebKit phone UI: approval, chat, single send, quiet reconnect, preserved draft, disconnect passed (test bridge).');
 } finally {await browser?.close();for(const child of children)child.kill('SIGTERM');}

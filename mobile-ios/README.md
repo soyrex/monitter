@@ -1,8 +1,14 @@
 # Monitter iOS shell
 
-This is a small native SwiftUI container with two connections:
+This is a small native SwiftUI container with two connections. On a fresh
+launch it opens the paired relay workspace first, so a previously paired phone
+reconnects over Wi-Fi or cellular without selecting a network or entering an
+IP address. If the app returns from the background or the iPhone changes
+network path, the shell asks the already-loaded page to resume once; it keeps
+the same WebKit instance, origin, pairing keys, and page state instead of
+reloading it.
 
-- **Owner LAN workspace** opens the same live responsive site as a phone browser.
+- **Owner LAN workspace (advanced)** opens the same live responsive site as a phone browser.
   Enter the address shown in desktop Settings → LAN access, such as
   `http://192.168.1.20:18436/`. The Mac must be running and reachable on the
   same network. The site and its owner permissions come from the desktop LAN
@@ -17,7 +23,10 @@ This is a small native SwiftUI container with two connections:
   without repeatedly disconnecting the paired connection.
 
 The connection chooser saves only the LAN base address, never an access code.
-The native connection control lets you switch modes or change that address.
+Choosing local LAN is explicit and remains the saved preference until changed;
+the app never upgrades or changes that trust decision. If that local address is
+unavailable away from the LAN, choose the paired workspace to use the saved
+relay pairing instead.
 
 ## Build the web bundle
 
@@ -73,6 +82,19 @@ window.dispatchEvent(new CustomEvent('monitter:qr', { detail: invitation }))
 The route should listen for `monitter:qr` and validate/paste the invitation
 using its ordinary invitation flow. The shell deliberately does not interpret
 or persist QR payloads.
+
+## Focused lifecycle check
+
+```sh
+node scripts/network-recovery-run.mjs
+npm run test:owner-relay-ui
+```
+
+These exercise silent connection failures and foreground recovery in the real
+encrypted client and WebKit owner route. Build the web assets first for the UI
+test. Use `./mobile-ios/build-simulator.sh` to compile the native lifecycle hooks
+against an installed iOS SDK. Physical Wi-Fi/cellular and lock/unlock checks
+remain separate from these local tests.
 
 ## Install on iPhone with a free Personal Team
 

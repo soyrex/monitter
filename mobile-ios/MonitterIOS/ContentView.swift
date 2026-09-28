@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import Network
 
 private enum ConnectionMode: Equatable {
     case chooser
@@ -10,7 +11,9 @@ private enum ConnectionMode: Equatable {
 struct ContentView: View {
     @AppStorage("ownerLANBaseURL") private var savedLANAddress = ""
     @AppStorage("lastConnectionMode") private var savedMode = ""
-    @State private var mode: ConnectionMode = .chooser
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var connectionRecovery = WebConnectionRecovery()
+    @State private var mode: ConnectionMode = .paired
     @State private var address = ""
     @State private var scannerPresented = false
     @State private var webView: WKWebView?
@@ -30,7 +33,9 @@ struct ContentView: View {
             case .paired, .lan:
                 GeometryReader { geometry in
                     ZStack(alignment: .topTrailing) {
-                        WebContentView(webView: $webView, url: webURL, error: startError, requestScan: {
+                        WebContentView(webView: $webView, url: webURL, error: startError, webViewReady: { view in
+                            connectionRecovery.setWebView(view)
+                        }, requestScan: {
                             scannerPresented = true
                         }, requestConnectionChooser: {
                             editingAddress = true
@@ -89,10 +94,16 @@ struct ContentView: View {
             if savedMode == "lan", !savedLANAddress.isEmpty, let url = LANAddress.parse(savedLANAddress) {
                 mode = .lan(url)
                 webURL = url
-            } else if savedMode == "paired" {
+            } else {
                 mode = .paired
             }
             startServerIfNeeded()
+        }
+        .task(id: webURL) {
+            connectionRecovery.setTrustedURL(webURL)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { connectionRecovery.resumeAfterForeground() }
         }
         .sheet(isPresented: $editingAddress) { connectionChooser }
         .fullScreenCover(isPresented: $scannerPresented) {
@@ -108,7 +119,13 @@ struct ContentView: View {
     private var connectionChooser: some View {
         NavigationStack {
             Form {
-                Section("Owner workspace") {
+                Section("Paired owner workspace") {
+                    Text("Your saved phone pairing reconnects through the Monitter relay wherever this phone has internet access. No network or IP address selection is needed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Use paired workspace") { usePairedMode() }
+                }
+                Section("Advanced: local network workspace") {
                     TextField("http://192.168.1.20:18436", text: $address)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
@@ -116,14 +133,11 @@ struct ContentView: View {
                     Text("Enter the Monitter desktop address on your local network. HTTP is accepted for private IPv4 and .local addresses; HTTPS requires port 18436.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Button("Connect to owner workspace") { connectToLAN() }
+                    Button("Use saved local workspace") { connectToLAN() }
                         .disabled(LANAddress.parse(address) == nil)
-                }
-                Section("Owner workspace via Monitter relay") {
-                    Text("Use the same responsive workspace away from your local network. Your desktop must separately approve full-workspace access for this phone.")
+                    Text("This only uses the explicitly saved local address. Away from that LAN, return to the paired workspace; it keeps the existing pairing and trust decision.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Button("Connect through relay") { usePairedMode() }
                 }
                 if let startError {
                     Section("Connection status") {
@@ -277,10 +291,87 @@ private final class MonitterWebView: WKWebView {
     override var inputAccessoryView: UIView? { nil }
 }
 
+/// Keeps a persistent WebKit page and asks its already-paired transport to
+/// resume after iOS foreground or network-path changes. It deliberately never
+/// reloads the page: the browser session owns reconnect/backoff and persistent
+/// pairing keys.
+@MainActor
+private final class WebConnectionRecovery: ObservableObject {
+    private let pathMonitor = NWPathMonitor()
+    private let pathQueue = DispatchQueue(label: "com.soyrex.monitter.network-path")
+    private weak var webView: WKWebView?
+    private var trustedURL: URL?
+    private var pendingResume: DispatchWorkItem?
+    private var hasObservedPath = false
+
+    init() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let status = path.status
+            DispatchQueue.main.async { self?.networkPathChanged(status: status) }
+        }
+        pathMonitor.start(queue: pathQueue)
+    }
+
+    deinit {
+        pendingResume?.cancel()
+        pathMonitor.cancel()
+    }
+
+    func setWebView(_ webView: WKWebView) {
+        self.webView = webView
+    }
+
+    func setTrustedURL(_ url: URL?) {
+        trustedURL = url
+    }
+
+    func resumeAfterForeground() {
+        queueResume()
+    }
+
+    private func networkPathChanged(status: NWPath.Status) {
+        // NWPathMonitor reports its initial state immediately. It is not a
+        // recovery, and reacting to it would duplicate the launch connection.
+        // Two usable Wi-Fi paths can have different routes/DNS while reporting
+        // the same interface type. Do not discard such path changes.
+        defer { hasObservedPath = true }
+        guard hasObservedPath, status == .satisfied else { return }
+        queueResume()
+    }
+
+    private func queueResume() {
+        guard trustedURL != nil else { return }
+        pendingResume?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.dispatchResume() }
+        pendingResume = work
+        // UIApplication and NWPathMonitor commonly report the same recovery
+        // together. Coalescing here leaves one reconnect request for WebKit.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300), execute: work)
+    }
+
+    private func dispatchResume() {
+        pendingResume = nil
+        guard let trustedURL, isPairedLoopback(trustedURL), let webView, matchesTrustedOrigin(webView.url, trustedURL) else { return }
+        webView.evaluateJavaScript("window.dispatchEvent(new CustomEvent('monitter:resume'))")
+    }
+
+    private func matchesTrustedOrigin(_ pageURL: URL?, _ trustedURL: URL) -> Bool {
+        guard let pageURL else { return false }
+        return pageURL.scheme?.lowercased() == trustedURL.scheme?.lowercased()
+            && pageURL.host?.lowercased() == trustedURL.host?.lowercased()
+            && pageURL.port == trustedURL.port
+    }
+
+    private func isPairedLoopback(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "http" && url.host == "127.0.0.1" && url.port == 31977
+    }
+}
+
 private struct WebContentView: UIViewRepresentable {
     @Binding var webView: WKWebView?
     let url: URL?
     let error: String?
+    let webViewReady: (WKWebView) -> Void
     let requestScan: () -> Void
     let requestConnectionChooser: () -> Void
     let navigationError: (String) -> Void
@@ -301,6 +392,7 @@ private struct WebContentView: UIViewRepresentable {
         view.isOpaque = false
         view.backgroundColor = .systemBackground
         webView = view
+        webViewReady(view)
         return view
     }
 

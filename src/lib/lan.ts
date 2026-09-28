@@ -1,5 +1,7 @@
 import { invokeCommand } from './command-invoke';
 import { createCommandGuard } from './command-protocol';
+import { OwnerRelayDisconnectedError } from './owner-relay-error.js';
+export { OwnerRelayDisconnectedError, isOwnerRelayDisconnectedError } from './owner-relay-error.js';
 export type { LanServerInfo } from './types';
 
 /** The installed iOS shell serves its bundled UI only from this private loopback origin. */
@@ -17,6 +19,7 @@ type OwnerRelayInvoker = (command: string, args: Record<string, unknown>) => Pro
 let ownerRelayInvoker: OwnerRelayInvoker | null = null;
 /** Only the owner relay gate registers this provider after an approved session. */
 export function setOwnerRelayInvoker(invoke: OwnerRelayInvoker | null): void { ownerRelayInvoker = invoke; }
+export const isOwnerRelayReconnecting = () => isOwnerRelayBrowser() && !ownerRelayInvoker;
 const storageKey = 'monitter.lan.access';
 export function accessKey(): string { return sessionStorage.getItem(storageKey) ?? ''; }
 export function setAccessKey(key: string) { sessionStorage.setItem(storageKey, key.trim()); }
@@ -27,8 +30,15 @@ export async function lanInvoke<T>(command: string, args: Record<string, unknown
 }
 async function lanRequest<T>(command: string, args: Record<string, unknown>): Promise<T> {
   if (isOwnerRelayBrowser()) {
-    if (!ownerRelayInvoker) throw new Error('The owner relay is not connected. Reconnect this phone to the desktop.');
-    return ownerRelayInvoker(command, args) as Promise<T>;
+    const invoke = ownerRelayInvoker;
+    if (!invoke) throw new OwnerRelayDisconnectedError();
+    try { return await invoke(command, args) as T; }
+    catch (reason) {
+      // A request can lose its transport after dispatch. Classify that failure
+      // for quiet background refreshes; never retry the command here.
+      if (invoke !== ownerRelayInvoker) throw new OwnerRelayDisconnectedError();
+      throw reason;
+    }
   }
   const response = await fetch('/api/invoke', {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessKey()}` },

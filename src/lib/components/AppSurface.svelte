@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { localUuid, isLanBrowser } from '$lib/lan';
+  import { localUuid, isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, OwnerRelayDisconnectedError } from '$lib/lan';
   import { workspaceShareOpen, workspaceShareTaskId } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
   import { DEFAULT_SURFACE_TINT, setSurfaceTint, surfaceTint } from '$lib/surface-tint';
@@ -364,7 +364,7 @@
       usageState.overview = await bridge.getUsageOverview(policy);
       usageState.error = '';
     } catch (reason) {
-      usageState.error = text(reason);
+      if (!isOwnerRelayDisconnectedError(reason)) usageState.error = text(reason);
     } finally {
       usageState.loading = false;
     }
@@ -381,7 +381,7 @@
     codexAccountsLoading = true;
     codexAccountsError = '';
     try { codexAccounts = await bridge.listCodexAccounts(); codexAccountsLoaded = true; }
-    catch (reason) { codexAccountsError = text(reason); }
+    catch (reason) { if (!isOwnerRelayDisconnectedError(reason)) codexAccountsError = text(reason); }
     finally { codexAccountsLoading = false; }
   }
   onMount(() => { void refreshCodexAccounts(); });
@@ -913,7 +913,7 @@
         const result = await bridge.getTaskGoal(taskId);
         if (!cancelled && revision === goalRequestRevision) { goal = result; goalError = ""; }
       } catch (reason) {
-        if (!cancelled && revision === goalRequestRevision) goalError = text(reason);
+        if (!cancelled && revision === goalRequestRevision && !isOwnerRelayDisconnectedError(reason)) goalError = text(reason);
       } finally { pending = false; }
     }
     untrack(() => { void refreshGoal(); });
@@ -938,7 +938,7 @@
   const timelineEvents = $derived([...(timelinePage?.events ?? visibleEvents)]
     .filter(event => !isNativeMessageTransportArtifact(event))
     .sort((a, b) => b.createdAt - a.createdAt));
-  async function loadTimeline(taskId: string, before?: number) {
+  async function loadTimeline(taskId: string, before?: number, reportDisconnect = false) {
     const current = timelinePages[taskId];
     if (current?.loading) return;
     timelinePages = { ...timelinePages, [taskId]: { events: current?.events ?? [], nextBefore: current?.nextBefore ?? null, loading: true, error: '', loadedOlder: current?.loadedOlder ?? false } };
@@ -957,7 +957,8 @@
       timelinePages = { ...timelinePages, [taskId]: { events, nextBefore: before === undefined && loadedOlder ? (previous ? previous.nextBefore : page.nextBefore) : page.nextBefore, loading: false, error: '', loadedOlder } };
     } catch (reason) {
       const page = timelinePages[taskId];
-      timelinePages = { ...timelinePages, [taskId]: { events: page?.events ?? [], nextBefore: page?.nextBefore ?? null, loading: false, error: `Could not load full activity: ${text(reason)}`, loadedOlder: page?.loadedOlder ?? false } };
+      const failure = !reportDisconnect && before === undefined && isOwnerRelayDisconnectedError(reason) ? '' : `Could not load full activity: ${text(reason)}`;
+      timelinePages = { ...timelinePages, [taskId]: { events: page?.events ?? [], nextBefore: page?.nextBefore ?? null, loading: false, error: failure, loadedOlder: page?.loadedOlder ?? false } };
     }
   }
   let eventDetailChunksSupported: boolean | null = null;
@@ -1153,7 +1154,7 @@
           subagentTranscriptErrors[subagent.id] = '';
         }
       } catch (reason) {
-        if (!cancelled) subagentTranscriptErrors[subagent.id] = String(reason);
+        if (!cancelled && !isOwnerRelayDisconnectedError(reason)) subagentTranscriptErrors[subagent.id] = String(reason);
       } finally {
         reading = false;
         if (!cancelled) subagentTranscriptLoading[subagent.id] = false;
@@ -2417,6 +2418,7 @@
       scheduleUsageRefresh();
       workspaceConnected = bridge.available;
     } catch (reason) {
+      if (isOwnerRelayDisconnectedError(reason)) return;
       workspaceConnected = false;
       error = text(reason);
     }
@@ -3417,7 +3419,13 @@
       forkError = `Could not fork this chat: ${text(reason)}`;
     } finally { busy = false; }
   }
+  function reportUnavailableConnection() {
+    if (!isOwnerRelayReconnecting()) return false;
+    error = new OwnerRelayDisconnectedError().message;
+    return true;
+  }
   async function send() {
+    if (reportUnavailableConnection()) return;
     if (busy || handleSlashSubmit()) return;
     if (currentDraftId) { await createTask(); return; }
     if (!selectedTask || !canSend || busy) return;
@@ -3488,6 +3496,7 @@
     } catch (reason) { error = `Could not choose folder: ${text(reason)}`; }
   }
   async function createTask() {
+    if (reportUnavailableConnection()) return;
     if (busy) return;
     const draftId = currentDraftId;
     const draft = draftId ? taskDrafts[draftId] : null;
@@ -3959,7 +3968,7 @@
       providerSlashCommands = commands;
       slashCommandTask = taskId;
     } catch (reason) {
-      if (revision === slashCommandRevision && selectedTask?.id === taskId) slashCommandsError = text(reason);
+      if (revision === slashCommandRevision && selectedTask?.id === taskId && !isOwnerRelayDisconnectedError(reason)) slashCommandsError = text(reason);
     } finally {
       if (revision === slashCommandRevision) slashCommandsLoading = false;
     }
@@ -4729,6 +4738,7 @@
   async function editQueuedMessage(id:string,text:string) { return Boolean(await run(()=>bridge.editQueuedMessage(id,text))); }
   async function removeQueuedMessage(id:string) { await run(()=>bridge.cancelQueuedMessage(id)); }
   async function sendChannel() {
+    if (reportUnavailableConnection()) return;
     if (busy) return;
     const boardProjectId = activeChannel ? projectBoardId(activeChannel.id) : null;
     if (boardProjectId) {
@@ -5086,8 +5096,10 @@
           <div>
             <p class="eyebrow">WORKSPACE · {workspaceLabel}</p>
             {#if !embedded}<div class="workspace-health" role="status" title="Connection reflects the latest workspace refresh; counts cover all saved agents and active tasks.">
-              <span class="connection-light" class:connected={workspaceConnected===true} aria-hidden="true"></span>
-              <span>{!bridge.available?'Preview only':workspaceConnected===true?'Connected':workspaceConnected===false?'Connection unavailable':'Connecting…'}</span>
+              {#if !isOwnerRelayBrowser()}
+                <span class="connection-light" class:connected={workspaceConnected===true} aria-hidden="true"></span>
+                <span>{!bridge.available?'Preview only':workspaceConnected===true?'Connected':workspaceConnected===false?'Connection unavailable':'Connecting…'}</span>
+              {/if}
               <span>{visibleAgents.length} {visibleAgents.length===1?'agent':'agents'} · {visibleTasks.filter(task=>task.status==='running'&&!task.archived).length} running</span>
             </div>{/if}
             <h1>
@@ -5415,7 +5427,7 @@
           <SidebarResize side="right"/>
             {@render detailTabs()}
             <GitPane taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} statusOnly onStatus={value=>{gitState=value}}/>
-            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
+            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id, undefined, true); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
             <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll approval-history-panel" class:hidden={detailTab!=='approvals'} aria-label="Approval history">
               <header><h2>Approvals</h2><p>Saved rules for this agent, host and folder, plus this chat's resolved requests.</p></header>
               {#if selectedApprovalRules.length}<section class="saved-approvals-sidebar" aria-label="Saved approvals for this chat"><h3>Saved rules</h3><p>Revoking affects future requests only; work already approved keeps running.</p><SavedApprovalRules rules={selectedApprovalRules} agents={visibleAgents} hosts={snapshot.hosts} agentId={selectedTask.agentId} hostId={selectedTask.hostId} cwd={selectedTask.cwd} onrevoke={revokeApprovalRule} revokingId={revokingApprovalRuleId} compact={compactDetail}/></section>{/if}
