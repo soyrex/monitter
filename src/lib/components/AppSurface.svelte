@@ -7125,6 +7125,8 @@
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry { border:0; border-radius:0; background:color-mix(in srgb,var(--tab-strip-color,var(--accent)) 52%,var(--sidebar)); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry.active { background:var(--tab-strip-color,var(--accent)); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry > * { visibility:hidden; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry::after { content:""; position:absolute; z-index:4; right:0; bottom:0; left:0; height:3px; background:color-mix(in srgb,var(--tab-strip-color,var(--accent)) 58%,var(--sidebar)); pointer-events:none; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry.active::after { background:var(--tab-strip-color,var(--accent)); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'] { --tab-strip-color:var(--muted); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'][data-tab-status='running'] { --tab-strip-color:var(--accent); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'][data-tab-status='error'] { --tab-strip-color:#c44c4c; }
