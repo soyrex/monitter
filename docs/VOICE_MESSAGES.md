@@ -1,4 +1,4 @@
-# Voice messages (desktop and owner LAN)
+# Voice messages (desktop, owner LAN, and paired iPhone)
 
 The composer records up to 90 seconds and transcribes the recording on the
 desktop Mac with whisper.cpp. Review the transcript before pressing Send. Only
@@ -36,8 +36,12 @@ sent to the desktop Mac only for transcription. A browser-trusted HTTPS origin
 and microphone permission are required. The LAN device does not need
 whisper.cpp or the model. The transcript returns to the browser composer for
 review, and only that text follows the normal agent message path. Ordinary
-HTTP LAN pages cannot use browser microphone capture. The paired iPhone composer
-does not expose recording yet, and shared visitor clients cannot use it.
+HTTP LAN pages cannot use browser microphone capture. The paired iPhone app uses
+its bundled loopback page and an explicitly approved encrypted owner relay; it
+can record after the iOS microphone permission is granted. The desktop still
+does the transcription, and only transcript text enters the agent message.
+Shared visitor clients cannot use owner voice transcription. The iPhone app
+does not store the WAV or create an audio attachment.
 
 ## LAN HTTPS setup
 

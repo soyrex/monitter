@@ -389,6 +389,7 @@ private struct WebContentView: UIViewRepresentable {
         let view = MonitterWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = context.coordinator
+        view.uiDelegate = context.coordinator
         view.isOpaque = false
         view.backgroundColor = .systemBackground
         webView = view
@@ -413,7 +414,7 @@ private struct WebContentView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         private let requestScan: () -> Void
         private let requestConnectionChooser: () -> Void
         private let navigationError: (String) -> Void
@@ -429,6 +430,22 @@ private struct WebContentView: UIViewRepresentable {
         }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             failed(error)
+        }
+        func webView(
+            _ webView: WKWebView,
+            requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+            initiatedByFrame frame: WKFrameInfo,
+            type: WKMediaCaptureType,
+            decisionHandler: @escaping (WKPermissionDecision) -> Void
+        ) {
+            // The bundled paired workspace is the only HTTP origin that may
+            // request capture. LAN workspaces have no implicit media trust.
+            let isBundledPairedMainFrame = pairedMode
+                && frame.isMainFrame
+                && origin.protocol == "http"
+                && origin.host == "127.0.0.1"
+                && origin.port == 31977
+            decisionHandler(isBundledPairedMainFrame && type == .microphone ? .grant : .deny)
         }
         private func failed(_ error: Error) {
             let nsError = error as NSError

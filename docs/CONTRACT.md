@@ -81,7 +81,9 @@ No fake conversations, progress, token counts, host connections or model replies
   otherwise ordered 32 KiB chunks. Both paths retain a 32 MiB aggregate ceiling,
   2 MiB encrypted-frame ceiling, 60-second transfer timeout, and client pacing
   below the public relay's 120-frames-per-10-seconds limit; ambiguous mutations
-  are not replayed. The owner relay also carries two
+  are not replayed. After a completed voice request transfer, the paired iPhone
+  waits up to six minutes for desktop Whisper transcription; other owner commands
+  retain the one-minute response limit. The owner relay also carries two
   small, validated presentation-only operations in the desktop renderer for app palette,
   surface tint and terminal palette, which are client-local rather than Snapshot fields.
 - `get_snapshot {}` -> Snapshot
@@ -1524,9 +1526,10 @@ to the composer, and normal message delivery sends that text without attaching o
 Transcription accepts only bounded, valid PCM16 WAV input; temporary audio and output files are removed after
 the command. First-run Whisper startup can spend additional time compiling local Metal kernels;
 the native process has a five-minute hard timeout. Errors and process output never contain audio content.
-The transcription command is available to the native owner and the owner LAN view.
-The paired iPhone composer does not expose recording yet; shared visitors cannot
-invoke the owner command. It does not store the WAV or create an
+The transcription command is available to the native owner, the owner LAN view,
+and the paired iPhone through its separately approved encrypted owner relay.
+The iPhone shell grants microphone capture only to its bundled loopback owner
+page. Shared visitors cannot invoke the owner command. It does not store the WAV or create an
 attachment ID. The separate `read_attachment_audio { attachmentId }` reader applies only
 to an already registered WAV attachment, validates MIME type, format, and duration, and
 remains desktop-only. The macOS bundle declares the

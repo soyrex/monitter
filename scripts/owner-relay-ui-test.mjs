@@ -40,6 +40,8 @@ try {
   const controllerTrusted = new Set();
   const ownerTrusted = new Set();
   const ownerCommands = [];
+  const ownerVoiceCalls = [];
+  const ownerSentMessages = [];
   let limitedSnapshotCalls = 0;
   const snapshot = {
     hosts: [],
@@ -61,13 +63,18 @@ try {
     onControllerAccess: key => { controllerTrusted.add(key); },
     isTrustedOwnerWorkspace: key => ownerTrusted.has(key),
     onOwnerWorkspaceAccess: () => {},
-    onOwnerInvoke: async (command) => {
+    onOwnerInvoke: async (command, args) => {
       ownerCommands.push(command);
+      if (command === 'transcribe_voice_message') {
+        ownerVoiceCalls.push(args);
+        return { text: 'Transcript from iPhone' };
+      }
+      if (command === 'send_message') ownerSentMessages.push(args);
       if (command === 'get_owner_appearance') return {
         version: 1, appTheme: { light: 'monitter', dark: 'monitter', accent: null, contrast: 0 },
         surfaceTint: 3, terminalTheme: 'monitter',
       };
-      if (command === 'get_command_capabilities') return { protocolVersion: 1, commands: ['get_snapshot', 'get_usage_overview', 'list_codex_accounts', 'send_message', 'get_task_git_status', 'get_task_goal', 'list_terminals', 'get_task_model_settings', 'get_task_slash_commands'] };
+      if (command === 'get_command_capabilities') return { protocolVersion: 1, commands: ['get_snapshot', 'get_usage_overview', 'list_codex_accounts', 'send_message', 'transcribe_voice_message', 'get_task_git_status', 'get_task_goal', 'list_terminals', 'get_task_model_settings', 'get_task_slash_commands'] };
       if (command === 'get_snapshot' || command === 'send_message') return snapshot;
       if (command === 'list_codex_accounts' || command === 'list_terminals' || command === 'get_task_slash_commands') return [];
       if (command === 'get_usage_overview') return { generatedAt: Date.now(), capturedSince: null, subscriptions: [], providerTotals: [], recentRuns: [] };
@@ -78,6 +85,28 @@ try {
 
   browser = await webkit.launch();
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await phone.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+    });
+    window.MediaRecorder = class {
+      state = 'inactive';
+      mimeType = 'audio/mp4';
+      start() { this.state = 'recording'; }
+      stop() {
+        this.state = 'inactive';
+        this.ondataavailable?.({ data: new Blob([new Uint8Array([1])], { type: this.mimeType }) });
+        this.onstop?.();
+      }
+    };
+    window.AudioContext = class {
+      async decodeAudioData() {
+        return { numberOfChannels: 1, sampleRate: 16_000, length: 16, getChannelData: () => new Float32Array(16) };
+      }
+      async close() {}
+    };
+  });
   // The shell's fixed private origin must enter owner bootstrap even if a
   // WebKit navigation drops the optional ?owner=1 query string.
   await phone.goto(new URL('/mobile', baseUrl).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
@@ -124,6 +153,19 @@ try {
   await phone.getByRole('button', { name: 'Open chat Recovery reading test', exact: true }).click();
   await expect(phone.getByText('Keep this conversation readable while reconnecting.', { exact: true })).toBeVisible();
   const composer = phone.getByRole('textbox', { name: 'Task message', exact: true });
+  const recorder = phone.locator('.composer .voice-recorder');
+  await expect(recorder.getByRole('button', { name: 'Record voice message' })).toBeVisible();
+  await recorder.getByRole('button', { name: 'Record voice message' }).click();
+  await expect(recorder.getByRole('button', { name: 'Stop recording' })).toBeVisible();
+  await recorder.getByRole('button', { name: 'Stop recording' }).click();
+  await expect(composer).toHaveValue('Transcript from iPhone');
+  assert.equal(ownerVoiceCalls.length, 1, 'iPhone audio did not reach desktop transcription');
+  assert.equal(typeof ownerVoiceCalls[0]?.audioBase64, 'string');
+  await phone.getByRole('button', { name: 'Send task message', exact: true }).click();
+  await expect.poll(() => ownerSentMessages.length).toBe(1);
+  assert.deepEqual(ownerSentMessages[0]?.attachmentIds ?? [], [], 'iPhone voice attached audio to the agent message');
+  assert.equal(ownerSentMessages[0]?.text, 'Transcript from iPhone');
+  assert.equal(ownerCommands.includes('store_attachment'), false, 'iPhone audio was stored as an attachment');
   await composer.fill('Preserve this unsent draft');
   await phone.evaluate(() => { window.__networkRecoveryShell = document.querySelector('.app-shell'); });
   desktop.close();
@@ -138,15 +180,15 @@ try {
   await phone.getByRole('button', { name: 'Send task message', exact: true }).click();
   await expect(phone.locator('.alert.error')).toContainText('Reconnecting to your desktop. Try again once connected.');
   await expect(composer).toHaveValue('Preserve this unsent draft');
-  assert.equal(ownerCommands.includes('send_message'), false, 'offline send was dispatched');
+  assert.equal(ownerSentMessages.length, 1, 'offline send was dispatched');
   desktop = await createResumableDesktopSession(desktopOptions);
   await expect(phone.getByTestId('connection-recovery-spinner')).toHaveCount(0);
   await expect.poll(() => desktop.getOwnerWorkspaceState()).toBe('approved');
   assert.equal(desktop.getPeerControllerPublicKey(), phoneKey);
   assert.equal(await phone.evaluate(() => window.__networkRecoveryShell === document.querySelector('.app-shell')), true, 'reconnect remounted the workspace');
   await expect(composer).toHaveValue('Preserve this unsent draft');
-  assert.equal(ownerCommands.includes('send_message'), false, 'reconnect replayed an unsent draft');
-  console.log('WebKit owner relay: approval, foreground recovery, quiet readable outage, and explicit send feedback passed.');
+  assert.equal(ownerSentMessages.length, 1, 'reconnect replayed an unsent draft');
+  console.log('WebKit owner relay: transcript-only voice, approval, foreground recovery, quiet readable outage, and explicit send feedback passed.');
 } finally {
   desktop?.close();
   await browser?.close();

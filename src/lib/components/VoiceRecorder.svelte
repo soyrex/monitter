@@ -5,7 +5,7 @@
   import X from "@lucide/svelte/icons/x";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import { audioBufferToWav16k } from '$lib/voice-wav';
-  import { isLanBrowser } from '$lib/lan';
+  import { isLanBrowser, isOwnerRelayBrowser } from '$lib/lan';
 
   type RecordedFile = { filename: string; mimeType: string; dataBase64: string };
   let { disabled = false, onrecorded }: { disabled?: boolean; onrecorded: (file: RecordedFile) => Promise<void> } = $props();
@@ -14,6 +14,7 @@
   let recording = $state(false);
   let requesting = $state(false);
   let processing = $state(false);
+  let transcribing = $state(false);
   let elapsed = $state(0);
   let error = $state('');
   let stream: MediaStream | undefined;
@@ -42,7 +43,9 @@
     elapsed = 0;
     cancelled = false;
     if (isLanBrowser() && typeof isSecureContext !== 'undefined' && !isSecureContext) {
-      error = 'Voice recording requires a secure context. Open Monitter over HTTPS or localhost.';
+      error = isOwnerRelayBrowser()
+        ? 'Microphone capture is unavailable in this iPhone workspace.'
+        : 'Voice recording requires a secure context. Open Monitter over HTTPS or localhost.';
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined' || typeof AudioContext === 'undefined') {
@@ -120,12 +123,14 @@
       const dataBase64 = await blobToBase64(wav);
       if (cancelled) return;
       const filename = `voice-message-${new Date().toISOString().replace(/[:.]/g, '-')}.wav`;
+      transcribing = true;
       await onrecorded({ filename, mimeType: 'audio/wav', dataBase64 });
     } catch (reason) {
       error = `Could not prepare the recording: ${reason instanceof Error ? reason.message : String(reason)}`;
     } finally {
       await context?.close().catch(() => {});
       chunks = [];
+      transcribing = false;
       processing = false;
       recorder = undefined;
     }
@@ -159,8 +164,8 @@
     <button type="button" class="control stop" aria-label="Stop recording" title="Stop recording" onclick={stop}><Square size={15} fill="currentColor"/></button>
     <button type="button" class="control cancel" aria-label="Cancel recording" title="Cancel recording" onclick={cancel}><X size={15}/></button>
   {:else if processing}
-    <span class="recording-status" role="status"><span class="spinner"><LoaderCircle size={14}/></span>Preparing audio…</span>
-    <button type="button" class="control cancel" aria-label="Cancel recording" title="Discard recording" onclick={cancel}><X size={15}/></button>
+    <span class="recording-status" role="status"><span class="spinner"><LoaderCircle size={14}/></span>{transcribing ? 'Transcribing on desktop…' : 'Preparing audio…'}</span>
+    {#if !transcribing}<button type="button" class="control cancel" aria-label="Cancel recording" title="Discard recording" onclick={cancel}><X size={15}/></button>{/if}
   {:else if requesting}
     <span class="recording-status" role="status"><span class="spinner"><LoaderCircle size={14}/></span>Waiting for microphone…</span>
   {:else}

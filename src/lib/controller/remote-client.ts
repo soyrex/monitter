@@ -100,6 +100,9 @@ const MAX_OWNER_TRANSFER_BYTES = 32 * 1024 * 1024;
 const LEGACY_OWNER_CHUNK_BYTES = 32 * 1024;
 const OWNER_CHUNK_BYTES = 512 * 1024;
 const OWNER_TRANSFER_TIMEOUT_MS = 60_000;
+// Whisper may take up to five minutes on the desktop, especially on first use.
+// Keep the longer wait scoped to voice; transport/chunk limits stay unchanged.
+const OWNER_VOICE_RESPONSE_TIMEOUT_MS = 6 * 60_000;
 // The desktop accepts at most eight active owner commands. Leave room for
 // commands completing on the desktop while their responses reach the phone.
 const MAX_CONCURRENT_MOBILE_OWNER_RPCS = 3;
@@ -557,7 +560,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
   const session = new class extends PairingConnection {
     private readonly pending = new Map<string, { resolve: (value: ControllerResult) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
     private readonly pendingOwner = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-    private readonly queuedOwner: Array<{ id: string; bytes: Uint8Array; resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+    private readonly queuedOwner: Array<{ id: string; command: string; bytes: Uint8Array; resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
     private queuedOwnerBytes = 0;
     private activeOwnerRpcs = 0;
     private readonly incomingOwnerResponses = new Map<string, OwnerTransfer>();
@@ -631,7 +634,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
           this.queuedOwnerBytes -= bytes.byteLength;
           reject(new Error('Owner workspace is busy; try again shortly.'));
         }, OWNER_TRANSFER_TIMEOUT_MS);
-        this.queuedOwner.push({ id, bytes, resolve, reject, timer });
+        this.queuedOwner.push({ id, command, bytes, resolve, reject, timer });
         this.queuedOwnerBytes += bytes.byteLength;
         this.drainOwnerQueue();
       });
@@ -649,7 +652,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
           if (!pending) return;
           this.pendingOwner.delete(request.id);
           pending.reject(new Error('Owner command timed out.'));
-        }, OWNER_TRANSFER_TIMEOUT_MS);
+        }, request.command === 'transcribe_voice_message' ? OWNER_VOICE_RESPONSE_TIMEOUT_MS : OWNER_TRANSFER_TIMEOUT_MS);
         this.pendingOwner.set(request.id, {
           resolve: value => { complete(); request.resolve(value); },
           reject: reason => { complete(); request.reject(reason); },
