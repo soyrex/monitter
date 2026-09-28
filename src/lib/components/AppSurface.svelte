@@ -7641,7 +7641,7 @@
   .mobile-navigation .modern-tabs:not(.compact-tabs) > .topbar:has(> .mobile-back) .tab-entry:first-child { border-left:1px solid var(--line); }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { background:var(--soft); }
-  .modern-tabs:not(.compact-tabs) .tab-entry:hover { box-shadow:inset 0 -1px 0 var(--line); }
+  .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { box-shadow:inset 0 -1px 0 var(--line); }
   .modern-tabs:not(.compact-tabs) .tab-entry > .tab:hover { background:transparent; }
   .modern-tabs:not(.compact-tabs) .workspace-context { padding:0; }
   .modern-tabs:not(.compact-tabs) .top-actions { padding:0 8px; }
