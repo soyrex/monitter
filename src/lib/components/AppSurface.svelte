@@ -4887,7 +4887,7 @@
 {/snippet}
 
 {#snippet attachmentTools()}
-  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
+  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip class="composer-paperclip" size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
 {/snippet}
 
@@ -8512,6 +8512,7 @@
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   .attachment-tools .icon { width: 24px; height: 24px; }
+  .attachment-tools :global(.composer-paperclip) { transform: translate(-5px, -3px); opacity: 0.7; }
   .attachment-tools small { font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .attachment-input { display: none; }
   .composer.drop-files .composer-box { outline: 2px solid var(--accent); background: color-mix(in srgb,var(--accent) 8%,var(--panel)); }
