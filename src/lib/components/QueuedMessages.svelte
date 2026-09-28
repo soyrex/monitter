@@ -33,7 +33,7 @@
   {/each}
 </section>{/if}
 <style>
-  .message-queue { flex:none;max-height:150px;overflow:auto;width:min(var(--chat-content-max-width,900px),calc(100% - 2 * var(--chat-side-padding,clamp(25px,4vw,50px))));margin:0 auto 8px;border-left:2px solid var(--line);padding-left:10px; }
+  .message-queue { flex:none;max-height:150px;overflow:auto;box-sizing:border-box;width:min(var(--chat-content-max-width,900px),calc(100% - 2 * var(--chat-side-padding,clamp(25px,4vw,50px))));margin:0 auto 8px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--soft); }
   .message-queue.editing { max-height:300px; }
   .queue-editor { display:grid; gap:6px; padding:8px 0; font-size:12px; }
   textarea { box-sizing:border-box; width:100%; min-height:70px; resize:vertical; border:1px solid var(--line); border-radius:6px; padding:8px; background:var(--panel); color:var(--ink); font:inherit; }

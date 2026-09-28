@@ -7844,7 +7844,7 @@
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .composer-input-row { display:flex; align-items:flex-end; gap:8px; min-width:0; }
-  .composer-input-row > .attachment-tools { flex:none; }
+  .composer-input-row > .attachment-tools { flex:none; align-self:flex-start; margin-top:3px; margin-right:2px; }
   .composer-input-row > textarea, .composer-input-row > .longform-editor, .composer-input-row > :global(.mention-composer) { flex:1; min-width:0; }
   .composer.expanded .composer-input-row { flex:1; min-height:0; }
   .composer.expanded .composer-input-row > .longform-editor { align-self:stretch; }
@@ -8565,7 +8565,7 @@
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   .attachment-tools .icon { width: 24px; height: 24px; }
-  .attachment-tools :global(.composer-paperclip) { transform: translate(-5px, -3px); opacity: 0.7; }
+  .attachment-tools :global(.composer-paperclip) { opacity: 0.7; }
   .attachment-tools small { font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .attachment-input { display: none; }
   .composer.drop-files .composer-box { outline: 2px solid var(--accent); background: color-mix(in srgb,var(--accent) 8%,var(--panel)); }
