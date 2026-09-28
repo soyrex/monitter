@@ -386,6 +386,7 @@ fn watchdog_terminates_owner_and_drops_buffer_after_timeout() {
     crate::admin_turn_broker::spawn_admin_turn_watchdog(
         broker_weak,
         task_id.clone(),
+        request_id.clone(),
         owner_weak,
         move || {
             owner_for_timeout.terminate_owned();
@@ -496,7 +497,7 @@ fn app_server_event_redirection_skips_snapshot_events_for_admin_task() {
 }
 
 #[test]
-fn broker_rejects_concurrent_registration_with_a_readable_error() {
+fn broker_accepts_three_distinct_task_registrations() {
     let broker = AdminTurnBroker::new();
     let owner_a: Arc<crate::runner::RunControl> = crate::runner::RunControl::new(false);
     let owner_b: Arc<crate::runner::RunControl> = crate::runner::RunControl::new(false);
@@ -514,11 +515,7 @@ fn broker_rejects_concurrent_registration_with_a_readable_error() {
         Arc::downgrade(&owner_b),
         Instant::now() + Duration::from_secs(5),
     );
-    let error = second.expect_err("second registration must reject");
-    assert!(
-        error.contains("Monitter Admin is busy with another interface request"),
-        "unexpected error: {error}"
-    );
+    assert!(second.is_ok());
     drop(receiver_a);
 }
 
@@ -562,6 +559,7 @@ fn broker_ignores_late_completion_when_a_request_was_already_timed_out() {
     crate::admin_turn_broker::spawn_admin_turn_watchdog(
         broker_weak,
         "task-timed".into(),
+        "req-timed".into(),
         owner_weak,
         move || {
             owner_for_timeout.terminate_owned();

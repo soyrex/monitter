@@ -1246,6 +1246,9 @@ pub struct Snapshot {
     /// forward-compatible.
     #[serde(default)]
     pub schedules: Vec<Schedule>,
+    /// Native age-based chat retention, absent in older snapshots.
+    #[serde(default)]
+    pub chat_archive_rules: Vec<crate::auto_archive::ChatArchiveRule>,
     #[serde(default)]
     pub schedule_runs: Vec<ScheduleRun>,
     /// Task IDs created by `throwaway` schedule fires. The scheduler
@@ -1683,6 +1686,7 @@ pub fn default_snapshot() -> Snapshot {
         approval_requests: vec![],
         approval_rules: vec![],
         schedules: vec![],
+        chat_archive_rules: vec![],
         schedule_runs: vec![],
         pending_throwaway_task_ids: vec![],
         settings: Settings {

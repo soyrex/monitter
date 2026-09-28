@@ -1,8 +1,8 @@
 //! Process-local broker for the resident Monitter Admin agent.
 //!
-//! Small interface "mini-LLM" turns route their prompts to a single long-running
-//! task bound to the resident admin agent. The broker ensures that exactly one
-//! admin turn is active at a time, that the only way to complete a registered
+//! Small interface "mini-LLM" turns route their prompts to one of three hidden,
+//! long-running tasks bound to the resident admin agent. The broker ensures that
+//! only one turn owns each task, that the only way to complete a registered
 //! request is through the [`runner::RunControl`] that owns the resident task,
 //! and that an accepted request will never replay a prompt after the task or
 //! transport ends.
@@ -32,7 +32,7 @@ use std::{
     collections::HashMap,
     sync::{
         mpsc::{self, Receiver, Sender},
-        Arc, Mutex, Weak,
+        Arc, Condvar, Mutex, Weak,
     },
     thread,
     time::{Duration, Instant},
@@ -69,16 +69,48 @@ struct AdminTurnRequest {
     closed: bool,
 }
 
+const MAX_CONCURRENT_TURNS: usize = 3;
+
 #[derive(Debug, Default)]
 pub(crate) struct AdminTurnBrokerState {
-    current: Mutex<Option<AdminTurnRequest>>,
+    current: Mutex<HashMap<String, AdminTurnRequest>>,
+    pool: Mutex<AdminTurnPoolState>,
+    pool_changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct AdminTurnPoolState {
+    next_ticket: u64,
+    serving_ticket: u64,
+    reserved: std::collections::HashSet<String>,
+    shutting_down: bool,
+}
+
+/// A FIFO reservation for one invisible admin task. Dropping it only makes the
+/// slot reusable after the caller has finished its terminal cleanup.
+pub(crate) struct AdminTurnPermit {
+    state: Arc<AdminTurnBrokerState>,
+    task_id: String,
+}
+
+impl AdminTurnPermit {
+    pub(crate) fn task_id(&self) -> &str { &self.task_id }
+}
+
+impl Drop for AdminTurnPermit {
+    fn drop(&mut self) {
+        if let Ok(mut pool) = self.state.pool.lock() {
+            pool.reserved.remove(&self.task_id);
+            self.state.pool_changed.notify_all();
+        }
+    }
 }
 
 /// Process-local broker for the resident Monitter Admin agent's mini-LLM turns.
 ///
-/// The broker is intentionally minimal: only one admin turn may be active at a
-/// time, its completion callback is owned by a single [`Weak<RunControl>`],
-/// and a timed-out request removes itself without invoking the callback.
+/// The broker is intentionally minimal: up to three task-isolated admin turns
+/// may be active, each completion callback is owned by its [`Weak<RunControl>`],
+/// and a timed-out request removes only its own generation.
 ///
 /// The state is shared through an internal [` `Arc`] so background watchdog
 /// threads can hold a [`Weak`] reference and exit cleanly when the owning
@@ -93,18 +125,44 @@ impl AdminTurnBroker {
         Self::default()
     }
 
-    /// Returns the internal task id of the currently registered admin turn,
-    /// if any.
+    /// Blocks in FIFO order until one of the supplied hidden task slots is
+    /// available. Queue time deliberately does not start a model deadline.
+    pub(crate) fn acquire_slot(&self, task_ids: &[String]) -> Result<AdminTurnPermit, String> {
+        if task_ids.is_empty() { return Err("No Monitter Admin chat slots are configured.".into()); }
+        let mut pool = self.state.pool.lock().map_err(|_| "Monitter Admin pool lock failed.".to_string())?;
+        let ticket = pool.next_ticket;
+        pool.next_ticket = pool.next_ticket.wrapping_add(1);
+        loop {
+            if pool.shutting_down { return Err("Monitter Admin broker is shutting down.".into()); }
+            if pool.serving_ticket == ticket && pool.reserved.len() < MAX_CONCURRENT_TURNS {
+                if let Some(task_id) = task_ids.iter().find(|id| !pool.reserved.contains(id.as_str())).cloned() {
+                    pool.reserved.insert(task_id.clone());
+                    pool.serving_ticket = pool.serving_ticket.wrapping_add(1);
+                    self.state.pool_changed.notify_all();
+                    return Ok(AdminTurnPermit { state: Arc::clone(&self.state), task_id });
+                }
+            }
+            pool = self.state.pool_changed.wait(pool).map_err(|_| "Monitter Admin pool lock failed.".to_string())?;
+        }
+    }
+
+    /// Returns one active internal task id, if any. Compatibility helper for
+    /// old focused tests; production callers use task-scoped operations.
     pub(crate) fn active_task_id(&self) -> Option<String> {
         self.state
             .current
             .lock()
             .ok()
-            .and_then(|guard| guard.as_ref().map(|request| request.task_id.clone()))
+            .and_then(|guard| guard.values().next().map(|request| request.task_id.clone()))
     }
 
-    /// Register a new admin turn. Fails with a readable error if another turn
-    /// is already registered. The returned [`Receiver`] waits for the broker
+    pub(crate) fn is_active_task(&self, task_id: &str) -> bool {
+        self.state.current.lock().is_ok_and(|guard| guard.contains_key(task_id))
+    }
+
+    /// Register a new admin turn. Fails with a readable error if the selected
+    /// slot is already registered or shutdown won the admission race. The
+    /// returned [`Receiver`] waits for the broker
     /// to deliver a final [`AdminTurnReply`]; a dropped receiver is allowed
     /// but never causes the broker to leak a buffered reply into the snapshot.
     pub(crate) fn try_register(
@@ -115,23 +173,24 @@ impl AdminTurnBroker {
         deadline: Instant,
     ) -> Result<Receiver<AdminTurnReply>, String> {
         let (tx, rx) = mpsc::channel();
+        // Keep pool -> request lock order consistent with reset so a waiter
+        // admitted just before shutdown cannot register afterward.
+        let pool = self.state.pool.lock()
+            .map_err(|_| "Monitter Admin pool lock failed.".to_string())?;
+        if pool.shutting_down { return Err("Monitter Admin broker is shutting down.".into()); }
         let mut guard = self
             .state
             .current
             .lock()
             .map_err(|_| "Monitter Admin broker lock failed.".to_string())?;
-        if let Some(existing) = guard.as_ref() {
-            // The existing entry's owner must still be alive: a dropped
-            // weak reference means the previous transport was lost and the
-            // broker can accept a fresh registration.
-            if existing.owner.strong_count() > 0 && !existing.closed {
-                return Err(format!(
-                    "Monitter Admin is busy with another interface request ({}).",
-                    existing.task_id
-                ));
-            }
+        guard.retain(|_, request| request.owner.strong_count() > 0 && !request.closed);
+        if guard.contains_key(&task_id) {
+            return Err(format!("Monitter Admin task is already handling an interface request ({task_id})."));
         }
-        *guard = Some(AdminTurnRequest {
+        if guard.len() >= MAX_CONCURRENT_TURNS {
+            return Err("Monitter Admin capacity is unavailable.".into());
+        }
+        guard.insert(task_id.clone(), AdminTurnRequest {
             request_id,
             task_id,
             owner,
@@ -143,6 +202,8 @@ impl AdminTurnBroker {
             app_server_prefix_len: None,
             closed: false,
         });
+        drop(guard);
+        drop(pool);
         Ok(rx)
     }
 
@@ -154,7 +215,7 @@ impl AdminTurnBroker {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        let Some(request) = guard.as_mut() else {
+        let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
         if request.task_id != task_id || request.closed {
@@ -164,7 +225,7 @@ impl AdminTurnBroker {
             // The owning transport went away without finalising the broker;
             // remove the entry so the receiver observes a clean
             // disconnection rather than a stale callback.
-            *guard = None;
+            guard.remove(task_id);
             return false;
         }
         if request.buffer.len().saturating_add(delta.len()) > MAX_BUFFER_BYTES {
@@ -173,7 +234,7 @@ impl AdminTurnBroker {
             let _ = request.completion.send(AdminTurnReply::Error(
                 "Monitter Admin reply exceeded the supported size.".into(),
             ));
-            *guard = None;
+            guard.remove(task_id);
             return false;
         }
         request.buffer.push_str(delta);
@@ -189,7 +250,7 @@ impl AdminTurnBroker {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        let Some(request) = guard.as_mut() else {
+        let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
         if request.task_id != task_id || request.closed || request.owner.strong_count() == 0 {
@@ -200,7 +261,7 @@ impl AdminTurnBroker {
                 let _ = request.completion.send(AdminTurnReply::Error(
                     "Monitter Admin reply contained too many message items.".into(),
                 ));
-                *guard = None;
+                guard.remove(task_id);
                 return false;
             }
             request
@@ -222,7 +283,7 @@ impl AdminTurnBroker {
             let _ = request.completion.send(AdminTurnReply::Error(
                 "Monitter Admin reply exceeded the supported size.".into(),
             ));
-            *guard = None;
+            guard.remove(task_id);
             return false;
         }
         request.buffer.truncate(prefix);
@@ -242,7 +303,7 @@ impl AdminTurnBroker {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        let Some(request) = guard.as_mut() else {
+        let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
         if request.task_id != task_id || request.closed {
@@ -250,7 +311,7 @@ impl AdminTurnBroker {
         }
         let text = std::mem::take(&mut request.buffer);
         let _ = request.completion.send(AdminTurnReply::Text(text));
-        *guard = None;
+        guard.remove(task_id);
         true
     }
 
@@ -263,13 +324,13 @@ impl AdminTurnBroker {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        let Some(request) = guard.as_ref() else {
+        let Some(request) = guard.get(task_id) else {
             return false;
         };
         if request.task_id != task_id {
             return false;
         }
-        *guard = None;
+        guard.remove(task_id);
         true
     }
 
@@ -281,14 +342,14 @@ impl AdminTurnBroker {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        let Some(request) = guard.as_mut() else {
+        let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
         if request.task_id != task_id || request.closed {
             return false;
         }
         let _ = request.completion.send(AdminTurnReply::Error(message));
-        *guard = None;
+        guard.remove(task_id);
         true
     }
 
@@ -298,14 +359,30 @@ impl AdminTurnBroker {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        let Some(request) = guard.as_mut() else {
+        let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
         if request.task_id != task_id || request.closed {
             return false;
         }
         let _ = request.completion.send(AdminTurnReply::Timeout);
-        *guard = None;
+        guard.remove(task_id);
+        true
+    }
+
+    fn time_out_if_current(&self, task_id: &str, request_id: &str) -> bool {
+        let mut guard = match self.state.current.lock() { Ok(guard) => guard, Err(_) => return false };
+        let Some(request) = guard.get_mut(task_id) else { return false; };
+        if request.request_id != request_id || request.closed { return false; }
+        let _ = request.completion.send(AdminTurnReply::Timeout);
+        guard.remove(task_id);
+        true
+    }
+
+    fn cancel_silently_if_current(&self, task_id: &str, request_id: &str) -> bool {
+        let mut guard = match self.state.current.lock() { Ok(guard) => guard, Err(_) => return false };
+        if !guard.get(task_id).is_some_and(|request| request.request_id == request_id) { return false; }
+        guard.remove(task_id);
         true
     }
 
@@ -317,14 +394,19 @@ impl AdminTurnBroker {
     /// Reset the broker; used by `Service::cleanup` so a final shutdown never
     /// leaves a registered sender dangling.
     pub(crate) fn reset(&self) {
+        // Set the admission fence before draining requests. `try_register`
+        // holds this pool lock while it obtains the request map.
+        let Ok(mut pool) = self.state.pool.lock() else { return };
+        pool.shutting_down = true;
+        self.state.pool_changed.notify_all();
         if let Ok(mut guard) = self.state.current.lock() {
-            if let Some(request) = guard.as_mut() {
+            for request in guard.values_mut() {
                 request.closed = true;
                 let _ = request.completion.send(AdminTurnReply::Error(
                     "Monitter Admin broker is shutting down.".into(),
                 ));
             }
-            *guard = None;
+            guard.clear();
         }
     }
 }
@@ -345,14 +427,15 @@ pub(crate) const MAX_BUFFER_BYTES: usize = 64 * 1024;
 pub(crate) fn spawn_admin_turn_watchdog(
     broker: Weak<AdminTurnBrokerState>,
     task_id: String,
+    request_id: String,
     owner: Weak<RunControl>,
     on_timeout: impl FnOnce() + Send + 'static,
 ) {
     thread::spawn(move || {
         let deadline = match broker.upgrade() {
             Some(state) => match state.current.lock() {
-                Ok(guard) => match guard.as_ref() {
-                    Some(request) if request.task_id == task_id => request.deadline,
+                Ok(guard) => match guard.get(&task_id) {
+                    Some(request) if request.request_id == request_id => request.deadline,
                     _ => return,
                 },
                 Err(_) => return,
@@ -364,7 +447,7 @@ pub(crate) fn spawn_admin_turn_watchdog(
             if now >= deadline {
                 if let Some(state) = broker.upgrade() {
                     let broker = AdminTurnBroker { state };
-                    if broker.time_out(&task_id) {
+                    if broker.time_out_if_current(&task_id, &request_id) {
                         on_timeout();
                     }
                 }
@@ -375,7 +458,7 @@ pub(crate) fn spawn_admin_turn_watchdog(
             if owner.strong_count() == 0 {
                 if let Some(state) = broker.upgrade() {
                     let broker = AdminTurnBroker { state };
-                    broker.cancel_silently(&task_id);
+                    broker.cancel_silently_if_current(&task_id, &request_id);
                 }
                 return;
             }
@@ -383,8 +466,8 @@ pub(crate) fn spawn_admin_turn_watchdog(
             // watchdog without waiting for the next tick.
             let still_active = match broker.upgrade() {
                 Some(state) => match state.current.lock() {
-                    Ok(guard) => match guard.as_ref() {
-                        Some(request) if request.task_id == task_id && !request.closed => true,
+                    Ok(guard) => match guard.get(&task_id) {
+                        Some(request) if request.request_id == request_id && !request.closed => true,
                         _ => false,
                     },
                     Err(_) => false,
@@ -410,14 +493,14 @@ const WATCHDOG_TICK: Duration = Duration::from_millis(100);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::{mpsc::RecvTimeoutError, mpsc};
 
     fn fresh_request_id(label: &str) -> String {
         format!("req-{label}-{}", crate::id())
     }
 
     #[test]
-    fn try_register_rejects_a_concurrent_request() {
+    fn try_register_accepts_three_distinct_tasks_and_bounds_the_fourth() {
         let broker = AdminTurnBroker::new();
         let owner_a: Arc<RunControl> = RunControl::new(false);
         let owner_b: Arc<RunControl> = RunControl::new(false);
@@ -436,8 +519,46 @@ mod tests {
             Arc::downgrade(&owner_b),
             now + Duration::from_secs(5),
         );
-        assert!(matches!(second, Err(message) if message.contains("Monitter Admin is busy")));
+        assert!(second.is_ok());
+        let owner_c: Arc<RunControl> = RunControl::new(false);
+        assert!(broker.try_register(fresh_request_id("c"), "task-c".into(), Arc::downgrade(&owner_c), now + Duration::from_secs(5)).is_ok());
+        let owner_d: Arc<RunControl> = RunControl::new(false);
+        assert!(matches!(broker.try_register(fresh_request_id("d"), "task-d".into(), Arc::downgrade(&owner_d), now + Duration::from_secs(5)), Err(message) if message.contains("capacity")));
         drop(first);
+    }
+
+    #[test]
+    fn fifo_pool_queues_the_fourth_turn_until_a_slot_drains() {
+        let broker = AdminTurnBroker::new();
+        let tasks = vec!["slot-0".into(), "slot-1".into(), "slot-2".into()];
+        let first = broker.acquire_slot(&tasks).unwrap();
+        let second = broker.acquire_slot(&tasks).unwrap();
+        let third = broker.acquire_slot(&tasks).unwrap();
+        let waiting = broker.clone();
+        let waiting_tasks = tasks.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || { tx.send(waiting.acquire_slot(&waiting_tasks).map(|permit| permit.task_id().to_string())).unwrap(); });
+        assert!(matches!(rx.recv_timeout(Duration::from_millis(30)), Err(RecvTimeoutError::Timeout)));
+        let released = first.task_id().to_string();
+        drop(first);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap().unwrap(), released);
+        drop(second);
+        drop(third);
+    }
+
+    #[test]
+    fn reset_wakes_queued_pool_callers() {
+        let broker = AdminTurnBroker::new();
+        let tasks = vec!["slot-0".into(), "slot-1".into(), "slot-2".into()];
+        let _a = broker.acquire_slot(&tasks).unwrap();
+        let _b = broker.acquire_slot(&tasks).unwrap();
+        let _c = broker.acquire_slot(&tasks).unwrap();
+        let waiting = broker.clone();
+        let waiting_tasks = tasks.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || { tx.send(waiting.acquire_slot(&waiting_tasks).err().unwrap()).unwrap(); });
+        broker.reset();
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap().contains("shutting down"));
     }
 
     #[test]
@@ -610,9 +731,10 @@ mod tests {
     fn watchdog_times_out_an_inactive_request() {
         let broker = AdminTurnBroker::new();
         let owner: Arc<RunControl> = RunControl::new(false);
+        let request_id = fresh_request_id("wd");
         let receiver = broker
             .try_register(
-                fresh_request_id("wd"),
+                request_id.clone(),
                 "task-watchdog".into(),
                 Arc::downgrade(&owner),
                 Instant::now() + Duration::from_millis(50),
@@ -620,7 +742,7 @@ mod tests {
             .unwrap();
         let broker_weak = broker.downgrade();
         let owner_weak = Arc::downgrade(&owner);
-        spawn_admin_turn_watchdog(broker_weak, "task-watchdog".into(), owner_weak, move || {
+        spawn_admin_turn_watchdog(broker_weak, "task-watchdog".into(), request_id, owner_weak, move || {
             // Timeout hook is intentionally empty in the test.
         });
         let reply = receiver
@@ -630,12 +752,31 @@ mod tests {
     }
 
     #[test]
+    fn stale_watchdog_cannot_timeout_a_new_generation_on_the_same_task() {
+        let broker = AdminTurnBroker::new();
+        let owner_old: Arc<RunControl> = RunControl::new(false);
+        let old_id = fresh_request_id("old");
+        let old = broker.try_register(old_id.clone(), "task-reused".into(), Arc::downgrade(&owner_old), Instant::now() + Duration::from_millis(50)).unwrap();
+        spawn_admin_turn_watchdog(broker.downgrade(), "task-reused".into(), old_id, Arc::downgrade(&owner_old), move || {});
+        assert!(broker.complete("task-reused"));
+        assert!(matches!(old.recv_timeout(Duration::from_secs(1)), Ok(AdminTurnReply::Text(_))));
+        let owner_new: Arc<RunControl> = RunControl::new(false);
+        let new_id = fresh_request_id("new");
+        let fresh = broker.try_register(new_id, "task-reused".into(), Arc::downgrade(&owner_new), Instant::now() + Duration::from_secs(5)).unwrap();
+        thread::sleep(Duration::from_millis(120));
+        assert!(broker.capture_assistant_text("task-reused", "fresh"));
+        assert!(broker.complete("task-reused"));
+        assert_eq!(fresh.recv_timeout(Duration::from_secs(1)).unwrap(), AdminTurnReply::Text("fresh".into()));
+    }
+
+    #[test]
     fn watchdog_exits_when_owner_drops() {
         let broker = AdminTurnBroker::new();
         let owner: Arc<RunControl> = RunControl::new(false);
+        let request_id = fresh_request_id("wd-drop");
         let receiver = broker
             .try_register(
-                fresh_request_id("wd-drop"),
+                request_id.clone(),
                 "task-watchdog-drop".into(),
                 Arc::downgrade(&owner),
                 Instant::now() + Duration::from_secs(10),
@@ -646,6 +787,7 @@ mod tests {
         spawn_admin_turn_watchdog(
             broker_weak,
             "task-watchdog-drop".into(),
+            request_id,
             owner_weak,
             move || {},
         );
@@ -684,9 +826,10 @@ mod tests {
         // happy path.
         let broker = AdminTurnBroker::new();
         let owner: Arc<RunControl> = RunControl::new(false);
+        let request_id = fresh_request_id("wd-complete");
         let receiver = broker
             .try_register(
-                fresh_request_id("wd-complete"),
+                request_id.clone(),
                 "task-watchdog-complete".into(),
                 Arc::downgrade(&owner),
                 Instant::now() + Duration::from_secs(5),
@@ -699,6 +842,7 @@ mod tests {
         spawn_admin_turn_watchdog(
             broker_weak,
             "task-watchdog-complete".into(),
+            request_id,
             owner_weak,
             move || {
                 timeout_flag.store(true, std::sync::atomic::Ordering::Release);

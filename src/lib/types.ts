@@ -366,6 +366,8 @@ export interface Snapshot {
   approvalRules?: ApprovalRule[];
   /** In-process scheduled agent runs. See CONTRACT.md. */
   schedules?: Schedule[];
+  /** Native age-based archive policies. Project rules override the global fallback. */
+  chatArchiveRules?: ChatArchiveRule[];
   /** Per-fire records of schedule activity; bounded to 200 per schedule and 500 globally. */
   scheduleRuns?: ScheduleRun[];
   /**
@@ -377,6 +379,12 @@ export interface Snapshot {
    * restarts; an empty list means "no throwaway work pending".
    */
   pendingThrowawayTaskIds?: string[];
+}
+
+export interface ChatArchiveRule {
+  /** null is the global fallback. */
+  projectId: string | null; olderThanDays: number; enabled: boolean;
+  createdAt: number; updatedAt: number;
 }
 
 export interface ProjectBoardMessage {

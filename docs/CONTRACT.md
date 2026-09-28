@@ -308,6 +308,10 @@ No fake conversations, progress, token counts, host connections or model replies
 - `run_schedule_now { id: string }` -> Snapshot (dispatches via the same overlap and mode-aware path as a timer fire; records a run with the same shape)
 - `pause_schedule { id: string }` -> Snapshot (flips `enabled: false`; preserves run log and `lastFireAtMs`)
 - `resume_schedule { id: string }` -> Snapshot (flips `enabled: true`; resets `consecutiveFailures` to 0)
+- `list_chat_archive_rules {}` -> `{ rules: ChatArchiveRule[], projects: { id, name }[], checkIntervalSeconds, ageBasis }` (authenticated collaboration-MCP only; read-only)
+- `save_chat_archive_rule { scope: "global" | "project", project_id?: string, older_than_days: integer, enabled?: boolean }` -> `{ rule: ChatArchiveRule, appliesOnNextCheck: boolean }` (authenticated collaboration-MCP only)
+- `delete_chat_archive_rule { scope: "global" | "project", project_id?: string }` -> `{ removed: boolean }` (authenticated collaboration-MCP only)
+- `archive_chats { scope: "global" | "project", project_id?: string, older_than_days: integer, dry_run?: boolean }` -> `ChatArchiveResult` (authenticated collaboration-MCP only)
 - `finish_quit {}` completes a native quit only after `monitter-before-quit` lets the frontend save workspace state
 - `edit_queued_message { id: string, text: string }` -> Snapshot (queued/error only; preserves attachments, recipient, position and status; never retries automatically)
 - `cancel_queued_message { id: string }` -> Snapshot (removes only an unsent queued/error message)
@@ -950,20 +954,21 @@ supervisor supports the same persistent full-duplex channel. OpenCode `run` does
 show enabled interactive approval buttons. No auto-resubmission after
 errors.
 
-The resident Monitter Admin transport is a separate, single-occupant lane that the runtime owns for
-its own use (currently `autoname`): the bootstrap migration creates exactly one internal agent named
-"Monitter Admin" on `Service::open` and hides it from conversation surfaces while exposing its
-configuration in Settings → Agents. The internal task is
-created lazily on first use, never archived, and never projected into ordinary chat lists. Repeated
-`autoname` calls reuse its resident transport. It follows the same five-minute idle retirement
-policy, with an active broker request preventing collection; the next request restores its saved
-native session silently. The transport also stops on app quit, on admin
-reconfiguration that changes its provider/host/cwd/sandbox (so the next use launches a fresh resident
-session), and on transport failure. A restart resumes the saved native session id from the persisted
-task; no silent retries are attempted after a failed, timed-out, or interrupted turn, and concurrent
-admin requests are rejected with a readable "Monitter Admin is busy with another interface request."
-error. The admin's configured provider, model, host, cwd, and sandbox are used as-is: no Spark/Luna/Mini
-mini-model selection, no provider fallback, and no automatic retry.
+The resident Monitter Admin owns a pool of at most three hidden chats for interface work
+(currently `autoname`). Bootstrap still creates exactly one internal agent named "Monitter Admin"
+on `Service::open`, exposes its configuration in Settings → Agents, and hides it from conversation
+surfaces. Each pool chat is created lazily, never archived, and never projected into ordinary chat
+lists. Requests reuse idle resident transports and may run concurrently on three distinct chats.
+Further requests wait silently in a process-local FIFO queue until a slot is released; queue
+capacity does not produce a busy error. The 45-second execution deadline starts after admission,
+so waiting for a slot does not consume the turn budget. All waits happen off the UI thread.
+
+Each transport follows the five-minute idle retirement policy. The next request restores its
+saved native session silently. App quit, admin reconfiguration, or transport failure retires the
+corresponding resident controls. Shutdown wakes queued callers; neither queued nor in-flight
+prompts are persisted or replayed after restart. Real configuration, provider, or execution-timeout
+errors remain visible. The admin's saved provider, model, host, cwd, and sandbox are used as-is,
+with no mini-model selection, provider fallback, or automatic retry.
 
 Codex command/file/permission approval decisions remain one-time approve or deny and are returned
 to the exact JSON-RPC request. Structured questions and supported MCP forms attach optional `input`
@@ -1051,7 +1056,7 @@ active chat's provider context while preserving its visible transcript. In an ac
 reset leaves the title unchanged. Outside an active chat `/new` opens an independent draft.
 `/settings` opens preferences, `/project` selects the chat's project, and `/stop` cancels a running
 task. Task-specific actions only appear in applicable contexts.
-`/rename` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming routes through the resident Monitter Admin agent (see Internal agent) on its saved provider, model, host, cwd, and sandbox. The admin uses no Spark/Luna/Mini mini-model selection, no provider fallback, and no persisted admin prompt/reply. Concurrent requests are rejected; the request is bounded to 45 seconds; the final target mutation (task title, channel name, or terminal rename) is reported through `monitter:changed` exactly like any other rename.
+`/rename` names the current chat or channel from its recent messages. Controls → Auto-name current pane also names an active terminal from a bounded recent-output buffer; it is never written to that shell. Naming routes through the resident Monitter Admin agent (see Internal agent) on its saved provider, model, host, cwd, and sandbox. The admin uses no Spark/Luna/Mini mini-model selection, no provider fallback, and no persisted admin prompt/reply. Up to three requests run concurrently; further requests queue silently in FIFO order. The execution is bounded to 45 seconds after admission; the final target mutation (task title, channel name, or terminal rename) is reported through `monitter:changed` exactly like any other rename.
 `/terminal` opens a terminal tab in the current host and folder; `/terminal <command>` runs that shell command in the new interactive tab (for example `/terminal npm build`). The command is written to the PTY after the shell starts, so the tab stays interactive when it finishes.
 Selection supports arrows, Enter, Escape and clicking. IME composition does not select an action.
 
@@ -1079,7 +1084,7 @@ literal leading slash; paths such as `/path/to/file` remain ordinary messages.
 exactly one internal agent on `Service::open`, named "Monitter Admin"; that record is created only by
 the bootstrap, is never offered for creation by ordinary `save_agent` callers, and cannot be deleted.
 The existing admin record is selectable in Settings → Agents so its provider, model, host, folder,
-and permissions can be changed. The internal agent and its single resident task are hidden from
+and permissions can be changed. The internal agent and its up to three resident tasks are hidden from
 conversation surfaces:
 
 - Sidebars, the monitter menu, the Agent directory, and Cmd-K / Cmd-P palettes list user agents
@@ -1089,13 +1094,13 @@ conversation surfaces:
 - Extensions MCP/skill eligible-agent sets, collaboration discovery, and the resident routing
   eligible-agent set all filter out the internal record before iteration.
 - Archived chats, the share control, mobile projections, and paired-mobile / controller replies
-  never surface the internal agent or its task. Visitor snapshots exclude them by construction.
+  never surface the internal agent or its tasks. Visitor snapshots exclude them by construction.
 - Task detail, the right sidebar, and any agent-attributed chat metadata skip the internal record.
 
 Editing the existing admin via `save_agent` preserves `internal: true`, the canonical "Monitter
 Admin" name, and `collaborationEnabled: false`. Generic callers cannot create a new internal record
 or clear an existing one. When the admin's configured provider, model, host, cwd, or sandbox changes
-through ordinary agent edits, the next `autoname` run safely replaces the resident task/session so
+through ordinary agent edits, the next `autoname` runs safely replace the resident pool tasks/sessions so
 the new transport starts cleanly without inheriting the old native session id.
 
 ## Cross-agent collaboration
@@ -1610,7 +1615,7 @@ Conversation display: `Settings.tintUserMessages` defaults to false for existing
 `Settings.activityAnimation` is an owner preference shared by desktop, LAN, and paired mobile views. It defaults to `"sparkles"`; `"grid"` selects a pulsating accent grid and `"matrix"` selects a changing-letter stream. It only affects decorative indicators for running tasks. Existing or unknown settings values are rejected on save, while the motion preference and operating-system reduced-motion setting continue to limit animation.
 
 
-`autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` returns Snapshot. Exactly one target is required; terminal text comes from a bounded, control-sequence-scrubbed client buffer. Chat/channel context uses the last 12 messages, bounded to 12,000 characters. The naming request is a blocking resident turn on the resident Monitter Admin agent: `Service::send_admin_turn(prompt)` → `AdminTurnBroker` → the saved Codex app-server / Claude stream-json / ACP transport selected by the admin's configured provider. The admin's configured provider, model, host, cwd, and sandbox are used exactly as saved — there is no Spark/Luna/Mini mini-model selection, no provider fallback, and no automatic retry. The request is bounded to 45 seconds; on expiry the resident control is terminated and the next explicit turn starts a fresh resident transport. At most one admin request is active at a time; concurrent callers are rejected with `Monitter Admin is busy with another interface request.` Internal prompts, replies, and request IDs are runtime-only and never enter `Snapshot.messages`, `RunEvent`s, `get_task_events` pages, compact LAN snapshots, or shared/visitor projections. The saved native session id on the internal task is persisted so a restart resumes the saved native session; an interrupted, timed-out, or failed request is never replayed. Titles are bounded to 60 characters. Terminal names update the existing session and are refreshed into the tab runtime. The final target mutation is reported through `monitter:changed` exactly as for ordinary renames. Use /rename in chat or find Auto-name current pane in the Controls palette (Cmd-P on macOS) for a terminal; the shell never receives the command.
+`autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` returns Snapshot. Exactly one target is required; terminal text comes from a bounded, control-sequence-scrubbed client buffer. Chat/channel context uses the last 12 messages, bounded to 12,000 characters. The naming request is a blocking resident turn on the resident Monitter Admin agent: `Service::send_admin_turn(prompt)` → `AdminTurnBroker` → the saved Codex app-server / Claude stream-json / ACP transport selected by the admin's configured provider. The admin's configured provider, model, host, cwd, and sandbox are used exactly as saved — there is no Spark/Luna/Mini mini-model selection, no provider fallback, and no automatic retry. Execution is bounded to 45 seconds after a pool slot is acquired; on expiry the owned resident control is terminated. Up to three admin requests run on separate hidden chats. Additional callers queue silently in FIFO order, with no capacity error and no execution timeout while waiting. Every completion, failure, or timeout releases its slot for the next caller. Shutdown wakes pending callers without replaying their requests. Internal prompts, replies, and request IDs are runtime-only and never enter `Snapshot.messages`, `RunEvent`s, `get_task_events` pages, compact LAN snapshots, or shared/visitor projections. The saved native session id on the internal task is persisted so a restart resumes the saved native session; an interrupted, timed-out, or failed request is never replayed. Titles are bounded to 60 characters. Terminal names update the existing session and are refreshed into the tab runtime. The final target mutation is reported through `monitter:changed` exactly as for ordinary renames. Use /rename in chat or find Auto-name current pane in the Controls palette (Cmd-P on macOS) for a terminal; the shell never receives the command.
 
 
 ### Pane controls and window chrome
@@ -1894,3 +1899,48 @@ app startup and stops when the desktop exits.
 - `ScheduleMode = 'persistent_thread' | 'new_thread_per_fire' | 'throwaway'`
 - `OverlapPolicy = 'skip' | 'queue'`
 - `ScheduleRunStatus = 'succeeded' | 'error' | 'skipped' | 'missed'`
+
+### Age-based chat archiving
+
+Age-based chat archiving is an opt-in, local desktop maintenance feature. There is no rule by
+default, and it does not make model calls. A native Rust scheduler evaluates enabled rules every
+15 seconds only while the desktop is running. It creates no OS-level job and does not change any
+chat or setting until the user explicitly saves a rule or applies a one-time archive.
+
+`Snapshot.chatArchiveRules` is persisted as `{ projectId, olderThanDays, enabled, createdAt,
+updatedAt }[]`; `projectId: null` is the global fallback. MCP inputs always require explicit
+`scope`: `global` rejects `project_id`, while `project` requires an existing project UUID.
+`olderThanDays` is an integer from 1 through 36,500. There is at most one global rule and one
+override per project. A project rule overrides the global rule even if its `enabled` value is false;
+deleting that project override restores global inheritance. Deleting the global rule leaves no
+global rule. Saving a rule without `enabled` sets it to true.
+
+The authenticated, opted-in collaboration MCP exposes these tools; they are absent from visitor,
+LAN mutation, and unauthenticated surfaces:
+
+- `list_chat_archive_rules {}` reads current rules, project IDs/names, and the check interval;
+  it is available to read-only tasks.
+- `save_chat_archive_rule { scope, project_id?, older_than_days, enabled? }` creates or replaces
+  the explicit scope rule. For example, `{ "scope": "global", "older_than_days": 90 }` enables
+  a 90-day global rule, while `{ "scope": "project", "project_id": "…", "older_than_days": 30,
+  "enabled": false }` creates a disabled project override.
+- `delete_chat_archive_rule { scope, project_id? }` deletes that explicit rule. For example,
+  deleting `{ "scope": "project", "project_id": "…" }` makes the project inherit the global
+  rule again.
+- `archive_chats { scope, project_id?, older_than_days, dry_run? }` is a one-time operation that
+  ignores recurring rules. It previews by default (`dry_run: true`); `dry_run: false` applies the
+  explicit scoped archive. Read-only tasks may list rules and preview only.
+
+Eligibility uses a strict cutoff from the latest task creation/update, message, collaboration,
+subagent, and work-plan activity. A day is exactly 24 hours. The scheduler and one-time operation
+skip already archived chats, internal Admin chats, running or runtime-resident work, queued or
+sending messages, pending approvals, live collaboration or subagents, active work plans, scheduled
+persistent-thread chats (including paused schedules), pending throwaway cleanup, and ancestors
+of protected tasks. Eligible archive operations preserve chat history and use the normal
+unarchive behavior.
+
+One-time replies include `matchedCount`, `archivedCount`, `skippedProtectedCount`,
+`skippedByReason`, and up to 100 matching task summaries with `tasksTruncated` explicitly marking
+a longer result. The count covers the entire operation, not just the returned summaries. A preview
+is advisory; applying rechecks current activity under the state writer lock. Successful archives
+write a status event per chat. Native scheduler failures appear in the desktop diagnostic log.

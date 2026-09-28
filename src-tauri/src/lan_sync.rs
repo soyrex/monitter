@@ -373,6 +373,7 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         approval_requests: snapshot.approval_requests.clone(),
         approval_rules: snapshot.approval_rules.clone(),
         schedules: snapshot.schedules.clone(),
+        chat_archive_rules: snapshot.chat_archive_rules.clone(),
         schedule_runs: snapshot.schedule_runs.clone(),
         pending_throwaway_task_ids: snapshot.pending_throwaway_task_ids.clone(),
     }
