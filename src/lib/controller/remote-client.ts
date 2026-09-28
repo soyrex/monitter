@@ -1,4 +1,5 @@
 import { ControllerDispatcher } from './dispatcher';
+import { OwnerRelayDisconnectedError } from '../owner-relay-error.js';
 import { CONTROLLER_MAX_UPLOAD_BYTES, CONTROLLER_MAX_UPLOAD_PREVIEW_CHARS, CONTROLLER_PROTOCOL_VERSION, CONTROLLER_UPLOAD_CHUNK_BYTES, parseControllerRequest, type ControllerRequest, type ControllerResponse, type ControllerResult, type ControllerSendReceipt } from './protocol';
 import { SecureChannel, base64urlToBytes, bytesToBase64url, deriveDirectionalKeys, deriveEcdhSecret, exportPairingPublicKey, generatePairingKeyPair, pairingCommitment, randomBytes, verificationCode, type SecureEnvelope } from './secure-session';
 import type { Attachment, AttachmentFileData, Snapshot, TerminalRead, TerminalSession } from '../types';
@@ -730,7 +731,14 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       for (const request of this.queuedOwner.splice(0)) { clearTimeout(request.timer); request.reject(reason); }
       this.queuedOwnerBytes = 0;
     }
-    protected onDisconnected() { this.ownerWorkspaceState = 'none'; this.settleOwnerRequest(new Error('Connection closed.')); for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); } this.pending.clear(); this.rejectOwnerRequests(new Error('Connection closed.')); }
+    protected onDisconnected() {
+      // Owner-workspace callers already special-case this exact error type to
+      // stay quiet through transient drops (see isOwnerRelayDisconnectedError
+      // call sites); a generic Error here defeats that classification.
+      this.ownerWorkspaceState = 'none'; this.settleOwnerRequest(new OwnerRelayDisconnectedError());
+      for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); }
+      this.pending.clear(); this.rejectOwnerRequests(new OwnerRelayDisconnectedError());
+    }
   }(invitationData, 'mobile', keyPair ? { privateKey: keyPair.privateKey, publicKey, expectedPeerPublicKey } : {});
   return session as MobileSession | CollaboratorMobileSession;
 }

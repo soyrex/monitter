@@ -3,7 +3,7 @@
   import { loadMobilePairing } from '$lib/controller/pairing-store';
   import { createResumableMobileSession, type ResumableMobileSession } from '$lib/controller/resumable-session';
   import { watchReconnectEvents } from '$lib/controller/reconnect-events';
-  import { setOwnerRelayInvoker } from '$lib/lan';
+  import { setOwnerRelayInvoker, noteOwnerRelayReconnectOutcome } from '$lib/lan';
   import { appTheme } from '$lib/app-theme';
   import { surfaceTint } from '$lib/surface-tint';
   import { terminalTheme } from '$lib/terminal-theme';
@@ -102,8 +102,9 @@
         session = current;
         stop = current.subscribe(state => {
           if (closed) return;
-          if (state.status === 'connected') void connected(current);
+          if (state.status === 'connected') { noteOwnerRelayReconnectOutcome(true); void connected(current); }
           else {
+            if (state.status === 'closed' || state.status === 'error') noteOwnerRelayReconnectOutcome(false);
             authorizationEpoch += 1;
             authorizing = false;
             ready = false;

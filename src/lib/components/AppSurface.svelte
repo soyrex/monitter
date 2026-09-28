@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { localUuid, isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, OwnerRelayDisconnectedError } from '$lib/lan';
+  import { localUuid, isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, isOwnerRelayReconnectPersistent, OwnerRelayDisconnectedError } from '$lib/lan';
+  import { OWNER_RELAY_DISCONNECTED_MESSAGE } from '$lib/owner-relay-error.js';
   import { workspaceShareOpen, workspaceShareTaskId } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
   import { DEFAULT_SURFACE_TINT, setSurfaceTint, surfaceTint } from '$lib/surface-tint';
@@ -2127,6 +2128,11 @@
   const defaultAgent = $derived(indexes?.defaultAgent ?? null);
   const text = (reason: unknown) =>
     reason instanceof Error ? reason.message : String(reason);
+  // Phones drop and recover their relay connection routinely on cellular/Wi-Fi
+  // handoffs; popping an alert for every blip is noisy. Only a persistent run
+  // of failed reconnects (tracked in lan.ts) is worth interrupting the user
+  // about, so quietly hold the message otherwise.
+  const errorIsQuietDisconnect = $derived(error.includes(OWNER_RELAY_DISCONNECTED_MESSAGE) && !isOwnerRelayReconnectPersistent());
   const avatarSrc = (agent: Agent | null | undefined) => {
     const value = agent?.avatar;
     return value && /^data:image\/(png|jpeg|webp);base64,/i.test(value) ? value : null;
@@ -2168,16 +2174,12 @@
   const activityAvatarFor = (agent: Agent | null | undefined) => {
     const name = agent?.name?.trim() || 'Agent';
     const provider = String(agent?.provider ?? '').toLowerCase();
-    const known = isMonaAgent(agent) ? { mark: 'M', tone: 'mona' }
-      : /open\s?code/i.test(name) ? { mark: 'OC', tone: 'opencode' }
-      : /claude/i.test(name) ? { mark: 'CL', tone: 'claude' }
-      : /codex/i.test(name) ? { mark: 'CX', tone: 'codex' }
-      : null;
-    if (known) return known;
-    const words = name.split(/[\s_-]+/).filter(Boolean);
-    const mark = (words.length > 1 ? words.slice(0, 2).map(word => word[0]).join('') : name.slice(0, 2)).toUpperCase();
-    const tone = provider === 'codex' ? 'codex' : provider === 'claude' ? 'claude' : 'default';
-    return { mark, tone };
+    const tone = isMonaAgent(agent) ? 'mona'
+      : /open\s?code/i.test(name) ? 'opencode'
+      : /claude/i.test(name) ? 'claude'
+      : /codex/i.test(name) ? 'codex'
+      : provider === 'codex' ? 'codex' : provider === 'claude' ? 'claude' : 'default';
+    return { tone };
   };
   const blankHost = (): Host => ({
     id: "",
@@ -4888,7 +4890,7 @@
     {#if cardStyle}
       <button class="task-select activity-task-tile" aria-label={`Open chat ${task.title}`} title={task.title} onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)}></button>
       <div class="activity-task-content">
-        <span class={`activity-avatar ${activityAvatar.tone}`} class:grouped-task-mark={groupedStyle} aria-hidden="true">{activityAvatar.mark}<span class={`activity-status-dot ${task.status}`}></span></span>
+        <span class={`activity-avatar ${activityAvatar.tone}`} class:grouped-task-mark={groupedStyle} aria-hidden="true">{@render avatarVisual(agent, groupedStyle ? 14 : 18)}<span class={`activity-status-dot ${task.status}`}></span></span>
         <span class="activity-task-copy">
           <span class="activity-task-title">{task.title}</span>
           <span class="chat-meta activity-task-meta">
@@ -5077,7 +5079,7 @@
       {/if}
       {/if}
     </header>{/if}
-    {#if error}<PaneNotice message={error} blocking ondismiss={()=>error=''}/>{/if}
+    {#if error && !errorIsQuietDisconnect}<PaneNotice message={error} blocking ondismiss={()=>error=''}/>{/if}
     {#if notice}<PaneNotice message={notice} ondismiss={()=>notice=''}/>{/if}
     {#if !bridge.available}<div class="preview-banner">
         <Command size={14} /> Browser design preview — connect the native app to
