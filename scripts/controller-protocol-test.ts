@@ -33,21 +33,60 @@ assert.equal(sourceSnapshot.events[119].detail.length, 5000);
 assert.deepEqual(projected.messages, sourceSnapshot.messages);
 assert.notEqual(projected.messages, sourceSnapshot.messages);
 
-const hugeHistory: Snapshot = { ...sourceSnapshot,
-  tasks: Array.from({ length: 8 }, (_, taskIndex) => ({ id:`task-${taskIndex}`,agentId:`agent-${taskIndex}`,title:`Task ${taskIndex}`,nativeSessionId:null,archived:false,status:'idle' as const,createdAt:0,updatedAt:0,parentTaskId:null,channelId:null,projectId:null,hostId:'host',cwd:'/workspace',provider:'codex' as const,model:'model',sandbox:'workspace-write' as const })),
-  agents: Array.from({ length: 8 }, (_, agentIndex) => ({ id:`agent-${agentIndex}`,name:`Agent ${agentIndex}`,description:'',instructions:'',avatar:null,provider:'codex' as const,model:'model',hostId:'host',cwd:'/workspace',color:'#000',sandbox:'workspace-write' as const,expertise:[],responsibilities:[],skills:[],collaborationEnabled:true })),
-  messages: Array.from({ length: 1600 }, (_, index) => ({ id:`huge-message-${index}`,taskId:`task-${index % 8}`,role:'assistant' as const,text:`${index}:${'x'.repeat(80_000)}`,createdAt:index })),
+// A paired phone has no history-paging RPC in protocol v1. Long transcripts
+// must therefore be projected to recent, visibly marked tails that still fit
+// the encrypted controller response ceiling.
+const hugeHistory: Snapshot = {
+  ...sourceSnapshot,
+  tasks: Array.from({ length: 8 }, (_, taskIndex) => ({
+    id: `task-${taskIndex}`, agentId: `agent-${taskIndex}`, title: `Task ${taskIndex}`,
+    nativeSessionId: null, archived: false, status: 'idle' as const, createdAt: 0, updatedAt: 0,
+    parentTaskId: null, channelId: null, projectId: null, hostId: 'host', cwd: '/workspace', provider: 'codex' as const, model: 'model', sandbox: 'workspace-write' as const,
+  })),
+  agents: Array.from({ length: 8 }, (_, agentIndex) => ({
+    id: `agent-${agentIndex}`, name: `Agent ${agentIndex}`, description: '', instructions: '', avatar: null,
+    provider: 'codex' as const, model: 'model', hostId: 'host', cwd: '/workspace', color: '#000', sandbox: 'workspace-write' as const,
+    expertise: [], responsibilities: [], skills: [], collaborationEnabled: true,
+  })),
+  messages: Array.from({ length: 1_600 }, (_, index) => ({
+    id: `huge-message-${index}`, taskId: `task-${index % 8}`, role: 'assistant' as const,
+    text: `${index}:${'x'.repeat(80_000)}`, createdAt: index,
+  })),
+  channels: [{ id: 'huge-channel', name: 'Huge channel', description: '', agentIds: ['agent-0'], messages: Array.from({ length: 100 }, (_, index) => ({
+    id: `huge-channel-message-${index}`, role: 'assistant' as const, agentId: 'agent-0', taskId: null, text: 'y'.repeat(80_000), createdAt: index,
+  })) }],
 };
 const hugeProjected = controllerSnapshot(hugeHistory);
+assert.deepEqual(hugeProjected.tasks.map(item => item.id), hugeHistory.tasks.map(item => item.id));
+assert.deepEqual(hugeProjected.agents.map(item => item.id), hugeHistory.agents.map(item => item.id));
 assert.ok(hugeProjected.messages.length < hugeHistory.messages.length);
-assert.ok(hugeProjected.messages.some(message => message.text === '[Earlier messages are available on the desktop.]'));
+const hugeNotice = hugeProjected.messages.find(message => message.text === '[Earlier messages are available on the desktop.]');
+assert.ok(hugeNotice);
+assert.match(hugeNotice.id, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+const firstRetainedForNotice = hugeProjected.messages.find(message => message.taskId === hugeNotice.taskId && message.id !== hugeNotice.id);
+assert.ok(firstRetainedForNotice && hugeProjected.messages.indexOf(hugeNotice) < hugeProjected.messages.indexOf(firstRetainedForNotice));
 assert.ok(new TextEncoder().encode(JSON.stringify({ version: 1, id: '00000000-0000-4000-8000-000000000000', ok: true, result: hugeProjected })).byteLength <= CONTROLLER_MAX_RESPONSE_BYTES);
-const manyTaskMessages = Array.from({ length: 650 }, (_, taskIndex) => ({ id:`many-${taskIndex}`,taskId:`${taskIndex.toString(16).padStart(8,'0')}-0000-4000-8000-000000000000`,role:'assistant' as const,text:'Message',createdAt:taskIndex }));
+
+// The global content tail must not silently discard per-task truncation notices
+// when a workspace has more tasks than its content-message allowance.
+const manyTaskMessages = Array.from({ length: 650 }, (_, taskIndex) => ({
+  id: `many-${taskIndex}`, taskId: `${taskIndex.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`, role: 'assistant' as const,
+  text: 'Message', createdAt: taskIndex,
+}));
 const manyTaskProjected = controllerSnapshot({ ...sourceSnapshot, messages: manyTaskMessages });
 assert.equal(manyTaskProjected.messages.filter(message => message.text === '[Earlier messages are available on the desktop.]').length, 50);
-const byteHeavyMessages = Array.from({ length: 600 }, (_, taskIndex) => ({ id:`byte-heavy-${taskIndex}`,taskId:`${taskIndex.toString(16).padStart(8,'0')}-0001-4000-8000-000000000000`,role:'assistant' as const,text:'z'.repeat(80_000),createdAt:taskIndex }));
+
+// Byte-budget trimming has the same omission guarantee as the initial global
+// tail: every task retains content or receives its deterministic notice.
+const byteHeavyMessages = Array.from({ length: 600 }, (_, taskIndex) => ({
+  id: `byte-heavy-${taskIndex}`, taskId: `${taskIndex.toString(16).padStart(8, '0')}-0001-4000-8000-000000000000`, role: 'assistant' as const,
+  text: 'z'.repeat(80_000), createdAt: taskIndex,
+}));
 const byteHeavyProjected = controllerSnapshot({ ...sourceSnapshot, messages: byteHeavyMessages });
-for (const message of byteHeavyMessages) assert.ok(byteHeavyProjected.messages.some(item => item.taskId === message.taskId), `Task ${message.taskId} must retain content or a history notice.`);
+for (const message of byteHeavyMessages) {
+  assert.ok(byteHeavyProjected.messages.some(item => item.taskId === message.taskId), `Task ${message.taskId} must retain content or a history notice.`);
+}
+assert.ok(byteHeavyProjected.messages.some(message => message.text === '[Earlier messages are available on the desktop.]'));
 assert.ok(new TextEncoder().encode(JSON.stringify({ version: 1, id: '00000000-0000-4000-8000-000000000000', ok: true, result: byteHeavyProjected })).byteLength <= CONTROLLER_MAX_RESPONSE_BYTES);
 
 // Shared visitors may see selected conversations, never owner-only approval

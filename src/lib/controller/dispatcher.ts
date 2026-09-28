@@ -28,51 +28,140 @@ const CONTROLLER_EVENT_DETAIL_LIMIT = 4000;
 const CONTROLLER_EVENT_TITLE_LIMIT = 512;
 const CONTROLLER_TRUNCATION_NOTICE = '[Earlier messages are available on the desktop.]';
 
-/** Mobile v1 has no transcript paging, so project a bounded compatibility Snapshot. */
+/**
+ * Mobile v1 has no transcript paging. Project its compatibility Snapshot here,
+ * rather than raising the paired transport frame ceiling. This clones the
+ * desktop-owned data, keeps task/agent identities, and retains chronological
+ * recent conversation tails. A system notice makes per-task history clipping
+ * visible in the phone UI.
+ */
 export function controllerSnapshot(snapshot: Snapshot): Snapshot {
-  const messages = recentTaskMessages(snapshot), channels = recentChannelMessages(snapshot);
-  const projected = limitStrings({ ...snapshot, messages, channels,
-    events: [...snapshot.events].sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id)).slice(0, 100)
-      .map(event => ({ ...event, title: truncate(event.title, CONTROLLER_EVENT_TITLE_LIMIT), detail: truncate(event.detail, CONTROLLER_EVENT_DETAIL_LIMIT, '\n[Remaining detail available on desktop]') })),
-    collaborations: [], queuedMessages: [], approvalRequests: [], approvalRules: [], workPlans: [], projectBoardMessages: [], subagentSessions: [], subagentTranscripts: {}, schedules: [], scheduleRuns: [], pendingThrowawayTaskIds: [],
+  const messages = recentTaskMessages(snapshot);
+  const channels = recentChannelMessages(snapshot);
+  const projected = limitStrings({
+    ...snapshot,
+    messages,
+    channels,
+    events: [...snapshot.events]
+      .sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id)).slice(0, 100)
+      .map(event => ({
+        ...event,
+        title: truncate(event.title, CONTROLLER_EVENT_TITLE_LIMIT),
+        detail: truncate(event.detail, CONTROLLER_EVENT_DETAIL_LIMIT, '\n[Remaining detail available on desktop]'),
+      })),
+    // These desktop-only queues and approval payloads are not rendered by the
+    // controller. Keeping their full records can otherwise crowd out chat.
+    collaborations: [], queuedMessages: [], approvalRequests: [], approvalRules: [],
+    workPlans: [], projectBoardMessages: [], subagentSessions: [], subagentTranscripts: {},
+    schedules: [], scheduleRuns: [], pendingThrowawayTaskIds: [],
   }) as Snapshot;
   return fitControllerSnapshot(projected);
 }
 
 function recentTaskMessages(snapshot: Snapshot): Snapshot['messages'] {
   const grouped = new Map<string, Snapshot['messages']>();
-  for (const message of snapshot.messages) { const messages = grouped.get(message.taskId) ?? []; messages.push(message); grouped.set(message.taskId, messages); }
-  const perTask = [...grouped.entries()].map(([taskId, messages]) => { const ordered = [...messages].sort(compareChronological); return { taskId, ordered, tail: ordered.slice(-CONTROLLER_MESSAGE_TAIL_PER_TASK) }; });
+  for (const message of snapshot.messages) {
+    const messages = grouped.get(message.taskId) ?? [];
+    messages.push(message); grouped.set(message.taskId, messages);
+  }
+  const perTask = [...grouped.entries()].map(([taskId, messages]) => {
+    const ordered = [...messages].sort(compareChronological);
+    return { taskId, ordered, tail: ordered.slice(-CONTROLLER_MESSAGE_TAIL_PER_TASK) };
+  });
   const content = perTask.flatMap(item => item.tail).sort(compareChronological).slice(-CONTROLLER_MESSAGE_TAIL_TOTAL);
   const retainedTaskIds = new Set(content.map(message => message.taskId));
-  const notices = perTask.flatMap(({ taskId, ordered, tail }) => ordered.length > tail.length || !retainedTaskIds.has(taskId) ? [{ id: historyNoticeId(taskId), taskId, role: 'system' as const, text: CONTROLLER_TRUNCATION_NOTICE, createdAt: tail[0]?.createdAt ?? 0 }] : []);
+  // A task omitted by the global content window receives the same visible
+  // desktop-history marker as a per-task tail. That prevents silent loss when
+  // a workspace has more active conversations than the content allowance.
+  const notices = perTask.flatMap(({ taskId, ordered, tail }) => ordered.length > tail.length || !retainedTaskIds.has(taskId)
+    ? [{ id: historyNoticeId(taskId), taskId, role: 'system' as const, text: CONTROLLER_TRUNCATION_NOTICE, createdAt: tail[0]?.createdAt ?? 0 }]
+    : []);
   return [...notices, ...content].sort(compareChronological);
 }
+
 function recentChannelMessages(snapshot: Snapshot): Snapshot['channels'] {
   let remaining = CONTROLLER_CHANNEL_MESSAGE_TOTAL;
-  return snapshot.channels.map(channel => { const messages = [...channel.messages].sort(compareChronological).slice(-CONTROLLER_CHANNEL_MESSAGE_TAIL); const allowed = Math.max(0, Math.min(remaining, messages.length)); remaining -= allowed; return { ...channel, messages: allowed ? messages.slice(-allowed) : [] }; });
+  return snapshot.channels.map(channel => {
+    const messages = [...channel.messages].sort(compareChronological).slice(-CONTROLLER_CHANNEL_MESSAGE_TAIL);
+    const allowed = Math.max(0, Math.min(remaining, messages.length));
+    remaining -= allowed;
+    return { ...channel, messages: allowed ? messages.slice(-allowed) : [] };
+  });
 }
+
 function fitControllerSnapshot(snapshot: Snapshot): Snapshot {
+  // Measure encoded bytes rather than estimating characters: UTF-8 and JSON
+  // escaping make estimates unsafe. Remove only the oldest retained history
+  // until the conservative result budget fits the 1 MiB response envelope.
   const result = { ...snapshot, messages: [...snapshot.messages], channels: snapshot.channels.map(channel => ({ ...channel, messages: [...channel.messages] })), events: [...snapshot.events] };
   while (encodedBytes(result) > CONTROLLER_SNAPSHOT_BUDGET_BYTES) {
-    const oldest = oldestHistory(result); if (!oldest) break;
-    if (oldest.kind === 'message') { const [removed] = result.messages.splice(oldest.index, 1); if (removed && !result.messages.some(message => message.taskId === removed.taskId && !isHistoryNotice(message)) && !result.messages.some(message => message.taskId === removed.taskId && isHistoryNotice(message))) result.messages.push({ id: historyNoticeId(removed.taskId), taskId: removed.taskId, role: 'system', text: CONTROLLER_TRUNCATION_NOTICE, createdAt: removed.createdAt }); }
-    else if (oldest.kind === 'channel') result.channels[oldest.channelIndex].messages.splice(oldest.index, 1); else result.events.splice(oldest.index, 1);
+    const oldest = oldestHistory(result);
+    if (!oldest) break;
+    if (oldest.kind === 'message') {
+      const [removed] = result.messages.splice(oldest.index, 1);
+      if (removed && !result.messages.some(message => message.taskId === removed.taskId && !isHistoryNotice(message)) &&
+          !result.messages.some(message => message.taskId === removed.taskId && isHistoryNotice(message))) {
+        result.messages.push({ id: historyNoticeId(removed.taskId), taskId: removed.taskId, role: 'system', text: CONTROLLER_TRUNCATION_NOTICE, createdAt: removed.createdAt });
+      }
+    }
+    else if (oldest.kind === 'channel') result.channels[oldest.channelIndex].messages.splice(oldest.index, 1);
+    else result.events.splice(oldest.index, 1);
   }
-  result.messages.sort(compareChronological); return result;
+  result.messages.sort(compareChronological);
+  return result;
 }
+
 function oldestHistory(snapshot: Snapshot): { kind: 'message' | 'event'; index: number } | { kind: 'channel'; channelIndex: number; index: number } | null {
   const candidates: { createdAt: number; kind: 'message' | 'event' | 'channel'; index: number; channelIndex?: number }[] = [];
-  snapshot.messages.forEach((message, index) => { if (!isHistoryNotice(message)) candidates.push({ createdAt: message.createdAt, kind: 'message', index }); }); snapshot.events.forEach((event, index) => candidates.push({ createdAt: event.createdAt, kind: 'event', index })); snapshot.channels.forEach((channel, channelIndex) => channel.messages.forEach((message, index) => candidates.push({ createdAt: message.createdAt, kind: 'channel', index, channelIndex })));
-  const candidate = candidates.sort((a, b) => a.createdAt - b.createdAt || a.kind.localeCompare(b.kind) || a.index - b.index)[0]; if (!candidate) return null; return candidate.kind === 'channel' ? { kind: 'channel', channelIndex: candidate.channelIndex!, index: candidate.index } : { kind: candidate.kind, index: candidate.index };
+  snapshot.messages.forEach((message, index) => {
+    // Retain the tiny visible notice while trimming its task's remaining tail.
+    if (!isHistoryNotice(message)) candidates.push({ createdAt: message.createdAt, kind: 'message', index });
+  });
+  snapshot.events.forEach((event, index) => candidates.push({ createdAt: event.createdAt, kind: 'event', index }));
+  snapshot.channels.forEach((channel, channelIndex) => channel.messages.forEach((message, index) => candidates.push({ createdAt: message.createdAt, kind: 'channel', index, channelIndex })));
+  const candidate = candidates.sort((a, b) => a.createdAt - b.createdAt || a.kind.localeCompare(b.kind) || a.index - b.index)[0];
+  if (!candidate) return null;
+  return candidate.kind === 'channel'
+    ? { kind: 'channel', channelIndex: candidate.channelIndex!, index: candidate.index }
+    : { kind: candidate.kind, index: candidate.index };
 }
-function limitStrings<T>(value: T): T { if (typeof value === 'string') return truncate(value, CONTROLLER_TEXT_LIMIT) as T; if (Array.isArray(value)) return value.map(item => limitStrings(item)) as T; if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, limitStrings(item)])) as T; return value; }
-function truncate(value: string, limit: number, suffix = '\n[Truncated for mobile]'): string { return value.length > limit ? value.slice(0, Math.max(0, limit - suffix.length)) + suffix : value; }
-function compareChronological<T extends { createdAt: number; id: string }>(a: T, b: T): number { if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt; if (isHistoryNotice(a) !== isHistoryNotice(b)) return isHistoryNotice(a) ? -1 : 1; return a.id.localeCompare(b.id); }
+
+function limitStrings<T>(value: T): T {
+  if (typeof value === 'string') return truncate(value, CONTROLLER_TEXT_LIMIT) as T;
+  if (Array.isArray(value)) return value.map(item => limitStrings(item)) as T;
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, limitStrings(item)])) as T;
+  return value;
+}
+
+function truncate(value: string, limit: number, suffix = '\n[Truncated for mobile]'): string {
+  return value.length > limit ? value.slice(0, Math.max(0, limit - suffix.length)) + suffix : value;
+}
+
+function compareChronological<T extends { createdAt: number; id: string }>(a: T, b: T): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  if (isHistoryNotice(a) !== isHistoryNotice(b)) return isHistoryNotice(a) ? -1 : 1;
+  return a.id.localeCompare(b.id);
+}
+
 function encodedBytes(value: unknown): number { return new TextEncoder().encode(JSON.stringify(value)).byteLength; }
-function isHistoryNotice(value: { id: string; taskId?: string; text?: string; role?: string }): boolean { return value.role === 'system' && typeof value.taskId === 'string' && value.text === CONTROLLER_TRUNCATION_NOTICE && value.id === historyNoticeId(value.taskId); }
-function historyNoticeId(taskId: string): string { const hex = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35].map(seed => fnv1a(taskId, seed).toString(16).padStart(8, '0')).join(''); const variant = ((Number.parseInt(hex[8], 16) & 0x3) | 0x8).toString(16); return `00000000-${hex.slice(0, 4)}-5${hex.slice(5, 8)}-${variant}${hex.slice(9, 12)}-${hex.slice(12, 24)}`; }
-function fnv1a(value: string, seed: number): number { let hash = seed >>> 0; for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193) >>> 0; return hash; }
+
+function isHistoryNotice(value: { id: string; taskId?: string; text?: string; role?: string }): boolean {
+  return value.role === 'system' && typeof value.taskId === 'string' && value.text === CONTROLLER_TRUNCATION_NOTICE && value.id === historyNoticeId(value.taskId);
+}
+
+/** A stable v5-shaped UUID derived from the task id; no random state enters a snapshot read. */
+function historyNoticeId(taskId: string): string {
+  const hex = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35]
+    .map(seed => fnv1a(taskId, seed).toString(16).padStart(8, '0')).join('');
+  const variant = ((Number.parseInt(hex[8], 16) & 0x3) | 0x8).toString(16);
+  return `00000000-${hex.slice(0, 4)}-5${hex.slice(5, 8)}-${variant}${hex.slice(9, 12)}-${hex.slice(12, 24)}`;
+}
+
+function fnv1a(value: string, seed: number): number {
+  let hash = seed >>> 0;
+  for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193) >>> 0;
+  return hash;
+}
 
 interface Receipt { fingerprint: string; response: Promise<ControllerResponse>; }
 interface PendingUpload {
