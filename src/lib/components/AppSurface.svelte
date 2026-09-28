@@ -5542,7 +5542,7 @@
         {/if}
         {#if !sidebarRootChats.length}<p class="empty-tree">No chats yet</p>{/if}
       {:else}
-        <p class="activity-heading">Projects</p>
+        <div class="section-label project-section-label"><span>PROJECTS</span><button type="button" aria-label="New project" title="New project" onclick={()=>editProject()}><Plus size={15}/></button></div>
         {#each sidebarSorted(projects,'projects') as project (project.id)}
           {@const projectTasks = sidebarSorted(sidebarRootChats.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
           {@const ProjectIcon = projectIconComponent(project.icon)}
