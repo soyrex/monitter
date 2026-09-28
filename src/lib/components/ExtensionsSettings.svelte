@@ -7,8 +7,9 @@
   import { getBridge } from '$lib/bridge';
   import type { Agent, ExtensionConfig, ManagedSkill, McpServerConfig } from '$lib/types';
   import { isLanBrowser } from '$lib/lan';
+  import MailSettings from '$lib/components/MailSettings.svelte';
 
-  let { agents = [] }: { agents?: Agent[] } = $props();
+  let { agents = [], hosts = [] }: { agents?: Agent[]; hosts?: import('$lib/types').Host[] } = $props();
   type Tab = 'servers' | 'skills' | 'plugins';
   const empty = (): ExtensionConfig => ({ mcpServers: [], skills: [] });
   const newServer = (): McpServerConfig => ({ id: crypto.randomUUID(), name: '', enabled: true, agentIds: [], transport: 'stdio', command: '', args: [], env: {}, url: '', headers: {} });
@@ -157,6 +158,7 @@
         <div class="toolbar"><p class="hint">Skills are Markdown instructions. They are applied on the next harness launch.</p><span><input bind:this={skillInput} class="file-input" type="file" accept="text/markdown,.md" onchange={importSkill}/><button type="button" disabled={saving} onclick={() => skillInput?.click()}><FileUp size={14}/>Import .md</button><button type="button" class="primary" disabled={saving} onclick={() => editingSkill = newSkill()}><Plus size={14}/>Add skill</button></span></div>
         {#each config.skills as skill (skill.id)}<article class="extension-row"><label class="switch"><input type="checkbox" disabled={saving} checked={skill.enabled} onchange={() => toggleSkill(skill)}/><span>{skill.enabled ? 'Enabled' : 'Disabled'}</span></label><div><strong>{skill.name}</strong><small>{skill.description || 'No description'} · {agentSummary(skill.agentIds, skill.allAgents)}{#if skill.sourceUrl} · source: {skill.sourceUrl}{/if}</small></div><button type="button" disabled={saving} onclick={() => editingSkill = clone(skill)}>Edit</button><button type="button" disabled={saving} class="danger" aria-label={`Remove ${skill.name}`} onclick={() => removeSkill(skill.id)}><Trash2 size={15}/></button></article>{:else}<p class="empty">No skills configured.</p>{/each}
       {:else}
+        <MailSettings {agents} {hosts}/>
         <div class="plugin-note"><strong>Native plugins are not supported</strong><p>Monitter does not install scripts, assets, native packages, or third-party plugins. Add reviewed MCP servers or Markdown skills instead.</p></div>
       {/if}
     {/if}

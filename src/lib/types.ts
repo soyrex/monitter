@@ -189,6 +189,27 @@ export interface MailDetail {
   subject: string; receivedAt: number; bodyText: string;
 }
 export interface MailDetailRequestResult { status: 'ready' | 'pending'; }
+/** Private desktop Mail MCP configuration. Tokens and client secrets are never returned. */
+export interface MailConfig {
+  revision: string;
+  clientId: string;
+  clientSecretConfigured: boolean;
+  accounts: MailAccount[];
+}
+export interface MailAccount {
+  id: string;
+  provider: 'gmail';
+  email: string;
+  label: string;
+  agentIds: string[];
+  connectedAt: number;
+}
+export interface MailConnectStart { attemptId: string; authorizationUrl: string; expiresAt: number; }
+export interface MailConnectStatus {
+  status: 'pending' | 'connected' | 'error' | 'cancelled';
+  error: string | null;
+  account: MailAccount | null;
+}
 export interface Collaboration {
   id: string; kind: 'message' | 'delegation';
   fromAgentId: string; fromTaskId: string; toAgentId: string; toTaskId: string;

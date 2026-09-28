@@ -141,7 +141,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             return;
         }
     };
-    let mut extensions = match service.runtime_extensions_for_agent(&task.agent_id) {
+    let mut extensions = match service.runtime_extensions_for_task(&task_id) {
         Ok(extensions) => extensions,
         Err(error) => {
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));

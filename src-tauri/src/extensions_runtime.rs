@@ -16,6 +16,7 @@ use std::{
 pub(crate) struct RuntimeExtensions {
     servers: Vec<McpServerConfig>,
     skill_context: String,
+    mail_server: Option<McpServerConfig>,
 }
 
 pub(crate) struct PrivateConfigFile(PathBuf);
@@ -99,6 +100,7 @@ impl RuntimeExtensions {
         Self {
             servers,
             skill_context,
+            mail_server: None,
         }
     }
 
@@ -116,7 +118,7 @@ impl RuntimeExtensions {
         }
         for server in &mut self.servers {
             validate_id(&server.id)?;
-            if matches!(server.id.as_str(), "monitter" | "jev_decisions") {
+            if matches!(server.id.as_str(), "monitter" | "jev_decisions" | "monitter_mail") {
                 return Err(format!(
                     "Managed MCP server id '{}' is reserved for Monitter.",
                     server.id
@@ -143,6 +145,21 @@ impl RuntimeExtensions {
         Ok(())
     }
 
+    pub(crate) fn attach_mail(&mut self, grant: crate::collaboration_transport::SessionGrant) {
+        self.mail_server = Some(McpServerConfig {
+            id: "monitter_mail".into(), name: "Mail".into(), enabled: true,
+            agent_ids: Vec::new(), transport: McpTransport::Http, command: String::new(),
+            args: Vec::new(), env: Default::default(), url: grant.endpoint,
+            headers: [("Authorization".into(), format!("Bearer {}", grant.token))].into(),
+        });
+        if !self.skill_context.is_empty() { self.skill_context.push_str("\n\n"); }
+        self.skill_context.push_str(crate::mail_mcp::INSTRUCTIONS);
+    }
+
+    fn all_servers(&self) -> impl Iterator<Item = &McpServerConfig> {
+        self.servers.iter().chain(self.mail_server.iter())
+    }
+
     pub(crate) fn prompt(&self, prompt: &str) -> String {
         if self.skill_context.is_empty() {
             prompt.into()
@@ -155,17 +172,17 @@ impl RuntimeExtensions {
     }
 
     pub(crate) fn mcp_fingerprint(&self) -> Option<String> {
-        if self.servers.is_empty() {
+        if self.servers.is_empty() && self.mail_server.is_none() {
             return None;
         }
-        let encoded = serde_json::to_vec(&self.servers).ok()?;
+        let encoded = serde_json::to_vec(&self.all_servers().collect::<Vec<_>>()).ok()?;
         Some(format!("{:x}", Sha256::digest(encoded)))
     }
 
     /// Codex app-server's `config` object is sent over its owned stdin pipe.
     pub(crate) fn codex_config(&self) -> Map<String, Value> {
         let mut config = Map::new();
-        for server in &self.servers {
+        for server in self.all_servers() {
             let prefix = format!("mcp_servers.{}", server.id);
             match server.transport {
                 McpTransport::Stdio => {
@@ -198,7 +215,7 @@ impl RuntimeExtensions {
 
     pub(crate) fn claude_config(&self) -> Value {
         let mut servers = Map::new();
-        for server in &self.servers {
+        for server in self.all_servers() {
             let value = match server.transport {
                 McpTransport::Stdio => json!({
                     "command": server.command,
@@ -217,13 +234,12 @@ impl RuntimeExtensions {
     }
 
     pub(crate) fn has_http(&self) -> bool {
-        self.servers
-            .iter()
+        self.all_servers()
             .any(|server| server.transport == McpTransport::Http)
     }
 
     pub(crate) fn acp_servers(&self) -> Result<Value, String> {
-        let servers = self.servers.iter().map(|server| match server.transport {
+        let servers = self.all_servers().map(|server| match server.transport {
             McpTransport::Stdio => {
                 let command = crate::acp_discovery::resolve_command(&server.command)
                     .map_err(|_| "Managed MCP executable was not found. Install it separately or choose its absolute path.".to_string())?;
@@ -398,6 +414,27 @@ mod tests {
             .validate_for("codex", "local")
             .unwrap_err()
             .contains("jev_decisions"));
+    }
+
+    #[test]
+    fn mail_is_reserved_and_attached_without_provider_credentials() {
+        let mut managed = server(vec!["a".into()]);
+        managed.id = "monitter_mail".into();
+        let config = ExtensionConfig { revision: None, mcp_servers: vec![managed], skills: vec![] };
+        assert!(RuntimeExtensions::for_agent(&config, "a").validate_for("codex", "local").is_err());
+        let mut runtime = RuntimeExtensions::default();
+        assert!(!runtime.has_http());
+        runtime.attach_mail(crate::collaboration_transport::SessionGrant {
+            endpoint: "http://127.0.0.1:1234/mcp".into(), token: "task-capability".into(),
+        });
+        assert!(runtime.has_http());
+        assert!(runtime.prompt("request").contains("read-only access"));
+        let config = runtime.codex_config();
+        assert_eq!(config["mcp_servers.monitter_mail.http_headers"]["Authorization"], "Bearer task-capability");
+        assert_eq!(config["mcp_servers.monitter_mail.default_tools_approval_mode"], "prompt");
+        assert_eq!(runtime.claude_config()["mcpServers"]["monitter_mail"]["type"], "http");
+        assert_eq!(runtime.acp_servers().unwrap()[0]["name"], "monitter_mail");
+        assert_eq!(runtime.mcp_fingerprint().unwrap().len(), 64);
     }
 
     #[test]

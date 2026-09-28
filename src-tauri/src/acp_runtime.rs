@@ -1212,7 +1212,7 @@ fn run(
         );
         return;
     };
-    let mut extensions = match service.runtime_extensions_for_agent(&task.agent_id) {
+    let mut extensions = match service.runtime_extensions_for_task(&task_id) {
         Ok(extensions) => extensions,
         Err(error) => {
             fail(&service, &task_id, &control, error);

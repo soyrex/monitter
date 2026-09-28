@@ -334,6 +334,51 @@ Event `monitter:changed` payload `{ taskId?: string }` tells UI to reload snapsh
 The backend is authoritative; listen before initial snapshot. Errors reject with a readable string.
 Frontend may show a labelled browser design preview when Tauri isn't available, but never simulate an agent reply.
 
+## Built-in Mail plugin
+
+Mail account setup is owner-desktop-only. `mail_get_config {}` returns
+`MailConfig { revision, clientId, clientSecretConfigured, accounts }` with
+`MailAccount { id, provider, email, label, agentIds, connectedAt }` metadata.
+Credentials and account assignments live outside Snapshot in a separate macOS
+Keychain vault; OAuth tokens never reach the renderer, harness environment,
+managed MCP configuration, LAN, controller, visitor, or diagnostic output.
+
+- `mail_configure_gmail { revision, clientId, clientSecret? }` saves the installed
+  Google Desktop OAuth client; the secret is write-only. Returns `MailConfig`.
+- `mail_start_connect {}` starts a bounded loopback PKCE flow and opens the system
+  browser. Returns `MailConnectStart { attemptId, authorizationUrl, expiresAt }`.
+- `mail_connect_status { attemptId }` returns
+  `MailConnectStatus { status, error, account }`; status is `pending`, `connected`,
+  `error`, or `cancelled`.
+- `mail_cancel_connect { attemptId }` cancels a pending connection.
+- `mail_set_account_agents { revision, accountId, agentIds }` saves exact per-account
+  grants and returns `MailConfig`. Unknown, internal, SSH, unsupported provider,
+  and AGY headless profiles reject. New accounts have no assigned agents.
+- `mail_disconnect { revision, accountId }` removes the local connection and its
+  grants, returning `MailConfig`.
+
+A separate task-scoped `monitter_mail` Streamable HTTP MCP is attached on the next
+harness launch only when a supported local user agent has an assigned account.
+Local Codex, Claude, and ACP with HTTP MCP support use their existing managed
+server transport. Managed server IDs cannot impersonate `monitter_mail`.
+Each call verifies the running task, current agent eligibility and account grant;
+revocations are also checked before releasing provider results. Task retirement
+revokes its bearer token. Already-resident sessions need a fresh harness launch to
+acquire newly enabled tools. Account grant changes apply immediately to sessions
+that already carry Mail tools; removing access takes effect without a restart.
+
+The provider-neutral catalogue is read-only: `mail_accounts`, `mail_search`,
+`mail_read`, `mail_thread`. Gmail is the initial provider. `mail_search` accepts
+`account_id`, native `query`, `limit` (default 20, max 50), opaque `page_token`,
+`label_ids`, and `include_spam_trash`. Gmail operators belong in `query` and pass
+through verbatim. `mail_read` takes 1–20 `message_ids`; `mail_thread` takes a
+`thread_id` and `max_messages` (default 20, max 50). Both bound each message's body
+with `max_body_chars` (default 20,000, max 50,000), report truncation, and expose
+attachment metadata only. Mail content is untrusted data, never tool instructions.
+Results intentionally enter the requesting agent's conversation; the plugin
+itself does not persist message bodies. There are no send, modify, mark-read,
+archive, delete, attachment-download, or account-administration tools.
+
 ## MCP, plugins and managed skills
 
 Settings → MCP & Plugins manages optional MCP servers and portable Markdown skill
