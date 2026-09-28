@@ -399,6 +399,9 @@ impl Service {
         // last tick. Errors here are best-effort: they don't block
         // dispatch.
         let _ = cleanup_throwaway_tasks(self);
+        if let Err(error) = self.auto_archive_tick() {
+            eprintln!("[monitter] chat auto-archive failed: {error}");
+        }
         let snapshot = match self.snapshot() {
             Ok(snap) => snap,
             Err(_) => return,

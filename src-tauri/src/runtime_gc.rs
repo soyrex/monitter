@@ -124,7 +124,7 @@ impl Service {
                 let data = self.data.lock().ok()?;
                 let runs = self.runs.lock().ok()?;
                 if self.stopping.load(Ordering::Acquire)
-                    || self.admin_turn_broker.active_task_id().as_deref() == Some(task_id.as_str())
+                    || self.admin_turn_broker.is_active_task(&task_id)
                     || !runs
                         .tasks
                         .get(&task_id)

@@ -234,6 +234,7 @@ impl Database {
             approval_requests: read_vec(&connection, "approval_requests")?,
             approval_rules: read_vec(&connection, "approval_rules")?,
             schedules: read_vec(&connection, "schedules")?,
+            chat_archive_rules: get_meta(&connection, "chat_archive_rules")?.unwrap_or_default(),
             schedule_runs: read_vec(&connection, "schedule_runs")?,
             pending_throwaway_task_ids: get_meta(&connection, "pending_throwaway_task_ids")?
                 .unwrap_or_default(),
@@ -559,6 +560,7 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
     write_map(transaction, "task_hosts", task_hosts)?;
     write_map(transaction, "attachments", attachments)?;
     set_meta(transaction, "settings", &snapshot.settings)?;
+    set_meta(transaction, "chat_archive_rules", &snapshot.chat_archive_rules)?;
     set_meta(
         transaction,
         "pending_throwaway_task_ids",
@@ -703,6 +705,9 @@ fn diff_state(
         before_attachments,
         after_attachments,
     )?;
+    if before_snapshot.chat_archive_rules != after_snapshot.chat_archive_rules {
+        set_meta(transaction, "chat_archive_rules", &after_snapshot.chat_archive_rules)?;
+    }
     if before_snapshot.settings != after_snapshot.settings {
         set_meta(transaction, "settings", &after_snapshot.settings)?;
     }

@@ -66,6 +66,9 @@ mod ui_sync;
 mod history;
 mod markdown;
 mod mail_triage;
+mod mail;
+mod mail_mcp;
+mod mail_runtime;
 mod menu;
 pub mod model;
 pub mod model_router;
@@ -83,6 +86,7 @@ mod project_board;
 pub mod profile_init;
 mod runner;
 mod runtime_gc;
+mod auto_archive;
 mod scheduler;
 pub(crate) mod scheduler_impl;
 #[cfg(test)]
@@ -362,6 +366,9 @@ pub(crate) struct Service {
     extensions: extensions::ExtensionStore,
     extension_writes: Mutex<()>,
     environment_secrets: environment_secrets::EnvironmentSecretsStore,
+    mail: Arc<mail::MailService>,
+    mail_broker: Mutex<Option<collaboration_transport::Broker>>,
+    mail_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     // Initial Jev decisions are retained locally for audit. They contain a
     // prompt fingerprint, never the prompt itself or the Jev credential.
     router_trace_dir: PathBuf,
@@ -372,7 +379,6 @@ pub(crate) struct Service {
     runs: Mutex<RunRegistry>,
     // Serializes only the admin accept/reserve/register/dispatch window.
     // The caller drops this before waiting for its reply.
-    admin_dispatch: Mutex<()>,
     // A real CUA image result is held only until the same run emits its next
     // assistant message. It is never a path reader or a persisted capability.
     pending_codex_images: Mutex<HashMap<String, Vec<attachments::Attachment>>>,
@@ -418,8 +424,8 @@ pub(crate) struct Service {
     #[allow(dead_code)]
     internal_admin_state: InternalAdminState,
     /// Process-local broker for mini-LLM turns routed to the resident Monitter
-    /// Admin agent. The broker ensures exactly one active admin turn at a
-    /// time and never persists prompts or replies into the snapshot.
+    /// Admin agent. The broker permits up to three active hidden turns and
+    /// never persists prompts or replies into the snapshot.
     #[allow(dead_code)]
     admin_turn_broker: AdminTurnBroker,
 }
@@ -764,6 +770,12 @@ impl Service {
             extensions,
             extension_writes: Mutex::new(()),
             environment_secrets: environment_secrets::EnvironmentSecretsStore::new(),
+            #[cfg(not(test))]
+            mail: Arc::new(mail::MailService::new()),
+            #[cfg(test)]
+            mail: Arc::new(mail::MailService::for_test()),
+            mail_broker: Mutex::new(None),
+            mail_grants: Mutex::new(HashMap::new()),
             router_trace_dir: dir.join("router-traces"),
             state_writes: Mutex::new(()),
             data: Mutex::new(Arc::new(ServiceData {
@@ -775,7 +787,6 @@ impl Service {
                 revision: 0,
             })),
             runs: Mutex::new(RunRegistry::default()),
-            admin_dispatch: Mutex::new(()),
             pending_codex_images: Mutex::new(HashMap::new()),
             app_server_message_ids: Mutex::new(HashMap::new()),
             mail_details: Mutex::new(HashMap::new()),
@@ -847,18 +858,27 @@ impl Service {
     /// contract.
     pub(crate) const INTERNAL_ADMIN_TASK_TITLE: &'static str = "Monitter Admin resident task";
 
+    fn internal_admin_task_title(slot: usize) -> String {
+        if slot == 0 { Self::INTERNAL_ADMIN_TASK_TITLE.into() } else { format!("Monitter Admin resident task {slot}") }
+    }
+
     /// Returns the task id of the lazy internal admin task, creating it on
     /// first use. The task is never archived, never projected into
     /// `openTaskIds`, and never reused for ordinary chat sends. Repeated or
-    /// concurrent calls always observe exactly one task with `agent_id`
-    /// belonging to the resident admin agent.
+    /// concurrent calls always observe exactly one canonical slot-zero task.
     ///
     /// This intentionally bypasses the public `create_task` path because
     /// `create_task` rejects the internal admin agent as a chat recipient.
     #[allow(dead_code)] // Consumed by the resident-worker lane that follows this one.
     pub(crate) fn ensure_internal_admin_task(&self) -> Result<String, String> {
+        self.ensure_internal_admin_task_slot(0)
+    }
+
+    fn ensure_internal_admin_task_slot(&self, slot: usize) -> Result<String, String> {
+        if slot >= 3 { return Err("Monitter Admin slot is out of range.".into()); }
         let admin = self.internal_admin()?;
         let admin_id = admin.id.clone();
+        let title = Self::internal_admin_task_title(slot);
         let mut created_task: Option<Task> = None;
         let task_id = self.mutate_data(None, |data| {
             if let Some(existing) = data
@@ -867,7 +887,7 @@ impl Service {
                 .iter()
                 .find(|task| {
                     task.agent_id == admin_id
-                        && task.title == Self::INTERNAL_ADMIN_TASK_TITLE
+                        && task.title == title
                         && !task.archived
                 })
                 .cloned()
@@ -893,7 +913,7 @@ impl Service {
             let task = Task {
                 id: id(),
                 agent_id: admin.id.clone(),
-                title: Self::INTERNAL_ADMIN_TASK_TITLE.into(),
+                title: title.clone(),
                 native_session_id: None,
                 status: "idle".into(),
                 archived: false,
@@ -3194,6 +3214,7 @@ impl Service {
     fn release_run(&self, task_id: &str) {
         self.revoke_collaboration_grant(task_id);
         self.revoke_jev_decisions_grant(task_id);
+        self.revoke_mail_grant(task_id);
         if let Ok(mut runs) = self.runs.lock() {
             runs.tasks.remove(task_id);
             runs.native_sessions.retain(|_, owner| owner != task_id);
@@ -3565,6 +3586,7 @@ impl Service {
                 return Err("Project was not found.".into());
             }
             snapshot.projects.retain(|project| project.id != id);
+            snapshot.chat_archive_rules.retain(|rule| rule.project_id.as_deref() != Some(id));
             for task in &mut snapshot.tasks {
                 if task.project_id.as_deref() == Some(id) {
                     task.project_id = None;
@@ -3672,7 +3694,7 @@ impl Service {
     /// The lane:
     /// 1. Lazily ensures the canonical internal task exists (see
     ///    [`Self::ensure_internal_admin_task`]).
-    /// 2. Registers exactly one request in [`Self::admin_turn_broker`].
+    /// 2. Reserves one FIFO pool slot and registers its task-scoped request.
     /// 3. Sends the prompt to the resident transport; if no resident
     ///    transport exists yet, the same admin task is launched through a
     ///    resident-capable adapter — never a one-shot provider fallback.
@@ -3690,17 +3712,14 @@ impl Service {
         if prompt.trim().is_empty() {
             return Err("Monitter Admin prompt cannot be empty.".into());
         }
-        let dispatch = self
-            .admin_dispatch
-            .try_lock()
-            .map_err(|_| "Monitter Admin is busy with another interface request.".to_string())?;
-        let task_id = self.ensure_internal_admin_task()?;
-        // Single-writer guarantee: at most one admin turn is active at a time.
-        if let Some(active) = self.admin_turn_broker.active_task_id() {
-            if active == task_id {
-                return Err("Monitter Admin is busy with another interface request.".into());
-            }
-        }
+        // Admission is process-local and FIFO. It waits outside state/run
+        // locks, so excess interface requests remain silent until a hidden
+        // slot is free; their 45-second execution deadline starts below.
+        let task_ids = (0..3)
+            .map(|slot| self.ensure_internal_admin_task_slot(slot))
+            .collect::<Result<Vec<_>, _>>()?;
+        let permit = self.admin_turn_broker.acquire_slot(&task_ids)?;
+        let task_id = permit.task_id().to_string();
         let admin = self.internal_admin()?;
         // Claim an idle owner while holding the established data -> runs lock
         // order. `available_runtime` is only a read, so retirement can win
@@ -3747,16 +3766,41 @@ impl Service {
             // resident control. This is the only place the task enters the
             // running state.
             self.mark_internal_admin_task_running(&task_id)?;
-            (self.reserve_run(&task_id)?, true)
+            let control = match self.reserve_run(&task_id) {
+                Ok(control) => control,
+                Err(error) => {
+                    // Marking the task running is durable; reservation can
+                    // still lose a shutdown/ownership race. Restore a
+                    // terminal hidden-task state before releasing its slot.
+                    let _ = self.finalise_internal_admin_turn(&task_id, "error", None);
+                    return Err(error);
+                }
+            };
+            (control, true)
         };
         let request_id = id();
         let deadline = Instant::now() + ADMIN_TURN_TIMEOUT;
-        let receiver = self.admin_turn_broker.try_register(
-            request_id,
+        let receiver = match self.admin_turn_broker.try_register(
+            request_id.clone(),
             task_id.clone(),
             std::sync::Arc::downgrade(&control),
             deadline,
-        )?;
+        ) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                // Admission can lose the cleanup shutdown fence after this
+                // task has been marked running. A first-turn reservation has
+                // no adapter-owned drop guard yet, so remove it explicitly;
+                // an existing resident is terminated and reaped first.
+                control.terminate_owned();
+                if is_first_turn {
+                    self.release_run_if_current(&task_id, &control);
+                }
+                let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
+                let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
+                return Err(error);
+            }
+        };
         // Watchdog: times out the request, terminates the resident transport,
         // and refuses to replay a late reply. The closure runs only after the
         // broker entry has been closed with [`AdminTurnReply::Timeout`], so
@@ -3766,7 +3810,7 @@ impl Service {
         let owner_weak = std::sync::Arc::downgrade(&control);
         let timeout_control = std::sync::Arc::clone(&control);
         let timeout_task_id = task_id.clone();
-        spawn_admin_turn_watchdog(broker_weak, task_id.clone(), owner_weak, move || {
+        spawn_admin_turn_watchdog(broker_weak, task_id.clone(), request_id.clone(), owner_weak, move || {
             timeout_control.terminate_owned();
             // The OwnedRun drop guard inside the adapter will run
             // `release_app_server_run` for us, which clears the
@@ -3802,12 +3846,10 @@ impl Service {
             // entry silently and surface the error to the caller.
             self.admin_turn_broker.cancel_silently(&task_id);
             control.terminate_owned();
+            let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
             let _ = self.finalise_internal_admin_turn(&task_id, "error", None);
             return Err(error);
         }
-        // Holding this guard while waiting would serialize callers for up to
-        // the watchdog deadline. The broker now owns the active-turn gate.
-        drop(dispatch);
         // Wait for the broker reply until the deadline elapses. The
         // watchdog will deliver a Timeout error if the transport does not
         // complete in time.
@@ -3815,13 +3857,35 @@ impl Service {
         match receiver.recv_timeout(remaining) {
             Ok(AdminTurnReply::Text(text)) => Ok(text),
             Ok(AdminTurnReply::Timeout) => {
+                // Keep the slot reservation until the timed-out owner has
+                // torn down, so its late callbacks cannot target a newer
+                // request on this hidden task.
+                let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
+                let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
                 Err("Monitter Admin request exceeded its 45-second interface deadline.".into())
             }
-            Ok(AdminTurnReply::Error(error)) => Err(error),
-            Err(_) => {
+            Ok(AdminTurnReply::Error(error)) => {
+                control.terminate_owned();
+                let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
+                let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
+                Err(error)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // recv_timeout may win the watchdog's 100ms polling race.
+                // Close this generation and tear down before releasing its
+                // FIFO permit, exactly as the watchdog path does.
+                self.admin_turn_broker.time_out(&task_id);
+                control.terminate_owned();
+                let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
+                let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
+                Err("Monitter Admin request exceeded its 45-second interface deadline.".into())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // The transport ended without finalising the broker. Mark
                 // the task as interrupted so the next mini-task restarts.
                 let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
+                control.terminate_owned();
+                let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
                 let _ = admin;
                 Err("Monitter Admin transport closed before replying.".into())
             }
@@ -6327,6 +6391,11 @@ impl Service {
         if let Ok(mut grants) = self.jev_decisions_grants.lock() {
             grants.clear();
         }
+        self.mail.cancel_all_connects();
+        if let Ok(mut grants) = self.mail_grants.lock() {
+            grants.clear();
+            if let Ok(mut broker) = self.mail_broker.lock() { broker.take(); }
+        }
         self.admin_turn_broker.reset();
         let controls = self
             .runs
@@ -6990,6 +7059,52 @@ async fn list_system_fonts() -> Result<Vec<SystemFontFamily>, String> {
     tauri::async_runtime::spawn_blocking(load_system_font_families)
         .await
         .map_err(|error| format!("System font worker failed: {error}"))
+}
+
+// Mail account administration is owner-desktop-only, never LAN/controller/visitor.
+#[tauri::command]
+async fn mail_get_config(state: State<'_, AppState>) -> Result<mail::MailConfig, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.config()).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_configure_gmail(state: State<'_, AppState>, revision: String, client_id: String, client_secret: Option<String>) -> Result<mail::MailConfig, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.configure_gmail(revision, client_id, client_secret)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_start_connect(state: State<'_, AppState>) -> Result<mail::MailConnectStart, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let mail = state.0.mail.clone();
+    let app = state.0.app.clone().ok_or("Gmail connection requires the native desktop.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let start = mail.start_connect()?;
+        if app.opener().open_url(start.authorization_url.clone(), None::<&str>).is_err() {
+            let _ = mail.cancel_connect(&start.attempt_id);
+            return Err("Could not open the system browser for Gmail sign-in. Try again.".into());
+        }
+        Ok(start)
+    }).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_connect_status(state: State<'_, AppState>, attempt_id: String) -> Result<mail::MailConnectStatus, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.connect_status(&attempt_id)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_cancel_connect(state: State<'_, AppState>, attempt_id: String) -> Result<(), String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.cancel_connect(&attempt_id)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_set_account_agents(state: State<'_, AppState>, revision: String, account_id: String, agent_ids: Vec<String>) -> Result<mail::MailConfig, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.set_mail_account_agents(revision, account_id, agent_ids)).await.map_err(|_| "Mail worker failed.".to_string())?
+}
+#[tauri::command]
+async fn mail_disconnect(state: State<'_, AppState>, revision: String, account_id: String) -> Result<mail::MailConfig, String> {
+    let mail = state.0.mail.clone();
+    tauri::async_runtime::spawn_blocking(move || mail.disconnect(revision, account_id)).await.map_err(|_| "Mail worker failed.".to_string())?
 }
 
 /// Native desktop only. This command is deliberately absent from the LAN
@@ -9466,6 +9581,13 @@ pub fn run() {
             plan_jev_command,
             get_process_metrics,
             list_system_fonts,
+            mail_get_config,
+            mail_configure_gmail,
+            mail_start_connect,
+            mail_connect_status,
+            mail_cancel_connect,
+            mail_set_account_agents,
+            mail_disconnect,
             get_extension_config,
             save_extension_config,
             list_environment_secrets,
@@ -12737,24 +12859,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 
     #[test]
     fn autoname_routes_through_the_admin_turn_broker() {
-        // Pre-register a broker entry for the resident admin task id. The
-        // call must fail with the canonical "busy" error, proving that
-        // autoname actually went through send_admin_turn and entered the
-        // broker. Without the new routing the call would never reach the
-        // broker and could not observe this error.
+        // Shut the process-local broker before calling autoname. The call
+        // must reach send_admin_turn and observe its admission failure; this
+        // proves the resident path without launching a real provider.
         let dir = temp_dir("autoname-broker-route");
         let service = Service::open(None, dir.clone()).unwrap();
-        let admin_task_id = service.ensure_internal_admin_task().unwrap();
-        let owner: Arc<runner::RunControl> = runner::RunControl::new(false);
-        let _receiver = service
-            .admin_turn_broker
-            .try_register(
-                format!("req-{}", id()),
-                admin_task_id.clone(),
-                Arc::downgrade(&owner),
-                Instant::now() + Duration::from_secs(5),
-            )
-            .unwrap();
         // Seed a user task with some recent content so the target
         // resolution reaches the broker step.
         let agent_id = service
@@ -12769,15 +12878,16 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         let task = service
             .create_task(task_input(agent_id.clone(), "Original", None))
             .unwrap();
+        service.cleanup();
         let outcome = service.clone().autoname(AutonameTarget {
             task_id: Some(task.id.clone()),
             terminal_id: None,
             channel_id: None,
             content: None,
         });
-        let err = outcome.expect_err("occupied broker must reject the autoname request");
+        let err = outcome.expect_err("stopped broker must reject the autoname request");
         assert!(
-            err.contains("Monitter Admin is busy with another interface request"),
+            err.contains("Monitter Admin broker is shutting down"),
             "unexpected error: {err}"
         );
         let _ = std::fs::remove_dir_all(dir);

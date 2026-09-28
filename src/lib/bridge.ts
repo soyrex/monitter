@@ -59,6 +59,9 @@ import type {
   JevCommandPlan,
   MailDetail,
   MailDetailRequestResult,
+  MailConfig,
+  MailConnectStart,
+  MailConnectStatus,
   BrowserBounds,
   BrowserState,
   BrowserExtensionLoadResult,
@@ -107,6 +110,13 @@ export interface MonitterBridge {
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | SendAccepted>;
   requestMailDetail(taskId: string, mailId: string): Promise<MailDetailRequestResult>;
   getMailDetail(taskId: string, mailId: string): Promise<MailDetail | null>;
+  getMailConfig(): Promise<MailConfig>;
+  configureGmail(revision: string, clientId: string, clientSecret?: string): Promise<MailConfig>;
+  startMailConnect(): Promise<MailConnectStart>;
+  getMailConnectStatus(attemptId: string): Promise<MailConnectStatus>;
+  cancelMailConnect(attemptId: string): Promise<void>;
+  setMailAccountAgents(revision: string, accountId: string, agentIds: string[]): Promise<MailConfig>;
+  disconnectMailAccount(revision: string, accountId: string): Promise<MailConfig>;
   clearTaskContext(taskId: string): Promise<Snapshot>;
   cancelQueuedMessage(id: string): Promise<Snapshot>;
   editQueuedMessage(id: string, text: string): Promise<Snapshot>;
@@ -450,6 +460,13 @@ const nativeBridge: MonitterBridge = {
   sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
   requestMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('request_mail_detail', { taskId, mailId }),
   getMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('get_mail_detail', { taskId, mailId }),
+  getMailConfig: () => isLanBrowser() ? desktopOnly() : invoke('mail_get_config'),
+  configureGmail: (revision, clientId, clientSecret) => isLanBrowser() ? desktopOnly() : invoke('mail_configure_gmail', { revision, clientId, ...(clientSecret ? { clientSecret } : {}) }),
+  startMailConnect: () => isLanBrowser() ? desktopOnly() : invoke('mail_start_connect'),
+  getMailConnectStatus: (attemptId) => isLanBrowser() ? desktopOnly() : invoke('mail_connect_status', { attemptId }),
+  cancelMailConnect: (attemptId) => isLanBrowser() ? desktopOnly() : invoke('mail_cancel_connect', { attemptId }),
+  setMailAccountAgents: (revision, accountId, agentIds) => isLanBrowser() ? desktopOnly() : invoke('mail_set_account_agents', { revision, accountId, agentIds }),
+  disconnectMailAccount: (revision, accountId) => isLanBrowser() ? desktopOnly() : invoke('mail_disconnect', { revision, accountId }),
   clearTaskContext: (taskId) => invoke('clear_task_context', { taskId }),
   cancelQueuedMessage: (id) => invoke("cancel_queued_message", { id }),
   editQueuedMessage: (id, text) => invoke("edit_queued_message", { id, text }),
@@ -596,6 +613,13 @@ const previewBridge: MonitterBridge = {
   sendMessage: () => desktopOnly(),
   requestMailDetail: () => desktopOnly(),
   getMailDetail: () => desktopOnly(),
+  getMailConfig: () => desktopOnly(),
+  configureGmail: () => desktopOnly(),
+  startMailConnect: () => desktopOnly(),
+  getMailConnectStatus: () => desktopOnly(),
+  cancelMailConnect: () => desktopOnly(),
+  setMailAccountAgents: () => desktopOnly(),
+  disconnectMailAccount: () => desktopOnly(),
   clearTaskContext: () => desktopOnly(),
   cancelQueuedMessage: () => desktopOnly(),
   editQueuedMessage: () => desktopOnly(),
@@ -727,6 +751,13 @@ export function getBridge(): MonitterBridge {
         test.invoke("send_message", { taskId, text, attachmentIds }) as Promise<Snapshot>,
       requestMailDetail: (taskId, mailId) => test.invoke('request_mail_detail', { taskId, mailId }) as Promise<MailDetailRequestResult>,
       getMailDetail: (taskId, mailId) => test.invoke('get_mail_detail', { taskId, mailId }) as Promise<MailDetail | null>,
+      getMailConfig: () => test.invoke('mail_get_config') as Promise<MailConfig>,
+      configureGmail: (revision, clientId, clientSecret) => test.invoke('mail_configure_gmail', { revision, clientId, ...(clientSecret ? { clientSecret } : {}) }) as Promise<MailConfig>,
+      startMailConnect: () => test.invoke('mail_start_connect') as Promise<MailConnectStart>,
+      getMailConnectStatus: (attemptId) => test.invoke('mail_connect_status', { attemptId }) as Promise<MailConnectStatus>,
+      cancelMailConnect: (attemptId) => test.invoke('mail_cancel_connect', { attemptId }) as Promise<void>,
+      setMailAccountAgents: (revision, accountId, agentIds) => test.invoke('mail_set_account_agents', { revision, accountId, agentIds }) as Promise<MailConfig>,
+      disconnectMailAccount: (revision, accountId) => test.invoke('mail_disconnect', { revision, accountId }) as Promise<MailConfig>,
       clearTaskContext: (taskId) => test.invoke('clear_task_context', { taskId }) as Promise<Snapshot>,
       cancelQueuedMessage: (id) => test.invoke("cancel_queued_message", { id }) as Promise<Snapshot>,
       editQueuedMessage: (id, text) => test.invoke("edit_queued_message", { id, text }) as Promise<Snapshot>,

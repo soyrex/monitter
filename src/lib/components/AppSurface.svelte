@@ -49,6 +49,7 @@
   import Clock from "@lucide/svelte/icons/clock";
   import Check from "@lucide/svelte/icons/check";
   import ChartPie from "@lucide/svelte/icons/chart-pie";
+  import Cog from "@lucide/svelte/icons/cog";
   import CornerDownLeft from "@lucide/svelte/icons/corner-down-left";
   import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import GitFork from "@lucide/svelte/icons/git-fork";
@@ -5182,12 +5183,13 @@
           {#if composerExpanded || composerMultiline}{@render composerExpandButton()}{/if}
           {#if !projectBoardId(activeChannel.id)}<AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>{/if}
           <div class="composer-input-row" use:watchComposerLines>
+            {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}{/if}
             {@render composerEditor(projectBoardId(activeChannel.id) ? 'Write a project coordination note…' : 'Message this channel… Use @ to mention an agent', true)}
             <div class="composer-actions">{#if !projectBoardId(activeChannel.id)}{@render voiceButton()}{/if}{#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
           </div>
           </div>
           <div class="composer-footer">
-            {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}{@render voiceStatus()}
+            {#if !projectBoardId(activeChannel.id)}{@render voiceStatus()}
             <div class="recipient-picker">
               <span>Send to</span
               >{#each visibleAgents.filter( (a) => activeChannel.agentIds.includes(a.id), ) as agent}<button
@@ -5239,11 +5241,12 @@
             {#if composerExpanded || composerMultiline}{@render composerExpandButton()}{/if}
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             <div class="composer-input-row" use:watchComposerLines>
+              {@render attachmentTools()}
               {@render composerEditor('Describe what you want this agent to do…')}
               <div class="composer-actions">{@render voiceButton()}<button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
             </div>
             </div>
-      <div class="composer-footer"><div class="composer-left">{@render attachmentTools()}{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} jevMode={taskFormAgent?.jevRouting ?? 'off'} onchange={changeModel}/></div></div>
+      <div class="composer-footer"><div class="composer-left">{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} jevMode={taskFormAgent?.jevRouting ?? 'off'} onchange={changeModel}/></div></div>
           </dialog>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -5279,13 +5282,14 @@
             {#if composerExpanded || composerMultiline}{@render composerExpandButton()}{/if}
             <AttachmentList attachments={currentAttachments} onremove={filesBusy?undefined:removeAttachment}/>
             <div class="composer-input-row" use:watchComposerLines>
+              {@render attachmentTools()}
               {@render composerEditor(`Message ${selectedAgent?.name ?? 'agent'}…`)}
               <div class="composer-actions">{@render voiceButton()}{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}<button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
             </div>
             <ContextUsageBar usage={selectedTaskContextUsage}/>
             </div>
             <div class="composer-footer">
-              <div class="composer-left">{@render attachmentTools()}{@render voiceStatus()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
+              <div class="composer-left">{@render voiceStatus()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
               <div class="composer-right">
                 <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} jevMode={selectedAgent?.jevRouting ?? 'off'} onchange={changeModel}/>
               </div>
@@ -5416,7 +5420,8 @@
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null;railProjectId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
-      {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Create">
+      {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Sidebar actions">
+        {#if mobileSidebar}<button class="icon brand-action" type="button" aria-label="Open Settings" title="Open Settings" onclick={()=>routeSettings()}><Cog size={18}/></button>{/if}
         <button class="icon brand-action" type="button" aria-label={terminalBusy?'Opening terminal':'New terminal'} title="New terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
         <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
       </div>{/if}
@@ -5687,6 +5692,7 @@
   }}
   {@const myAgents = visibleAgents.filter(agent => !localHost || agent.hostId === localHost.id)}
   {@const peerAgents = localHost ? visibleAgents.filter(agent => agent.hostId !== localHost.id) : []}
+  {@const adminAgents = settingsAgents.filter(agent => agent.internal && (!localHost || agent.hostId === localHost.id))}
   <div class="agent-directory-shell">
     <header class="agent-directory-header">
       <label class="agent-directory-search">
@@ -5708,7 +5714,7 @@
     </header>
     {#if visibleAgents.length === 0}
       <section class="agent-directory-empty">
-        <h2>No agents yet</h2>
+        <h2>No configured agents yet</h2>
         <p>Add your first agent to start a chat with it.</p>
         <button
           type="button"
@@ -5818,6 +5824,33 @@
           {/if}
         </section>
       {/if}
+    {/if}
+    {#if adminAgents.length}
+      {@const adminMatches = adminAgents.filter(agent => haystack(agent).includes(directoryQuery.trim().toLowerCase()))}
+      <section class="agent-directory-section" aria-label="Monitter Admin">
+        <h2 class="agent-directory-section-title">Monitter Admin</h2>
+        {#if adminMatches.length === 0}
+          <p class="hint">No system agents match your search.</p>
+        {:else}
+          <ul class="agent-directory-list">
+            {#each adminMatches as agent (agent.id)}
+              <li class="agent-row">
+                <button type="button" class="agent-row-edit" aria-label={`Edit ${agent.name}`} onclick={() => routeAgentSettings({ ...agent })}>
+                  <span class="avatar">{@render avatarVisual(agent, 16)}</span>
+                  <span class="agent-row-body">
+                    <strong>{agent.name}</strong>
+                    <small>{agent.description || 'Handles Monitter interface requests'}</small>
+                    <small class="agent-row-meta">{friendlyProviderName(agent)}{agent.model ? ` · ${agent.model}` : ''}</small>
+                  </span>
+                </button>
+                <div class="agent-row-actions">
+                  <button type="button" class="icon" aria-label={`Open ${agent.name} settings`} title="Edit agent" onclick={() => routeAgentSettings({ ...agent })}><MoreHorizontal size={15} /></button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     {/if}
   </div>
 {/snippet}
@@ -7094,6 +7127,8 @@
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry { border:0; border-radius:0; background:color-mix(in srgb,var(--tab-strip-color,var(--accent)) 52%,var(--sidebar)); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry.active { background:var(--tab-strip-color,var(--accent)); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry > * { visibility:hidden; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry::after { content:""; position:absolute; z-index:4; right:0; bottom:0; left:0; height:3px; background:color-mix(in srgb,var(--tab-strip-color,var(--accent)) 58%,var(--sidebar)); pointer-events:none; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry.active::after { background:var(--tab-strip-color,var(--accent)); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'] { --tab-strip-color:var(--muted); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'][data-tab-status='running'] { --tab-strip-color:var(--accent); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='task'][data-tab-status='error'] { --tab-strip-color:#c44c4c; }
@@ -7543,8 +7578,9 @@
   .cancellation-event :global(.message-meta) { flex:1; min-width:0; margin:0; }
   .cancellation-event :global(.message-meta time) { margin-left:auto; }
   .cancellation-event :global(svg) { flex:none; color:#b56a54; }
-  .optimistic-message { border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+  .optimistic-message { position:relative; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
   .delivery-status { display:inline-flex; align-items:center; margin-left:auto; color: var(--muted); font: calc(9px * var(--interface-font-ratio, 1)) var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+  .optimistic-message .delivery-status[data-delivery-status="sending"], .optimistic-message .delivery-status[data-delivery-status="sent"] { position:absolute; right:2px; bottom:2px; display:flex; width:13px; height:13px; align-items:center; justify-content:center; margin:0; transform:scale(.8); transform-origin:bottom right; }
   .delivery-status[data-delivery-status="sending"] { color: var(--accent); }
   .delivery-status[data-delivery-status="not-confirmed"], .delivery-error { color: #bd655b; }
   .delivery-retry { width: auto; min-height: 20px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--panel); font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); }
@@ -7677,7 +7713,8 @@
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .composer-input-row { display:flex; align-items:flex-end; gap:8px; min-width:0; }
-  .composer-input-row > :first-child { flex:1; min-width:0; }
+  .composer-input-row > .attachment-tools { flex:none; }
+  .composer-input-row > textarea, .composer-input-row > .longform-editor, .composer-input-row > :global(.mention-composer) { flex:1; min-width:0; }
   .composer.expanded .composer-input-row { flex:1; min-height:0; }
   .composer.expanded .composer-input-row > .longform-editor { align-self:stretch; }
   .composer-input-row :global(.mention-composer textarea) { min-height:30px; }

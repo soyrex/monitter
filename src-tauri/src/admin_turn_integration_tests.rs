@@ -44,6 +44,23 @@ fn fixture(name: &str) -> ServiceFixture {
 }
 
 #[test]
+fn admin_shutdown_before_launch_does_not_leave_a_running_hidden_task() {
+    let fixture = fixture("shutdown-before-launch");
+    // Model shutdown becoming visible after admission but before a provider
+    // starts. The reserve_run fence must reject without leaking running state.
+    fixture.service.stopping.store(true, std::sync::atomic::Ordering::Release);
+    let error = fixture.service.send_admin_turn("Never launch this prompt".into()).unwrap_err();
+    assert!(error.contains("shutting down"));
+    assert!(fixture.service.runs.lock().unwrap().tasks.is_empty());
+    assert!(fixture.service.admin_turn_broker.active_task_id().is_none());
+    let snapshot = fixture.service.snapshot().unwrap();
+    let admin_id = fixture.service.internal_admin().unwrap().id;
+    assert!(snapshot.tasks.iter().filter(|task| task.agent_id == admin_id)
+        .all(|task| task.status != "running"));
+    assert!(snapshot.messages.is_empty());
+}
+
+#[test]
 fn ensure_internal_admin_task_returns_a_single_task_across_repeated_calls() {
     let fixture = fixture("lazy-single");
     let first = fixture
@@ -386,6 +403,7 @@ fn watchdog_terminates_owner_and_drops_buffer_after_timeout() {
     crate::admin_turn_broker::spawn_admin_turn_watchdog(
         broker_weak,
         task_id.clone(),
+        request_id.clone(),
         owner_weak,
         move || {
             owner_for_timeout.terminate_owned();
@@ -496,7 +514,7 @@ fn app_server_event_redirection_skips_snapshot_events_for_admin_task() {
 }
 
 #[test]
-fn broker_rejects_concurrent_registration_with_a_readable_error() {
+fn broker_accepts_three_distinct_task_registrations() {
     let broker = AdminTurnBroker::new();
     let owner_a: Arc<crate::runner::RunControl> = crate::runner::RunControl::new(false);
     let owner_b: Arc<crate::runner::RunControl> = crate::runner::RunControl::new(false);
@@ -514,11 +532,7 @@ fn broker_rejects_concurrent_registration_with_a_readable_error() {
         Arc::downgrade(&owner_b),
         Instant::now() + Duration::from_secs(5),
     );
-    let error = second.expect_err("second registration must reject");
-    assert!(
-        error.contains("Monitter Admin is busy with another interface request"),
-        "unexpected error: {error}"
-    );
+    assert!(second.is_ok());
     drop(receiver_a);
 }
 
@@ -562,6 +576,7 @@ fn broker_ignores_late_completion_when_a_request_was_already_timed_out() {
     crate::admin_turn_broker::spawn_admin_turn_watchdog(
         broker_weak,
         "task-timed".into(),
+        "req-timed".into(),
         owner_weak,
         move || {
             owner_for_timeout.terminate_owned();

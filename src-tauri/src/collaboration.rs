@@ -95,6 +95,8 @@ impl Service {
             "resume_schedule" => {
                 self.resume_schedule_protocol(caller_task, &required_string(args, "id")?)
             }
+            "list_chat_archive_rules" | "save_chat_archive_rule" | "delete_chat_archive_rule"
+            | "archive_chats" => self.chat_archive_protocol(caller_task, tool, args),
             "work_plan_start" => self.work_plan_start(caller_task, args),
             "work_plan_update" => self.work_plan_update(caller_task, args),
             "work_plan_list" => self.work_plan_list(caller_task),
@@ -1085,6 +1087,10 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
             "enabled",
         ],
         "delete_schedule" | "run_schedule_now" | "pause_schedule" | "resume_schedule" => &["id"],
+        "list_chat_archive_rules" => &[],
+        "save_chat_archive_rule" => &["scope", "project_id", "older_than_days", "enabled"],
+        "delete_chat_archive_rule" => &["scope", "project_id"],
+        "archive_chats" => &["scope", "project_id", "older_than_days", "dry_run"],
         "project_board_read" => &["after_sequence"],
         "project_board_post" => &["request_id", "text"],
         _ => return Err("Unknown Monitter collaboration tool.".into()),
