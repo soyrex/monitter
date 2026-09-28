@@ -37,7 +37,10 @@ try {
   const slowSend = new Promise(resolve => { releaseSlowSend = resolve; });
   const bridge = { getSnapshot: async()=>snapshot, sendMessage: async(_taskId,text)=>{ sends++; if(text==='slow') await slowSend; return { accepted:true }; }, cancelTask:async()=>snapshot,resumeTask:async()=>snapshot,listTerminals:async()=>[],readTerminal:async()=>({chunks:[],nextSeq:0,status:'exited',exitCode:0,truncated:false}) };
   let ownerStarted = false, releaseOwner = () => {};
-  const ownerOptions = { isTrustedOwnerWorkspace:key=>ownerTrusted.has(key), onOwnerWorkspaceAccess:()=>{}, onOwnerInvoke:async(command,args)=>{ ownerInvokes++; if(command==='workspace.large') return { requestBytes:args.payload.length, payload:'r'.repeat(8 * 1024 * 1024) }; if(command==='workspace.blocked'){ownerStarted=true;await new Promise(resolve=>{releaseOwner=resolve;});} return { command,args }; } };
+  let concurrentStarted = 0, concurrentActive = 0, concurrentPeak = 0, releaseConcurrent = () => {};
+  const concurrentGate = new Promise(resolve => { releaseConcurrent = resolve; });
+  const ownerOptions = { isTrustedOwnerWorkspace:key=>ownerTrusted.has(key), onOwnerWorkspaceAccess:()=>{}, onOwnerInvoke:async(command,args)=>{ ownerInvokes++; if(command==='workspace.large') return { requestBytes:args.payload.length, payload:'r'.repeat(8 * 1024 * 1024) }; if(command==='workspace.concurrent'){concurrentStarted++;concurrentActive++;concurrentPeak=Math.max(concurrentPeak,concurrentActive);await concurrentGate;concurrentActive--;}
+    if(command==='workspace.blocked'){ownerStarted=true;await new Promise(resolve=>{releaseOwner=resolve;});} return { command,args }; } };
   let desktop = await createResumableDesktopSession({ relayUrl, bridge, identity: desktopIdentity, isTrustedController:key=>trusted.has(key), onControllerAccess, ...ownerOptions });
   const invitation = desktop.invitation;
   let mobile = await createResumableMobileSession({ invitation, identity: mobileIdentity });
@@ -56,6 +59,15 @@ try {
   assert.equal(mobile.hasOwnerWorkspaceAccess(), true);
   assert.deepEqual(await mobile.invokeOwner('workspace.read', { bounded:true }), { command:'workspace.read', args:{ bounded:true } });
   assert.equal(ownerInvokes, 1);
+  // A burst of normal workspace reads must wait on the phone instead of
+  // reaching the desktop's eight-active-command rejection gate.
+  const concurrent = Array.from({ length: 12 }, (_, index) => mobile.invokeOwner('workspace.concurrent', { index }));
+  await wait(done=>{const timer=setInterval(()=>{if(concurrentStarted===3){clearInterval(timer);done();}},5);return()=>clearInterval(timer);},5000,'bounded owner burst');
+  assert.equal(concurrentStarted, 3);
+  releaseConcurrent();
+  const concurrentResults = await Promise.all(concurrent);
+  assert.deepEqual(concurrentResults.map(result=>result.args.index), Array.from({length:12},(_,index)=>index));
+  assert.equal(concurrentPeak, 3);
   // Owner frames stay small while the logical request and response cross the
   // former 16/64 KiB limits by orders of magnitude.
   const large = await mobile.invokeOwner('workspace.large', { payload:'q'.repeat(8 * 1024 * 1024) });
@@ -70,7 +82,7 @@ try {
   // revoke the limited controller session.
   ownerTrusted.delete(mobileKey);
   await assert.rejects(mobile.invokeOwner('workspace.read', {}), /revoked|Connection closed|approval/);
-  assert.equal(ownerInvokes, 3); assert.equal(mobile.getStatus(), 'connected');
+  assert.equal(ownerInvokes, 15); assert.equal(mobile.getStatus(), 'connected');
   await mobile.sendMessage(task, 'one'); assert.equal(sends, 1); assert.ok(accesses > 0);
   // A phone process restart uses the same identity; the desktop trusts it without a new approval.
   mobile.close(); mobile = await createResumableMobileSession({ invitation, identity: mobileIdentity });

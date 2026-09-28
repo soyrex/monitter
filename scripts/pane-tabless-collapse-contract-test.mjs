@@ -2,8 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { strict as assert } from 'node:assert';
 import { paneRemovalDecision, paneTabCount, remapPromotedPaneId, remapQueuedPaneRemovals } from '../src/lib/pane-lifecycle.ts';
 
-const empty = () => ({ openTaskIds: [], openDraftIds: [], openChannelIds: [], openTerminalIds: [], openEmptyIds: [], settingsOpen: false });
+const empty = () => ({ openTaskIds: [], openDraftIds: [], openChannelIds: [], openTerminalIds: [], openGitTaskIds: [], openEmptyIds: [], settingsOpen: false });
 const terminal = id => ({ ...empty(), openTerminalIds: [id] });
+const gitReview = id => ({ ...empty(), openGitTaskIds: [id] });
 const task = id => ({ ...empty(), openTaskIds: [id] });
 
 // Exercise the actual lifecycle decision helper with a tiny deferred-removal
@@ -70,6 +71,14 @@ function paneHarness({ panes, pending = false }) {
   assert.equal(h.requests.size, 0);
 }
 
+// A Git review is a first-class tab and must keep its split alive.
+{
+  const h = paneHarness({ panes: { main: task('chat'), side: gitReview('review') } });
+  h.request('side'); h.drain();
+  assert.deepEqual(h.removed, []);
+  assert.equal(h.requests.size, 0);
+}
+
 // Transfer requests removal only once acceptance is committed. A cancelled
 // drop leaves the source tab and makes no request.
 {
@@ -110,15 +119,16 @@ for (const expected of [
   'await drainEmptyPaneRemovals();',
   "const decision = state ? paneRemovalDecision(state, paneIds(layout).length, layoutPending()) : 'keep';",
   'if (!state && paneIds(layout).includes(id)) continue;',
-  "if (remaining && tabCount(remaining) === 0) await removeEmptyPane(tab.sourcePaneId);",
+  "if (!keepEmptySource && remaining && tabCount(remaining) === 0) await removeEmptyPane(tab.sourcePaneId);",
   'pendingEmptyPaneIds=remapQueuedPaneRemovals(pendingEmptyPaneIds,id,promoted);',
   'expandedPaneId=expandedPaneId===null?null:remapPromotedPaneId(expandedPaneId,id,promoted);',
   'function handleChildWorkspaceChange()',
   'onWorkspaceChange={handleChildWorkspaceChange}',
 ]) assert.ok(source.includes(expected), `Missing lifecycle integration: ${expected}`);
+assert.ok(source.includes("openGitTaskIds.map(id=>({kind:'git' as const,id}))") && source.includes("if(tab.kind==='git')"), 'Git reviews must remain first-class persisted and transferable tabs.');
 assert.ok(source.includes('closeSettings(collapse = true)') && source.includes("if(pane!=='settings'){if (collapse) collapseTablessPane();return;}"), 'Closing a non-selected Settings tab must still collapse a tabless pane.');
 assert.ok(source.includes('if (collapse) collapseTablessPane();') && source.includes('finally{terminalBusy=false;}'), 'Terminal collapse is queued before busy clears and retried by the root queue.');
 assert.ok(source.includes('Runtime terminal removal is also a tab close.') && source.includes('else openOverview();\n      // Runtime terminal removal is also a tab close. Do not retain a blank\n      // split merely because the session disappeared outside the tab button.\n      collapseTablessPane();'), 'A terminal session removed outside its tab Close control must also collapse a final-tab pane.');
-assert.ok(source.includes('tabOrder=orderedTabs();\n      if(pane!==\'terminal\'||!selectedTerminalId||sessions[selectedTerminalId]) { collapseTablessPane(); return; }'), 'Runtime terminal cleanup must normalize stale tab order and collapse even when that terminal was not selected.');
+assert.ok(source.includes('paneLocal.restore(orderedTabs(), availableTabs());\n      if(pane!==\'terminal\'||!selectedTerminalId||sessions[selectedTerminalId]) { collapseTablessPane(); return; }'), 'Runtime terminal cleanup must normalize stale tab order and collapse even when that terminal was not selected.');
 
 console.log('pane lifecycle: deferred terminal/unrelated-busy collapse, failed-close safety, committed-transfer collapse, and fresh/sole-pane preservation pass.');

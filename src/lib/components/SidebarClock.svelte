@@ -268,5 +268,5 @@
   .compact .metric-row > strong { grid-area:value; width:100%; overflow:visible; font-size:7px; letter-spacing:0; text-align:center; text-overflow:clip; }
   .compact .sparkline { grid-area:spark; height:8px; }
   .compact .metrics-error { overflow:hidden; max-width:100%; font-size:7px; text-align:center; }
-  @media (prefers-reduced-motion: reduce) { .widget-toggle :global(.widget-chevron) { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { :global(:root:not([data-motion="on"])) .widget-toggle :global(.widget-chevron) { transition: none; } }
 </style>

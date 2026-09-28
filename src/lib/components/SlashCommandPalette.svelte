@@ -92,6 +92,6 @@
   :global(.spin) { animation:spin .8s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
   @keyframes slash-rise { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
-  @media (prefers-reduced-motion:reduce) { .slash-dock,:global(.spin) { animation:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .slash-dock,:global(:root:not([data-motion="on"])) :global(.spin) { animation:none; } }
   @container (width < 560px) { button { grid-template-columns:18px minmax(70px,auto) minmax(0,1fr); } button small { display:none; } }
 </style>

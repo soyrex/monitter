@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { rangeFill } from '$lib/range-fill';
   import Bot from "@lucide/svelte/icons/bot";
   import Check from "@lucide/svelte/icons/check";
@@ -30,7 +31,7 @@
   // "Agents" category. The in-pane route inside AppSurface decides whether
   // the directory or the edit view is shown, so this component only
   // owns the sidebar slot.
-  type Category = "profile" | "appearance" | "typography" | "behaviour" | "conversation" | "approvals" | "agents" | "lan" | "remote" | "extensions" | "environment";
+  type Category = "profile" | "connection" | "appearance" | "typography" | "behaviour" | "conversation" | "approvals" | "agents" | "lan" | "remote" | "extensions" | "environment";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
   type FontWeightKey = "interfaceFontWeight" | "chatFontWeight" | "terminalFontWeight";
@@ -72,8 +73,11 @@
 
   const accents = ["#00a8f0", "#3978d4", "#8755c7", "#c44c79", "#c27524"];
   const remoteControlAvailable = !isLanBrowser() && getBridge().available;
-  const categories: { id: Category; label: string; detail: string; icon: typeof Palette }[] = [
+  let iosConnectionAvailable = $state(false);
+  onMount(() => { iosConnectionAvailable = !!(window as Window & { webkit?: { messageHandlers?: { changeConnection?: { postMessage: (value: null) => void } } } }).webkit?.messageHandlers?.changeConnection; });
+  const categories = $derived<{ id: Category; label: string; detail: string; icon: typeof Palette }[]>([
     { id: "profile", label: "Profile", detail: "Your name for new chats", icon: UserRound },
+    ...(iosConnectionAvailable ? [{ id: "connection" as const, label: "Connection", detail: "Choose LAN or relay workspace", icon: Smartphone }] : []),
     { id: "lan", label: "LAN access", detail: "Open Monitter in a browser", icon: ShieldCheck },
     ...(remoteControlAvailable ? [{ id: "remote" as const, label: "Remote control", detail: "Pair this desktop with your phone", icon: Smartphone }] : []),
     { id: "agents", label: "Agents", detail: "Browse and configure your agents", icon: Bot },
@@ -84,7 +88,7 @@
     { id: "behaviour", label: "Permissions & behaviour", detail: "Focus and busy messages", icon: ShieldCheck },
     { id: "approvals", label: "Approvals", detail: "Saved always-approve rules", icon: ShieldCheck },
     { id: "conversation", label: "Conversation", detail: "Messages and activity", icon: MessageSquare },
-  ];
+  ]);
   const fonts: { key: FontKey; sizeKey: FontSizeKey; weightKey: FontWeightKey; size: number; label: string; fallback: string }[] = [
     { key: "interfaceFont", sizeKey: "interfaceFontSize", weightKey: "interfaceFontWeight", size: 14, label: "Interface font", fallback: "IBM Plex Sans" },
     { key: "chatFont", sizeKey: "chatFontSize", weightKey: "chatFontWeight", size: 13, label: "Chat font", fallback: "IBM Plex Sans" },
@@ -235,6 +239,10 @@
     const menu = (event.currentTarget as HTMLElement).closest('details');
     if (menu) menu.open = false;
   }
+
+  function changeIOSConnection() {
+    (window as Window & { webkit?: { messageHandlers?: { changeConnection?: { postMessage: (value: null) => void } } } }).webkit?.messageHandlers?.changeConnection?.postMessage(null);
+  }
 </script>
 
 <section class="settings-pane" aria-label="Settings">
@@ -262,7 +270,8 @@
         <h1>{categories.find((item) => item.id === activeCategory)?.label}</h1>
       </div>
       <div class="save-state" aria-live="polite">
-        {#if activeCategory === "lan"}<span>Local network</span>
+        {#if activeCategory === "connection"}<span>iPhone app</span>
+        {:else if activeCategory === "lan"}<span>Local network</span>
         {:else if activeCategory === "remote"}<span>Desktop pairing</span>
         {:else if activeCategory === "extensions" || activeCategory === "environment"}<span>Applies on next harness launch</span>
         {:else if activeCategory === "agents"}<span>Browse and configure your agents</span>
@@ -279,7 +288,14 @@
     {/if}
 
     <div class="settings-category" use:motionView={{ key: activeCategory, y: 4, duration: 150, opacity: .9, enabled: visible && active }}>
-    {#if activeCategory === "lan"}<LanSettings />
+    {#if activeCategory === "connection"}
+      <div class="section-stack">
+        <section class="setting-card" aria-labelledby="iphone-connection-heading">
+          <div class="card-heading"><h2 id="iphone-connection-heading">Workspace connection</h2><p>Switch between the nearby LAN workspace and your paired relay connection without leaving the app.</p></div>
+          <div class="setting-actions"><button class="secondary" type="button" onclick={changeIOSConnection}>Change connection</button></div>
+        </section>
+      </div>
+    {:else if activeCategory === "lan"}<LanSettings />
     {:else if activeCategory === "remote"}
       <div class="section-stack">
         <section class="setting-card" aria-labelledby="remote-control-heading">
@@ -426,9 +442,9 @@
         </section>
 
         <section class="setting-card" aria-labelledby="motion-heading">
-          <div class="card-heading"><h2 id="motion-heading">Motion</h2><p>Keep interface movement comfortable. Your operating-system reduced-motion setting always takes priority.</p></div>
+          <div class="card-heading"><h2 id="motion-heading">Motion</h2><p>System follows your device. On keeps Monitter animated even when Reduce Motion is enabled.</p></div>
           <div class="segmented" aria-label="Motion">
-            {#each ['system', 'subtle', 'off'] as preference}
+            {#each ['system', 'subtle', 'on', 'off'] as preference}
               <button type="button" class:chosen={$motionPreference === preference} aria-pressed={$motionPreference === preference}
                 onclick={() => setMotionPreference(preference as MotionPreference)}>{preference[0].toUpperCase() + preference.slice(1)}</button>
             {/each}
@@ -585,5 +601,5 @@
   @keyframes spin { to { transform:rotate(360deg); } }
   @container (max-width:620px) { .settings-pane { grid-template-columns:150px minmax(0,1fr); }.settings-nav { padding:14px 7px; }.settings-nav button { padding:9px 7px; }.settings-nav small { display:none; }.settings-content { padding:18px 14px; }.settings-header { margin-bottom:18px; }.settings-header h1 { font-size:calc(20px * var(--interface-font-ratio, 1)); }.save-state { font-size:calc(10px * var(--interface-font-ratio, 1)); }.font-setting { grid-template-columns:1fr; gap:10px; } }
   @container (max-width:430px) { .settings-pane { grid-template-columns:52px minmax(0,1fr); }.settings-nav { padding:12px 8px; }.nav-heading,.settings-nav span { display:none; }.settings-nav button { justify-content:center; padding:10px; }.settings-content { padding:16px 12px; }.setting-card { padding:14px; }.settings-header { align-items:center; }.save-state { font-size:0; }.save-state :global(svg) { width:14px; height:14px; }.swatches { gap:7px; }.colour-picker { margin-left:0; }.app-theme-selectors { grid-template-columns:1fr; }.theme-default-row { align-items:flex-start; flex-direction:column; } }
-  @media (prefers-reduced-motion: reduce) { .save-state :global(svg.spin) { animation:none; }.switch-row input,.switch-row input::after { transition:none; } }
+  @media (prefers-reduced-motion: reduce) { :global(:root:not([data-motion="on"])) .save-state :global(svg.spin) { animation:none; }:global(:root:not([data-motion="on"])) .switch-row input,:global(:root:not([data-motion="on"])) .switch-row input::after { transition:none; } }
 </style>

@@ -69,7 +69,7 @@
   .goal-sparkles { position:absolute; inset:0; z-index:-1; overflow:hidden; border-radius:inherit; pointer-events:none; }
   .goal-sparkles span { position:absolute; font-size:8px; line-height:1; color:var(--accent-ink); text-shadow:0 0 7px var(--accent); animation:goal-twinkle 2.6s ease-in-out infinite; }
   @keyframes goal-twinkle { 0%,100% { opacity:.12; transform:translate(-50%,-50%) scale(.5); } 50% { opacity:.85; transform:translate(-50%,-50%) scale(1); } }
-  @media (prefers-reduced-motion:reduce) { .goal-sparkles span { animation:none; opacity:.45; transform:translate(-50%,-50%); } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .goal-sparkles span { animation:none; opacity:.45; transform:translate(-50%,-50%); } }
   .activity-label { display: flex; align-items: center; gap: 7px; color: var(--accent-ink); }
   strong { font-weight: 600; }
   .status { margin-left: auto; font: calc(10px * var(--interface-font-ratio, 1)) var(--mono); color: var(--muted); }

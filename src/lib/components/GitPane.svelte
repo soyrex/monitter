@@ -7,7 +7,7 @@
   import type { GitDiffScope, TaskGitDiff, TaskGitStatus } from '$lib/types';
 
   type GitPaneStatus = { repository: boolean | null; error: string; loading: boolean; status: TaskGitStatus | null };
-  let { taskId, probeKey = taskId, active = false, onRepository, onStatus }: { taskId: string; probeKey?: string; active?: boolean; onRepository?: (repository: boolean) => void; onStatus?: (status: GitPaneStatus) => void } = $props();
+  let { taskId, probeKey = taskId, active = false, statusOnly = false, onRepository, onStatus }: { taskId: string; probeKey?: string; active?: boolean; statusOnly?: boolean; onRepository?: (repository: boolean) => void; onStatus?: (status: GitPaneStatus) => void } = $props();
   const bridge = getBridge();
   let status = $state<TaskGitStatus | null>(null), loading = $state(false), error = $state('');
   let selected = $state<{ path: string; scope: GitDiffScope } | null>(null), diff = $state<TaskGitDiff | null>(null), diffLoading = $state(false), diffError = $state('');
@@ -34,7 +34,7 @@
   async function choose(path: string, scope: GitDiffScope) { selected = { path, scope }; diff = null; await loadDiff(selected); }
   $effect(() => {
     const id = taskId, key = probeKey; void id; void key;
-    generation++; statusRevision++; diffRevision++; status = null; error = ''; loading = false; diffLoading = false; selected = null; diff = null; diffError = '';
+    generation++; statusRevision++; diffRevision++; status = null; error = ''; loading = false; diffLoading = false; selected = null; diff = null; diffError = ''; untrack(publish);
     const expectedGeneration = generation;
     const unsubscribe = untrack(() => observeGit(bridge, taskId, probeKey, next => {
       if (expectedGeneration !== generation) return;
@@ -49,7 +49,7 @@
   const group = (scope: GitDiffScope) => files.filter(file => scope === 'staged' ? changed(file.indexStatus) && !file.untracked : scope === 'unstaged' ? changed(file.worktreeStatus) && !file.untracked : file.untracked);
 </script>
 
-{#if status?.repository}
+{#if status?.repository && !statusOnly}
 <section class="git-pane" aria-label="Git changes">
   <header><span>{status?.repository && status.branch ? status.branch : 'Git'}</span><button class="icon" aria-label="Refresh Git status" title="Refresh" onclick={refresh} disabled={loading}><RefreshCw class={loading ? 'spin' : ''} size={14}/></button></header>
   <div class="git-body"><aside class="git-files">
@@ -71,5 +71,6 @@
 {/if}
 
 <style>
-.git-pane{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0;height:100%;font-size:calc(11px * var(--interface-font-ratio, 1))}.git-pane header{display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--line)}.git-body{display:grid;grid-template-rows:minmax(90px,40%) minmax(0,1fr);min-height:0;overflow:hidden}.git-files{overflow:auto;border-bottom:1px solid var(--line);padding:6px}.git-files h4{margin:10px 4px 3px;font-size:calc(10px * var(--interface-font-ratio, 1));color:var(--muted)}.git-files h4 span{float:right}.git-files button{display:flex;width:100%;gap:5px;padding:4px;text-align:left}.git-files button.chosen{background:var(--soft)}.git-files code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.git-diff{overflow:auto;min-width:0}.git-diff pre{margin:0;padding:8px;user-select:text;white-space:pre;tab-size:2}.git-diff pre span{display:block}.plus{color:#237b4b;background:#237b4b14}.minus{color:#b54a55;background:#b54a5514}.git-note{padding:10px;color:var(--muted)}.git-note.error{color:#b54a55}:global(.spin){animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){:global(.spin){animation:none}}
+.git-pane{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0;height:100%;font-size:calc(11px * var(--interface-font-ratio, 1))}.git-pane header{display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--line)}.git-body{display:grid;grid-template-rows:minmax(90px,40%) minmax(0,1fr);min-height:0;overflow:hidden}.git-files{overflow:auto;border-bottom:1px solid var(--line);padding:6px}.git-files h4{margin:10px 4px 3px;font-size:calc(10px * var(--interface-font-ratio, 1));color:var(--muted)}.git-files h4 span{float:right}.git-files button{display:flex;width:100%;gap:5px;padding:4px;text-align:left}.git-files button.chosen{background:var(--soft)}.git-files code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.git-diff{overflow:auto;min-width:0}.git-diff pre{margin:0;padding:8px;user-select:text;white-space:pre;tab-size:2}.git-diff pre span{display:block}.plus{color:#237b4b;background:#237b4b14}.minus{color:#b54a55;background:#b54a5514}.git-note{padding:10px;color:var(--muted)}.git-note.error{color:#b54a55}:global(.spin){animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){:global(:root:not([data-motion="on"])) :global(.spin){animation:none}}
+@media(min-width:720px){.git-body{grid-template-columns:minmax(180px,32%) minmax(0,1fr);grid-template-rows:minmax(0,1fr)}.git-files{border-bottom:0;border-right:1px solid var(--line)}}
 </style>

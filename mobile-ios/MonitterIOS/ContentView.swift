@@ -28,47 +28,60 @@ struct ContentView: View {
             case .chooser:
                 connectionChooser
             case .paired, .lan:
-                ZStack(alignment: .topTrailing) {
-                    WebContentView(webView: $webView, url: webURL, error: startError, requestScan: {
-                        scannerPresented = true
-                    }, navigationError: { pageError = $0 })
-                    .ignoresSafeArea()
+                GeometryReader { geometry in
+                    ZStack(alignment: .topTrailing) {
+                        WebContentView(webView: $webView, url: webURL, error: startError, requestScan: {
+                            scannerPresented = true
+                        }, requestConnectionChooser: {
+                            editingAddress = true
+                        }, navigationError: { pageError = $0 })
+                        .frame(
+                            width: geometry.size.width,
+                            height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
+                        )
+                        .offset(y: -geometry.safeAreaInsets.top)
 
-                    if let currentPageError = pageError {
-                        VStack(spacing: 12) {
-                            Text("Workspace unavailable").font(.headline)
-                            Text(currentPageError).font(.callout).multilineTextAlignment(.center)
-                            Button("Retry") { pageError = nil; if let webURL { webView?.load(URLRequest(url: webURL)) } }
-                            Button("Change connection") { editingAddress = true }
+                        if let currentPageError = pageError {
+                            VStack(spacing: 12) {
+                                Text("Workspace unavailable").font(.headline)
+                                Text(currentPageError).font(.callout).multilineTextAlignment(.center)
+                                Button("Retry") { pageError = nil; if let webURL { webView?.load(URLRequest(url: webURL)) } }
+                                Button("Change connection") { editingAddress = true }
+                            }
+                            .padding(20)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+                            .frame(maxWidth: 340)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else if case .paired = mode, let pairedError {
+                            VStack(spacing: 12) {
+                                Text("Relay workspace unavailable").font(.headline)
+                                Text(pairedError).font(.callout).multilineTextAlignment(.center)
+                                Button("Retry relay workspace") { retryPairedMode() }
+                                Button("Change connection") { editingAddress = true }
+                            }
+                            .padding(20)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+                            .frame(maxWidth: 340)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
-                        .padding(20)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-                        .frame(maxWidth: 340)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if case .paired = mode, let pairedError {
-                        VStack(spacing: 12) {
-                            Text("Relay workspace unavailable").font(.headline)
-                            Text(pairedError).font(.callout).multilineTextAlignment(.center)
-                            Button("Retry relay workspace") { retryPairedMode() }
-                            Button("Change connection") { editingAddress = true }
-                        }
-                        .padding(20)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-                        .frame(maxWidth: 340)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
 
-                    Button {
-                        editingAddress = true
-                    } label: {
-                        Image(systemName: "rectangle.connected.to.line.below")
-                            .font(.system(size: 16, weight: .semibold))
-                            .padding(11)
-                            .background(.regularMaterial, in: Circle())
+                        // The live LAN page may be older than this iPhone build.
+                        // Keep its escape hatch until the Settings action is
+                        // published there; paired mode uses the bundled page.
+                        if case .lan = mode {
+                            Button { editingAddress = true } label: {
+                                Image(systemName: "rectangle.connected.to.line.below")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .padding(11)
+                                    .background(.regularMaterial, in: Circle())
+                            }
+                            .accessibilityLabel("Change connection")
+                            .padding(.top, 8)
+                            .padding(.trailing, 12)
+                        }
+
                     }
-                    .accessibilityLabel("Change connection")
-                    .padding(.top, 8)
-                    .padding(.trailing, 12)
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                 }
             }
         }
@@ -258,21 +271,31 @@ private extension Array where Element == UInt8? {
     }
 }
 
+private final class MonitterWebView: WKWebView {
+    // Monitter's composer already owns its input controls. Keep the system
+    // keyboard, but omit WebKit's separate previous/next/done form toolbar.
+    override var inputAccessoryView: UIView? { nil }
+}
+
 private struct WebContentView: UIViewRepresentable {
     @Binding var webView: WKWebView?
     let url: URL?
     let error: String?
     let requestScan: () -> Void
+    let requestConnectionChooser: () -> Void
     let navigationError: (String) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(requestScan: requestScan, navigationError: navigationError) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(requestScan: requestScan, requestConnectionChooser: requestConnectionChooser, navigationError: navigationError)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "scanQR")
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        configuration.userContentController.add(context.coordinator, name: "changeConnection")
+        let view = MonitterWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = context.coordinator
         view.isOpaque = false
@@ -300,11 +323,13 @@ private struct WebContentView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         private let requestScan: () -> Void
+        private let requestConnectionChooser: () -> Void
         private let navigationError: (String) -> Void
         var pairedMode = false
         var requestedURL: URL?
-        init(requestScan: @escaping () -> Void, navigationError: @escaping (String) -> Void) {
+        init(requestScan: @escaping () -> Void, requestConnectionChooser: @escaping () -> Void, navigationError: @escaping (String) -> Void) {
             self.requestScan = requestScan
+            self.requestConnectionChooser = requestConnectionChooser
             self.navigationError = navigationError
         }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -319,6 +344,15 @@ private struct WebContentView: UIViewRepresentable {
             DispatchQueue.main.async { self.navigationError(error.localizedDescription) }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "changeConnection" {
+                guard message.frameInfo.isMainFrame,
+                      requestedURL != nil,
+                      let pageURL = message.webView?.url,
+                      message.frameInfo.securityOrigin.host == pageURL.host,
+                      message.frameInfo.securityOrigin.protocol == pageURL.scheme else { return }
+                requestConnectionChooser()
+                return
+            }
             guard pairedMode, message.name == "scanQR", message.frameInfo.isMainFrame,
                   message.frameInfo.securityOrigin.protocol == "http",
                   message.frameInfo.securityOrigin.host == "127.0.0.1",

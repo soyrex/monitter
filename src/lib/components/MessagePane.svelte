@@ -220,10 +220,10 @@
     :global(.message.sticky-user-request) { position:sticky; z-index:4; top:9px; }
   }
   @media (prefers-reduced-motion:reduce) {
-    .jump-latest { transition:none; }
-    .jump-latest.thinking.visible { animation:none; }
-    .jump-latest.thinking.visible::before,
-    .jump-latest.thinking.visible::after { animation:none; opacity:.5; }
+    :global(:root:not([data-motion="on"])) .jump-latest { transition:none; }
+    :global(:root:not([data-motion="on"])) .jump-latest.thinking.visible { animation:none; }
+    :global(:root:not([data-motion="on"])) .jump-latest.thinking.visible::before,
+    :global(:root:not([data-motion="on"])) .jump-latest.thinking.visible::after { animation:none; opacity:.5; }
   }
 
 </style>

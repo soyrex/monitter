@@ -96,6 +96,11 @@ const MAX_OWNER_TRANSFER_BYTES = 32 * 1024 * 1024;
 const LEGACY_OWNER_CHUNK_BYTES = 32 * 1024;
 const OWNER_CHUNK_BYTES = 512 * 1024;
 const OWNER_TRANSFER_TIMEOUT_MS = 60_000;
+// The desktop accepts at most eight active owner commands. Leave room for
+// commands completing on the desktop while their responses reach the phone.
+const MAX_CONCURRENT_MOBILE_OWNER_RPCS = 3;
+const MAX_QUEUED_MOBILE_OWNER_RPCS = 64;
+const MAX_QUEUED_MOBILE_OWNER_BYTES = 32 * 1024 * 1024;
 // The public relay permits 120 frames per 10 seconds. Leave headroom for
 // handshake and control frames even when multiple owner RPCs overlap.
 const MAX_SECURE_FRAMES_PER_WINDOW = 100;
@@ -499,6 +504,9 @@ export async function createMobileSession(invitation: string, operator?: Collabo
   const session = new class extends PairingConnection {
     private readonly pending = new Map<string, { resolve: (value: ControllerResult) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
     private readonly pendingOwner = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    private readonly queuedOwner: Array<{ id: string; bytes: Uint8Array; resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+    private queuedOwnerBytes = 0;
+    private activeOwnerRpcs = 0;
     private readonly incomingOwnerResponses = new Map<string, OwnerTransfer>();
     private rememberedDevices = false;
     private ownerWorkspaceSupported = false;
@@ -559,10 +567,49 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       const bytes = new TextEncoder().encode(json);
       if (bytes.byteLength > MAX_OWNER_TRANSFER_BYTES) return Promise.reject(new Error('Owner request exceeds the 32 MiB relay transfer limit.'));
       return new Promise<unknown>((resolve, reject) => {
-        const timer = setTimeout(() => { this.pendingOwner.delete(id); reject(new Error('Owner command timed out.')); }, OWNER_TRANSFER_TIMEOUT_MS);
-        this.pendingOwner.set(id, { resolve, reject, timer });
-        this.sendOwnerRequest(id, bytes).catch(reason => { const pending = this.pendingOwner.get(id); if (pending) { clearTimeout(pending.timer); this.pendingOwner.delete(id); } reject(reason instanceof Error ? reason : new Error('Connection failed.')); });
+        if (this.queuedOwner.length >= MAX_QUEUED_MOBILE_OWNER_RPCS || this.queuedOwnerBytes + bytes.byteLength > MAX_QUEUED_MOBILE_OWNER_BYTES) {
+          reject(new Error('Owner workspace is busy; try again shortly.'));
+          return;
+        }
+        const timer = setTimeout(() => {
+          const index = this.queuedOwner.findIndex(request => request.id === id);
+          if (index < 0) return;
+          this.queuedOwner.splice(index, 1);
+          this.queuedOwnerBytes -= bytes.byteLength;
+          reject(new Error('Owner workspace is busy; try again shortly.'));
+        }, OWNER_TRANSFER_TIMEOUT_MS);
+        this.queuedOwner.push({ id, bytes, resolve, reject, timer });
+        this.queuedOwnerBytes += bytes.byteLength;
+        this.drainOwnerQueue();
       });
+    }
+    private drainOwnerQueue() {
+      while (this.ownerWorkspaceState === 'approved' && this.status === 'connected'
+        && this.activeOwnerRpcs < MAX_CONCURRENT_MOBILE_OWNER_RPCS && this.queuedOwner.length) {
+        const request = this.queuedOwner.shift()!;
+        clearTimeout(request.timer);
+        this.queuedOwnerBytes -= request.bytes.byteLength;
+        this.activeOwnerRpcs += 1;
+        const complete = () => { this.activeOwnerRpcs -= 1; this.drainOwnerQueue(); };
+        const timer = setTimeout(() => {
+          const pending = this.pendingOwner.get(request.id);
+          if (!pending) return;
+          this.pendingOwner.delete(request.id);
+          pending.reject(new Error('Owner command timed out.'));
+        }, OWNER_TRANSFER_TIMEOUT_MS);
+        this.pendingOwner.set(request.id, {
+          resolve: value => { complete(); request.resolve(value); },
+          reject: reason => { complete(); request.reject(reason); },
+          timer,
+        });
+        this.sendOwnerRequest(request.id, request.bytes).catch(reason => {
+          const pending = this.pendingOwner.get(request.id);
+          if (!pending) return;
+          clearTimeout(pending.timer);
+          this.pendingOwner.delete(request.id);
+          pending.reject(reason instanceof Error ? reason : new Error('Connection failed.'));
+        });
+      }
     }
     private async sendOwnerRequest(id: string, bytes: Uint8Array) {
       const chunkBytes = this.ownerLargeChunksSupported ? OWNER_CHUNK_BYTES : LEGACY_OWNER_CHUNK_BYTES;
@@ -619,7 +666,14 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     async listTerminals() { return this.call('listTerminals', {}) as Promise<TerminalSession[]>; }
     async readTerminal(id: string, afterSeq: number) { return this.call('readTerminal', { id, afterSeq }) as Promise<TerminalRead>; }
     private settleOwnerRequest(reason?: Error) { const request = this.ownerRequest; if (!request) return; this.ownerRequest = null; clearTimeout(request.timer); reason ? request.reject(reason) : request.resolve(); }
-    private rejectOwnerRequests(reason: Error) { for (const transfer of this.incomingOwnerResponses.values()) clearTimeout(transfer.timer); this.incomingOwnerResponses.clear(); for (const callback of this.pendingOwner.values()) { clearTimeout(callback.timer); callback.reject(reason); } this.pendingOwner.clear(); }
+    private rejectOwnerRequests(reason: Error) {
+      for (const transfer of this.incomingOwnerResponses.values()) clearTimeout(transfer.timer);
+      this.incomingOwnerResponses.clear();
+      for (const callback of this.pendingOwner.values()) { clearTimeout(callback.timer); callback.reject(reason); }
+      this.pendingOwner.clear();
+      for (const request of this.queuedOwner.splice(0)) { clearTimeout(request.timer); request.reject(reason); }
+      this.queuedOwnerBytes = 0;
+    }
     protected onDisconnected() { this.ownerWorkspaceState = 'none'; this.settleOwnerRequest(new Error('Connection closed.')); for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); } this.pending.clear(); this.rejectOwnerRequests(new Error('Connection closed.')); }
     close() { this.onDisconnected(); super.close(); }
   }(invitationData, 'mobile', keyPair ? { privateKey: keyPair.privateKey, publicKey, expectedPeerPublicKey } : {});

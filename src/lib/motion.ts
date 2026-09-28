@@ -1,31 +1,50 @@
 import type { Action } from 'svelte/action';
 import { get, writable } from 'svelte/store';
 
-export type MotionPreference = 'system' | 'subtle' | 'off';
+export type MotionPreference = 'system' | 'subtle' | 'on' | 'off';
 
 const storageKey = 'monitter.appearance.motion.v1';
+const iosMotionDefaultKey = 'monitter.ios.motion-default-on.v1';
 const hasWindow = typeof window !== 'undefined';
 const reducedMotion = hasWindow && typeof window.matchMedia === 'function'
   ? window.matchMedia('(prefers-reduced-motion: reduce)')
   : null;
 
 function normalize(value: unknown): MotionPreference {
-  return value === 'subtle' || value === 'off' || value === 'system' ? value : 'system';
+  return value === 'subtle' || value === 'on' || value === 'off' || value === 'system' ? value : 'system';
+}
+
+function isIOSApp(): boolean {
+  if (!hasWindow) return false;
+  const appWindow = window as Window & { webkit?: { messageHandlers?: { changeConnection?: { postMessage: (value: null) => void } } } };
+  return typeof appWindow.webkit?.messageHandlers?.changeConnection?.postMessage === 'function';
 }
 
 function loadPreference(): MotionPreference {
   if (!hasWindow) return 'system';
-  try { return normalize(window.localStorage.getItem(storageKey)); }
-  catch { return 'system'; }
+  try {
+    const saved = window.localStorage.getItem(storageKey);
+    // One-time iPhone-app default: animate even when iOS Reduce Motion is on.
+    // Preserve a previously explicit Off choice and all later user changes.
+    if (isIOSApp() && window.localStorage.getItem(iosMotionDefaultKey) !== '1') {
+      window.localStorage.setItem(iosMotionDefaultKey, '1');
+      if (saved === null || saved === 'system' || saved === 'subtle') {
+        window.localStorage.setItem(storageKey, 'on');
+        return 'on';
+      }
+    }
+    return normalize(saved);
+  } catch { return isIOSApp() ? 'on' : 'system'; }
 }
 
-/** Client-local motion setting. The operating-system reduced-motion preference remains a hard limit. */
+/** Client-local motion setting; explicit On can override the OS preference. */
 export const motionPreference = writable<MotionPreference>(loadPreference());
 const motionAllowed = writable(false);
 const activeAnimations = new Set<Animation>();
 
 function updatePolicy(): void {
-  const enabled = get(motionPreference) !== 'off' && !reducedMotion?.matches;
+  const preference = get(motionPreference);
+  const enabled = preference === 'on' || (preference !== 'off' && !reducedMotion?.matches);
   motionAllowed.set(enabled);
   if (!enabled) {
     for (const animation of activeAnimations) animation.cancel();
@@ -38,7 +57,8 @@ if (reducedMotion) reducedMotion.addEventListener('change', updatePolicy);
 
 /** Returns the effective policy now; safe to call during SSR. */
 export function motionEnabled(): boolean {
-  return get(motionPreference) !== 'off' && !reducedMotion?.matches;
+  const preference = get(motionPreference);
+  return preference === 'on' || (preference !== 'off' && !reducedMotion?.matches);
 }
 
 export function setMotionPreference(value: MotionPreference): void {
@@ -50,7 +70,9 @@ export function setMotionPreference(value: MotionPreference): void {
 
 function applyDocumentPolicy(): void {
   if (typeof document !== 'undefined') {
-    document.documentElement.dataset.motion = motionEnabled() ? 'subtle' : 'off';
+    document.documentElement.dataset.motion = motionEnabled()
+      ? get(motionPreference) === 'on' ? 'on' : 'subtle'
+      : 'off';
   }
 }
 

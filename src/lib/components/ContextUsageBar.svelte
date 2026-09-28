@@ -46,5 +46,5 @@
   .context-usage-bar { position:absolute; bottom:0; left:0; right:0; height:3px; overflow:hidden; background:color-mix(in srgb, var(--line) 70%, transparent); }
   .context-usage-bar span { display:block; height:100%; transition:width 160ms ease, background-color 160ms ease; }
   .context-usage-bar.unavailable { opacity:.7; }
-  @media (prefers-reduced-motion: reduce) { .context-usage-bar span { transition:none; } }
+  @media (prefers-reduced-motion: reduce) { :global(:root:not([data-motion="on"])) .context-usage-bar span { transition:none; } }
 </style>

@@ -567,5 +567,5 @@
   }
   .rings-only .account-cycle,.compact .account-cycle { grid-column:1; grid-row:3; width:100%; font-size:calc(9px * var(--interface-font-ratio,1)); }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }
-  @media (prefers-reduced-motion:reduce) { .loading .ring-active,.ring-active,.ring-weekly,.usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .loading .ring-active,:global(:root:not([data-motion="on"])) .ring-active,:global(:root:not([data-motion="on"])) .ring-weekly,:global(:root:not([data-motion="on"])) .usage-toggle :global(.usage-chevron) { animation:none; transition:none; } }
 </style>

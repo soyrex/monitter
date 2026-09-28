@@ -20,5 +20,5 @@
   .title-sparkle { position:absolute; pointer-events:none; line-height:1; color:var(--accent-ink); text-shadow:0 0 8px var(--accent); animation:title-twinkle 1.3s ease-in-out infinite; }
   @keyframes title-glow { 50% { opacity:.6; } }
   @keyframes title-twinkle { 0%,100% { opacity:.15; transform:scale(.45) rotate(-15deg); } 50% { opacity:1; transform:scale(1) rotate(15deg); } }
-  @media(prefers-reduced-motion:reduce) { .naming,.title-sparkle { animation:none; } .title-sparkle { opacity:.5; } }
+  @media(prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .naming,:global(:root:not([data-motion="on"])) .title-sparkle { animation:none; } :global(:root:not([data-motion="on"])) .title-sparkle { opacity:.5; } }
 </style>

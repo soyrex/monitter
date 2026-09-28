@@ -506,7 +506,7 @@
   .blank-conversation h2 { margin:10px 0 5px; color:var(--ink); font-size:calc(15px * var(--interface-font-ratio,1)); }
   .blank-conversation p { margin:0; font-size:calc(12.5px * var(--interface-font-ratio,1)); line-height:1.55; }
   @media (hover:none),(pointer:coarse) { .task-title-edit { opacity:1; pointer-events:auto; } .message-actions { max-width:none; overflow:visible; opacity:1; visibility:visible; pointer-events:auto; transform:none; } .approval-inline { min-height:44px; padding-block:8px; } }
-  @media (prefers-reduced-motion:reduce) { .message-actions { transition:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .message-actions { transition:none; } }
   @container workspace-pane (width < 1000px) { .conversation { --chat-side-padding:20px; } .conversation-head { padding-left:20px; padding-right:20px; } }
   @media (max-width:640px) { .conversation-head { padding:12px; gap:8px; } .conversation-head h1 { font-size:calc(18px * var(--interface-font-ratio,1)); } .task-actions { flex-wrap:wrap; } }
   @media (max-height:500px) { .conversation-head { padding-top:10px; padding-bottom:10px; gap:6px; } .task-heading { padding-top:10px; } }

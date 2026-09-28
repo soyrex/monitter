@@ -294,5 +294,5 @@
   .pane-resizer{position:relative;flex:0 0 1px;cursor:col-resize;background:var(--line);box-shadow:-3px 0 4px -3px rgba(0,0,0,.22),3px 0 4px -3px rgba(0,0,0,.22);touch-action:none;z-index:2}.pane-resizer::after{content:"";position:absolute;inset:0 -4px}.column>.pane-resizer{cursor:row-resize;box-shadow:0 -3px 4px -3px rgba(0,0,0,.22),0 3px 4px -3px rgba(0,0,0,.22)}.column>.pane-resizer::after{inset:-4px 0}.pane-resizer:hover,.pane-resizer:focus-visible{background:var(--accent);outline:0}
   .pane-drop{position:absolute;inset:6px;z-index:30;display:grid;place-items:center;border:2px solid var(--accent);border-radius:10px;background:color-mix(in srgb,var(--accent) 16%,var(--panel));opacity:.94;pointer-events:none}
   .pane-drop[data-edge=left]{right:50%}.pane-drop[data-edge=right]{left:50%}.pane-drop[data-edge=top]{bottom:50%}.pane-drop[data-edge=bottom]{top:50%}.pane-drop span{padding:8px;border-radius:6px;background:var(--panel);color:var(--ink);font-size:calc(12px * var(--interface-font-ratio, 1))}
-  @media(prefers-reduced-motion:reduce){.pane-dim-overlay{transition:none}}
+  @media(prefers-reduced-motion:reduce){:global(:root:not([data-motion="on"])) .pane-dim-overlay{transition:none}}
 </style>

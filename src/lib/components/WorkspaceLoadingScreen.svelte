@@ -133,6 +133,6 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    img { filter: none; }
+    :global(:root:not([data-motion="on"])) img { filter: none; }
   }
 </style>

@@ -64,5 +64,5 @@
   .observer-tooltip ul{list-style:none;margin:5px 0 0;padding:0}
   .observer-tooltip li+li{margin-top:3px}
   @keyframes observer-twinkle{0%,100%{opacity:.25;transform:scale(.65) rotate(-12deg)}50%{opacity:1;transform:scale(1) rotate(12deg)}}
-  @media(prefers-reduced-motion:reduce){.sparkle{animation:none;opacity:.75}}
+  @media(prefers-reduced-motion:reduce){:global(:root:not([data-motion="on"])) .sparkle{animation:none;opacity:.75}}
 </style>

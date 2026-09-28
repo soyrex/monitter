@@ -345,7 +345,7 @@
   .tool-image-preview{display:block;width:min(220px,calc(100% - 18px));margin:0 9px 9px;padding:0;border:1px solid var(--line);border-radius:6px;background:var(--soft);cursor:zoom-in;overflow:hidden}.tool-image-preview:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.tool-image-preview img{display:block;width:100%;max-height:150px;object-fit:contain;background:var(--paper)}
   pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(11px * var(--interface-font-ratio, 1))/1.6 var(--mono)}
   @media (max-width:640px){.activity{margin:2px 0 7px}.activity-trigger{padding:6px 0}}
-  @media (prefers-reduced-motion:reduce){.process-tree{transition:none}}
+  @media (prefers-reduced-motion:reduce){:global(:root:not([data-motion="on"])) .process-tree{transition:none}}
 </style>
 
 <ImageLightbox bind:image={lightbox} returnFocus={lightboxOpener}/>

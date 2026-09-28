@@ -30,5 +30,5 @@
   .error { border-color:color-mix(in srgb,#bd4c43 45%,var(--line));color:#b84c44; }
   .fading { opacity:0;translate:0 -4px;pointer-events:none; }
   @media(hover:none) { .close-slot { opacity:1; } }
-  @media(prefers-reduced-motion:reduce) { .alert,.close-slot { transition:none; } }
+  @media(prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .alert,:global(:root:not([data-motion="on"])) .close-slot { transition:none; } }
 </style>

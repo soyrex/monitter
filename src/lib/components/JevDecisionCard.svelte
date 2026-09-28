@@ -267,4 +267,5 @@
   .jev-full-question { display:grid; gap:3px; margin:0; color:var(--ink); font-size:10px; line-height:1.4; overflow-wrap:anywhere; }.jev-full-question span { color:var(--muted); font:9px var(--mono); }
   .jev-detail-state { margin:0; color:var(--muted); font-size:10px; line-height:1.4; }.jev-detail-state.error { color:var(--danger,#b84c44); }
   @media (prefers-reduced-motion:no-preference) { .jev-bar span { transition:width 160ms ease-out; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root[data-motion="on"]) .jev-bar span { transition:width 160ms ease-out; } }
 </style>

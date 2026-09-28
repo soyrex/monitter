@@ -115,7 +115,7 @@ svg.lucide { stroke-width: 1.5px; }
   scroll-behavior: auto !important;
 }
 @media (prefers-reduced-motion: reduce) {
-  :root *, :root *::before, :root *::after {
+  :root:not([data-motion="on"]) *, :root:not([data-motion="on"]) *::before, :root:not([data-motion="on"]) *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0ms !important;

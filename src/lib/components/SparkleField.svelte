@@ -131,10 +131,12 @@
   :global([data-motion="off"]) .pulse-grid { opacity:.32; transform:none; filter:none; }
   :global([data-motion="off"]) .matrix-column { opacity:.38; transform:translateY(120%); }
   @media (prefers-reduced-motion:reduce) {
-    .sparkle-glow { animation:none; }
-    .sparkle,.pulse-grid,.matrix-column { animation:none; }
-    .sparkle { opacity:.55; transform:none; }
-    .pulse-grid { opacity:.32; transform:none; filter:none; }
-    .matrix-column { opacity:.38; transform:translateY(120%); }
+    :global(:root:not([data-motion="on"])) .sparkle-glow { animation:none; }
+    :global(:root:not([data-motion="on"])) .sparkle,
+    :global(:root:not([data-motion="on"])) .pulse-grid,
+    :global(:root:not([data-motion="on"])) .matrix-column { animation:none; }
+    :global(:root:not([data-motion="on"])) .sparkle { opacity:.55; transform:none; }
+    :global(:root:not([data-motion="on"])) .pulse-grid { opacity:.32; transform:none; filter:none; }
+    :global(:root:not([data-motion="on"])) .matrix-column { opacity:.38; transform:translateY(120%); }
   }
 </style>

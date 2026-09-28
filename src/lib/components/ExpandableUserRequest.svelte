@@ -61,5 +61,5 @@
     .request-text :global(.markdown) { display:block; overflow:visible; -webkit-line-clamp:unset; line-clamp:unset; }
     button { display:none; }
   }
-  @media (prefers-reduced-motion:reduce) { button :global(svg) { transition:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) button :global(svg) { transition:none; } }
 </style>

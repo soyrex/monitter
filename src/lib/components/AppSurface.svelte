@@ -223,7 +223,7 @@
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
   type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; browser?: BrowserTabMetadata; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
   type MarkdownDocument = { taskId: string; path: string; title: string };
-  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openBrowserIds:string[];selectedBrowserId:string|null;browserTabs:Record<string,BrowserTabMetadata>;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'git'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
+  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openBrowserIds:string[];selectedBrowserId:string|null;browserTabs:Record<string,BrowserTabMetadata>;openGitTaskIds:string[];selectedGitTaskId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let sidebarSelected = $state(false);
   let pendingEmptyPaneIds = $state<string[]>([]);
@@ -233,7 +233,7 @@
   const paneLocal = createPaneLocalState();
   let expandedPaneId=$state<string|null>(null), focusStep=$state<0|1|2>(0), focusTarget=$state('');
   const workspaceExpansion=$derived(embedded?parentExpandedPaneId:expandedPaneId);
-  const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='browser'?selectedBrowserId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
+  const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='browser'?selectedBrowserId:pane==='git'?selectedGitTaskId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
   function setPaneExpansion(id:string|null){if(embedded)onExpandPane?.(id);else{expandedPaneId=id;if(id)activePaneId=id;}}
   function resetTabExpansion(){focusStep=0;focusTarget='';if(workspaceExpansion===paneId)setPaneExpansion(null);}
   function expandTab(workspace=false){
@@ -429,7 +429,7 @@
   let snapshot = $state.raw<Snapshot | null>(null),
     selectedTaskId = $state<string | null>(null),
     selectedChannelId = $state<string | null>(null),
-    pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "browser" | "settings">(untrack(()=>embedded?"empty":"overview"));
+    pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "browser" | "git" | "settings">(untrack(()=>embedded?"empty":"overview"));
   // Embedded panes share this projection from the root surface. Only a root
   // snapshot update rebuilds the indexes, rather than every pane re-filtering
   // messages/events/approvals from the full snapshot independently.
@@ -445,6 +445,7 @@
   const visibleActivityTasks = $derived(indexes?.visibleActivityTasks ?? []);
   let openTerminalIds=$state<string[]>([]), selectedTerminalId=$state<string|null>(null), terminalBusy=$state(false);
   let openBrowserIds=$state<string[]>([]), selectedBrowserId=$state<string|null>(null);
+  let openGitTaskIds=$state<string[]>([]), selectedGitTaskId=$state<string|null>(null);
   let browserTabs=$state<Record<string,BrowserTabMetadata>>({});
   let browserHistory=$state<Record<string, { canGoBack: boolean | null; canGoForward: boolean | null }>>({});
   let browserBounds=$state<Record<string, BrowserBounds>>({});
@@ -465,6 +466,7 @@
   const selectedTerminal=$derived(selectedTerminalId ? $terminalSessions[selectedTerminalId] ?? null : null);
   const openTerminals=$derived(openTerminalIds.flatMap(id=>$terminalSessions[id]?[$terminalSessions[id]]:[]));
   const selectedBrowser=$derived(selectedBrowserId ? browserTabs[selectedBrowserId] ?? null : null);
+  const selectedGitTask=$derived(selectedGitTaskId ? snapshot?.tasks.find(task=>task.id===selectedGitTaskId) ?? null : null);
   const selectedBrowserHistory=$derived(selectedBrowserId ? browserHistory[selectedBrowserId] ?? { canGoBack: null, canGoForward: null } : { canGoBack: null, canGoForward: null });
   // Each pane only accepts state for its own persisted tab IDs. This also
   // avoids leaking native history/auth information into workspace metadata.
@@ -644,7 +646,7 @@
   let railProjectId = $state<string | null>(null);
   let railProjectAnchor = $state<HTMLButtonElement>();
   let taskMenuAnchor = $state<HTMLButtonElement>();
-  let detailTab = $state<'run' | 'git' | 'timeline' | 'approvals' | 'subagents'>('run');
+  let detailTab = $state<'run' | 'timeline' | 'approvals' | 'subagents'>('run');
   let taskInfoOpen = $state(false);
   let selectedSubagentId = $state<string | null>(null);
   let subagentVisorOpen = $state(false);
@@ -654,7 +656,6 @@
   let subagentTranscriptErrors = $state<Record<string, string>>({});
   let timelinePages = $state<Record<string, { events: RunEvent[]; nextBefore: number | null; loading: boolean; error: string; loadedOlder: boolean }>>({});
   let gitState = $state<{ repository: boolean | null; error: string; loading: boolean; status:TaskGitStatus|null }>({ repository: null, error: '', loading: false, status:null });
-  let gitPane = $state<GitPane>();
   const railAgent = $derived(railAgentId ? indexes?.agentById.get(railAgentId) ?? null : null);
   const sidebarViews = [{ id: 'standard', label: 'Agents', icon: Bot }, { id: 'projects', label: 'Projects', icon: Folder }, { id: 'activity', label: 'Activity', icon: Activity }] as const;
   const projectIcons = [
@@ -1294,6 +1295,7 @@
       ...openChannelIds.map(id=>({kind:'channel' as const,id})),
       ...openTerminalIds.map(id=>({kind:'terminal' as const,id})),
       ...openBrowserIds.map(id=>({kind:'browser' as const,id})),
+      ...openGitTaskIds.map(id=>({kind:'git' as const,id})),
       ...openEmptyIds.map(id=>({kind:'empty' as const,id})),
       ...(settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
     ];
@@ -1381,7 +1383,7 @@
   export function hasPending() { return terminalBusy || Object.values(composerPending).some(Boolean) || Object.values(pendingUploads).some(Boolean); }
   export function captureState():PaneState {
     // Persistence must only read reactive state: writing here can recursively trigger itself.
-    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
+    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openGitTaskIds,selectedGitTaskId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
     const key=currentDraftKey();
     if(key)captured.drafts[key]=composer;
     if(pane==='channel' && selectedChannelId)captured.channelRecipients[selectedChannelId]=[...recipients];
@@ -1393,7 +1395,7 @@
   export function restoreState(value:PaneState) {
     value = applySharedComposers(value as unknown as Record<string, unknown>) as unknown as PaneState;
     agentDraft=value.settingsEditor?.draft??null;agentEdits=value.settingsEditor?.edits??{};
-    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
+    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openGitTaskIds,selectedGitTaskId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
     paneLocal.restore(Array.isArray(value.tabOrder) ? value.tabOrder : [], availableTabs());
     composer=drafts[currentDraftKey() ?? ''] ?? '';
     recipients=selectedChannelId?channelRecipients[selectedChannelId]??[]:[];
@@ -1499,11 +1501,13 @@
       // it so its sidebar entry survives a layout reload.
       settingsCategory: (() => {
         const raw = saved.settingsCategory === 'directory' ? 'agents' : saved.settingsCategory;
-        return ['profile','extensions','appearance','typography','behaviour','conversation','approvals','agents','lan','remote','environment'].includes(raw ?? '') ? raw! : 'appearance';
+        return ['profile','connection','extensions','appearance','typography','behaviour','conversation','approvals','agents','lan','remote','environment'].includes(raw ?? '') ? raw! : 'appearance';
       })(),
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openBrowserIds: Array.isArray(saved.openBrowserIds) ? saved.openBrowserIds.filter(id => typeof id === 'string') : [],
       selectedBrowserId: typeof saved.selectedBrowserId === 'string' ? saved.selectedBrowserId : null,
+      openGitTaskIds: Array.isArray(saved.openGitTaskIds) ? saved.openGitTaskIds.filter(id => typeof id === 'string') : [],
+      selectedGitTaskId: typeof saved.selectedGitTaskId === 'string' ? saved.selectedGitTaskId : null,
       browserTabs: saved.browserTabs && typeof saved.browserTabs === 'object' && !Array.isArray(saved.browserTabs)
         ? Object.fromEntries(Object.entries(saved.browserTabs).flatMap(([id, value]) => {
             const tab = value as BrowserTabMetadata;
@@ -1520,14 +1524,14 @@
       openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,
       openDraftIds: Array.isArray(saved.openDraftIds) ? saved.openDraftIds : fallback.openDraftIds,
       openChannelIds: Array.isArray(saved.openChannelIds) ? saved.openChannelIds : fallback.openChannelIds,
-      tabOrder: Array.isArray(saved.tabOrder) ? saved.tabOrder.filter((tab): tab is TabKey => !!tab && typeof tab === 'object' && ['task','draft','channel','terminal','browser','settings','empty'].includes((tab as TabKey).kind) && typeof (tab as TabKey).id === 'string') : fallback.tabOrder,
+      tabOrder: Array.isArray(saved.tabOrder) ? saved.tabOrder.filter((tab): tab is TabKey => !!tab && typeof tab === 'object' && ['task','draft','channel','terminal','browser','git','settings','empty'].includes((tab as TabKey).kind) && typeof (tab as TabKey).id === 'string') : fallback.tabOrder,
       taskDrafts: saved.taskDrafts && typeof saved.taskDrafts === 'object' ? saved.taskDrafts : fallback.taskDrafts,
       drafts: saved.drafts && typeof saved.drafts === 'object' ? saved.drafts : fallback.drafts,
       queuedAttachments: saved.queuedAttachments && typeof saved.queuedAttachments === 'object' ? saved.queuedAttachments : fallback.queuedAttachments,
       attachmentContexts: saved.attachmentContexts && typeof saved.attachmentContexts === 'object' ? saved.attachmentContexts : fallback.attachmentContexts,
       channelRecipients: saved.channelRecipients && typeof saved.channelRecipients === 'object' ? saved.channelRecipients : fallback.channelRecipients,
-      pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'browser', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
-      detailTab: ['run', 'git', 'timeline', 'approvals', 'subagents'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
+      pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'browser', 'git', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
+      detailTab: ['run', 'timeline', 'approvals', 'subagents'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
     };
     const taskIds = new Set((snapshot?.tasks ?? []).filter(task => !task.archived && indexes?.visibleAgentIds.has(task.agentId) === true && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
     const channelIds = new Set(availableChannels.map(channel => channel.id));
@@ -1537,6 +1541,8 @@
     state.openChannelIds = state.openChannelIds.filter(id => channelIds.has(id));
     state.openBrowserIds = state.openBrowserIds.filter(id => !!state.browserTabs[id]);
     if (!state.selectedBrowserId || !state.openBrowserIds.includes(state.selectedBrowserId)) state.selectedBrowserId = null;
+    state.openGitTaskIds = state.openGitTaskIds.filter(id => taskIds.has(id));
+    if (!state.selectedGitTaskId || !state.openGitTaskIds.includes(state.selectedGitTaskId)) state.selectedGitTaskId = null;
     state.openDraftIds = state.openDraftIds.filter(id => {
       const draft = state.taskDrafts[id];
       return !!draft && agentIds.has(draft.agentId) && taskBelongsToWorkspace(draft, scope);
@@ -1549,6 +1555,7 @@
     state.tabOrder = normalizeTabOrder(state.tabOrder, [
       ...state.openTaskIds.map(id=>({kind:'task' as const,id})), ...state.openDraftIds.map(id=>({kind:'draft' as const,id})),
       ...state.openChannelIds.map(id=>({kind:'channel' as const,id})), ...state.openTerminalIds.map(id=>({kind:'terminal' as const,id})), ...state.openBrowserIds.map(id=>({kind:'browser' as const,id})),
+      ...state.openGitTaskIds.map(id=>({kind:'git' as const,id})),
       ...(state.openEmptyIds ?? []).map(id=>({kind:'empty' as const,id})),
       ...(state.settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
     ]);
@@ -1562,6 +1569,7 @@
     if (state.pane === 'settings' && !state.settingsOpen) state.pane = 'overview';
     if (state.pane === 'terminal' && !state.selectedTerminalId) state.pane = 'overview';
     if (state.pane === 'browser' && !state.selectedBrowserId) state.pane = 'overview';
+    if (state.pane === 'git' && !state.selectedGitTaskId) state.pane = 'overview';
     if (state.pane === 'overview' && !state.overviewOpen) state.pane = 'empty';
     return state;
   }
@@ -1610,7 +1618,7 @@
   }
   function emptyWorkspace() {
     const state = captureState();
-    return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openBrowserIds: [], selectedBrowserId: null, browserTabs: {}, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
+    return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openBrowserIds: [], selectedBrowserId: null, browserTabs: {}, openGitTaskIds: [], selectedGitTaskId: null, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
   }
   export async function retireBrowserTabs() {
     if (!nativeRuntime || !bridge.available) return;
@@ -1695,12 +1703,12 @@
   $effect(() => {
     // Stringifying tracks nested pane edits, but capture/storage is coalesced
     // below so every composer keystroke does not clone the entire workspace.
-    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openEmptyIds, selectedEmptyId, documents, openTaskIds, openDraftIds, openChannelIds, tabOrder:paneLocal.order, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
+    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openGitTaskIds, selectedGitTaskId, openEmptyIds, selectedEmptyId, documents, openTaskIds, openDraftIds, openChannelIds, tabOrder:paneLocal.order, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
     workspaceReady;
     untrack(() => { if (embedded) onWorkspaceChange?.(); else workspaceSave.schedule(); });
   });
   function layoutPending() { return hasPending() || paneIds(layout).some(id=>paneRefs[id]?.hasPending()); }
-  function tabCount(state: Pick<PaneState, 'openTaskIds'|'openDraftIds'|'openChannelIds'|'openTerminalIds'|'openEmptyIds'|'settingsOpen'>) { return paneTabCount(state); }
+  function tabCount(state: Pick<PaneState, 'openTaskIds'|'openDraftIds'|'openChannelIds'|'openTerminalIds'|'openGitTaskIds'|'openEmptyIds'|'settingsOpen'>) { return paneTabCount(state); }
   function queueEmptyPaneRemoval(id: string) {
     if (!pendingEmptyPaneIds.includes(id)) pendingEmptyPaneIds = [...pendingEmptyPaneIds, id];
   }
@@ -1749,6 +1757,12 @@
       if (pane === 'browser' && selectedBrowserId === tab.id) { selectedBrowserId = null; openOverview(); }
       forgetTab(tab); return { tab, browser: { ...browser } };
     }
+    if(tab.kind==='git') {
+      if (!openGitTaskIds.includes(tab.id)) return null;
+      openGitTaskIds=openGitTaskIds.filter(id=>id!==tab.id);
+      if (pane==='git' && selectedGitTaskId===tab.id) { selectedGitTaskId=null; openOverview(); }
+      forgetTab(tab); return {tab};
+    }
     const attachments=queuedAttachments[`${tab.kind}:${tab.id}`], attachmentContext=attachmentContexts[`${tab.kind}:${tab.id}`];
     if (tab.kind === 'draft') {
       const draft = taskDrafts[tab.id];
@@ -1777,6 +1791,11 @@
       const browser = payload.browser;
       if (!browser || browser.id !== tab.id || typeof browser.url !== 'string' || typeof browser.title !== 'string' || typeof browser.unloaded !== 'boolean') return;
       browserTabs[tab.id] = { ...browser }; openBrowser(tab.id); rememberTab(tab,before); return;
+    }
+    if(tab.kind==='git') {
+      const task=snapshot?.tasks.find(task=>task.id===tab.id);
+      if (task) { openGitReview(task); rememberTab(tab,before); }
+      return;
     }
     if(tab.kind==='channel')channelRecipients[tab.id]=payload.recipients ?? [];
     queuedAttachments[`${tab.kind}:${tab.id}`]=payload.attachments ?? [];
@@ -2667,6 +2686,7 @@
     if(next.kind==='settings')openSettings();
     else if(next.kind==='terminal')openTerminalTab(next.id);
     else if(next.kind==='browser')openBrowser(next.id);
+    else if(next.kind==='git'){const task=snapshot?.tasks.find(item=>item.id===next.id);if(task)openGitReview(task);}
     else if(next.kind==='draft')openTaskDraft(taskDrafts[next.id]);
     else if(next.kind==='task'){const task=snapshot?.tasks.find(item=>item.id===next.id);if(task)openTask(task);}
     else {const channel=availableChannels.find(item=>item.id===next.id);if(channel)openChannel(channel);}
@@ -2773,6 +2793,30 @@
     if (selectedTaskId === id) {
       const next = openTasks.at(-1);
       if (next) openTask(next); else openOverview();
+    }
+    if (collapse) collapseTablessPane();
+  }
+  export function openGitReview(task: Task) {
+    if (!taskBelongsToWorkspace(task, activeWorkspaceKey)) { workspaceNavigation.task(task); return; }
+    saveCurrentDraft();
+    if (!openGitTaskIds.includes(task.id)) {
+      openGitTaskIds = [...openGitTaskIds, task.id];
+      rememberTab({ kind: 'git', id: task.id });
+    }
+    selectedGitTaskId = task.id;
+    selectedTaskId = null; currentDraftId = null; selectedChannelId = null;
+    selectedTerminalId = null; selectedBrowserId = null;
+    focusedAgentId = null; focusedProjectId = null;
+    pane = 'git';
+  }
+  function closeGitReview(id: string, collapse = true) {
+    openGitTaskIds = openGitTaskIds.filter(openId => openId !== id);
+    forgetTab({ kind: 'git', id });
+    if (selectedGitTaskId === id) {
+      selectedGitTaskId = null;
+      const task = snapshot?.tasks.find(item => item.id === openGitTaskIds.at(-1));
+      const sourceTask = snapshot?.tasks.find(item => item.id === id);
+      if (task) openGitReview(task); else if (sourceTask && openTaskIds.includes(id)) openTask(sourceTask); else openOverview();
     }
     if (collapse) collapseTablessPane();
   }
@@ -3071,6 +3115,7 @@
     if(pane==='empty'){if(selectedEmptyId)closeEmptyTab(selectedEmptyId);else closeOverview();return;}
     if(pane==='settings'){closeSettings();return;}
     if(pane==='browser' && selectedBrowserId){ void closeBrowserTab(selectedBrowserId); return; }
+    if(pane==='git' && selectedGitTaskId){ closeGitReview(selectedGitTaskId); return; }
     if (pane === 'terminal' && selectedTerminalId) { void closeTerminalTab(selectedTerminalId); return; }
     if (pane === 'task' && currentDraftId) { closeTaskDraft(currentDraftId); return; }
     if (pane === 'task' && selectedTaskId) { closeTaskTab(selectedTaskId); return; }
@@ -3130,6 +3175,7 @@
     if (pane === 'channel' && selectedChannelId) return {kind:'channel',id:selectedChannelId};
     if (pane === 'terminal' && selectedTerminalId) return {kind:'terminal',id:selectedTerminalId};
     if (pane === 'browser' && selectedBrowserId) return {kind:'browser',id:selectedBrowserId};
+    if (pane === 'git' && selectedGitTaskId) return {kind:'git',id:selectedGitTaskId};
     if (pane === 'empty' && selectedEmptyId) return {kind:'empty',id:selectedEmptyId};
     return pane === 'settings' ? {kind:'settings',id:'settings'} : null;
   }
@@ -3141,7 +3187,7 @@
     if(tab.kind==='task'){const item=snapshot?.tasks.find(item=>item.id===tab.id);if(item)openTask(item);}
     else if(tab.kind==='draft'){const item=taskDrafts[tab.id];if(item)openTaskDraft(item);}
     else if(tab.kind==='channel'){const item=availableChannels.find(item=>item.id===tab.id);if(item)openChannel(item);}
-    else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='browser')openBrowser(tab.id); else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings();
+    else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='browser')openBrowser(tab.id); else if(tab.kind==='git'){const task=snapshot?.tasks.find(item=>item.id===tab.id);if(task)openGitReview(task);} else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings();
     focusSelectedTabInput();
     return true;
   }
@@ -4134,6 +4180,7 @@
     if (pane === 'channel') return activeChannel?.name || 'Channel';
     if (pane === 'terminal') return selectedTerminal ? terminalTabTitle(selectedTerminal, snapshot?.hosts ?? []) : 'Terminal';
     if (pane === 'browser') return selectedBrowser?.title || 'Browser';
+    if (pane === 'git') return selectedGitTaskId ? `Git · ${snapshot?.tasks.find(task => task.id === selectedGitTaskId)?.title ?? 'review'}` : 'Git review';
     if (pane === 'empty') return selectedEmptyId && documents[selectedEmptyId]?.title || 'New tab';
     if (pane === 'settings') return settingsTabTitle(settingsCategory);
     if (pane === 'agent') return focusedAgent?.name || 'Agent';
@@ -4469,7 +4516,7 @@
       {id:`app-theme-light:${theme.id}`,label:`Light app theme: ${theme.label}`,checked:$appTheme.light===theme.id,group:'Appearance'},
       {id:`app-theme-dark:${theme.id}`,label:`Dark app theme: ${theme.label}`,checked:$appTheme.dark===theme.id,group:'Appearance'},
     ]),
-    ...(['system','subtle','off'] as const).map(preference=>({id:`motion:${preference}`,label:`Motion: ${preference}`,checked:$motionPreference===preference,group:'Appearance'})),
+    ...(['system','subtle','on','off'] as const).map(preference=>({id:`motion:${preference}`,label:`Motion: ${preference}`,checked:$motionPreference===preference,group:'Appearance'})),
     ...(['tight','normal','spacious'] as const).map(density=>({id:`density:${density}`,label:`Interface density: ${density}`,checked:(snapshot?.settings.interfaceDensity ?? 'normal')===density,group:'Appearance'})),
     ...(['classic','modern'] as const).map(style=>({id:`tab-style:${style}`,label:`Tab style: ${style}`,checked:(snapshot?.settings.tabStyle ?? 'classic')===style,group:'Appearance'})),
     ...terminalThemes.map(theme=>({id:`terminal-theme:${theme.id}`,label:`Terminal theme: ${theme.label}`,checked:$terminalTheme===theme.id,group:'Appearance'})),
@@ -4923,8 +4970,8 @@
 {/snippet}
 
 {#snippet workspaceView()}
-  <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
-  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
+  <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
+  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
@@ -4957,6 +5004,9 @@
           {/if}
           {:else if tab.kind === 'browser'}{@const browser=browserTabs[tab.id]}{#if browser}
             <div class="tab-entry browser-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='browser' && selectedBrowserId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'browser',tab.id)} onpointerdown={event=>startTabPointer(event,'browser',tab.id)} aria-pressed={pane==='browser'&&selectedBrowserId===tab.id} onclick={()=>selectTabPicker(()=>openBrowser(tab.id))} title={browser.url}><span class="tab-kind-icon" aria-hidden="true"><Globe size={13}/><span class="tab-shortcut"></span></span><span>{browser.title || 'Browser'}</span></button><button class="close-tab" aria-label={`Close browser tab ${browser.title}`} title="Close browser tab" onclick={()=>{void closeBrowserTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+          {/if}
+          {:else if tab.kind === 'git'}{@const task=snapshot?.tasks.find(item=>item.id===tab.id)}{#if task}
+            <div class="tab-entry git-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='git' && selectedGitTaskId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'git',tab.id)} onpointerdown={event=>startTabPointer(event,'git',tab.id)} aria-pressed={pane==='git'&&selectedGitTaskId===tab.id} onclick={()=>selectTabPicker(()=>openGitReview(task))} title={`Git review · ${task.title}`}><span class="tab-kind-icon" aria-hidden="true"><GitFork size={13}/><span class="tab-shortcut"></span></span><span>Git · {task.title}</span></button><button class="close-tab" aria-label={`Close Git review for ${task.title}`} title="Close Git review" onclick={()=>{closeGitReview(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'empty'}
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}<FileText size={13}/><span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
@@ -5010,6 +5060,11 @@
         {@const browserId = selectedBrowser.id}
         <BrowserTabPanel tab={selectedBrowser} active={browserPaneVisible} available={nativeRuntime && bridge.available} layoutRevision={browserGeometryRevision} canGoBack={selectedBrowserHistory.canGoBack} canGoForward={selectedBrowserHistory.canGoForward} onLayout={viewport=>void layoutBrowser(browserId,viewport)} onNavigate={url=>void navigateBrowser(browserId,url)} onBack={()=>void browserBack(browserId)} onForward={()=>void browserForward(browserId)} onRefreshState={()=>void refreshBrowserState(browserId)} onReload={()=>void reloadBrowser(browserId)} onUnload={()=>void unloadBrowser(browserId)} onLoadExtension={path=>bridge.browserLoadUnpackedExtension(path)} onClose={()=>void closeBrowserTab(browserId)}/>
       {/key}
+    {:else if pane === 'git' && selectedGitTask}
+      <section class="git-review-workspace" aria-label={`Git review for ${selectedGitTask.title}`}>
+        <div class="git-review-heading"><div><p class="eyebrow">GIT REVIEW</p><h1>{selectedGitTask.title}</h1><p>{selectedGitTask.cwd || 'Task workspace'}</p></div><div class="task-actions">{@render paneExpandControl()}</div></div>
+        <GitPane taskId={selectedGitTask.id} probeKey={`${selectedGitTask.hostId}\u001f${selectedGitTask.cwd}`} active={embedded ? active : activePaneId === 'main'}/>
+      </section>
     {:else if pane === 'project' && focusedProject}
       {@const ProjectIcon = projectIconComponent(focusedProject.icon)}
       <section class="overview project-overview">
@@ -5265,11 +5320,10 @@
       </section>
     {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
         {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Task detail views">
-          <div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Task detail</button></div>
-          <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
-          <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>Approvals</button></div>
-          <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>Subagents <span>{taskSubagents.length}</span></button></div>
-          {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
+          <div class="detail-tab-entry" class:active={detailTab==='run'}><button class="detail-tab" role="tab" aria-selected={detailTab==='run'} onclick={()=>detailTab='run'}>INFO</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>SUBAGENTS <span>{taskSubagents.length}</span></button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>TIMELINE</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>APPROVALS</button></div>
         </div>{/snippet}
         {#snippet taskComposer()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
@@ -5321,7 +5375,7 @@
           {goalClearError}
           onClearGoal={() => { void clearSelectedGoal(); }}
           gitStatus={gitState.status}
-          onOpenGit={() => { detailTab = 'git'; showDetail = true; }}
+          onOpenGit={() => openGitReview(selectedTask)}
           computerTools={computerTools}
           {scrollRevision}
           {busy}
@@ -5360,9 +5414,7 @@
         <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
           <SidebarResize side="right"/>
             {@render detailTabs()}
-            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="git-slot" class:hidden={detailTab!=='git' || gitState.repository!==true}>
-              <GitPane bind:this={gitPane} taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} onStatus={value=>{gitState=value}}/>
-            </div>
+            <GitPane taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} statusOnly onStatus={value=>{gitState=value}}/>
             <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab!=='timeline'}><TimelinePane events={timelineEvents} provider={selectedTask.provider} {goalError} loading={timelinePage?.loading ?? false} error={timelinePage?.error ?? ''} hasMore={timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined} onretry={()=>{ if (selectedTask) void loadTimeline(selectedTask.id); }} onloadolder={()=>{ if (selectedTask && timelinePage?.nextBefore !== null && timelinePage?.nextBefore !== undefined) void loadTimeline(selectedTask.id, timelinePage.nextBefore); }}/></div>
             <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll approval-history-panel" class:hidden={detailTab!=='approvals'} aria-label="Approval history">
               <header><h2>Approvals</h2><p>Saved rules for this agent, host and folder, plus this chat's resolved requests.</p></header>
@@ -5372,7 +5424,7 @@
             <section use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll subagent-panel" class:hidden={detailTab!=='subagents'} aria-label="Subagents">
               {#key subagentLifecycleRevision}<UnifiedSubagentSidebar items={taskSubagents} selectedId={selectedSubagentId} onselect={inspectSubagent}/>{/key}
             </section>
-            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || detailTab==='subagents' || (detailTab==='git' && gitState.repository===true)}>
+            <div use:motionView={{key:detailTab,enabled:showDetail,y:4,duration:150}} class="detail-scroll" class:hidden={detailTab==='timeline' || detailTab==='approvals' || detailTab==='subagents'}>
               <section class="agent-identity" aria-label="Agent identity">
                 <div class="agent-identity-heading">
                   <button class="avatar identity-avatar identity-avatar-button" aria-label={`Change ${selectedAgent?.name ?? 'agent'} avatar`} title="Change avatar" onclick={event=>{event.preventDefault();event.stopPropagation();if(selectedAgent)routeAgentSettings({...selectedAgent});}}>{@render avatarVisual(selectedAgent, 17)}<span class="avatar-edit-overlay"><Pencil size={13}/></span></button>
@@ -5381,7 +5433,7 @@
                 </div>
                 {#if selectedAgent?.description}<div class="identity-actions"><p>{selectedAgent.description}</p></div>{/if}
               </section>
-              <RunSummary task={selectedTask} gitStatus={gitState.status} tasks={visibleTasks} terminalSessions={Object.values($terminalSessions)} workPlans={snapshot.workPlans?.filter(plan=>plan.taskId===selectedTask.id)} onOpenGit={()=>detailTab='git'}/>
+              <RunSummary task={selectedTask} gitStatus={gitState.status} tasks={visibleTasks} terminalSessions={Object.values($terminalSessions)} workPlans={snapshot.workPlans?.filter(plan=>plan.taskId===selectedTask.id)} onOpenGit={()=>openGitReview(selectedTask)}/>
               <section class="detail-section collaboration-list"><h3>COLLABORATION <span>{taskCollaborations.length}</span></h3>{#each taskCollaborations as collaboration}<button class="collaboration-row" onclick={()=>{const id=collaboration.fromTaskId===selectedTask?.id?collaboration.toTaskId:collaboration.fromTaskId; const task=snapshot?.tasks.find(item=>item.id===id); if(task) openTask(task)}}><span class={`dot ${collaboration.status === 'running' ? 'running' : collaboration.status === 'error' ? 'error' : 'completed'}`}></span><span><b>{collaboration.kind === 'delegation' ? 'Delegation' : 'Agent message'} · {visibleAgents.find(agent=>agent.id===(collaboration.fromTaskId===selectedTask?.id?collaboration.toAgentId:collaboration.fromAgentId))?.name ?? 'Agent'}</b><small>{collaborationStatus(collaboration)} · {relative(collaboration.updatedAt)}</small>{#if collaboration.result}<em>{collaboration.result}</em>{/if}{#if collaboration.error}<em class="collaboration-error">{collaboration.error}</em>{:else if !collaboration.result}<em>{collaboration.text}</em>{/if}</span></button>{:else}<p class="detail-empty">No routed agent messages or delegations yet.</p>{/each}</section>
               <section class="detail-section">
                 <h3>DELEGATED TASKS <span>{delegated.length}</span></h3>
@@ -5413,7 +5465,7 @@
 {#if !embedded}<RootSurfaceLifecycle start={startRootLifecycle}/>{/if}
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
-  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:embedded class="app-shell" inert={!embedded && !snapshot}>
+  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:mobile-task-chat={mobileSidebar && pane === 'task' && !currentDraftId} class:embedded class="app-shell" inert={!embedded && !snapshot}>
   {#if !embedded}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the sidebar delegates arrow navigation among its focusable controls) -->
   <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
@@ -5592,6 +5644,14 @@
           onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={handleChildWorkspaceChange} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}
     </PaneGrid>
+    {#if mobileSidebar && compactDetail && showDetail && ((pane === 'task' && !!selectedTask) || (pane === 'channel' && !!activeChannel))}
+      <div class="mobile-detail-bottom-fill" aria-hidden="true"></div>
+    {/if}
+    {#if mobileSidebar && pane === 'task' && !currentDraftId && (selectedTask?.status === 'running' || activeTaskSubagents.length > 0)}
+      <div class="mobile-bottom-effect" class:subagent-bottom-effect={activeTaskSubagents.length > 0} aria-hidden="true">
+        {#if activeTaskSubagents.length === 0}<SparkleField active animation={snapshot?.settings.activityAnimation ?? 'sparkles'} />{/if}
+      </div>
+    {/if}
   </div>{/if}
 </main>
 
@@ -6488,7 +6548,7 @@
   :global(*::-webkit-scrollbar-thumb) { min-height:28px; border:2px solid transparent; border-radius:999px; background:transparent; background-clip:padding-box; transition:background-color 180ms ease; }
   :global(*:hover::-webkit-scrollbar-thumb) { background:color-mix(in srgb, #fff 10%, transparent); background-clip:padding-box; }
   :global(*::-webkit-scrollbar-corner) { background:transparent; }
-  @media (prefers-reduced-motion:reduce) { :global(*::-webkit-scrollbar-thumb) { transition:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"]) *::-webkit-scrollbar-thumb) { transition:none; } }
   :global(button),
   :global(input),
   :global(textarea),
@@ -6877,7 +6937,7 @@
   .sidebar-child-select .chat-copy { min-width:0; }
   .sidebar-child-select .chat-meta { font-size:calc(9px * var(--interface-font-ratio,1)); }
   .sidebar-child-select > .dot { flex:none; }
-  @media(prefers-reduced-motion:reduce) { .sidebar-child-toggle :global(svg) { transition:none; } }
+  @media(prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .sidebar-child-toggle :global(svg) { transition:none; } }
   .task-row,
   .channel-row {
     display: flex;
@@ -6896,7 +6956,7 @@
   .sidebar-live-spinner :global(svg) { animation:sidebar-running-spin 1.15s linear infinite; }
   @keyframes sidebar-running-spin { to { transform:rotate(360deg); } }
   :global([data-motion="off"]) .sidebar-live-spinner :global(svg) { animation:none; }
-  @media (prefers-reduced-motion:reduce) { .sidebar-live-spinner :global(svg) { animation:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .sidebar-live-spinner :global(svg) { animation:none; } }
   .task-row:hover,
   .task-row.current,
   .channel-row:hover {
@@ -6939,7 +6999,7 @@
   .sidebar.sidebar-selected .activity-subagents:focus-visible { outline:2px solid #4c9feb; outline-offset:2px; }
   .activity-subagents-sparkle { color:#2b9aff; font-size:10px; line-height:1; filter:drop-shadow(0 0 3px color-mix(in srgb,#4aa8ff 70%,transparent)); animation:activity-sparkle 2.8s ease-in-out infinite; }
   @keyframes activity-sparkle { 0%,100% { opacity:.65; transform:scale(.88); } 50% { opacity:1; transform:scale(1.12); } }
-  @media (prefers-reduced-motion:reduce) { .activity-subagents-sparkle { animation:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .activity-subagents-sparkle { animation:none; } }
   :global([data-theme='dark']) .activity-subagents { color:#b6dbff; }
   .side-scroll .activity-child-group { display:grid; gap:2px; margin:2px 0 3px 27px; border:0; }
   .side-scroll .activity-child-group[hidden] { display:none; }
@@ -6979,7 +7039,7 @@
   .activity-status-dot.running::after { content:'✦'; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); color:white; font:7px/1 sans-serif; text-shadow:0 0 3px white; }
   @keyframes sidebar-running-glow { 50% { box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 32%,transparent),0 0 12px var(--accent); } }
   :global([data-motion="off"]) .activity-status-dot.running { animation:none; }
-  @media (prefers-reduced-motion:reduce) { .activity-status-dot.running { animation:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .activity-status-dot.running { animation:none; } }
   .activity-status-dot.error { background:#e88683; }
   .activity-status-dot.interrupted { background:#d2ab75; }
   .task-select { display:flex; align-items:center; gap:7px; min-width:0; flex:1; padding:0; text-align:left; }
@@ -7066,7 +7126,15 @@
   .mobile-navigation > .sidebar { border-right:0; transform:translateX(0); background:var(--sidebar); }
   .mobile-navigation .brand { padding-inline:8px; gap:0; }
   .mobile-navigation .brand-action { width:44px; height:44px; }
-  .mobile-navigation > .pane-grid { flex-direction:column; transform:translateX(100%); visibility:hidden; }
+  .mobile-navigation > .pane-grid { --mobile-bottom-inset:env(safe-area-inset-bottom,0px); flex-direction:column; transform:translateX(100%); visibility:hidden; }
+  .mobile-navigation.mobile-task-chat > .pane-grid { --mobile-bottom-inset:max(0px,calc(env(safe-area-inset-bottom,0px) - 12px)); padding-bottom:var(--mobile-bottom-inset); }
+  .mobile-navigation > .pane-grid::before { content:''; position:absolute; inset:0 0 auto; height:env(safe-area-inset-top,0px); background:var(--sidebar); pointer-events:none; z-index:1; }
+  .mobile-bottom-effect { --bottom-glow-strength:10%; position:absolute; inset:auto 0 0; height:calc(var(--mobile-bottom-inset) + 1px); overflow:hidden; pointer-events:none; z-index:1; background:color-mix(in srgb,var(--accent) var(--bottom-glow-strength),var(--paper)); }
+  .mobile-bottom-effect.subagent-bottom-effect { background:var(--panel); }
+  .mobile-detail-bottom-fill { position:absolute; right:0; bottom:0; z-index:23; box-sizing:border-box; width:min(max(260px,var(--right-sidebar-width,340px)),calc(100% - 24px)); height:calc(var(--mobile-bottom-inset) + 1px); border-left:1px solid var(--line); background:var(--sidebar); pointer-events:none; }
+  .mobile-bottom-effect :global(.sparkle-glow) { display:none; }
+  :global(:root[data-theme="dark"]) .mobile-bottom-effect { --bottom-glow-strength:20%; }
+  @media (prefers-color-scheme:dark) { :global(:root[data-theme="system"]) .mobile-bottom-effect { --bottom-glow-strength:20%; } }
   .mobile-navigation.mobile-main > .sidebar { transform:translateX(-100%); visibility:hidden; }
   .mobile-navigation.mobile-main > .pane-grid { transform:translateX(0); visibility:visible; transition-delay:0s; }
   .mobile-navigation:not(.mobile-main) > .sidebar { visibility:visible; transition-delay:0s; }
@@ -7074,12 +7142,18 @@
     font-size:max(16px,var(--chat-font-size,13px));
   }
   .mobile-navigation :global(.composer textarea) { min-height:36px; resize:none; }
+  .mobile-navigation :global(.composer:not(.expanded)) { margin-bottom:0; }
   .mobile-navigation:global([data-keyboard-composer=true]) { --pane-tabbar-height:52px; }
+  .mobile-navigation:global([data-keyboard-composer=true]) > .pane-grid { padding-bottom:0; }
+  .mobile-navigation:global([data-keyboard-composer=true]) > .pane-grid > .mobile-bottom-effect { display:none; }
+  .mobile-navigation:global([data-keyboard-composer=true]) > .pane-grid > .mobile-detail-bottom-fill { display:none; }
+  .mobile-navigation:global([data-keyboard-composer=true]) :global(.composer:not(.expanded)) { margin-bottom:4px; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-layout) { padding:8px 12px; align-content:start; mask-image:none; -webkit-mask-image:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-content > :not(.composer)) { display:none; }
   .mobile-navigation:global([data-keyboard-composer=true]) :global(.draft-composer.composer) { width:100%; margin:0; }
   @media (prefers-reduced-motion:reduce) {
-    .mobile-navigation > .sidebar, .mobile-navigation > .pane-grid { transition:none; }
+    :global(:root:not([data-motion="on"])) .mobile-navigation > .sidebar,
+    :global(:root:not([data-motion="on"])) .mobile-navigation > .pane-grid { transition:none; }
   }
   .mobile-navigation .workspace > .topbar { display:flex; height:52px; box-sizing:border-box; align-items:center; padding:4px; gap:4px; }
   .mobile-navigation .agent-row, .mobile-navigation .task-row, .mobile-navigation .channel-row, .mobile-navigation .project-row { min-height:44px; }
@@ -7137,9 +7211,10 @@
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='channel'] { --tab-strip-color:#6d91cf; }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='terminal'] { --tab-strip-color:var(--terminal-foreground,#aab4c0); }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='browser'] { --tab-strip-color:#63a7bb; }
+  .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='git'] { --tab-strip-color:#d08c4a; }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='settings'] { --tab-strip-color:#a284cd; }
   .workspace.auto-hide-tabs:not(.tab-revealed) > .topbar:not(:hover):not(:focus-within) .tab-entry[data-tab-kind='empty'] { --tab-strip-color:#8b91a0; }
-  @media (prefers-reduced-motion:reduce) { .topbar { transition:none; } }
+  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .topbar { transition:none; } }
   .workspace-context { display:grid; place-items:center; flex:none; width:var(--density-control-size); padding-bottom:var(--density-tabbar-inset); color:var(--muted); }
   .top-actions {
     display: flex;
@@ -7153,6 +7228,8 @@
   .sidebar .side-scroll { padding-bottom:calc(var(--sidebar-statistics-height) + var(--sidebar-footer-safe-area,0px) + 12px); }
   .sidebar .agent-rail { padding-bottom:calc(var(--sidebar-statistics-height) + var(--sidebar-footer-safe-area,0px) + 12px); }
   .mobile-navigation { --sidebar-footer-safe-area:env(safe-area-inset-bottom,0px); }
+  .mobile-navigation .sidebar-statistics,
+  .mobile-navigation .sidebar-statistics-compact { bottom:0; padding-bottom:max(0px,calc(var(--sidebar-footer-safe-area) - 12px)); }
   .new-task,
   .primary {
     display: inline-flex;
@@ -7516,7 +7593,8 @@
   .modern-tabs:not(.compact-tabs) .workspace-context { padding:0; }
   .modern-tabs:not(.compact-tabs) .top-actions { padding:0 8px; }
   @media (prefers-reduced-motion:reduce) {
-    .compact-tabs .tab-picker-trigger :global(svg), .compact-tabs .tab-picker-list { transition:none; }
+    :global(:root:not([data-motion="on"])) .compact-tabs .tab-picker-trigger :global(svg),
+    :global(:root:not([data-motion="on"])) .compact-tabs .tab-picker-list { transition:none; }
   }
   .conversation-head {
     background: var(--paper);
@@ -7727,7 +7805,7 @@
   .composer-actions :global(.voice-recorder .record) { border-color:transparent; background:transparent; }
   .composer-control { width: 30px; min-width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; border-radius: 50%; }
   .spin { animation: composer-spin .8s linear infinite; }
-  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { :global(:root:not([data-motion="on"])) .spin { animation: none; } }
   @keyframes composer-spin { to { transform: rotate(360deg); } }
   .composer-footer > div {
     display: flex;
@@ -7809,6 +7887,7 @@
     border-radius: 5px 5px 0 0;
     color: var(--muted);
     font-size: calc(10.5px * var(--interface-font-ratio, 1));
+    text-transform: uppercase;
   }
   .detail-tab:hover { background: var(--soft); color: var(--ink); }
   .detail-tab-entry.active { position:relative; z-index:1; margin-bottom:-1px; color: var(--ink); border-color: var(--line); background: var(--sidebar); }
@@ -7822,7 +7901,11 @@
   .modern-tabs .detail-tab { border-radius:0; }
   .channel-members { display:flex;flex-direction:column;overflow:hidden;padding:0; }
   .run-detail.closed, .hidden { display: none; }
-  .git-slot { flex: 1; min-height: 0; overflow: hidden; }
+  .git-review-workspace { display:flex; flex:1; min-height:0; flex-direction:column; overflow:hidden; }
+  .git-review-heading { display:flex; flex:none; align-items:flex-start; justify-content:space-between; gap:12px; padding:18px 20px 12px; border-bottom:1px solid var(--line); }
+  .git-review-heading h1 { margin:2px 0; font-size:calc(18px * var(--interface-font-ratio,1)); }
+  .git-review-heading p:last-child { margin:0; color:var(--muted); font:calc(11px * var(--interface-font-ratio,1)) var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .git-review-workspace :global(.git-pane) { flex:1; min-height:0; border:0; border-radius:0; }
   .detail-scroll {
     --scroll-fade: 20px;
     -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--scroll-fade), #000 calc(100% - var(--scroll-fade)), transparent 100%);
@@ -8132,7 +8215,8 @@
   .check-row input:checked::before { transform: translateX(14px); }
   .check-row input:disabled { opacity: 0.5; cursor: wait; }
   @media (prefers-reduced-motion: reduce) {
-    .check-row input, .check-row input::before { transition: none; }
+    :global(:root:not([data-motion="on"])) .check-row input,
+    :global(:root:not([data-motion="on"])) .check-row input::before { transition: none; }
   }
   @media (forced-colors: active) {
     .check-row input { forced-color-adjust: none; background: Canvas; border-color: ButtonText; }
@@ -8418,6 +8502,10 @@
   .task-layout:not(.detail-hidden) { grid-template-columns: minmax(0, 1fr) min(40vw, max(260px, var(--right-sidebar-width, 292px)), calc(100% - 300px)); }
   /* Anchor overlays to the content row, keeping the pane header and neighbours clear. */
   .compact-detail .run-detail { grid-column: 1 / -1; grid-row: 2 / 3; width: min(max(260px, var(--right-sidebar-width, 340px)), calc(100% - 24px)); }
+  /* The mobile detail drawer and its scrim cover the pane's bottom safe-area;
+     keep the drawer's scrollable content above the home indicator. */
+  .mobile-navigation .compact-detail .run-detail { bottom:calc(0px - var(--mobile-bottom-inset)); padding-bottom:var(--mobile-bottom-inset); }
+  .mobile-navigation .compact-detail .detail-backdrop { bottom:calc(0px - var(--mobile-bottom-inset)); }
   .composer-right { display:flex;align-items:center;gap:8px;min-width:0; }
   .composer-left { display:flex;align-items:center;gap:8px;min-width:0; }
   .message-avatar { width:20px;height:20px;flex-shrink:0;border-radius:5px;font-size:calc(10px * var(--interface-font-ratio, 1)); }
@@ -8433,5 +8521,5 @@
   .vim-commandbar input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; }
   .vim-commandbar p { margin: 7px 2px 0; color: var(--danger,#b84c44); font-size: calc(11px * var(--interface-font-ratio,1)); }
   .vim-commandbar ul { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 4px 10px; margin: 8px 2px 1px; padding: 0; list-style: none; color: var(--muted); font: calc(10px * var(--interface-font-ratio,1)) var(--mono); }
-  @media (prefers-reduced-motion: reduce) { .vim-commandbar { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { :global(:root:not([data-motion="on"])) .vim-commandbar { transition: none; } }
 </style>

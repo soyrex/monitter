@@ -11,7 +11,8 @@ export function mobileViewport(node: HTMLElement) {
     node.style.setProperty('--mobile-viewport-top', `${top}px`);
     node.style.setProperty('--scaled-mobile-viewport-height', `${height / scale}px`);
     node.style.setProperty('--scaled-mobile-viewport-top', `${top / scale}px`);
-    node.dataset.keyboardComposer = String(height < 500 && !!document.activeElement?.closest('.composer'));
+    const keyboardVisible = height < 500 || (!!viewport && window.innerHeight - height > 120);
+    node.dataset.keyboardComposer = String(keyboardVisible && !!document.activeElement?.closest('.composer'));
   };
   const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
   update();

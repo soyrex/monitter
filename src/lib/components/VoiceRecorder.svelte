@@ -176,5 +176,5 @@
   .error{max-width:min(320px,50vw);color:var(--danger,#b84c44);overflow-wrap:anywhere}
   .spinner{display:inline-flex;animation:spin 1s linear infinite}
   @keyframes pulse{50%{opacity:.35}}@keyframes spin{to{transform:rotate(360deg)}}
-  @media(prefers-reduced-motion:reduce){.dot,.spinner{animation:none}}
+  @media(prefers-reduced-motion:reduce){:global(:root:not([data-motion="on"])) .dot,:global(:root:not([data-motion="on"])) .spinner{animation:none}}
 </style>
