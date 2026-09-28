@@ -1510,7 +1510,7 @@ caller-supplied path, enforces the saved attachment folder and 20 MiB limit, and
 PNG/JPEG/WebP/GIF raster images. Missing or unsafe originals produce a visible error rather than
 an enlarged thumbnail. Original bytes load on demand, not with transcript history.
 
-Voice messages are recorded by the owner desktop as 16 kHz mono PCM16 WAV, with a maximum
+Voice messages are recorded by the owner desktop or owner LAN browser as 16 kHz mono PCM16 WAV, with a maximum
 duration of 90 seconds. `transcribe_voice_message { audioBase64: string }` returns
 `{ text: string }` and invokes the locally installed whisper.cpp `whisper-cli` with a local
 model with automatic language detection. Install whisper.cpp with Homebrew (`brew install
@@ -1519,15 +1519,17 @@ whisper-cpp`) and obtain the multilingual `ggml-base.bin` model from the
 place it at the default path below. Configure nonstandard locations with `MONITTER_WHISPER_CLI` and
 `MONITTER_WHISPER_MODEL`; defaults discover `whisper-cli` on PATH/Homebrew and look for
 `~/Library/Application Support/Monitter/whisper/models/ggml-base.bin` (or standard whisper.cpp
-model locations). Recording and transcription run locally. The frontend adds the returned text
+model locations). Recording runs on the user's device and transcription runs on the desktop Mac. The frontend adds the returned text
 to the composer, and normal message delivery sends that text without attaching or retaining the WAV.
 Transcription accepts only bounded, valid PCM16 WAV input; temporary audio and output files are removed after
 the command. First-run Whisper startup can spend additional time compiling local Metal kernels;
-the native process has a five-minute hard timeout. Errors and process output never contain audio content. `read_attachment_audio
-{ attachmentId }` returns `{ filename, mimeType, dataBase64 }` only for a registered WAV
-attachment, validating its MIME type, WAV format, and duration. Both voice commands are owner
-desktop-only and are absent from LAN, mobile, and shared visitor dispatch; audio is loaded on
-demand for playback rather than placed in image previews. The macOS bundle declares the
+the native process has a five-minute hard timeout. Errors and process output never contain audio content.
+The transcription command is available to the native owner and the owner LAN view.
+The paired iPhone composer does not expose recording yet; shared visitors cannot
+invoke the owner command. It does not store the WAV or create an
+attachment ID. The separate `read_attachment_audio { attachmentId }` reader applies only
+to an already registered WAV attachment, validates MIME type, format, and duration, and
+remains desktop-only. The macOS bundle declares the
 microphone purpose string and audio-input hardened-runtime entitlement required for recording.
 Setup and privacy details are in `docs/VOICE_MESSAGES.md`.
 Codex receives original attachment paths in its text prompt, not inline image input or thumbnails;
@@ -1753,7 +1755,31 @@ can select another free port. It does not publish LAN assets or replace the inst
 Svelte/CSS changes use Vite HMR; backend changes still need a desktop rebuild. Normal `npm run dev`
 and production builds do not enable the dev proxy or dev-only browser bridge.
 
-The desktop app owns an internal HTTP server on port 18436. It prefers live web assets
+The desktop app owns an internal LAN server. By default it generates a persistent,
+per-install local root CA in the app data directory and serves LAN peers over
+HTTPS on port 18437 using IP-address SANs for the current private addresses.
+It also retains the trusted-LAN HTTP listener on port 18436 for existing clients.
+The native `get_lan_server_info` result includes the public `localCaPem` and its
+SHA-256 `localCaFingerprint` for export and verification; it never includes the
+private key. `GET /api/lan-ca.crt` serves the public root certificate. Each
+browser device must explicitly trust that root before using microphone capture;
+users should compare its fingerprint against native Settings before trusting it.
+The root persists across app restarts; the IP leaf is regenerated at startup.
+An invalid or incomplete stored root fails LAN startup rather than silently
+replacing its identity.
+
+An optional `lan-tls.json` in the app data directory replaces the local TLS
+identity with a custom hostname and absolute `certPath` and `keyPath` values
+(the hostname has no scheme or port). The complete `MONITTER_LAN_TLS_HOST`,
+`MONITTER_LAN_TLS_CERT`, and `MONITTER_LAN_TLS_KEY` environment trio overrides
+that file. With a custom identity, HTTP binds loopback only, and the public
+local-root endpoint is unavailable. A partial or invalid custom configuration
+fails LAN startup. Custom certificate renewal requires a desktop restart. A
+browser separately verifies certificate trust, expiry, and hostname. DNS-01 can
+issue a publicly trusted custom certificate without exposing the server to the
+Internet, but no domain or DNS configuration is needed for the default path.
+
+The server prefers live web assets
 in the app data folder's `lan-web` directory, with bundled assets as a fallback.
 On macOS, `npm run build` builds and publishes there without rebuilding Rust or restarting
 Monitter. `npm run publish:lan` publishes an already completed build. Publication installs
@@ -1761,14 +1787,17 @@ assets before atomically replacing `index.html`, retaining old hashed chunks for
 Refresh the browser to load the new interface. This updates LAN browsers only; the desktop
 webview remains bundled. Backend/API changes still require a matching app rebuild.
 Settings → LAN access displays local addresses and a random
-per-process six-digit access code (`get_lan_server_info {}` -> `{urls, token, error, accessCodeRequired}`;
+per-process six-digit access code (`get_lan_server_info {}` -> `{urls, token, error, accessCodeRequired, localCaPem?, localCaFingerprint?}`;
 the `token` string preserves leading zeros). Five incorrect guesses lock API access
 for five minutes across all clients; successful polling does not reset the counter. The server
 starts with the app and stops with it. A bind failure is shown in Settings.
 
-During LAN-only prototyping, `REQUIRE_ACCESS_CODE` is false: the code gate and guess
-limiter are bypassed, while private/loopback peer, literal local Host and same-origin checks
-remain enforced. `GET /api/access` returns `{required:false}` so browsers skip the gate.
+During trusted-LAN prototyping, `REQUIRE_ACCESS_CODE` is false: the code gate and guess
+limiter are bypassed, while private/loopback peer and same-origin checks remain enforced.
+The HTTP listener accepts only literal local Host values; the HTTPS listener requires
+an advertised IP or custom DNS hostname in Host, with the POST Origin matching
+that exact Host. `GET /api/access` returns
+`{required:false}` so browsers skip the gate.
 Anyone on the trusted LAN has owner-level access, including terminals. The code and limiter
 implementation remain available to re-enable later; this is intentionally not Internet-facing.
 
@@ -1777,8 +1806,9 @@ responses are `{ok: true, result}` or `{ok: false, error}`. The browser sign-in 
 stores the code in sessionStorage. Access links place the code in a fragment, which is
 removed after loading. Static assets are public; workspace data and commands require
 authentication and same-origin requests. The code grants owner-level workspace control,
-including terminals; this is distinct from limited visitor sharing. HTTP is unencrypted
-and intended for a trusted LAN. Restarting the app invalidates browser access codes.
+including terminals; this is distinct from limited visitor sharing. The legacy HTTP
+LAN listener is unencrypted. HTTPS encrypts the connection but does not turn the trusted-LAN
+owner interface into visitor access. Restarting the app invalidates browser access codes.
 
 The full interface uses the same compact revision-based UI protocol as the desktop. Browser
 refreshes are coalesced so slow requests cannot overlap; unchanged revisions do not replace

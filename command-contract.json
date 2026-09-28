@@ -718,7 +718,8 @@
       "resultTsType": "VoiceTranscription",
       "legacyCompatible": true,
       "surfaces": [
-        "native"
+        "native",
+        "lan"
       ]
     },
     "read_attachment_image": {
