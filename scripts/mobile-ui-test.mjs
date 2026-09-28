@@ -59,10 +59,10 @@ try {
   await phone.getByRole('tab',{name:'Standard view',exact:true}).click();
   await phone.getByRole('button',{name:'Controller test'}).click();
   await phone.getByLabel('Message',{exact:true}).fill('Keep this draft');
-  await phone.getByRole('button',{name:'Back to chats'}).click();
+  await phone.getByRole('button',{name:'Open chats menu'}).click();
   await phone.getByRole('button',{name:'Other test chat'}).click();
   await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('');
-  await phone.getByRole('button',{name:'Back to chats'}).click();
+  await phone.getByRole('button',{name:'Open chats menu'}).click();
   await phone.getByRole('button',{name:'Controller test'}).click();
   await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Keep this draft');
   await host.evaluate(()=>{
@@ -81,14 +81,14 @@ try {
   await host.evaluate(()=>{window.holdSend=true;window.sendStarted=false;});
   await phone.getByRole('button',{name:'Send message'}).click();
   await expect.poll(()=>host.evaluate(()=>window.sendStarted)).toBe(true);
-  await phone.getByRole('button',{name:'Back to chats'}).click();
+  await phone.getByRole('button',{name:'Open chats menu'}).click();
   await phone.getByRole('button',{name:'Controller test'}).click();
   await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Mobile UI test message');
   await expect(phone.getByRole('button',{name:'Send message'})).toBeDisabled();
   await host.evaluate(()=>{window.holdSend=false;window.releaseSend();});
   await expect(phone.getByText('Mobile UI test message',{exact:true})).toBeVisible();
   await expect.poll(()=>host.evaluate(()=>window.testSends)).toBe(1);
-  await phone.getByRole('button',{name:'Back to chats'}).click();
+  await phone.getByRole('button',{name:'Open chats menu'}).click();
   await phone.getByRole('button',{name:'Preferences',exact:true}).click();
   const mobileScale=phone.getByRole('slider',{name:'Mobile interface scale',exact:true});
   await expect(mobileScale).toHaveValue('125');

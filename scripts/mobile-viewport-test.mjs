@@ -55,7 +55,7 @@ try {
   expect(restoredBounds.y + restoredBounds.height).toBeLessThanOrEqual(844);
   await expect(composer).toHaveValue('Keep this draft while the keyboard moves.');
   await expect(composer).toBeFocused();
-  await page.getByRole('button', { name: 'Back to chats' }).click();
+  await page.getByRole('button', { name: 'Open chats menu' }).click();
   await expect(page.getByRole('complementary', { name: 'Agents and tasks' })).toBeVisible();
   await page.getByRole('button', { name: 'Existing chat', exact: true }).click();
   const existingComposer = page.getByRole('textbox', { name: 'Task message' });

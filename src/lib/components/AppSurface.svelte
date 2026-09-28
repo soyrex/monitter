@@ -54,6 +54,7 @@
   import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import GitFork from "@lucide/svelte/icons/git-fork";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import Menu from "@lucide/svelte/icons/menu";
   import Search from "@lucide/svelte/icons/search";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
@@ -4897,7 +4898,7 @@
 {/snippet}
 
 {#snippet attachmentTools()}
-  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
+  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip class="composer-paperclip" size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
 {/snippet}
 
@@ -4984,7 +4985,7 @@
   <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
-        <button class="icon mobile-back" type="button" aria-label="Back to chats" title="Back to chats" onclick={()=>{tabPickerOpen=false;backToChats();}}><ArrowLeft size={20}/></button>
+        <button class="icon mobile-back" type="button" aria-label="Open chats menu" title="Open chats menu" onclick={()=>{tabPickerOpen=false;backToChats();}}><Menu size={20}/></button>
       {:else}
         {#if activeWorkspaceKey.startsWith('project:')}{@render workspaceContext()}{/if}
       {/if}
@@ -5483,9 +5484,9 @@
   <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null;railProjectId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
+      {#if mobileSidebar}<button class="icon brand-action" type="button" aria-label="Open Settings" title="Open Settings" onclick={()=>routeSettings()}><Cog size={18}/></button>{/if}
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
       {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Sidebar actions">
-        {#if mobileSidebar}<button class="icon brand-action" type="button" aria-label="Open Settings" title="Open Settings" onclick={()=>routeSettings()}><Cog size={18}/></button>{/if}
         <button class="icon brand-action" type="button" aria-label={terminalBusy?'Opening terminal':'New terminal'} title="New terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
         <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
       </div>{/if}
@@ -5553,7 +5554,7 @@
         {/if}
         {#if !sidebarRootChats.length}<p class="empty-tree">No chats yet</p>{/if}
       {:else}
-        <p class="activity-heading">Projects</p>
+        <div class="section-label project-section-label"><span>PROJECTS</span><button type="button" aria-label="New project" title="New project" onclick={()=>editProject()}><Plus size={15}/></button></div>
         {#each sidebarSorted(projects,'projects') as project (project.id)}
           {@const projectTasks = sidebarSorted(sidebarRootChats.filter(task=>task.projectId===project.id),`project-chats:${project.id}`)}
           {@const ProjectIcon = projectIconComponent(project.icon)}
@@ -8524,6 +8525,7 @@
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   .attachment-tools .icon { width: 24px; height: 24px; }
+  .attachment-tools :global(.composer-paperclip) { transform: translate(-5px, -3px); opacity: 0.7; }
   .attachment-tools small { font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .attachment-input { display: none; }
   .composer.drop-files .composer-box { outline: 2px solid var(--accent); background: color-mix(in srgb,var(--accent) 8%,var(--panel)); }

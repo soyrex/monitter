@@ -108,7 +108,7 @@ async function mobileChecks(width) {
     expect(await page.evaluate(() => window.__MONITTER_QA__.calls.some(c => c.method === 'resumeTask'))).toBe(false);
 
     // Closing a tab is a UI-only operation and must not archive, delete, cancel, or touch task state.
-    await page.getByRole('button', { name: 'Back to chats', exact: true }).click();
+    await page.getByRole('button', { name: 'Open chats menu', exact: true }).click();
     await page.getByRole('button', { name: 'Close me', exact: true }).first().click();
     await page.locator('.tab-picker-trigger').click();
     await page.locator('[data-tab-id="interrupted-task"] .tab').click();
@@ -127,7 +127,7 @@ async function mobileChecks(width) {
     expect(afterCalls.filter(method => ['setTaskArchived', 'deleteTask', 'deleteArchivedTask', 'cancelTask'].includes(method))).toEqual([]);
     expect(await page.evaluate(() => window.__MONITTER_QA__.snapshot().tasks.some(t => t.id === 'close-me' && !t.archived))).toBe(true);
 
-    await page.getByRole('button', { name: 'Back to chats', exact: true }).click();
+    await page.getByRole('button', { name: 'Open chats menu', exact: true }).click();
     await page.getByRole('button', { name: 'Running task', exact: true }).first().click();
     await expect(page.locator('.pane-task-header')).toBeHidden();
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
