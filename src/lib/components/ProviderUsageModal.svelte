@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import ProviderIcon from './ProviderIcon.svelte';
+  import UsagePacingChart from './UsagePacingChart.svelte';
   import type { UsageRingData, UsageRingProvider, UsageRingWindow } from './UsageRings.svelte';
 
   let { open, provider, data, accountLabel, onclose }: {
@@ -10,6 +12,22 @@
     accountLabel?: string;
     onclose: () => void;
   } = $props();
+
+  let now = $state(Date.now());
+  onMount(() => {
+    const timer = window.setInterval(() => { now = Date.now(); }, 60_000);
+    return () => window.clearInterval(timer);
+  });
+
+  // The pacing chart needs an actual reported percentage and a reset time to
+  // place "now" inside the window; anything else has nothing to plot against.
+  const pacingWindow = $derived(
+    data?.weekly && !data.weekly.unlimited
+      && typeof data.weekly.usedPercent === 'number' && Number.isFinite(data.weekly.usedPercent)
+      && typeof data.weekly.resetsAt === 'number' && Number.isFinite(data.weekly.resetsAt)
+      ? data.weekly
+      : null
+  );
 
   const providerNames: Record<UsageRingProvider, string> = {
     codex: 'Codex',
@@ -80,6 +98,12 @@
         {/each}
       </div>
       <p class="calculation-note">Remaining is calculated from the reported used percentage.</p>
+      {#if pacingWindow}
+        <section class="pacing-section" aria-label="Weekly pacing">
+          <h3>Week pacing</h3>
+          <UsagePacingChart usedPercent={pacingWindow.usedPercent ?? 0} resetsAt={pacingWindow.resetsAt ?? 0} {now} />
+        </section>
+      {/if}
     {:else}
       <p class="unavailable">{data?.message?.trim() || 'This provider has not reported allowance details.'}</p>
     {/if}
@@ -99,6 +123,8 @@
   .status { margin-left:auto; padding:4px 7px; border:1px solid var(--line); border-radius:20px; color:var(--muted); font-size:calc(10px * var(--interface-font-ratio, 1)); white-space:nowrap; }
   .status[data-status="ready"] { color:var(--accent-ink); }
   .window-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr)); gap:10px; }
+  .pacing-section { padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--soft); }
+  .pacing-section h3 { margin:0 0 12px; font-size:calc(11px * var(--interface-font-ratio, 1)); font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
   .window-card { min-width:0; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--soft); }
   h3 { margin:0 0 12px; font-size:calc(11px * var(--interface-font-ratio, 1)); font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
   .figures { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
