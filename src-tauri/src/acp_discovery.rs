@@ -67,6 +67,15 @@ pub fn catalog() -> Vec<AcpCandidate> {
             vec!["acp"],
         ),
         (
+            "hermes",
+            "Hermes Agent",
+            "Nous Research's native ACP server; existing legacy Hermes chats keep their original transport",
+            "https://github.com/NousResearch/hermes-agent",
+            "native",
+            "hermes",
+            vec!["acp"],
+        ),
+        (
             "goose",
             "Goose",
             "Block's native ACP integration",
@@ -510,6 +519,13 @@ mod tests {
                 .launch
                 .command,
             "qwen"
+        );
+        assert_eq!(
+            candidates.iter().find(|c| c.id == "hermes").unwrap().launch,
+            AcpLaunch {
+                command: "hermes".into(),
+                args: vec!["acp".into()]
+            }
         );
         assert_eq!(
             candidates

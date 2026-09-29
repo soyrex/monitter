@@ -879,9 +879,11 @@ restoration after idle retirement, or an explicit handoff. OpenCode uses
 a bounded read-only `export <session>` lookup verifies the native ID and restores the original
 session folder into the task snapshot, before collaboration setup. This prevents inherited PWD
 or a mismatched attachment folder from silently losing the CLI event stream. Export contents
-are not imported into the chat or logged. Hermes runs the installed TUI gateway with a Python
-bridge: session.create/resume, length-framed multiline prompt.submit, durable stored_session_id, normalized JSONL events,
-explicit denial of interactive requests, and owned child cleanup. An explicit Hermes `provider/model`
+are not imported into the chat or logged. New Hermes Agent profiles launch the installed `hermes acp`
+server through the ordinary ACP transport, including its advertised session configuration. Existing
+native Hermes profiles remain on the TUI gateway with the Python bridge: session.create/resume,
+length-framed multiline prompt.submit, durable stored_session_id, normalized JSONL events, explicit
+denial of interactive requests, and owned child cleanup. An explicit native Hermes `provider/model`
 selection is passed as separate session-scoped provider and model fields; unqualified models retain
 Hermes' configured provider. Never silently substitute a harness.
 Provider stderr is diagnostic-only: routine trace, debug, info and warning output is discarded.
@@ -981,9 +983,10 @@ launch or explicit resume uses that saved mode. A running process keeps its laun
 Codex defaults to read-only with explicit workspace-write selection. `yolo` is an explicit,
 per-agent choice, captured in each newly created task's snapshot and off by default. Codex invokes
 `--dangerously-bypass-approvals-and-sandbox`; Claude invokes `--dangerously-skip-permissions`.
-OpenCode and Hermes reject `yolo`: OpenCode's `--auto` still respects explicit denials, and the
-Hermes bridge has no verified per-invocation bypass. ACP accepts it only after the live session explicitly
-advertises `bypassPermissions`; other providers require `harness-configured`;
+OpenCode and legacy native Hermes reject `yolo`: OpenCode's `--auto` still respects explicit denials,
+and the Hermes bridge has no verified per-invocation bypass. Hermes ACP follows the ordinary ACP rule:
+it accepts `yolo` only after the live session explicitly advertises `bypassPermissions`. Other ACP agents
+also accept it only after that advertisement; other providers require `harness-configured`;
 do not describe their host permission rules as an OS sandbox.
 Approval requests are durable task records, not generic tool activity. A request contains the provider,
 provider run/request ID, proposed tool/action summary, provider detail, risk label, timestamp and an
@@ -1010,7 +1013,7 @@ A matching future request is auditable with its rule ID and `approve_always` dec
 to every native harness is always one-shot approve. Rules never survive a scope change, do not replay stale
 work after cancellation/restart, and can be revoked from Settings or the Approvals sidebar.
 
-Current interactive approval transports include local and SSH Codex app-server, Hermes' local full-duplex gateway and Claude's local
+Current interactive approval transports include local and SSH Codex app-server, legacy Hermes' local full-duplex gateway and Claude's local
 stream-json host protocol. A Claude `can_use_tool` request creates one durable desktop approval and the
 chosen one-time allow or deny is returned to that exact control request ID with the provider's original
 tool input preserved. SSH Hermes and SSH Claude remain safe-deny/unsupported until their remote
@@ -1305,8 +1308,9 @@ Codex receives invocation-only `mcp_servers.monitter` overrides, required startu
 allowlist and approval scoped to these Monitter tools. Claude receives invocation-only MCP config
 and an exact Monitter tool allowlist. OpenCode uses its inline config layer; existing native permission
 rules remain in force. These are added to normal host configuration, without replacing authentication
-or disabling other configured MCP servers. Hermes can receive tasks through its existing gateway
-adapter; publishing callable collaboration tools into a Hermes turn awaits its ACP integration.
+or disabling other configured MCP servers. Hermes ACP receives the same scoped MCP configuration as
+other compatible local ACP servers when it advertises support; legacy Hermes profiles retain their
+existing gateway behavior.
 
 Local harnesses use the broker's loopback `/mcp` URL. SSH uses an owned reverse forward bound to
 remote loopback; the remote harness receives that forwarded port, not the desktop-only port.
