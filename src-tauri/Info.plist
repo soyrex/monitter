@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Record voice messages to transcribe locally with Whisper.</string>
+  <string>Record voice messages for local transcription.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Transcribe voice messages on this Mac using Apple on-device speech recognition.</string>
 </dict>
 </plist>

@@ -7375,6 +7375,15 @@ async fn transcribe_voice_message(audio_base64: String) -> Result<voice::VoiceTr
         .map_err(|_| "Voice transcription worker failed.".to_string())?
 }
 
+/// Native desktop only. Owner LAN and paired mobile keep the existing Whisper
+/// command; the Apple engine is an explicit local macOS preference.
+#[tauri::command]
+async fn transcribe_voice_message_apple(audio_base64: String) -> Result<voice::VoiceTranscript, String> {
+    tauri::async_runtime::spawn_blocking(move || voice::transcribe_apple(audio_base64))
+        .await
+        .map_err(|_| "Apple speech transcription worker failed.".to_string())?
+}
+
 #[tauri::command]
 async fn read_attachment_image(
     state: State<'_, AppState>,
@@ -8354,6 +8363,9 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
         "sparkles" | "grid" | "matrix"
     ) {
         return Err("Activity animation must be sparkles, grid, or matrix.".into());
+    }
+    if !matches!(settings.voice_transcription_engine.as_str(), "whisper" | "apple") {
+        return Err("Voice transcription engine must be Whisper or Apple on-device.".into());
     }
     Ok(())
 }
@@ -9639,6 +9651,7 @@ pub fn run() {
             finish_quit,
             read_attachment_file,
             transcribe_voice_message,
+            transcribe_voice_message_apple,
             read_attachment_image,
             read_attachment_audio,
             store_attachment,
@@ -10249,6 +10262,20 @@ name@rafa.test",
         assert_eq!(
             validate_settings(&settings),
             Err("Activity animation must be sparkles, grid, or matrix.".into())
+        );
+    }
+
+    #[test]
+    fn settings_validation_limits_voice_transcription_engine() {
+        let mut settings = default_snapshot().settings;
+        for engine in ["whisper", "apple"] {
+            settings.voice_transcription_engine = engine.into();
+            assert!(validate_settings(&settings).is_ok());
+        }
+        settings.voice_transcription_engine = "cloud".into();
+        assert_eq!(
+            validate_settings(&settings),
+            Err("Voice transcription engine must be Whisper or Apple on-device.".into())
         );
     }
 

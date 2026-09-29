@@ -1098,6 +1098,9 @@ pub struct Settings {
     pub interface_density: String,
     #[serde(default = "default_activity_animation")]
     pub activity_animation: String,
+    /// Native macOS composer recognition engine. Remote owner voice stays on Whisper.
+    #[serde(default = "default_voice_transcription_engine")]
+    pub voice_transcription_engine: String,
 }
 impl Eq for Settings {}
 fn default_terminal_font_size() -> u8 {
@@ -1117,6 +1120,9 @@ fn default_interface_density() -> String {
 }
 fn default_activity_animation() -> String {
     "sparkles".into()
+}
+fn default_voice_transcription_engine() -> String {
+    "whisper".into()
 }
 fn default_window_surface() -> String {
     "opaque".into()
@@ -1726,6 +1732,7 @@ pub fn default_snapshot() -> Snapshot {
             tab_style: default_tab_style(),
             interface_density: default_interface_density(),
             activity_animation: default_activity_animation(),
+            voice_transcription_engine: default_voice_transcription_engine(),
         },
     }
 }
@@ -1757,6 +1764,7 @@ mod tests {
 
         assert!(settings.user_name.is_empty());
         assert_eq!(settings.board_guidance_text, None);
+        assert_eq!(settings.voice_transcription_engine, "whisper");
         assert_eq!(settings.interface_scale, 125);
         assert_eq!(settings.window_surface, "opaque");
         assert_eq!(settings.chat_line_height, 1.65);

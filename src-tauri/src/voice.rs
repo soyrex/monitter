@@ -193,11 +193,7 @@ impl Drop for TempFiles {
     }
 }
 
-pub(crate) fn transcribe(audio_base64: String) -> Result<VoiceTranscript, String> {
-    let wav = decode_base64(&audio_base64)?;
-    validate_wav(&wav)?;
-    let cli = configured_executable()?;
-    let model = configured_model()?;
+fn prepare_audio(wav: &[u8]) -> Result<(TempFiles, PathBuf), String> {
     let dir = env::temp_dir().join(format!("monitter-voice-{}", uuid::Uuid::new_v4()));
     #[cfg(unix)]
     {
@@ -213,7 +209,6 @@ pub(crate) fn transcribe(audio_base64: String) -> Result<VoiceTranscript, String
         .map_err(|_| "Could not prepare temporary voice transcription files.".to_string())?;
     let files = TempFiles { dir: dir.clone() };
     let input = dir.join("audio.wav");
-    let output = dir.join("transcript");
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -224,9 +219,19 @@ pub(crate) fn transcribe(audio_base64: String) -> Result<VoiceTranscript, String
     let mut file = options
         .open(&input)
         .map_err(|_| "Could not prepare temporary voice transcription files.".to_string())?;
-    file.write_all(&wav)
+    file.write_all(wav)
         .map_err(|_| "Could not prepare temporary voice transcription files.".to_string())?;
     drop(file);
+    Ok((files, input))
+}
+
+pub(crate) fn transcribe(audio_base64: String) -> Result<VoiceTranscript, String> {
+    let wav = decode_base64(&audio_base64)?;
+    validate_wav(&wav)?;
+    let cli = configured_executable()?;
+    let model = configured_model()?;
+    let (files, input) = prepare_audio(&wav)?;
+    let output = files.dir.join("transcript");
     let mut child = Command::new(cli)
         .args(["--model"])
         .arg(model)
@@ -265,6 +270,68 @@ pub(crate) fn transcribe(audio_base64: String) -> Result<VoiceTranscript, String
     })
 }
 
+#[cfg(target_os = "macos")]
+fn transcribe_apple_file(input: &std::path::Path) -> Result<String, String> {
+    use std::{
+        ffi::{CStr, CString},
+        os::{raw::c_char, unix::ffi::OsStrExt},
+        ptr,
+    };
+
+    unsafe extern "C" {
+        fn monitter_apple_speech_transcribe_file(
+            input: *const c_char,
+            error: *mut *mut c_char,
+        ) -> *mut c_char;
+        fn monitter_apple_speech_free(value: *mut c_char);
+    }
+
+    let path = CString::new(input.as_os_str().as_bytes())
+        .map_err(|_| "Voice recording path is invalid.".to_string())?;
+    let mut error = ptr::null_mut();
+    let result = unsafe { monitter_apple_speech_transcribe_file(path.as_ptr(), &mut error) };
+    let message = if result.is_null() {
+        if error.is_null() {
+            Err("Apple on-device transcription failed.".to_string())
+        } else {
+            Err(unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .into_owned())
+        }
+    } else {
+        Ok(unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned())
+    };
+    if !result.is_null() {
+        unsafe { monitter_apple_speech_free(result) };
+    }
+    if !error.is_null() {
+        unsafe { monitter_apple_speech_free(error) };
+    }
+    message
+}
+
+pub(crate) fn transcribe_apple(audio_base64: String) -> Result<VoiceTranscript, String> {
+    let wav = decode_base64(&audio_base64)?;
+    validate_wav(&wav)?;
+    #[cfg(target_os = "macos")]
+    {
+        let (_files, input) = prepare_audio(&wav)?;
+        let text = transcribe_apple_file(&input)?;
+        if text.len() as u64 > MAX_TEXT_BYTES {
+            return Err("Apple speech transcript exceeded the output limit.".into());
+        }
+        Ok(VoiceTranscript {
+            text: text.trim().to_string(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Apple on-device transcription is available only on macOS.".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +365,14 @@ mod tests {
     fn decodes_base64_and_rejects_bad_padding() {
         assert_eq!(decode_base64("UklGRg==").unwrap(), b"RIFF");
         assert!(decode_base64("UklGR===").is_err());
+    }
+    #[test]
+    fn apple_rejects_invalid_audio_before_requesting_permission() {
+        assert!(transcribe_apple("not base64".into()).is_err());
+        assert!(transcribe_apple("UklGRg==".into())
+            .err()
+            .unwrap()
+            .contains("WAV"));
     }
     #[test]
     fn config_missing_model_is_explicit() {

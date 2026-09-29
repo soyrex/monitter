@@ -2015,7 +2015,10 @@
     if(!targets.length) { voiceErrors[key]='Choose an agent to receive this voice message.'; return; }
     voiceProcessing[key]=true; voiceErrors[key]='';
     try {
-      const transcript=(await bridge.transcribeVoiceMessage(file.dataBase64)).text.trim();
+      const transcription = nativeRuntime && macPlatform && snapshot?.settings.voiceTranscriptionEngine === 'apple'
+        ? await bridge.transcribeVoiceMessageApple(file.dataBase64)
+        : await bridge.transcribeVoiceMessage(file.dataBase64);
+      const transcript=transcription.text.trim();
       // A pane switch must not lose the transcript. Keep it with the captured
       // composer, while refusing to apply it after that destination changes.
       if(key===currentDraftKey() && scope!==attachmentScope) return;

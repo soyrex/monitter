@@ -173,6 +173,7 @@ export interface MonitterBridge {
   deleteArchivedTask(taskId: string, removeNativeFiles: boolean): Promise<Snapshot>;
   storeAttachment(target: AttachmentTarget, file: AttachmentFileData, previewDataUrl?: string | null, sourceId?: string): Promise<Attachment>;
   transcribeVoiceMessage(audioBase64: string): Promise<VoiceTranscription>;
+  transcribeVoiceMessageApple(audioBase64: string): Promise<VoiceTranscription>;
   readAttachmentFile(sourcePath: string): Promise<AttachmentFileData>;
   readAttachmentAudio(attachmentId: string): Promise<AttachmentFileData>;
   readAttachmentImage(attachmentId: string): Promise<AttachmentFileData>;
@@ -526,6 +527,7 @@ const nativeBridge: MonitterBridge = {
   // The owner LAN bridge sends bounded audio to the desktop for local
   // transcription; only returned text enters the composer.
   transcribeVoiceMessage: audioBase64 => invoke('transcribe_voice_message', { audioBase64 }),
+  transcribeVoiceMessageApple: audioBase64 => isLanBrowser() ? desktopOnly() : invoke('transcribe_voice_message_apple', { audioBase64 }),
   readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke("read_attachment_file", {sourcePath}),
   readAttachmentAudio: attachmentId => isLanBrowser() ? desktopOnly() : invoke('read_attachment_audio', { attachmentId }),
   readAttachmentImage: attachmentId => invoke('read_attachment_image', {attachmentId}),
@@ -675,6 +677,7 @@ const previewBridge: MonitterBridge = {
   deleteArchivedTask: () => desktopOnly(),
   storeAttachment: () => desktopOnly(),
   transcribeVoiceMessage: () => desktopOnly(),
+  transcribeVoiceMessageApple: () => desktopOnly(),
   readAttachmentFile: () => desktopOnly(),
   readAttachmentAudio: () => desktopOnly(),
   readAttachmentImage: () => desktopOnly(),
@@ -825,6 +828,7 @@ export function getBridge(): MonitterBridge {
       deleteArchivedTask: (taskId, removeNativeFiles) => test.invoke("delete_archived_task", {taskId, removeNativeFiles}) as Promise<Snapshot>,
       storeAttachment: (target, file, previewDataUrl = null, sourceId) => test.invoke("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}) as Promise<Attachment>,
       transcribeVoiceMessage: audioBase64 => test.invoke('transcribe_voice_message', { audioBase64 }) as Promise<VoiceTranscription>,
+      transcribeVoiceMessageApple: audioBase64 => test.invoke('transcribe_voice_message_apple', { audioBase64 }) as Promise<VoiceTranscription>,
       readAttachmentFile: sourcePath => test.invoke("read_attachment_file", {sourcePath}) as Promise<AttachmentFileData>,
       readAttachmentAudio: attachmentId => test.invoke('read_attachment_audio', { attachmentId }) as Promise<AttachmentFileData>,
       readAttachmentImage: attachmentId => test.invoke('read_attachment_image', {attachmentId}) as Promise<AttachmentFileData>,

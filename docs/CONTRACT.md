@@ -1528,12 +1528,22 @@ the command. First-run Whisper startup can spend additional time compiling local
 the native process has a five-minute hard timeout. Errors and process output never contain audio content.
 The transcription command is available to the native owner, the owner LAN view,
 and the paired iPhone through its separately approved encrypted owner relay.
+The native macOS owner can set `Settings.voiceTranscriptionEngine` to `"apple"`
+instead of its `"whisper"` default. In that mode the desktop calls native-only
+`transcribe_voice_message_apple { audioBase64: string }` with the same bounded WAV
+input and `{ text: string }` output. Apple's Speech framework is required to use
+on-device recognition for the Mac's current locale; unsupported locales, denied
+speech permission, and recognition failures return visible errors without silently
+sending audio elsewhere. The Apple command is unavailable to LAN and paired
+clients; their `transcribe_voice_message` requests continue to use desktop Whisper.
+Both commands delete their temporary audio and send only editable text to the
+composer and eventual agent message.
 The iPhone shell grants microphone capture only to its bundled loopback owner
 page. Shared visitors cannot invoke the owner command. It does not store the WAV or create an
 attachment ID. The separate `read_attachment_audio { attachmentId }` reader applies only
 to an already registered WAV attachment, validates MIME type, format, and duration, and
-remains desktop-only. The macOS bundle declares the
-microphone purpose string and audio-input hardened-runtime entitlement required for recording.
+remains desktop-only. The macOS bundle declares the microphone and speech-recognition
+purpose strings and the audio-input hardened-runtime entitlement required for recording.
 Setup and privacy details are in `docs/VOICE_MESSAGES.md`.
 Codex receives original attachment paths in its text prompt, not inline image input or thumbnails;
 the agent must open the file. This does not guarantee provider-internal full-resolution processing.

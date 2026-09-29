@@ -123,6 +123,9 @@ export interface CommandArgs {
   "transcribe_voice_message": {
   audioBase64: string;
   };
+  "transcribe_voice_message_apple": {
+  audioBase64: string;
+  };
   "read_attachment_image": {
   attachmentId: string;
   };
@@ -432,6 +435,7 @@ export interface CommandResults {
   "finish_quit": void;
   "read_attachment_file": AttachmentFileData;
   "transcribe_voice_message": VoiceTranscription;
+  "transcribe_voice_message_apple": VoiceTranscription;
   "read_attachment_image": AttachmentFileData;
   "read_attachment_audio": AttachmentFileData;
   "store_attachment": Attachment;

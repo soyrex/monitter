@@ -552,6 +552,13 @@
           <div class="card-heading"><h2 id="messages-heading">Messages</h2><p>Choose the keyboard shortcut that sends a task or channel message.</p></div>
           <label class="switch-row"><span><strong>Enter to send</strong><small>{settings.sendWithEnter ? "Enter sends. Shift+Enter adds a new line." : "Cmd/Ctrl+Enter sends. Enter adds a new line."}</small></span><input type="checkbox" role="switch" aria-label="Enter to send" checked={settings.sendWithEnter ?? false} onchange={(event) => void save({ sendWithEnter: event.currentTarget.checked })} /></label>
         </section>
+        {#if !isLanBrowser() && getBridge().available && typeof navigator !== 'undefined' && /Mac/.test(navigator.platform)}
+          <section class="setting-card" aria-labelledby="voice-transcription-heading">
+            <div class="card-heading"><h2 id="voice-transcription-heading">Voice transcription</h2><p>Choose how voice recordings are transcribed on this desktop. The result is added to your editable message draft.</p></div>
+            <label>Transcription engine<select aria-label="Voice transcription engine" value={settings.voiceTranscriptionEngine ?? 'whisper'} onchange={event=>void save({voiceTranscriptionEngine:event.currentTarget.value as 'whisper'|'apple'})}><option value="whisper">Whisper (local)</option><option value="apple">Apple on-device</option></select></label>
+            <p class="hint">Apple on-device transcription is available in the macOS app. Whisper remains the default. Voice audio is not attached to the message.</p>
+          </section>
+        {/if}
         <section class="setting-card" aria-labelledby="project-board-heading">
           <div class="card-heading"><h2 id="project-board-heading">Project boards</h2><p>Private coordination notes shown as #channels for each project.</p></div>
           <label class="switch-row"><span><strong>Enable project boards</strong><small>Agents working in a project receive recent notes at turn start and can check for newer notes at meaningful checkpoints. Posting never wakes another agent. Turning this off hides boards but preserves their notes.</small></span><input type="checkbox" role="switch" aria-label="Enable project boards" checked={settings.projectBoardEnabled === true} onchange={(event) => void save({ projectBoardEnabled: event.currentTarget.checked })} /></label>

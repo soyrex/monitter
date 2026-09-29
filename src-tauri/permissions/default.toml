@@ -26,7 +26,7 @@ commands.allow = [
   "read_terminal", "close_terminal",
   "list_schedules", "save_schedule", "delete_schedule", "run_schedule_now", "pause_schedule", "resume_schedule",
   "browser_open", "browser_set_layout", "browser_navigate", "browser_back", "browser_forward", "browser_reload", "browser_close", "browser_get_state", "browser_load_unpacked_extension",
-  "transcribe_voice_message"
+  "transcribe_voice_message", "transcribe_voice_message_apple"
 ]
 
 [[permission]]

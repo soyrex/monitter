@@ -1,7 +1,8 @@
 # Voice messages (desktop, owner LAN, and paired iPhone)
 
-The composer records up to 90 seconds and transcribes the recording on the
-desktop Mac with whisper.cpp. Review the transcript before pressing Send. Only
+The composer records up to 90 seconds. The desktop Mac defaults to local
+whisper.cpp transcription; desktop Settings → Conversation can select Apple
+on-device transcription. Review the transcript before pressing Send. Only
 the transcript enters the message and agent prompt: Monitter does not create a
 WAV attachment or retain the recording. Transcription uses temporary files
 that are removed when the command completes. Recording is available in task,
@@ -9,7 +10,16 @@ draft, and ordinary channel composers; project board notes remain text only.
 
 ## macOS setup
 
-Install the free [whisper.cpp Homebrew formula](https://formulae.brew.sh/formula/whisper.cpp):
+Apple on-device mode uses the Mac's current language and requires that Apple's
+recognizer supports that language locally. Select it in desktop Settings →
+Conversation; on first use macOS asks for speech-recognition permission in
+addition to microphone permission. If the locale is unsupported or access is
+denied, Monitter shows an error and keeps the draft. You can switch back to
+Whisper; Monitter does not silently use a network recognizer. Apple mode needs
+no whisper.cpp CLI or model.
+
+Whisper remains the default and retains automatic language detection. To use it,
+install the free [whisper.cpp Homebrew formula](https://formulae.brew.sh/formula/whisper.cpp):
 
 ```sh
 brew install whisper.cpp

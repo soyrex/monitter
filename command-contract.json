@@ -753,6 +753,23 @@
         "lan"
       ]
     },
+    "transcribe_voice_message_apple": {
+      "arguments": [
+        {
+          "name": "audioBase64",
+          "rustName": "audio_base64",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "voice::VoiceTranscript",
+      "resultTsType": "VoiceTranscription",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "read_attachment_image": {
       "arguments": [
         {
