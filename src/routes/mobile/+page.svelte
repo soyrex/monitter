@@ -210,4 +210,5 @@ form{display:flex;align-items:end;gap:8px;padding:12px 16px calc(12px + env(safe
 .thread article.user>.message-bubble{padding:14px;border-radius:16px;background:color-mix(in srgb,var(--accent) 20%,var(--panel))}
   .thread article.final-answer>.message-bubble{padding:12px 14px;border:1px solid color-mix(in srgb,#4f9d69 18%,var(--line));border-radius:14px 14px 14px 4px;background:color-mix(in srgb,#4f9d69 7%,var(--panel))}
   .connection-recovery-spinner{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));z-index:10000;pointer-events:none;color:var(--ink)}.connection-spinner{display:block;width:18px;height:18px;border:2px solid color-mix(in srgb,currentColor 25%,transparent);border-top-color:currentColor;border-radius:50%;animation:connection-spin .8s linear infinite}@keyframes connection-spin{to{transform:rotate(360deg)}}
+  header>button[aria-label="Open chats menu"]{color:#fff}
 </style>

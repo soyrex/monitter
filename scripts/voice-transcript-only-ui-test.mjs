@@ -7,6 +7,8 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
 try {
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.addInitScript(() => {
+    // Exercise the owner LAN browser branch, including the recorder callback
+    // guard (the Tauri fixture below remains available for the rest of the UI).
     window.isTauri = true;
     window.__TAURI_INTERNALS__ = { transformCallback: () => 1, invoke: async () => undefined };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
@@ -31,8 +33,15 @@ try {
       async close() {}
     };
   });
+  await page.route('**/api/access', route => route.fulfill({ json: { required: false } }));
+  await page.route(url, async route => {
+    const response = await route.fetch();
+    const html = (await response.text()).replace(/<html(?=[\s>])/, '<html data-monitter-lan');
+    await route.fulfill({ response, body: html });
+  });
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120_000 });
+  await expect.poll(() => page.evaluate(() => document.documentElement.hasAttribute('data-monitter-lan'))).toBe(true);
   await expect(page.getByRole('button', { name: 'New chat with Atlas' })).toBeVisible({ timeout: 120_000 });
   await page.evaluate(() => {
     const qa = window.__MONITTER_QA__;

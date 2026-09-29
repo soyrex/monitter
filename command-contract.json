@@ -577,6 +577,37 @@
         "native"
       ]
     },
+    "read_image_file": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "href",
+          "rustName": "href",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "basePath",
+          "rustName": "base_path",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "image_file::ImageDocument",
+      "resultTsType": "ImageDocument",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "get_lan_server_info": {
       "arguments": [],
       "resultRustType": "lan::Info",
@@ -718,7 +749,8 @@
       "resultTsType": "VoiceTranscription",
       "legacyCompatible": true,
       "surfaces": [
-        "native"
+        "native",
+        "lan"
       ]
     },
     "read_attachment_image": {
@@ -2519,6 +2551,7 @@
       "EventDetailChunk",
       "ExtensionConfig",
       "GitDiffScope",
+      "ImageDocument",
       "JevCommandCandidate",
       "JevCommandPlan",
       "JevRoutePlan",

@@ -1,9 +1,6 @@
-use crate::Service;
+use crate::{local_file_link::resolve_local_link, Service};
 use serde::Serialize;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 const MAX_MARKDOWN_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -50,6 +47,8 @@ impl Service {
     }
 }
 
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
+
 fn read_task_markdown(
     cwd: &str,
     href: &str,
@@ -62,20 +61,7 @@ fn read_task_markdown(
     {
         return Err("Task folder is not a directory.".into());
     }
-    let href = local_href_path(href)?;
-    let base_dir = match base_path {
-        Some(base_path) => canonical_markdown_path(&cwd, Path::new(base_path))?
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or("Markdown base path has no parent directory.")?,
-        None => cwd.clone(),
-    };
-    let candidate = if href.is_absolute() {
-        href
-    } else {
-        base_dir.join(href)
-    };
-    let path = canonical_markdown_path(&cwd, &candidate)?;
+    let path = resolve_local_link(&cwd, href, base_path, MARKDOWN_EXTENSIONS)?;
     let metadata = fs::metadata(&path).map_err(|_| "Markdown file is not available.")?;
     if metadata.len() > MAX_MARKDOWN_BYTES {
         return Err("Markdown file is larger than 2 MiB.".into());
@@ -87,83 +73,6 @@ fn read_task_markdown(
         path: path.to_string_lossy().into_owned(),
         content,
     })
-}
-
-fn local_href_path(href: &str) -> Result<PathBuf, String> {
-    let href = href.trim();
-    if href.is_empty() {
-        return Err("Markdown link is empty.".into());
-    }
-    // A fragment/query selects renderer state rather than a local filename.
-    let href = href.split(['#', '?']).next().unwrap_or_default();
-    if href.is_empty() {
-        return Err("Markdown link does not name a file.".into());
-    }
-    let lowered = href.to_ascii_lowercase();
-    if let Some(path) = href.strip_prefix("file:///") {
-        return Ok(PathBuf::from(format!("/{}", percent_decode(path)?)));
-    }
-    if href.starts_with("//")
-        || lowered.starts_with("http:")
-        || lowered.starts_with("https:")
-        || lowered.starts_with("file:")
-        || lowered.starts_with("mailto:")
-        || lowered.contains("://")
-    {
-        return Err("Markdown links must point to a local file.".into());
-    }
-    Ok(PathBuf::from(href))
-}
-
-fn percent_decode(value: &str) -> Result<String, String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            decoded.push(bytes[index]);
-            index += 1;
-            continue;
-        }
-        if index + 2 >= bytes.len() {
-            return Err("Markdown file URL has invalid percent encoding.".into());
-        }
-        let high = hex_value(bytes[index + 1])?;
-        let low = hex_value(bytes[index + 2])?;
-        decoded.push((high << 4) | low);
-        index += 3;
-    }
-    String::from_utf8(decoded).map_err(|_| "Markdown file URL must use UTF-8 path encoding.".into())
-}
-
-fn hex_value(value: u8) -> Result<u8, String> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        b'A'..=b'F' => Ok(value - b'A' + 10),
-        _ => Err("Markdown file URL has invalid percent encoding.".into()),
-    }
-}
-
-fn canonical_markdown_path(cwd: &Path, candidate: &Path) -> Result<PathBuf, String> {
-    let path = fs::canonicalize(candidate).map_err(|_| "Markdown file was not found.")?;
-    if !path.starts_with(cwd) {
-        return Err("Markdown file must be inside the task folder.".into());
-    }
-    let metadata = fs::metadata(&path).map_err(|_| "Markdown file was not found.")?;
-    if !metadata.is_file() {
-        return Err("Markdown link must point to a regular file.".into());
-    }
-    let allowed = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
-        });
-    if !allowed {
-        return Err("Only .md and .markdown files can be opened.".into());
-    }
-    Ok(path)
 }
 
 fn markdown_title(content: &str, path: &Path) -> String {
@@ -184,7 +93,7 @@ fn markdown_title(content: &str, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
     fn fixture_dir() -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

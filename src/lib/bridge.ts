@@ -45,6 +45,7 @@ import type {
   SystemFontFamily,
   EventDetailChunk,
   MarkdownDocument,
+  ImageDocument,
   SendAccepted,
   ExtensionConfig,
   EnvironmentSecretsConfig,
@@ -87,6 +88,7 @@ export interface MonitterBridge {
   listSystemFonts(): Promise<SystemFontFamily[]>;
   getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
   readMarkdownFile(taskId: string, href: string, basePath?: string): Promise<MarkdownDocument>;
+  readImageFile(taskId: string, href: string, basePath?: string): Promise<ImageDocument>;
   getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
@@ -436,6 +438,7 @@ const nativeBridge: MonitterBridge = {
   listSystemFonts: () => isLanBrowser() ? Promise.resolve([]) : invoke('list_system_fonts'),
   getTaskEventDetail: (taskId, eventId, offset, limit) => invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
   readMarkdownFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
+  readImageFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_image_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   getSubagentTranscript: (taskId, subagentId) => invoke('get_subagent_transcript', { taskId, subagentId }),
   saveHost: (host) => invoke("save_host", { host }),
   deleteHost: (id) => invoke("delete_host", { id }),
@@ -520,7 +523,9 @@ const nativeBridge: MonitterBridge = {
   previewTaskDeletion: taskId => invoke("preview_task_deletion", { taskId }),
   deleteArchivedTask: (taskId, removeNativeFiles) => invoke("delete_archived_task", { taskId, removeNativeFiles }),
   storeAttachment: (target, file, previewDataUrl = null, sourceId) => invoke("store_attachment", {target, ...file, ...(previewDataUrl == null ? {} : {previewDataUrl}), sourceId}),
-  transcribeVoiceMessage: audioBase64 => isLanBrowser() ? desktopOnly() : invoke('transcribe_voice_message', { audioBase64 }),
+  // The owner LAN bridge sends bounded audio to the desktop for local
+  // transcription; only returned text enters the composer.
+  transcribeVoiceMessage: audioBase64 => invoke('transcribe_voice_message', { audioBase64 }),
   readAttachmentFile: sourcePath => isLanBrowser() ? desktopOnly() : invoke("read_attachment_file", {sourcePath}),
   readAttachmentAudio: attachmentId => isLanBrowser() ? desktopOnly() : invoke('read_attachment_audio', { attachmentId }),
   readAttachmentImage: attachmentId => invoke('read_attachment_image', {attachmentId}),
@@ -590,6 +595,7 @@ const previewBridge: MonitterBridge = {
   listSystemFonts: async () => [],
   getTaskEventDetail: () => desktopOnly(),
   readMarkdownFile: () => desktopOnly(),
+  readImageFile: () => desktopOnly(),
   getSubagentTranscript: () => desktopOnly(),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
@@ -719,6 +725,7 @@ export function getBridge(): MonitterBridge {
       listSystemFonts: () => test.invoke('list_system_fonts') as Promise<SystemFontFamily[]>,
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
       readMarkdownFile: (taskId, href, basePath) => test.invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<MarkdownDocument>,
+      readImageFile: (taskId, href, basePath) => test.invoke('read_image_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<ImageDocument>,
       getSubagentTranscript: (taskId, subagentId) => test.invoke('get_subagent_transcript', { taskId, subagentId }) as Promise<SubagentTranscriptEntry[]>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,

@@ -1,6 +1,12 @@
 export type Provider = 'codex' | 'claude' | 'opencode' | 'hermes' | 'acp';
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-export interface LanServerInfo { urls: string[]; token: string; error: string | null; accessCodeRequired: boolean; }
+export interface LanServerInfo {
+  urls: string[]; token: string; error: string | null; accessCodeRequired: boolean;
+  /** Public local root CA certificate in PEM form; never contains the private key. */
+  localCaPem?: string | null;
+  /** SHA-256 fingerprint of the public local root CA certificate. */
+  localCaFingerprint?: string | null;
+}
 export interface CommandCapabilities { protocolVersion: number; commands: string[]; }
 export type UsageProvider = Provider | 'gemini' | 'minimax' | 'opencode-go';
 export type UsageRefreshPolicy = 'cache-only' | 'if-stale' | 'refresh';
@@ -269,6 +275,7 @@ export interface SystemFontFamily { family: string; monospace: boolean; }
 export interface EventDetailChunk { chunk: string; nextOffset: number | null; totalBytes: number; }
 /** A local Markdown document explicitly scoped to one local task folder. */
 export interface MarkdownDocument { path: string; title: string; content: string; }
+export interface ImageDocument { path: string; title: string; mimeType: string; dataUrl: string; }
 export interface ChannelMessage {
   id: string; role: 'user' | 'assistant'; agentId: string | null;
   text: string; createdAt: number; taskId: string | null;

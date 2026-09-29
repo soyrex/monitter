@@ -64,6 +64,8 @@ mod lan;
 mod lan_sync;
 mod ui_sync;
 mod history;
+mod image_file;
+mod local_file_link;
 mod markdown;
 mod mail_triage;
 mod mail;
@@ -1577,8 +1579,12 @@ impl Service {
         lan_sync::event_detail_chunk(&data.snapshot, task_id, event_id, offset, limit)
     }
 
-    fn start_lan(self: &Arc<Self>, roots: Vec<PathBuf>) -> Result<(), String> {
-        match lan::Server::start(Arc::clone(self), roots) {
+    fn start_lan(
+        self: &Arc<Self>,
+        roots: Vec<PathBuf>,
+        tls_config_path: PathBuf,
+    ) -> Result<(), String> {
+        match lan::Server::start(Arc::clone(self), roots, tls_config_path) {
             Ok(server) => {
                 *self
                     .lan
@@ -1604,6 +1610,8 @@ impl Service {
                 urls: vec![],
                 token: String::new(),
                 access_code_required: lan::REQUIRE_ACCESS_CODE,
+                local_ca_pem: None,
+                local_ca_fingerprint: None,
                 error: self
                     .lan_error
                     .lock()
@@ -2063,6 +2071,10 @@ impl Service {
             ),
             "read_attachment_image" => {
                 value(self.read_attachment_image(&arg::<String>(&args, "attachmentId")?)?)
+            }
+            // Owner LAN voice input is transcript-only; validation and Whisper run locally.
+            "transcribe_voice_message" => {
+                value(voice::transcribe(arg::<String>(&args, "audioBase64")?)?)
             }
             _ => Err(format!("LAN command '{command}' is not available.")),
         }
@@ -7269,6 +7281,22 @@ async fn read_markdown_file(
     .map_err(|_| "Markdown reader worker failed.".to_string())?
 }
 
+/// Native desktop only. This is intentionally absent from the LAN dispatcher.
+#[tauri::command]
+async fn read_image_file(
+    state: State<'_, AppState>,
+    task_id: String,
+    href: String,
+    base_path: Option<String>,
+) -> Result<image_file::ImageDocument, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.read_image_file(&task_id, &href, base_path.as_deref())
+    })
+    .await
+    .map_err(|_| "Image reader worker failed.".to_string())?
+}
+
 /// The token is generated in memory on each app launch and is never written to
 /// the workspace. It is intentionally returned only to the native renderer.
 #[tauri::command]
@@ -9561,7 +9589,7 @@ pub fn run() {
                 && std::env::var_os("MONITTER_BROWSER_SMOKE_DISABLE_LAN").is_some())
             {
                 service
-                    .start_lan(lan_roots)
+                    .start_lan(lan_roots, dir.join("lan-tls.json"))
                     .map_err(|error| format!("Cannot initialize LAN server: {error}"))?;
             }
             Ok(())
@@ -9602,6 +9630,7 @@ pub fn run() {
             list_codex_accounts,
             get_task_event_detail,
             read_markdown_file,
+            read_image_file,
             get_lan_server_info,
             owner_relay_invoke,
             resolve_approval,
@@ -9805,6 +9834,35 @@ mod tests {
         let mut invalid = args;
         invalid["previewDataUrl"] = serde_json::json!("not-a-preview");
         assert!(service.lan_invoke("store_attachment", invalid).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lan_voice_transcription_is_allowlisted_and_native_file_reads_are_not() {
+        let dir = temp_dir("lan-voice-transcription");
+        let service = Service::open(None, dir.clone()).unwrap();
+
+        // Invalid base64 fails in the voice validator, proving that the
+        // command is dispatched without invoking Whisper or touching files.
+        let error = service
+            .lan_invoke(
+                "transcribe_voice_message",
+                serde_json::json!({ "audioBase64": "!" }),
+            )
+            .unwrap_err();
+        assert_eq!(error, "Voice audio is not valid base64.");
+
+        let error = service
+            .lan_invoke(
+                "read_attachment_file",
+                serde_json::json!({ "sourcePath": "/tmp/voice.wav" }),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "LAN command 'read_attachment_file' is not available."
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

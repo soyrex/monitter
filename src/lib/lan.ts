@@ -20,6 +20,16 @@ let ownerRelayInvoker: OwnerRelayInvoker | null = null;
 /** Only the owner relay gate registers this provider after an approved session. */
 export function setOwnerRelayInvoker(invoke: OwnerRelayInvoker | null): void { ownerRelayInvoker = invoke; }
 export const isOwnerRelayReconnecting = () => isOwnerRelayBrowser() && !ownerRelayInvoker;
+/** A phone's connection to its paired desktop drops and recovers routinely on
+ * cellular/Wi-Fi handoffs. Surfacing every transient drop as a popup is noisy;
+ * only a run of consecutive failed reconnects is worth interrupting the user
+ * about. OwnerRelayGate reports each attempt's outcome as it happens. */
+const OWNER_RELAY_RECONNECT_ALERT_THRESHOLD = 5;
+let ownerRelayReconnectFailures = 0;
+export function noteOwnerRelayReconnectOutcome(connected: boolean): void {
+  ownerRelayReconnectFailures = connected ? 0 : ownerRelayReconnectFailures + 1;
+}
+export const isOwnerRelayReconnectPersistent = () => ownerRelayReconnectFailures >= OWNER_RELAY_RECONNECT_ALERT_THRESHOLD;
 const storageKey = 'monitter.lan.access';
 export function accessKey(): string { return sessionStorage.getItem(storageKey) ?? ''; }
 export function setAccessKey(key: string) { sessionStorage.setItem(storageKey, key.trim()); }

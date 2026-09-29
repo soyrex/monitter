@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { localUuid, isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, OwnerRelayDisconnectedError } from '$lib/lan';
+  import { localUuid, isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, isOwnerRelayReconnectPersistent, OwnerRelayDisconnectedError } from '$lib/lan';
+  import { OWNER_RELAY_DISCONNECTED_MESSAGE } from '$lib/owner-relay-error.js';
   import { workspaceShareOpen, workspaceShareTaskId } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
   import { DEFAULT_SURFACE_TINT, setSurfaceTint, surfaceTint } from '$lib/surface-tint';
@@ -62,6 +63,7 @@
   import Command from "@lucide/svelte/icons/command";
   import Folder from "@lucide/svelte/icons/folder";
   import FileText from "@lucide/svelte/icons/file-text";
+  import ImageIcon from "@lucide/svelte/icons/image";
   import Code from "@lucide/svelte/icons/code";
   import Rocket from "@lucide/svelte/icons/rocket";
   import Globe from "@lucide/svelte/icons/globe";
@@ -223,7 +225,7 @@
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
   type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; browser?: BrowserTabMetadata; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
-  type MarkdownDocument = { taskId: string; path: string; title: string };
+  type MarkdownDocument = { taskId: string; path: string; title: string; kind?: 'markdown' | 'image' };
   type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openBrowserIds:string[];selectedBrowserId:string|null;browserTabs:Record<string,BrowserTabMetadata>;openGitTaskIds:string[];selectedGitTaskId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let sidebarSelected = $state(false);
@@ -322,30 +324,33 @@
   let codexAccountsError = $state('');
   let codexAccountsLoading = $state(false);
   let codexAccountsLoaded = $state(false);
-  async function openMarkdownDocument(taskId: string, href: string, basePath?: string) {
-    const file = await bridge.readMarkdownFile(taskId, href, basePath);
+  async function openFileDocument(kind: 'markdown' | 'image', taskId: string, href: string, basePath?: string) {
+    const file = kind === 'image' ? await bridge.readImageFile(taskId, href, basePath) : await bridge.readMarkdownFile(taskId, href, basePath);
     let id = Object.keys(documents).find(key => openEmptyIds.includes(key) && documents[key].path === file.path);
     if (!id) {
       id = localUuid();
-      documents[id] = { taskId, path: file.path, title: file.title };
+      documents[id] = { taskId, path: file.path, title: file.title, kind };
       openEmptyIds = [...openEmptyIds, id];
       rememberTab({ kind: 'empty', id });
     }
-    documentContents[id] = file.content;
+    documentContents[id] = 'dataUrl' in file ? file.dataUrl : file.content;
     delete documentErrors[id];
     saveCurrentDraft();
     selectedEmptyId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; currentDraftId = null;
     focusedAgentId = null; focusedProjectId = null; pane = 'empty';
   }
+  const openMarkdownDocument = (taskId: string, href: string, basePath?: string) => openFileDocument('markdown', taskId, href, basePath);
+  const openImageDocument = (taskId: string, href: string, basePath?: string) => openFileDocument('image', taskId, href, basePath);
   setContext('monitter-open-markdown', openMarkdownDocument);
+  setContext('monitter-open-image', openImageDocument);
   async function loadDocument(id: string) {
     const doc = documents[id];
     if (!doc || documentLoading[id]) return;
     documentLoading[id] = true;
     try {
-      const file = await bridge.readMarkdownFile(doc.taskId, doc.path);
+      const file = doc.kind === 'image' ? await bridge.readImageFile(doc.taskId, doc.path) : await bridge.readMarkdownFile(doc.taskId, doc.path);
       if (documents[id]?.path !== doc.path) return;
-      documentContents[id] = file.content;
+      documentContents[id] = 'dataUrl' in file ? file.dataUrl : file.content;
       delete documentErrors[id];
     } catch (reason) { documentErrors[id] = text(reason); }
     finally { delete documentLoading[id]; }
@@ -2005,7 +2010,7 @@
   }
   async function processVoiceRecording(file:AttachmentFileData) {
     const key=currentDraftKey();
-    if(!key || !nativeRuntime || voiceProcessing[key]) return;
+    if(!key || !(nativeRuntime || (isLanBrowser() && !embedded)) || voiceProcessing[key]) return;
     const targets=attachmentTargets(), scope=attachmentScope;
     if(!targets.length) { voiceErrors[key]='Choose an agent to receive this voice message.'; return; }
     voiceProcessing[key]=true; voiceErrors[key]='';
@@ -2127,6 +2132,11 @@
   const defaultAgent = $derived(indexes?.defaultAgent ?? null);
   const text = (reason: unknown) =>
     reason instanceof Error ? reason.message : String(reason);
+  // Phones drop and recover their relay connection routinely on cellular/Wi-Fi
+  // handoffs; popping an alert for every blip is noisy. Only a persistent run
+  // of failed reconnects (tracked in lan.ts) is worth interrupting the user
+  // about, so quietly hold the message otherwise.
+  const errorIsQuietDisconnect = $derived(error.includes(OWNER_RELAY_DISCONNECTED_MESSAGE) && !isOwnerRelayReconnectPersistent());
   const avatarSrc = (agent: Agent | null | undefined) => {
     const value = agent?.avatar;
     return value && /^data:image\/(png|jpeg|webp);base64,/i.test(value) ? value : null;
@@ -2168,16 +2178,12 @@
   const activityAvatarFor = (agent: Agent | null | undefined) => {
     const name = agent?.name?.trim() || 'Agent';
     const provider = String(agent?.provider ?? '').toLowerCase();
-    const known = isMonaAgent(agent) ? { mark: 'M', tone: 'mona' }
-      : /open\s?code/i.test(name) ? { mark: 'OC', tone: 'opencode' }
-      : /claude/i.test(name) ? { mark: 'CL', tone: 'claude' }
-      : /codex/i.test(name) ? { mark: 'CX', tone: 'codex' }
-      : null;
-    if (known) return known;
-    const words = name.split(/[\s_-]+/).filter(Boolean);
-    const mark = (words.length > 1 ? words.slice(0, 2).map(word => word[0]).join('') : name.slice(0, 2)).toUpperCase();
-    const tone = provider === 'codex' ? 'codex' : provider === 'claude' ? 'claude' : 'default';
-    return { mark, tone };
+    const tone = isMonaAgent(agent) ? 'mona'
+      : /open\s?code/i.test(name) ? 'opencode'
+      : /claude/i.test(name) ? 'claude'
+      : /codex/i.test(name) ? 'codex'
+      : provider === 'codex' ? 'codex' : provider === 'claude' ? 'claude' : 'default';
+    return { tone };
   };
   const blankHost = (): Host => ({
     id: "",
@@ -3146,7 +3152,39 @@
     if (index < 0 || target < 0 || target >= tabs.length) return false;
     return selectVimTab({ kind: 'index', index: target + 1 });
   }
+  const mobileEdgeSwipeWidth = 24;
+  const mobileEdgeSwipeDistance = 56;
+  let mobileEdgeSwipeOrigin: { edge: 'left' | 'right'; x: number; y: number; at: number } | null = null;
   let mobileTabSwipeOrigin: { x: number; y: number; at: number } | null = null;
+  let mobileTabSwipeMotionKey = $state(0);
+  let mobileTabSwipeMotionX = $state(0);
+  const canRevealMobileDetails = $derived(compactDetail && ((pane === 'task' && !!selectedTask) || (pane === 'channel' && !!activeChannel)));
+  function handleMobileEdgeSwipeStart(event: TouchEvent): void {
+    mobileEdgeSwipeOrigin = null;
+    if (embedded || !mobileSidebar || !mobileMain || modal || palette || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const edge = touch.clientX <= mobileEdgeSwipeWidth ? 'left'
+      : touch.clientX >= window.innerWidth - mobileEdgeSwipeWidth ? 'right' : null;
+    if (edge) mobileEdgeSwipeOrigin = { edge, x: touch.clientX, y: touch.clientY, at: Date.now() };
+  }
+  function handleMobileEdgeSwipeEnd(event: TouchEvent): void {
+    const start = mobileEdgeSwipeOrigin;
+    mobileEdgeSwipeOrigin = null;
+    if (!start || !mobileSidebar || !mobileMain || event.changedTouches.length !== 1) return;
+    const touch = event.changedTouches[0];
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    if (Date.now() - start.at > 900 || Math.abs(deltaX) < mobileEdgeSwipeDistance || Math.abs(deltaX) < Math.abs(deltaY) * 1.35) return;
+    if (start.edge === 'left' && deltaX > 0) {
+      tabPickerOpen = false;
+      showDetail = false;
+      backToChats();
+    } else if (start.edge === 'right' && deltaX < 0 && canRevealMobileDetails) {
+      tabPickerOpen = false;
+      showDetail = true;
+    }
+  }
+  function handleMobileEdgeSwipeCancel(): void { mobileEdgeSwipeOrigin = null; }
   function blocksMobileTabSwipe(target: EventTarget | null): boolean {
     if (!(target instanceof Element)) return true;
     if (target.closest('button, a, input, textarea, select, [contenteditable="true"], [role="button"], iframe, video, audio, .tab-picker, .composer, [data-no-tab-swipe]')) return true;
@@ -3160,6 +3198,7 @@
     mobileTabSwipeOrigin = null;
     if (!mobileSidebar || !mobileMain || event.touches.length !== 1 || blocksMobileTabSwipe(event.target)) return;
     const touch = event.touches[0];
+    if (touch.clientX <= mobileEdgeSwipeWidth || touch.clientX >= window.innerWidth - mobileEdgeSwipeWidth) return;
     mobileTabSwipeOrigin = { x: touch.clientX, y: touch.clientY, at: Date.now() };
   }
   function handleMobileTabSwipeEnd(event: TouchEvent): void {
@@ -3170,7 +3209,12 @@
     const deltaX = touch.clientX - start.x;
     const deltaY = touch.clientY - start.y;
     if (Date.now() - start.at > 1000 || Math.abs(deltaX) < 64 || Math.abs(deltaX) < Math.abs(deltaY) * 1.35) return;
-    selectRelativeTab(deltaX < 0 ? 1 : -1);
+    const tabDirection = deltaX < 0 ? 1 : -1;
+    if (selectRelativeTab(tabDirection)) {
+      // The next tab enters from the edge being revealed by the finger.
+      mobileTabSwipeMotionX = tabDirection > 0 ? 26 : -26;
+      mobileTabSwipeMotionKey += 1;
+    }
   }
   function handleMobileTabSwipeCancel(): void { mobileTabSwipeOrigin = null; }
   export function currentVimTab(): TabKey | null {
@@ -4850,7 +4894,7 @@
     {#if cardStyle}
       <button class="task-select activity-task-tile" aria-label={`Open chat ${task.title}`} title={task.title} onclick={(event) => routeSidebarTask(task, event.metaKey || event.ctrlKey)} oncontextmenu={(event) => sidebarTaskContextMenu(event, task)}></button>
       <div class="activity-task-content">
-        <span class={`activity-avatar ${activityAvatar.tone}`} class:grouped-task-mark={groupedStyle} aria-hidden="true">{activityAvatar.mark}<span class={`activity-status-dot ${task.status}`}></span></span>
+        <span class={`activity-avatar ${activityAvatar.tone}`} class:grouped-task-mark={groupedStyle} aria-hidden="true">{@render avatarVisual(agent, groupedStyle ? 14 : 18)}<span class={`activity-status-dot ${task.status}`}></span></span>
         <span class="activity-task-copy">
           <span class="activity-task-title">{task.title}</span>
           <span class="chat-meta activity-task-meta">
@@ -4903,7 +4947,7 @@
 {/snippet}
 
 {#snippet voiceButton()}
-  {#if nativeRuntime}
+  {#if nativeRuntime || (isLanBrowser() && !embedded)}
     {#key `${currentDraftKey() ?? ''}:${attachmentScope}`}
       <VoiceRecorder disabled={busy || filesBusy || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
     {/key}
@@ -4982,7 +5026,7 @@
 
 {#snippet workspaceView()}
   <PaneSurface bind:this={motionWorkspace} active={embedded ? active : activePaneId === 'main'} contentKey={pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??"")} compactTabs={useCompactTabPicker} autoHideTabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} modernTabs={snapshot?.settings.tabStyle === 'modern'} {focusStep} {mobileSidebar} onmetrics={updatePaneMetrics}>
-  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
+  <section use:conversationMotion={{key:pane+":"+(selectedTaskId??selectedChannelId??selectedGitTaskId??currentDraftId??""),active:embedded?active:activePaneId==='main'}} use:motionView={{key:mobileTabSwipeMotionKey,x:mobileTabSwipeMotionX,y:0,duration:180,opacity:0.9,enabled:mobileTabSwipeMotionKey>0}} use:paneAutoHideTrigger class="workspace" class:compact-tabs={useCompactTabPicker} class:auto-hide-tabs={snapshot?.settings.autoHideTabs === true && !mobileSidebar && !globalOverview} class:tab-revealed={autoHiddenTabsRevealed} class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:tab-expanded={focusStep>0} data-expansion={focusStep} ontouchstart={handleMobileTabSwipeStart} ontouchend={handleMobileTabSwipeEnd} ontouchcancel={handleMobileTabSwipeCancel}>
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Open chats menu" title="Open chats menu" onclick={()=>{tabPickerOpen=false;backToChats();}}><Menu size={20}/></button>
@@ -5020,7 +5064,7 @@
             <div class="tab-entry git-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='git' && selectedGitTaskId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'git',tab.id)} onpointerdown={event=>startTabPointer(event,'git',tab.id)} aria-pressed={pane==='git'&&selectedGitTaskId===tab.id} onclick={()=>selectTabPicker(()=>openGitReview(task))} title={`Git review · ${task.title}`}><span class="tab-kind-icon" aria-hidden="true"><GitFork size={13}/><span class="tab-shortcut"></span></span><span>Git · {task.title}</span></button><button class="close-tab" aria-label={`Close Git review for ${task.title}`} title="Close Git review" onclick={()=>{closeGitReview(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'empty'}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}<FileText size={13}/><span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}{#if documents[tab.id].kind==='image'}<ImageIcon size={13}/>{:else}<FileText size={13}/>{/if}<span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {:else if tab.kind === 'settings'}
             <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} title={settingsTabTitle(settingsCategory)} onclick={()=>selectTabPicker(()=>openSettings())}><span class="tab-kind-icon" aria-hidden="true"><Settings2 size={13}/><span class="tab-shortcut"></span></span><span>{settingsTabTitle(settingsCategory)}</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={()=>{closeSettings();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
@@ -5039,7 +5083,7 @@
       {/if}
       {/if}
     </header>{/if}
-    {#if error}<PaneNotice message={error} blocking ondismiss={()=>error=''}/>{/if}
+    {#if error && !errorIsQuietDisconnect}<PaneNotice message={error} blocking ondismiss={()=>error=''}/>{/if}
     {#if notice}<PaneNotice message={notice} ondismiss={()=>notice=''}/>{/if}
     {#if !bridge.available}<div class="preview-banner">
         <Command size={14} /> Browser design preview — connect the native app to
@@ -5054,10 +5098,13 @@
       </div>
     {:else if pane === 'empty' && selectedEmptyId && documents[selectedEmptyId]}
       {@const document=documents[selectedEmptyId]}
-      <section class="markdown-document" aria-label={`Markdown document ${document.title}`}>
-        <header><div><p class="eyebrow">MARKDOWN DOCUMENT</p><h1>{document.title}</h1><p class="document-path" title={document.path}>{document.path}</p></div><button class="secondary" type="button" disabled={!!documentLoading[selectedEmptyId]} onclick={()=>void loadDocument(selectedEmptyId!)}>Refresh</button></header>
+      {@const isImage=document.kind==='image'}
+      <section class="markdown-document" aria-label={`${isImage ? 'Image' : 'Markdown'} document ${document.title}`}>
+        <header><div><p class="eyebrow">{isImage ? 'IMAGE' : 'MARKDOWN DOCUMENT'}</p><h1>{document.title}</h1><p class="document-path" title={document.path}>{document.path}</p></div><button class="secondary" type="button" disabled={!!documentLoading[selectedEmptyId]} onclick={()=>void loadDocument(selectedEmptyId!)}>Refresh</button></header>
         {#if documentErrors[selectedEmptyId]}<p class="document-error" role="alert">{documentErrors[selectedEmptyId]}</p>{/if}
-        {#if documentContents[selectedEmptyId] !== undefined}<div class="document-body"><Markdown text={documentContents[selectedEmptyId]} taskId={document.taskId} basePath={document.path}/></div>
+        {#if documentContents[selectedEmptyId] !== undefined}
+          {#if isImage}<div class="image-document-body"><img src={documentContents[selectedEmptyId]} alt={document.title}/></div>
+          {:else}<div class="document-body"><Markdown text={documentContents[selectedEmptyId]} taskId={document.taskId} basePath={document.path}/></div>{/if}
         {:else if documentLoading[selectedEmptyId]}<p class="document-loading">Loading document…</p>{/if}
       </section>
     {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
@@ -5338,8 +5385,10 @@
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>TIMELINE</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>APPROVALS</button></div>
         </div>{/snippet}
-        {#snippet taskComposer()}
+        {#snippet taskQueuedMessages()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
+        {/snippet}
+        {#snippet taskComposer()}
           <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
           {#if !composerExpanded}{@render slashMenu()}{/if}
           <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded task composer' : 'Task composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
@@ -5399,6 +5448,7 @@
           {deliveryStatus}
           rightSidebar={rightSidebarControl}
           maximised={focusStep > 0}
+          queuedMessages={taskQueuedMessages}
           composer={taskComposer}
           {subagentDock}
           {senderName}
@@ -5478,7 +5528,7 @@
 {#if !embedded}<RootSurfaceLifecycle start={startRootLifecycle}/>{/if}
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
-  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:mobile-task-chat={mobileSidebar && pane === 'task' && !currentDraftId} class:embedded class="app-shell" inert={!embedded && !snapshot}>
+  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:mobile-task-chat={mobileSidebar && pane === 'task' && !currentDraftId} class:embedded class="app-shell" inert={!embedded && !snapshot} ontouchstart={handleMobileEdgeSwipeStart} ontouchend={handleMobileEdgeSwipeEnd} ontouchcancel={handleMobileEdgeSwipeCancel}>
   {#if !embedded}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the sidebar delegates arrow navigation among its focusable controls) -->
   <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
@@ -7172,7 +7222,7 @@
   .mobile-navigation .agent-row, .mobile-navigation .task-row, .mobile-navigation .channel-row, .mobile-navigation .project-row { min-height:44px; }
   .mobile-navigation .compact-tabs .tab-picker-list > .tab-entry,
   .mobile-navigation .compact-tabs .tab-picker-list > .tab-entry > .tab { min-height:44px; }
-  .mobile-navigation .mobile-back { flex:none; width:44px; height:44px; padding:0; color:var(--accent-ink); }
+  .mobile-navigation .mobile-back { flex:none; width:44px; height:44px; padding:0; color:#fff; }
   .mobile-navigation .topbar > .tabs { align-self:stretch; }
   .mobile-navigation .topbar > .top-actions { padding:0; gap:0; }
   .mobile-navigation .top-actions > .icon { width:44px; height:44px; }
@@ -7326,7 +7376,9 @@
   }
   .empty-pane { flex:1;min-width:0;min-height:0;overflow:auto;display:grid;place-items:center;padding:20px; }
   .markdown-document { flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding:clamp(20px,4vw,48px);color:var(--ink); }
-  .markdown-document > header,.document-body,.document-error,.document-loading { max-width:800px;margin-inline:auto; }
+  .markdown-document > header,.document-body,.image-document-body,.document-error,.document-loading { max-width:800px;margin-inline:auto; }
+  .image-document-body { display:grid; place-items:center; }
+  .image-document-body img { max-width:100%; height:auto; border-radius:8px; background:repeating-conic-gradient(color-mix(in srgb, var(--ink) 6%, transparent) 0% 25%, transparent 0% 50%) 0 0/20px 20px; }
   .markdown-document > header { display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px;padding-bottom:18px;border-bottom:1px solid var(--line); }
   .markdown-document h1 { margin:6px 0 8px;font-size:clamp(24px,3vw,34px);line-height:1.2;overflow-wrap:anywhere; }
   .document-path { margin:0;color:var(--muted);font:12px var(--mono);overflow-wrap:anywhere; }
@@ -7599,9 +7651,11 @@
   .modern-tabs:not(.compact-tabs) .tab-entry { border:0; border-right:1px solid var(--line); border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:first-child { border-left:0; }
   .modern-tabs:not(.compact-tabs) > .topbar:has(> .workspace-context) .tab-entry:first-child { border-left:1px solid var(--line); }
+  .mobile-navigation .workspace.modern-tabs:not(.compact-tabs) > .topbar { border-top:1px solid var(--line); }
+  .mobile-navigation .modern-tabs:not(.compact-tabs) > .topbar:has(> .mobile-back) .tab-entry:first-child { border-left:1px solid var(--line); }
   .modern-tabs:not(.compact-tabs) .tab { border:0; border-radius:0; }
   .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { background:var(--soft); }
-  .modern-tabs:not(.compact-tabs) .tab-entry:hover { box-shadow:inset 0 -1px 0 var(--line); }
+  .modern-tabs:not(.compact-tabs) .tab-entry:not(.active):hover { box-shadow:inset 0 -1px 0 var(--line); }
   .modern-tabs:not(.compact-tabs) .tab-entry > .tab:hover { background:transparent; }
   .modern-tabs:not(.compact-tabs) .workspace-context { padding:0; }
   .modern-tabs:not(.compact-tabs) .top-actions { padding:0 8px; }
@@ -7804,7 +7858,7 @@
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
   .composer-input-row { display:flex; align-items:flex-end; gap:8px; min-width:0; }
-  .composer-input-row > .attachment-tools { flex:none; }
+  .composer-input-row > .attachment-tools { flex:none; align-self:flex-start; margin-top:3px; margin-right:2px; }
   .composer-input-row > textarea, .composer-input-row > .longform-editor, .composer-input-row > :global(.mention-composer) { flex:1; min-width:0; }
   .composer.expanded .composer-input-row { flex:1; min-height:0; }
   .composer.expanded .composer-input-row > .longform-editor { align-self:stretch; }
@@ -8525,7 +8579,7 @@
   .human-avatar { background:var(--accent); color:var(--on-accent); }
   .attachment-tools { display: flex; align-items: center; gap: 7px; color: var(--muted); }
   .attachment-tools .icon { width: 24px; height: 24px; }
-  .attachment-tools :global(.composer-paperclip) { transform: translate(-5px, -3px); opacity: 0.7; }
+  .attachment-tools :global(.composer-paperclip) { opacity: 0.7; }
   .attachment-tools small { font-size: calc(10px * var(--interface-font-ratio, 1)); }
   .attachment-input { display: none; }
   .composer.drop-files .composer-box { outline: 2px solid var(--accent); background: color-mix(in srgb,var(--accent) 8%,var(--panel)); }

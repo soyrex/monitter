@@ -11,6 +11,7 @@
 		A10000000000000000000003 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* QRScannerView.swift */; };
 		A10000000000000000000005 /* BundleWebServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* BundleWebServer.swift */; };
 		A10000000000000000000004 /* Web in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* Web */; };
+		A10000000000000000000006 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -19,11 +20,12 @@
 		A20000000000000000000003 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* BundleWebServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleWebServer.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Web; sourceTree = "<group>"; };
+		A20000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A20000000000000000000005 /* MonitterIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MonitterIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
-		A30000000000000000000001 /* MonitterIOS */ = {isa = PBXGroup; children = (A20000000000000000000001 /* MonitterIOSApp.swift */, A20000000000000000000002 /* ContentView.swift */, A20000000000000000000003 /* QRScannerView.swift */, A20000000000000000000006 /* BundleWebServer.swift */, A20000000000000000000004 /* Web */); path = MonitterIOS; sourceTree = "<group>"; };
+		A30000000000000000000001 /* MonitterIOS */ = {isa = PBXGroup; children = (A20000000000000000000001 /* MonitterIOSApp.swift */, A20000000000000000000002 /* ContentView.swift */, A20000000000000000000003 /* QRScannerView.swift */, A20000000000000000000006 /* BundleWebServer.swift */, A20000000000000000000004 /* Web */, A20000000000000000000007 /* Assets.xcassets */); path = MonitterIOS; sourceTree = "<group>"; };
 		A40000000000000000000001 = {isa = PBXGroup; children = (A30000000000000000000001 /* MonitterIOS */, A40000000000000000000002 /* Products */); sourceTree = "<group>"; };
 		A40000000000000000000002 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000005 /* MonitterIOS.app */); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -37,7 +39,7 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A70000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* Web in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* Web in Resources */, A10000000000000000000006 /* Assets.xcassets in Resources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -51,8 +53,8 @@
 /* Begin XCBuildConfiguration section */
 		A90000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Debug; };
 		A90000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Release; };
-		A90000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; INFOPLIST_KEY_CFBundleDisplayName = Monitter; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSCameraUsageDescription = "Monitter uses the camera to scan invitation QR codes."; INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Monitter connects to your Monitter desktop workspace on your local network."; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.soyrex.monitter.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SWIFT_EMIT_LOC_STRINGS = YES; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
-		A90000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; INFOPLIST_KEY_CFBundleDisplayName = Monitter; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSCameraUsageDescription = "Monitter uses the camera to scan invitation QR codes."; INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Monitter connects to your Monitter desktop workspace on your local network."; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.soyrex.monitter.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SWIFT_EMIT_LOC_STRINGS = YES; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+		A90000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; INFOPLIST_KEY_CFBundleDisplayName = Monitter; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSCameraUsageDescription = "Monitter uses the camera to scan invitation QR codes."; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Monitter uses the microphone to record voice messages for your paired workspace."; INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Monitter connects to your Monitter desktop workspace on your local network."; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.soyrex.monitter.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SWIFT_EMIT_LOC_STRINGS = YES; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		A90000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_KEY_CFBundleDisplayName = Monitter; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSCameraUsageDescription = "Monitter uses the camera to scan invitation QR codes."; INFOPLIST_KEY_NSMicrophoneUsageDescription = "Monitter uses the microphone to record voice messages for your paired workspace."; INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Monitter connects to your Monitter desktop workspace on your local network."; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = com.soyrex.monitter.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SWIFT_EMIT_LOC_STRINGS = YES; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
