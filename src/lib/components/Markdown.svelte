@@ -14,7 +14,7 @@
   let lightboxOpener = $state<HTMLElement | null>(null);
   // Preserve local Markdown file URLs for the scoped native reader. Other URI
   // schemes retain DOMPurify's normal allowlist; the click handler owns opening.
-  const allowedMarkdownUris = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|file:\/\/\/[^?#]*\.(?:md|markdown|png|jpe?g|gif|svg|webp)(?:[?#]|$)|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+  const allowedMarkdownUris = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|(?:file:\/\/\/|(?:tauri|asset):\/\/localhost\/)[^?#]*\.(?:md|markdown|png|jpe?g|gif|svg|webp)(?:[?#]|$)|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
   // Keep expensive parsing tied to the primitive content, not a replaced message object.
   const sourceText = $derived(text);
   const html = $derived(
@@ -59,7 +59,7 @@
       event.preventDefault();
       const href = anchor.getAttribute("href")?.trim() ?? "";
       const bareHref = href.split(/[?#]/)[0];
-      const localPathLike = /^(?:file:\/\/|\/|\.{0,2}\/|[^:/?#]+(?:\/[^:/?#]+)*\.[a-z0-9]+(?:[?#].*)?$)/i.test(href);
+      const localPathLike = /^(?:file:\/\/|tauri:\/\/|asset:\/\/|\/|\.{0,2}\/|[^:/?#]+(?:\/[^:/?#]+)*\.[a-z0-9]+(?:[?#].*)?$)/i.test(href);
       if (localPathLike && /\.(?:md|markdown)$/i.test(bareHref)) {
         if (!openMarkdown || !(taskId ?? contextTaskId)) { linkError = 'Markdown files can only be opened from a local task.'; return; }
         try { linkError = ''; await openMarkdown(taskId ?? contextTaskId!, href, basePath); }

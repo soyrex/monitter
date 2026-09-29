@@ -59,6 +59,16 @@ pub(crate) fn local_href_path(href: &str) -> Result<PathBuf, String> {
     if let Some(path) = href.strip_prefix("file:///") {
         return Ok(PathBuf::from(format!("/{}", percent_decode(path)?)));
     }
+    // Tauri's asset protocol (and its legacy `tauri://` name) maps a URL path
+    // straight onto the filesystem root, the same way `file:///` does.
+    for prefix in ["tauri://localhost/", "asset://localhost/"] {
+        if lowered.starts_with(prefix) {
+            return Ok(PathBuf::from(format!(
+                "/{}",
+                percent_decode(&href[prefix.len()..])?
+            )));
+        }
+    }
     if href.starts_with("//")
         || lowered.starts_with("http:")
         || lowered.starts_with("https:")
@@ -161,6 +171,32 @@ mod tests {
         assert!(resolve_local_link(&cwd, "notes.txt", None, &["png"]).is_err());
         assert!(resolve_local_link(&cwd, outside.to_str().unwrap(), None, &["png"]).is_err());
         fs::remove_file(outside).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn accepts_a_bare_absolute_path_inside_cwd() {
+        let dir = fixture_dir();
+        let file = dir.join("docs/photo.png");
+        fs::write(&file, "x").unwrap();
+        let cwd = fs::canonicalize(&dir).unwrap();
+        let absolute = fs::canonicalize(&file).unwrap();
+        let resolved = resolve_local_link(&cwd, absolute.to_str().unwrap(), None, &["png"]).unwrap();
+        assert_eq!(resolved, absolute);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn accepts_tauri_and_asset_protocol_links_inside_cwd() {
+        let dir = fixture_dir();
+        let file = dir.join("docs/a b.png");
+        fs::write(&file, "x").unwrap();
+        let cwd = fs::canonicalize(&dir).unwrap();
+        let absolute = fs::canonicalize(&file).unwrap();
+        let encoded = absolute.display().to_string().replace(' ', "%20");
+        for scheme in ["tauri://localhost", "asset://localhost"] {
+            let href = format!("{scheme}{encoded}");
+            let resolved = resolve_local_link(&cwd, &href, None, &["png"]).unwrap();
+            assert_eq!(resolved, absolute);
+        }
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
