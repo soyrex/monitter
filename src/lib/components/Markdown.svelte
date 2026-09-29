@@ -7,13 +7,14 @@
   let { text, taskId, basePath, preserveLineBreaks = false }: { text: string; taskId?: string; basePath?: string; preserveLineBreaks?: boolean } = $props();
   const contextTaskId = getContext<string | undefined>('monitter-markdown-task-id');
   const openMarkdown = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-markdown');
+  const openImageFile = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-image');
   let container = $state<HTMLDivElement>();
   let linkError = $state("");
   let lightbox = $state<{ src: string; alt: string; title?: string } | null>(null);
   let lightboxOpener = $state<HTMLElement | null>(null);
   // Preserve local Markdown file URLs for the scoped native reader. Other URI
   // schemes retain DOMPurify's normal allowlist; the click handler owns opening.
-  const allowedMarkdownUris = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|file:\/\/\/[^?#]*\.(?:md|markdown)(?:[?#]|$)|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+  const allowedMarkdownUris = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|file:\/\/\/[^?#]*\.(?:md|markdown|png|jpe?g|gif|svg|webp)(?:[?#]|$)|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
   // Keep expensive parsing tied to the primitive content, not a replaced message object.
   const sourceText = $derived(text);
   const html = $derived(
@@ -57,9 +58,17 @@
       if (!anchor || !container?.contains(anchor)) return;
       event.preventDefault();
       const href = anchor.getAttribute("href")?.trim() ?? "";
-      if (/^(?:file:\/\/|\/|\.{0,2}\/|[^:/?#]+(?:\/[^:/?#]+)*\.(?:md|markdown)(?:[?#].*)?$)/i.test(href) && /\.(?:md|markdown)$/i.test(href.split(/[?#]/)[0])) {
+      const bareHref = href.split(/[?#]/)[0];
+      const localPathLike = /^(?:file:\/\/|\/|\.{0,2}\/|[^:/?#]+(?:\/[^:/?#]+)*\.[a-z0-9]+(?:[?#].*)?$)/i.test(href);
+      if (localPathLike && /\.(?:md|markdown)$/i.test(bareHref)) {
         if (!openMarkdown || !(taskId ?? contextTaskId)) { linkError = 'Markdown files can only be opened from a local task.'; return; }
         try { linkError = ''; await openMarkdown(taskId ?? contextTaskId!, href, basePath); }
+        catch (reason) { linkError = reason instanceof Error ? reason.message : String(reason); }
+        return;
+      }
+      if (localPathLike && /\.(?:png|jpe?g|gif|svg|webp)$/i.test(bareHref)) {
+        if (!openImageFile || !(taskId ?? contextTaskId)) { linkError = 'Images can only be opened from a local task.'; return; }
+        try { linkError = ''; await openImageFile(taskId ?? contextTaskId!, href, basePath); }
         catch (reason) { linkError = reason instanceof Error ? reason.message : String(reason); }
         return;
       }

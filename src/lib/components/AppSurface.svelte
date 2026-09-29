@@ -63,6 +63,7 @@
   import Command from "@lucide/svelte/icons/command";
   import Folder from "@lucide/svelte/icons/folder";
   import FileText from "@lucide/svelte/icons/file-text";
+  import ImageIcon from "@lucide/svelte/icons/image";
   import Code from "@lucide/svelte/icons/code";
   import Rocket from "@lucide/svelte/icons/rocket";
   import Globe from "@lucide/svelte/icons/globe";
@@ -224,7 +225,7 @@
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
   type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; browser?: BrowserTabMetadata; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
-  type MarkdownDocument = { taskId: string; path: string; title: string };
+  type MarkdownDocument = { taskId: string; path: string; title: string; kind?: 'markdown' | 'image' };
   type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openBrowserIds:string[];selectedBrowserId:string|null;browserTabs:Record<string,BrowserTabMetadata>;openGitTaskIds:string[];selectedGitTaskId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let sidebarSelected = $state(false);
@@ -323,30 +324,33 @@
   let codexAccountsError = $state('');
   let codexAccountsLoading = $state(false);
   let codexAccountsLoaded = $state(false);
-  async function openMarkdownDocument(taskId: string, href: string, basePath?: string) {
-    const file = await bridge.readMarkdownFile(taskId, href, basePath);
+  async function openFileDocument(kind: 'markdown' | 'image', taskId: string, href: string, basePath?: string) {
+    const file = kind === 'image' ? await bridge.readImageFile(taskId, href, basePath) : await bridge.readMarkdownFile(taskId, href, basePath);
     let id = Object.keys(documents).find(key => openEmptyIds.includes(key) && documents[key].path === file.path);
     if (!id) {
       id = localUuid();
-      documents[id] = { taskId, path: file.path, title: file.title };
+      documents[id] = { taskId, path: file.path, title: file.title, kind };
       openEmptyIds = [...openEmptyIds, id];
       rememberTab({ kind: 'empty', id });
     }
-    documentContents[id] = file.content;
+    documentContents[id] = 'dataUrl' in file ? file.dataUrl : file.content;
     delete documentErrors[id];
     saveCurrentDraft();
     selectedEmptyId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; currentDraftId = null;
     focusedAgentId = null; focusedProjectId = null; pane = 'empty';
   }
+  const openMarkdownDocument = (taskId: string, href: string, basePath?: string) => openFileDocument('markdown', taskId, href, basePath);
+  const openImageDocument = (taskId: string, href: string, basePath?: string) => openFileDocument('image', taskId, href, basePath);
   setContext('monitter-open-markdown', openMarkdownDocument);
+  setContext('monitter-open-image', openImageDocument);
   async function loadDocument(id: string) {
     const doc = documents[id];
     if (!doc || documentLoading[id]) return;
     documentLoading[id] = true;
     try {
-      const file = await bridge.readMarkdownFile(doc.taskId, doc.path);
+      const file = doc.kind === 'image' ? await bridge.readImageFile(doc.taskId, doc.path) : await bridge.readMarkdownFile(doc.taskId, doc.path);
       if (documents[id]?.path !== doc.path) return;
-      documentContents[id] = file.content;
+      documentContents[id] = 'dataUrl' in file ? file.dataUrl : file.content;
       delete documentErrors[id];
     } catch (reason) { documentErrors[id] = text(reason); }
     finally { delete documentLoading[id]; }
@@ -5060,7 +5064,7 @@
             <div class="tab-entry git-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='git' && selectedGitTaskId===tab.id}><button class="tab" draggable="false" ondragstart={event=>dragTab(event,'git',tab.id)} onpointerdown={event=>startTabPointer(event,'git',tab.id)} aria-pressed={pane==='git'&&selectedGitTaskId===tab.id} onclick={()=>selectTabPicker(()=>openGitReview(task))} title={`Git review · ${task.title}`}><span class="tab-kind-icon" aria-hidden="true"><GitFork size={13}/><span class="tab-shortcut"></span></span><span>Git · {task.title}</span></button><button class="close-tab" aria-label={`Close Git review for ${task.title}`} title="Close Git review" onclick={()=>{closeGitReview(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
           {:else if tab.kind === 'empty'}
-            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}<FileText size={13}/><span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+            <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}{#if documents[tab.id].kind==='image'}<ImageIcon size={13}/>{:else}<FileText size={13}/>{/if}<span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
           {:else if tab.kind === 'settings'}
             <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} title={settingsTabTitle(settingsCategory)} onclick={()=>selectTabPicker(()=>openSettings())}><span class="tab-kind-icon" aria-hidden="true"><Settings2 size={13}/><span class="tab-shortcut"></span></span><span>{settingsTabTitle(settingsCategory)}</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={()=>{closeSettings();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
@@ -5094,10 +5098,13 @@
       </div>
     {:else if pane === 'empty' && selectedEmptyId && documents[selectedEmptyId]}
       {@const document=documents[selectedEmptyId]}
-      <section class="markdown-document" aria-label={`Markdown document ${document.title}`}>
-        <header><div><p class="eyebrow">MARKDOWN DOCUMENT</p><h1>{document.title}</h1><p class="document-path" title={document.path}>{document.path}</p></div><button class="secondary" type="button" disabled={!!documentLoading[selectedEmptyId]} onclick={()=>void loadDocument(selectedEmptyId!)}>Refresh</button></header>
+      {@const isImage=document.kind==='image'}
+      <section class="markdown-document" aria-label={`${isImage ? 'Image' : 'Markdown'} document ${document.title}`}>
+        <header><div><p class="eyebrow">{isImage ? 'IMAGE' : 'MARKDOWN DOCUMENT'}</p><h1>{document.title}</h1><p class="document-path" title={document.path}>{document.path}</p></div><button class="secondary" type="button" disabled={!!documentLoading[selectedEmptyId]} onclick={()=>void loadDocument(selectedEmptyId!)}>Refresh</button></header>
         {#if documentErrors[selectedEmptyId]}<p class="document-error" role="alert">{documentErrors[selectedEmptyId]}</p>{/if}
-        {#if documentContents[selectedEmptyId] !== undefined}<div class="document-body"><Markdown text={documentContents[selectedEmptyId]} taskId={document.taskId} basePath={document.path}/></div>
+        {#if documentContents[selectedEmptyId] !== undefined}
+          {#if isImage}<div class="image-document-body"><img src={documentContents[selectedEmptyId]} alt={document.title}/></div>
+          {:else}<div class="document-body"><Markdown text={documentContents[selectedEmptyId]} taskId={document.taskId} basePath={document.path}/></div>{/if}
         {:else if documentLoading[selectedEmptyId]}<p class="document-loading">Loading document…</p>{/if}
       </section>
     {:else if pane === 'empty'}<section class="empty-pane" aria-label="Choose pane content"><div class="pane-choices">
@@ -7369,7 +7376,9 @@
   }
   .empty-pane { flex:1;min-width:0;min-height:0;overflow:auto;display:grid;place-items:center;padding:20px; }
   .markdown-document { flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding:clamp(20px,4vw,48px);color:var(--ink); }
-  .markdown-document > header,.document-body,.document-error,.document-loading { max-width:800px;margin-inline:auto; }
+  .markdown-document > header,.document-body,.image-document-body,.document-error,.document-loading { max-width:800px;margin-inline:auto; }
+  .image-document-body { display:grid; place-items:center; }
+  .image-document-body img { max-width:100%; height:auto; border-radius:8px; background:repeating-conic-gradient(color-mix(in srgb, var(--ink) 6%, transparent) 0% 25%, transparent 0% 50%) 0 0/20px 20px; }
   .markdown-document > header { display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px;padding-bottom:18px;border-bottom:1px solid var(--line); }
   .markdown-document h1 { margin:6px 0 8px;font-size:clamp(24px,3vw,34px);line-height:1.2;overflow-wrap:anywhere; }
   .document-path { margin:0;color:var(--muted);font:12px var(--mono);overflow-wrap:anywhere; }
