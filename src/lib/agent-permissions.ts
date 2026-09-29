@@ -35,7 +35,7 @@ export const NORMALIZED_PERMISSIONS: readonly NormalizedPermission[] = [
  * from the stored `Provider` enum because Mona, MiniMax and Gemini are stored as
  * `provider: 'acp'` and disambiguated by the configured executable name.
  */
-export type ProviderKey = 'claude-code' | 'codex' | 'opencode' | 'mona' | 'minimax' | 'gemini';
+export type ProviderKey = 'claude-code' | 'codex' | 'opencode' | 'hermes' | 'mona' | 'minimax' | 'gemini';
 
 export interface UiProviderOption {
   /** Logical UI key. Drives the capability table and friendly name lookup. */
@@ -96,6 +96,15 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     searchTerms: ['opencode', 'oss'],
   },
   {
+    key: 'hermes',
+    friendlyName: 'Hermes Agent',
+    subtitle: 'by Nous Research',
+    storedProvider: 'acp',
+    acpCommand: 'hermes',
+    acpArgs: ['acp'],
+    searchTerms: ['hermes', 'nous', 'hermes agent', 'acp'],
+  },
+  {
     key: 'mona',
     friendlyName: 'Mona',
     subtitle: 'Monitter harness',
@@ -135,7 +144,9 @@ export function deriveProviderKey(agent: Pick<Agent, 'provider' | 'acp'>): Provi
   if (agent.provider === 'claude') return 'claude-code';
   if (agent.provider === 'codex') return 'codex';
   if (agent.provider === 'opencode') return 'opencode';
-  if (agent.provider === 'hermes') return 'opencode';
+  // Existing native Hermes profiles remain runnable. New Hermes selections
+  // use its ACP server so they can use ACP configuration and capabilities.
+  if (agent.provider === 'hermes') return 'hermes';
   if (agent.provider === 'acp') {
     return detectProviderFromLaunch(agent.acp ?? null);
   }
@@ -157,6 +168,7 @@ export function detectProviderFromLaunch(launch: AcpLaunch | null | undefined): 
   if (/(?:^|[\W_])claude(?:$|[\W_])/.test(command)) return 'claude-code';
   if (/(?:^|[\W_])codex(?:$|[\W_])/.test(command)) return 'codex';
   if (/(?:^|[\W_])opencode(?:$|[\W_])/.test(command)) return 'opencode';
+  if (/(?:^|[\W_])hermes(?:$|[\W_])/.test(command)) return 'hermes';
   return 'opencode';
 }
 
@@ -207,6 +219,16 @@ export const PERMISSION_CAPABILITIES: Record<ProviderKey, PermissionCapability> 
     fullAccess: true,
     defaultLevel: 'auto-approve-edits',
     hint: 'OpenCode supports all three levels.',
+  },
+  hermes: {
+    // Hermes ACP v0.21.0 does not advertise a configurable read-only or
+    // bypass-permissions mode during initialization. Keep the picker aligned
+    // with that live capability rather than implying an OS-level sandbox.
+    readOnly: false,
+    autoApproveEdits: true,
+    fullAccess: false,
+    defaultLevel: 'auto-approve-edits',
+    hint: 'Hermes Agent currently uses its configured ACP permission policy.',
   },
   mona: {
     readOnly: true,
