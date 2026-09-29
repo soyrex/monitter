@@ -80,6 +80,7 @@
     deliveryStatus,
     maximised,
     rightSidebar,
+    queuedMessages,
     composer,
     subagentDock,
     senderName,
@@ -134,6 +135,7 @@
     deliveryStatus: Delivery;
     maximised: boolean;
     rightSidebar: EmptySnippet;
+    queuedMessages?: EmptySnippet;
     composer: EmptySnippet;
     subagentDock: EmptySnippet;
     senderName: (message: Message) => string | null;
@@ -397,6 +399,7 @@
       </MessagePane>
     {/if}
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
+    {#if queuedMessages}<div class="queued-messages-float">{@render queuedMessages()}</div>{/if}
     <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />
     {#if gitStatus?.repository}
       <button class="git-changes-bar" type="button" aria-label={`Open Git changes: ${gitStatus.branch ?? 'Detached HEAD'}, ${gitStatus.files.length} changed ${gitStatus.files.length === 1 ? 'file' : 'files'}`} title="Open Git changes" onclick={onOpenGit}>
@@ -431,6 +434,7 @@
   .mail-view-toggle:hover { color:var(--ink); background:var(--soft); }
   .history-pager{display:flex;align-items:center;justify-content:center;gap:10px;padding:5px 8px;background:color-mix(in srgb,var(--paper) 92%,transparent);font-size:calc(10px * var(--interface-font-ratio,1))}.history-pager button{padding:5px 10px;border:1px solid var(--line);border-radius:6px;color:var(--muted);background:var(--panel);font:inherit}.history-pager button:hover:not(:disabled){color:var(--ink);background:var(--soft)}.history-pager button:disabled{opacity:.55}.history-pager span{color:#bd655b}
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
+  .queued-messages-float { position:relative; z-index:2; flex-shrink:0; filter:drop-shadow(0 3px 8px #0002) drop-shadow(0 10px 24px #0004); }
   .composer-area { position:relative; flex-shrink:0; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }
   .composer-area.git-docked :global(.composer-box) { border-top-left-radius:0; border-top-right-radius:0; }

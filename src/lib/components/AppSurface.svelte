@@ -5378,8 +5378,10 @@
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>TIMELINE</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>APPROVALS</button></div>
         </div>{/snippet}
-        {#snippet taskComposer()}
+        {#snippet taskQueuedMessages()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
+        {/snippet}
+        {#snippet taskComposer()}
           <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
           {#if !composerExpanded}{@render slashMenu()}{/if}
           <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded task composer' : 'Task composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
@@ -5439,6 +5441,7 @@
           {deliveryStatus}
           rightSidebar={rightSidebarControl}
           maximised={focusStep > 0}
+          queuedMessages={taskQueuedMessages}
           composer={taskComposer}
           {subagentDock}
           {senderName}
