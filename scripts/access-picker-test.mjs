@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { build } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { chromium, expect } from '@playwright/test';
+import { chromium, webkit, expect } from '@playwright/test';
 
 const root = process.cwd();
 const iconStub = fileURLToPath(new URL('./fixtures/lucide-stub.svelte', import.meta.url));
@@ -29,7 +29,8 @@ const server = createServer((request, response) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const address = server.address();
 if (!address || typeof address === 'string') throw new Error('No isolated AccessPicker server address');
-const browser = await chromium.launch({ headless: true });
+const engine = process.env.MONITTER_TEST_BROWSER === 'webkit' ? webkit : chromium;
+const browser = await engine.launch({ headless: true });
 try {
   const page = await browser.newPage();
   const errors = [];
@@ -58,7 +59,7 @@ try {
   await expect(page.getByRole('dialog', { name: 'Permissions', exact: true })).toHaveCount(0);
   await expect(otherControl).toBeFocused();
   expect(errors).toEqual([]);
-  console.log('AccessPicker closes while permission saves are pending; rejected saves remain visible without reopening or stealing focus.');
+  console.log(`${engine.name()}: AccessPicker closes while permission saves are pending; rejected saves remain visible without reopening or stealing focus.`);
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

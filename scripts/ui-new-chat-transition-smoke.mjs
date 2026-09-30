@@ -16,7 +16,7 @@ try {
   await expect(page.getByRole('region',{name:'New chat draft',exact:true})).toHaveCount(0);
   await expect(starting.getByRole('heading',{name:'Inspect the workspace now',exact:true})).toBeVisible();
   await expect(starting.getByText('Inspect the workspace now',{exact:true})).toHaveCount(2);
-  await expect(starting.getByText('Sending',{exact:true})).toBeVisible();
+  await expect(starting.getByTitle('Sending your message…',{exact:true})).toBeVisible();
 
   await page.evaluate(()=>window.__releaseTaskCreation());
   await expect(starting).toHaveCount(0);

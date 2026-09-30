@@ -1,8 +1,9 @@
-import { chromium, expect } from '@playwright/test';
+import { chromium, webkit, expect } from '@playwright/test';
 
 // Uses the browser-only bridge fixture. No native runtime or agent is started.
 const url = process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18420';
-const browser = await chromium.launch({ headless: true });
+const engine = process.env.MONITTER_TEST_BROWSER === 'webkit' ? webkit : chromium;
+const browser = await engine.launch({ headless: true });
 try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
@@ -58,7 +59,7 @@ try {
   await expect(retryPalette).toHaveCount(0, { timeout: 1500 });
   await page.evaluate(() => window.__MONITTER_QA__.releaseSettingsSave());
   await expect(page.getByRole('alert').filter({ hasText: 'Could not save settings: deliberate settings failure' })).toBeVisible();
-  console.log('Chromium: delayed palette settings saves close promptly, leave the composer usable, and report failures.');
+  console.log(`${engine.name()}: delayed palette settings saves close promptly, leave the composer usable, and report failures.`);
 } finally {
   await browser.close();
 }
