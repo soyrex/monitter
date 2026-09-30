@@ -54,10 +54,10 @@
   async function choose(next: NormalizedPermission) {
     if (saving || disabled || next === selectedLevel) return;
     saving = true; error = '';
+    open = false;
+    anchor?.focus();
     try {
       await onchange(denormalizePermission(provider, next));
-      open = false;
-      anchor?.focus();
     }
     catch (reason) { error = reason instanceof Error ? reason.message : String(reason); }
     finally { saving = false; }
@@ -106,6 +106,7 @@
       <p class="explanation">{caps.hint}</p>
     </div>
   {/if}
+  {#if error && !open}<p class="error picker-error" role="alert">{error}</p>{/if}
 </div>
 
 <style>
