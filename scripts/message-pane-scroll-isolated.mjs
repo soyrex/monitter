@@ -125,6 +125,31 @@ try {
     expect((await metrics()).top).toBeLessThanOrEqual(firstIntent.top + 2);
     await page.getByRole('button', { name: 'Jump to latest message' }).click();
     await atBottom();
+
+    // A timer can queue a follow correction just before a reader starts a
+    // touch scroll. Check the public jump control and scroll position instead
+    // of asserting against an internal CSS class.
+    await page.locator('.messages').evaluate(async node => {
+      window.__PANE_QA__.tickTimer();
+      await Promise.resolve();
+      const touch = (type, clientY) => {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'touches', { value: clientY === undefined ? [] : [{ clientY }] });
+        node.dispatchEvent(event);
+      };
+      touch('touchstart', 180);
+      touch('touchmove', 260);
+      await Promise.resolve();
+      node.scrollTop -= 120;
+      node.dispatchEvent(new Event('scroll'));
+      touch('touchend');
+    });
+    await expect(page.getByRole('button', { name: 'Jump to latest message' })).toBeVisible();
+    const touchReaderPosition = await metrics();
+    await page.waitForTimeout(100);
+    expect((await metrics()).top).toBeLessThanOrEqual(touchReaderPosition.top + 2);
+    await jumpButton.click();
+    await atBottom();
     await page.waitForTimeout(50);
     await setBottomGap(49);
     await expect(jumpButton).toHaveAttribute('aria-hidden', 'true');
