@@ -4221,12 +4221,21 @@ impl Service {
     /// Directory discovery only: account configuration and credentials remain
     /// private to the Codex CLI. The caller gets canonical local paths/labels.
     fn list_codex_accounts(&self) -> Result<Vec<codex_accounts::CodexAccount>, String> {
-        let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
-        Ok(codex_accounts::list_accounts(
-            data.snapshot.agents.iter().map(|agent| agent.codex_home.clone()).chain(
-                data.snapshot.tasks.iter().map(|task| task.codex_home.clone()),
-            ),
-        ))
+        let configured_homes = {
+            let data = self.committed_data()?;
+            data.snapshot
+                .agents
+                .iter()
+                .map(|agent| agent.codex_home.clone())
+                .chain(
+                    data.snapshot
+                        .tasks
+                        .iter()
+                        .map(|task| task.codex_home.clone()),
+                )
+                .collect::<Vec<_>>()
+        };
+        Ok(codex_accounts::list_accounts(configured_homes))
     }
 
     fn mark_usage_final(&self, task_id: &str) {
@@ -7244,10 +7253,13 @@ async fn get_usage_overview(
 /// Native desktop and owner-LAN discovery of local account directories. It
 /// neither reads credentials nor starts a Codex session.
 #[tauri::command]
-fn list_codex_accounts(
+async fn list_codex_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<codex_accounts::CodexAccount>, String> {
-    state.0.list_codex_accounts()
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.list_codex_accounts())
+        .await
+        .map_err(|error| format!("Codex account discovery worker failed: {error}"))?
 }
 
 #[tauri::command]
