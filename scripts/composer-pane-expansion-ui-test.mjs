@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { chromium, expect } from '@playwright/test';
 
-const url = process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18423/monitter-app-ui/';
-const browser = await chromium.launch({ headless: true, executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+const url = process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18463/';
+const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
 
 try {
+  await page.addInitScript(() => {
+    window.__TAURI_INTERNALS__ = { transformCallback: () => 1, invoke: async () => 1 };
+  });
   await page.addInitScript({ path: 'scripts/ui-fixture.js' });
   await page.goto(url, { timeout: 90_000 });
   await expect(page.locator('.pane-leaf[data-pane-id="main"]')).toBeVisible({ timeout: 60_000 });
@@ -22,7 +25,7 @@ try {
   });
   const main = page.locator('.pane-leaf[data-pane-id="main"]');
   for (const title of ['left-chat', 'right-chat']) {
-    await page.locator('.sidebar .task-select').filter({ hasText: title }).click();
+    await page.getByRole('button', { name: `Open chat ${title}`, exact: true }).click();
     await expect(main.locator('.tabs').getByRole('button', { name: title, exact: true })).toBeVisible();
   }
   await main.click({ position: { x: 100, y: 100 } });
@@ -40,9 +43,15 @@ try {
   await dataTransfer.dispose();
   await expect(right.locator('.tabs').getByRole('button', { name: 'right-chat', exact: true })).toBeVisible();
 
+  const draftText = 'Draft line one\n\nDraft line two\n\nDraft line three';
+  const inlineComposer = right.locator('.composer textarea[aria-label="Task message"]');
+  await inlineComposer.fill(draftText);
+  await expect(right.getByRole('button', { name: 'Expand composer' })).toBeVisible();
   await right.getByRole('button', { name: 'Expand composer' }).click();
   const expanded = right.locator('.composer.expanded');
   await expect(expanded).toBeVisible();
+  await expect(expanded.locator('[contenteditable="true"]')).toContainText('Draft line one');
+  await expect(expanded.locator('[contenteditable="true"]')).toContainText('Draft line three');
   const measure = () => right.evaluate(pane => {
     const chat = pane.querySelector('.conversation').getBoundingClientRect();
     const composer = pane.querySelector('.composer.expanded').getBoundingClientRect();
@@ -74,6 +83,7 @@ try {
   assert.equal(await main.locator('.composer.expanded').count(), 0, 'Neighbouring pane stays unexpanded');
   await right.getByRole('button', { name: 'Restore composer' }).click();
   await expect(right.locator('.composer.expanded')).toHaveCount(0);
+  await expect(right.locator('.composer textarea[aria-label="Task message"]')).toHaveValue(draftText);
   assert.deepEqual(errors, []);
   console.log('Right-pane expanded composer is pane-local and edge-to-edge at both viewport sizes');
 } finally {
