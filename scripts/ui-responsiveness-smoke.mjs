@@ -84,6 +84,25 @@ for (const [engine, browserType] of [['WebKit', webkit], ['Chromium', chromium]]
     await expect(page.getByText('First alpha message', { exact: true })).toBeVisible();
     await expect(page.getByText('Not confirmed', { exact: true })).toBeVisible();
     expect((await calls(page, 'sendMessage')).map(call => call.args.taskId)).toEqual(['beta']);
+
+    // A retry must reserve its target before checking whether the first send
+    // was accepted. Two synchronous clicks must not cause two submissions.
+    await hold(page, 'getSnapshot');
+    await page.locator('.delivery-retry').evaluate(button => { button.click(); button.click(); });
+    await started(page, 'getSnapshot');
+    await expect(page.locator('.delivery-retry')).toBeDisabled();
+    await expect(send(page)).toBeDisabled();
+    await release(page, 'getSnapshot', true);
+    await expect(page.locator('.delivery-retry')).toBeEnabled();
+    await expect(page.getByText(/Could not refresh before retrying/)).toBeVisible();
+    expect((await calls(page, 'sendMessage')).map(call => call.args.taskId)).toEqual(['beta']);
+    await hold(page, 'getSnapshot');
+    await page.locator('.delivery-retry').evaluate(button => { button.click(); button.click(); });
+    await started(page, 'getSnapshot');
+    await release(page, 'getSnapshot');
+    await expect.poll(async () => (await calls(page, 'sendMessage')).length).toBe(2);
+    expect((await calls(page, 'sendMessage')).map(call => call.args.taskId)).toEqual(['beta', 'alpha']);
+    await expect(input(page)).toHaveValue('Next alpha draft');
     console.log(`${engine}: delayed task send and recovery passed.`);
     await page.close();
 
@@ -137,9 +156,10 @@ for (const [engine, browserType] of [['WebKit', webkit], ['Chromium', chromium]]
     `);
     await page.getByRole('button', { name: 'New chat with Atlas', exact: true }).click();
     await input(page).fill('Original routed message');
-    await send(page).click();
+    await input(page).press('Control+Enter');
     await started(page, 'planJevRoute');
-    await input(page).fill('Follow-up typed during routing');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('Follow-up typed during routing');
     await expect(send(page)).toBeDisabled();
     await input(page).press('Control+Enter');
     await release(page, 'planJevRoute');
@@ -153,21 +173,38 @@ for (const [engine, browserType] of [['WebKit', webkit], ['Chromium', chromium]]
     expect((await calls(page, 'sendMessage'))[0].args.text).toBe('Original routed message');
     expect(await calls(page, 'createTask')).toHaveLength(1);
     await expect(input(page)).toHaveValue('Unrelated beta draft');
+    await expect(input(page)).toBeFocused();
     await task(page, 'Original routed message');
     await expect(input(page)).toHaveValue('Follow-up typed during creation');
     console.log(`${engine}: delayed routing, creation and tab switch passed.`);
+    await page.close();
+
+    // Replacing the setup/pending/transcript DOM must preserve keyboard focus.
+    page = await open(`qa.hold('createTask');`);
+    await page.getByRole('button', { name: 'New chat with Atlas', exact: true }).click();
+    await input(page).fill('Keyboard-created chat');
+    await input(page).press('Control+Enter');
+    await started(page, 'createTask');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('Keep typing through creation');
+    await release(page, 'createTask');
+    await expect(page.locator('.task-layout')).toBeVisible();
+    await expect(input(page)).toHaveValue('Keep typing through creation');
+    await expect(input(page)).toBeFocused();
     await page.close();
 
     // A failed creation retains both the submitted copy and subsequent edits.
     page = await open(`qa.hold('createTask');`);
     await page.getByRole('button', { name: 'New chat with Atlas', exact: true }).click();
     await input(page).fill('Creation that will fail');
-    await send(page).click();
+    await input(page).press('Control+Enter');
     await started(page, 'createTask');
+    await expect(input(page)).toBeFocused();
     await input(page).fill('Do not erase this newer draft');
     await input(page).press('Control+Enter');
     await release(page, 'createTask', true);
     await expect(input(page)).toHaveValue('Do not erase this newer draft');
+    await expect(input(page)).toBeFocused();
     await expect(page.getByText('Not confirmed', { exact: true })).toBeVisible();
     await expect(page.getByText('Creation that will fail', { exact: true }).last()).toBeVisible();
     expect(await calls(page, 'createTask')).toHaveLength(0);

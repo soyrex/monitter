@@ -311,6 +311,10 @@
     if(!ready) return;
     void tick().then(() => {
       if(draftComposerFocusTransfer?.token!==transfer.token) return;
+      const sameTarget=transfer.phase==='task'
+        ? pane==='task' && !currentDraftId && selectedTaskId===transfer.taskId
+        : pane==='task' && currentDraftId===transfer.draftId;
+      if(!sameTarget) { draftComposerFocusTransfer=null; return; }
       const active=document.activeElement;
       if(active!==document.body && active!==document.documentElement) { draftComposerFocusTransfer=null; return; }
       const target=transfer.phase==='starting' ? startingTaskTextarea : composerTextarea;
