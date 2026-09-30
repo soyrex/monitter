@@ -19,6 +19,8 @@
   import MessageMeta from "./MessageMeta.svelte";
   import RichMarkdownComposer from './LazyRichMarkdownComposer.svelte';
   import VoiceRecorder from './VoiceRecorder.svelte';
+  import NativeSpeechRecorder from './NativeSpeechRecorder.svelte';
+  import { mobileSpeechMode, nativeSpeechPlatform } from '$lib/mobile-speech';
   import ChatDateDivider from "./ChatDateDivider.svelte";
   import { chatDay } from '$lib/chat-dates';
   import { autoGrowTextarea } from '$lib/textarea-autogrow';
@@ -446,6 +448,8 @@
     finally { codexAccountsLoading = false; }
   }
   onMount(() => { void refreshCodexAccounts(); });
+  let mobileNativeSpeechBridge = $state(false);
+  onMount(() => { mobileNativeSpeechBridge = nativeSpeechPlatform() !== null; });
   let motionReady = $state(false);
   onMount(() => { if (!embedded) motionReady = true; });
   onMount(() => {
@@ -2092,20 +2096,23 @@
       // A pane switch must not lose the transcript. Keep it with the captured
       // composer, while refusing to apply it after that destination changes.
       if(key===currentDraftKey() && scope!==attachmentScope) return;
-      if(transcript) {
-        const draftId=key.startsWith('draft:')?key.slice('draft:'.length):'';
-        const previous=key===currentDraftKey()?composer:(sharedComposers.get(key)?.text ?? drafts[key] ?? (draftId ? taskDrafts[draftId]?.text : '') ?? '');
-        const next=previous ? `${previous.replace(/\s+$/, '')}\n\n${transcript}` : transcript;
-        drafts[key]=next;
-        if(key===currentDraftKey()) composer=next;
-        if(draftId) {
-          const draft=taskDrafts[draftId];
-          if(draft) taskDrafts[draftId]={...draft,text:next};
-        }
-        publishComposer(key,next);
-      }
+      appendVoiceTranscript(key,transcript);
     } catch(reason) { voiceErrors[key]=`Could not transcribe the voice message: ${text(reason)}`; }
     finally { voiceProcessing[key]=false; }
+  }
+  function appendVoiceTranscript(key:string, transcript:string) {
+    const value=transcript.trim();
+    if(!key || !value) return;
+    const draftId=key.startsWith('draft:')?key.slice('draft:'.length):'';
+    const previous=key===currentDraftKey()?composer:(sharedComposers.get(key)?.text ?? drafts[key] ?? (draftId ? taskDrafts[draftId]?.text : '') ?? '');
+    const next=previous ? `${previous.replace(/\s+$/, '')}\n\n${value}` : value;
+    drafts[key]=next;
+    if(key===currentDraftKey()) composer=next;
+    if(draftId) {
+      const draft=taskDrafts[draftId];
+      if(draft) taskDrafts[draftId]={...draft,text:next};
+    }
+    publishComposer(key,next);
   }
   export async function attachNativeFiles(paths:string[]):Promise<void> {await attachFiles(paths);}
   function fileDrop(node:HTMLElement) {
@@ -5084,7 +5091,11 @@
 {#snippet voiceButton()}
   {#if nativeRuntime || (isLanBrowser() && !embedded)}
     {#key `${currentDraftKey() ?? ''}:${attachmentScope}`}
-      <VoiceRecorder disabled={filesBusy || draftSendPending || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
+      {#if isOwnerRelayBrowser() && mobileNativeSpeechBridge && $mobileSpeechMode==='on-device'}
+        <NativeSpeechRecorder contextKey={currentDraftKey() ?? ''} disabled={filesBusy || draftSendPending || !!voiceProcessing[currentDraftKey() ?? '']} ontranscript={(transcript,key)=>appendVoiceTranscript(key,transcript)}/>
+      {:else}
+        <VoiceRecorder disabled={filesBusy || draftSendPending || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
+      {/if}
     {/key}
   {/if}
 {/snippet}
@@ -7347,6 +7358,7 @@
     font-size:max(16px,var(--chat-font-size,13px));
   }
   .mobile-navigation :global(.composer textarea) { min-height:36px; resize:none; }
+  .mobile-navigation :global(.composer:not(.expanded) textarea) { max-height:min(35dvh,240px); overflow-y:auto; }
   .mobile-navigation :global(.composer:not(.expanded)) { margin-bottom:0; }
   .mobile-navigation:global([data-keyboard-composer=true]) { --pane-tabbar-height:52px; }
   .mobile-navigation:global([data-keyboard-composer=true]) > .pane-grid { padding-bottom:0; }

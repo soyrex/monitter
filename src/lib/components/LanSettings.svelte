@@ -94,7 +94,7 @@
   {#if browser}
     <p>You are connected to Monitter at {location.host}. Work runs on the host Mac.</p>
     {#if isOwnerRelayBrowser()}
-      <p class="hint">This paired iPhone workspace uses the encrypted relay. Allow microphone access when prompted to record here; the desktop transcribes your audio and only the transcript is sent to the agent.</p>
+      <p class="hint">This paired phone workspace uses the encrypted relay. If Desktop Whisper is selected, allow microphone access when prompted; the desktop transcribes your audio and only the transcript is sent to the agent. On-device voice recognition sends only the transcript to the desktop.</p>
     {:else}
     <p class="hint">Browser recording requires a secure HTTPS connection and a trusted Monitter certificate. If this page is open over HTTP, open the HTTPS address from desktop Settings and complete certificate trust on this device first.</p>
     {#if browserCertificateAvailable}

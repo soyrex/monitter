@@ -1,4 +1,4 @@
-# Voice messages (desktop, owner LAN, and paired iPhone)
+# Voice messages (desktop, LAN, and mobile)
 
 The composer records up to 90 seconds. The desktop Mac defaults to local
 whisper.cpp transcription; desktop Settings → Conversation can select Apple
@@ -46,12 +46,37 @@ sent to the desktop Mac only for transcription. A browser-trusted HTTPS origin
 and microphone permission are required. The LAN device does not need
 whisper.cpp or the model. The transcript returns to the browser composer for
 review, and only that text follows the normal agent message path. Ordinary
-HTTP LAN pages cannot use browser microphone capture. The paired iPhone app uses
-its bundled loopback page and an explicitly approved encrypted owner relay; it
-can record after the iOS microphone permission is granted. The desktop still
+HTTP LAN pages cannot use browser microphone capture. Paired phone apps use
+their secure bundled pages and an explicitly approved encrypted owner relay; they
+can record after microphone permission is granted. The desktop still
 does the transcription, and only transcript text enters the agent message.
-Shared visitor clients cannot use owner voice transcription. The iPhone app
+Shared visitor clients cannot use owner voice transcription. The phone apps
 does not store the WAV or create an audio attachment.
+
+## On-device mobile transcription
+
+On a paired iPhone or Android phone, Settings → Conversation → Voice transcription
+offers **Desktop Whisper** and **On this phone**. The saved choice belongs to
+that phone; Desktop Whisper remains the default for existing installations.
+On-device mode uses Apple's Speech recognizer only when the current language
+supports local recognition. It requests microphone and speech-recognition
+permission on first use, captures live audio in the iOS shell, and inserts only
+the resulting text into the same editable composer. Audio is not sent to the
+desktop, to Apple servers, or to the agent. If local recognition is unavailable,
+the iPhone shows that state instead of silently switching to another engine;
+select Desktop Whisper in Settings to use the established path.
+
+The Android paired owner workspace uses the same two-mode composer and setting.
+Its on-device mode needs Android 12 (API 31) or newer and an installed local
+recognizer for the chosen language; older or unsupported devices retain typing
+and can select Desktop Whisper. Android never uses a cloud recognizer as an
+automatic fallback. The previous limited controller remains available through
+the bundled `/mobile?controller=1` route, with its narrower permissions.
+
+Neither mobile mode saves an audio file or attaches audio to a harness message.
+On-device processing uses phone CPU/battery and may need a language model already
+installed by the system. Voice availability and accuracy must be checked on real
+devices and languages before treating it as a full substitute for desktop Whisper.
 
 ## LAN HTTPS setup
 

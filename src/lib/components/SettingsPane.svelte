@@ -20,7 +20,8 @@
   import { motionPreference, motionView, setMotionPreference, type MotionPreference } from '$lib/motion';
   import { setTerminalTheme, terminalTheme, terminalThemes, type TerminalThemeId } from '$lib/terminal-theme';
   import { appTheme, appThemePreset, appThemes, applyThemeContrast, resetAppTheme, setAppTheme, setAppThemeAccent, setAppThemeContrast, type AppThemeId } from '$lib/app-theme';
-  import { isLanBrowser } from '$lib/lan';
+  import { isLanBrowser, isOwnerRelayBrowser } from '$lib/lan';
+  import { mobileSpeechMode, nativeSpeechPlatform, setMobileSpeechMode } from '$lib/mobile-speech';
   import { remoteControlOpen, setRemoteControlTarget } from '$lib/workspace-panels';
   import LanSettings from './LanSettings.svelte';
   import SavedApprovalRules from './SavedApprovalRules.svelte';
@@ -74,10 +75,19 @@
   const accents = ["#00a8f0", "#3978d4", "#8755c7", "#c44c79", "#c27524"];
   const remoteControlAvailable = !isLanBrowser() && getBridge().available;
   let iosConnectionAvailable = $state(false);
-  onMount(() => { iosConnectionAvailable = !!(window as Window & { webkit?: { messageHandlers?: { changeConnection?: { postMessage: (value: null) => void } } } }).webkit?.messageHandlers?.changeConnection; });
+  let androidConnectionAvailable = $state(false);
+  let mobileNativeSpeechAvailable = $state(false);
+  let mobileSpeechDevice = $state('phone');
+  onMount(() => {
+    iosConnectionAvailable = !!(window as Window & { webkit?: { messageHandlers?: { changeConnection?: { postMessage: (value: null) => void } } } }).webkit?.messageHandlers?.changeConnection;
+    const platform = nativeSpeechPlatform();
+    androidConnectionAvailable = platform === 'android' && isOwnerRelayBrowser();
+    mobileNativeSpeechAvailable = platform !== null && isOwnerRelayBrowser();
+    mobileSpeechDevice = platform === 'ios' ? 'iPhone' : platform === 'android' ? 'Android phone' : 'phone';
+  });
   const categories = $derived<{ id: Category; label: string; detail: string; icon: typeof Palette }[]>([
     { id: "profile", label: "Profile", detail: "Your name for new chats", icon: UserRound },
-    ...(iosConnectionAvailable ? [{ id: "connection" as const, label: "Connection", detail: "Choose LAN or relay workspace", icon: Smartphone }] : []),
+    ...(iosConnectionAvailable || androidConnectionAvailable ? [{ id: "connection" as const, label: "Connection", detail: iosConnectionAvailable ? "Choose LAN or relay workspace" : "Manage paired workspace", icon: Smartphone }] : []),
     { id: "lan", label: "LAN access", detail: "Open Monitter in a browser", icon: ShieldCheck },
     ...(remoteControlAvailable ? [{ id: "remote" as const, label: "Remote control", detail: "Pair this desktop with your phone", icon: Smartphone }] : []),
     { id: "agents", label: "Agents", detail: "Browse and configure your agents", icon: Bot },
@@ -243,6 +253,7 @@
   function changeIOSConnection() {
     (window as Window & { webkit?: { messageHandlers?: { changeConnection?: { postMessage: (value: null) => void } } } }).webkit?.messageHandlers?.changeConnection?.postMessage(null);
   }
+  function manageAndroidPairing() { window.location.assign('/mobile?owner=1'); }
 </script>
 
 <section class="settings-pane" aria-label="Settings">
@@ -270,7 +281,7 @@
         <h1>{categories.find((item) => item.id === activeCategory)?.label}</h1>
       </div>
       <div class="save-state" aria-live="polite">
-        {#if activeCategory === "connection"}<span>iPhone app</span>
+        {#if activeCategory === "connection"}<span>{iosConnectionAvailable ? 'iPhone app' : 'Android app'}</span>
         {:else if activeCategory === "lan"}<span>Local network</span>
         {:else if activeCategory === "remote"}<span>Desktop pairing</span>
         {:else if activeCategory === "extensions" || activeCategory === "environment"}<span>Applies on next harness launch</span>
@@ -290,9 +301,9 @@
     <div class="settings-category" use:motionView={{ key: activeCategory, y: 4, duration: 150, opacity: .9, enabled: visible && active }}>
     {#if activeCategory === "connection"}
       <div class="section-stack">
-        <section class="setting-card" aria-labelledby="iphone-connection-heading">
-          <div class="card-heading"><h2 id="iphone-connection-heading">Workspace connection</h2><p>Switch between the nearby LAN workspace and your paired relay connection without leaving the app.</p></div>
-          <div class="setting-actions"><button class="secondary" type="button" onclick={changeIOSConnection}>Change connection</button></div>
+        <section class="setting-card" aria-labelledby="phone-connection-heading">
+          <div class="card-heading"><h2 id="phone-connection-heading">Workspace connection</h2><p>{iosConnectionAvailable ? 'Switch between the nearby LAN workspace and your paired relay connection without leaving the app.' : 'Reconnect or pair this phone with your desktop through the encrypted relay.'}</p></div>
+          <div class="setting-actions"><button class="secondary" type="button" onclick={iosConnectionAvailable ? changeIOSConnection : manageAndroidPairing}>{iosConnectionAvailable ? 'Change connection' : 'Manage pairing'}</button></div>
         </section>
       </div>
     {:else if activeCategory === "lan"}<LanSettings />
@@ -559,6 +570,13 @@
             <p class="hint">Apple on-device transcription is available in the macOS app. Whisper remains the default. Voice audio is not attached to the message.</p>
           </section>
         {/if}
+        {#if mobileNativeSpeechAvailable}
+          <section class="setting-card" aria-labelledby="speech-heading">
+            <div class="card-heading"><h2 id="speech-heading">Voice transcription on this {mobileSpeechDevice}</h2><p>Choose where spoken messages become editable text. This choice is saved on this {mobileSpeechDevice}.</p></div>
+            <label class="speech-choice"><input type="radio" name="mobile-speech-mode" value="desktop" checked={$mobileSpeechMode === 'desktop'} onchange={() => setMobileSpeechMode('desktop')}/><span><strong>Desktop Whisper</strong><small>Current method. The recording goes to your paired desktop for local transcription.</small></span></label>
+            <label class="speech-choice"><input type="radio" name="mobile-speech-mode" value="on-device" checked={$mobileSpeechMode === 'on-device'} onchange={() => setMobileSpeechMode('on-device')}/><span><strong>On this {mobileSpeechDevice}</strong><small>Recognize speech on the phone and send only the text. Availability depends on the phone and language.</small></span></label>
+          </section>
+        {/if}
         <section class="setting-card" aria-labelledby="project-board-heading">
           <div class="card-heading"><h2 id="project-board-heading">Project boards</h2><p>Private coordination notes shown as #channels for each project.</p></div>
           <label class="switch-row"><span><strong>Enable project boards</strong><small>Agents working in a project receive recent notes at turn start and can check for newer notes at meaningful checkpoints. Posting never wakes another agent. Turning this off hides boards but preserves their notes.</small></span><input type="checkbox" role="switch" aria-label="Enable project boards" checked={settings.projectBoardEnabled === true} onchange={(event) => void save({ projectBoardEnabled: event.currentTarget.checked })} /></label>
@@ -608,5 +626,11 @@
   @keyframes spin { to { transform:rotate(360deg); } }
   @container (max-width:620px) { .settings-pane { grid-template-columns:150px minmax(0,1fr); }.settings-nav { padding:14px 7px; }.settings-nav button { padding:9px 7px; }.settings-nav small { display:none; }.settings-content { padding:18px 14px; }.settings-header { margin-bottom:18px; }.settings-header h1 { font-size:calc(20px * var(--interface-font-ratio, 1)); }.save-state { font-size:calc(10px * var(--interface-font-ratio, 1)); }.font-setting { grid-template-columns:1fr; gap:10px; } }
   @container (max-width:430px) { .settings-pane { grid-template-columns:52px minmax(0,1fr); }.settings-nav { padding:12px 8px; }.nav-heading,.settings-nav span { display:none; }.settings-nav button { justify-content:center; padding:10px; }.settings-content { padding:16px 12px; }.setting-card { padding:14px; }.settings-header { align-items:center; }.save-state { font-size:0; }.save-state :global(svg) { width:14px; height:14px; }.swatches { gap:7px; }.colour-picker { margin-left:0; }.app-theme-selectors { grid-template-columns:1fr; }.theme-default-row { align-items:flex-start; flex-direction:column; } }
+  .speech-choice { display:flex; align-items:flex-start; gap:10px; padding:11px 12px; border:1px solid var(--line); border-radius:9px; cursor:pointer; }
+  .speech-choice:has(input:checked) { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,var(--panel)); }
+  .speech-choice input { flex:none; margin:2px 0 0; accent-color:var(--accent); }
+  .speech-choice span { display:grid; gap:3px; }
+  .speech-choice strong { font-size:calc(12px * var(--interface-font-ratio,1)); }
+  .speech-choice small { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio,1)); line-height:1.45; }
   @media (prefers-reduced-motion: reduce) { :global(:root:not([data-motion="on"])) .save-state :global(svg.spin) { animation:none; }:global(:root:not([data-motion="on"])) .switch-row input,:global(:root:not([data-motion="on"])) .switch-row input::after { transition:none; } }
 </style>

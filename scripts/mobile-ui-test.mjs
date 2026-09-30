@@ -34,6 +34,20 @@ try {
     return window.desktop.invitation;
   },relayUrl);
   const phone=await browser.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  await phone.addInitScript(() => {
+    window.__speechCalls = [];
+    window.monitterSpeechAndroid = { postMessage(raw) {
+      const message = JSON.parse(raw);
+      window.__speechCalls.push(message);
+      const emit = (type, extra = {}) => window.dispatchEvent(new CustomEvent('monitter:native-speech', {
+        detail: { sessionId: message.sessionId, type, ...extra },
+      }));
+      if (message.action === 'status') emit('availability', { available: true });
+      if (message.action === 'start') emit('started');
+      if (message.action === 'stop') emit('final', { text: 'Android on-device transcript' });
+      if (message.action === 'cancel') emit('stopped');
+    } };
+  });
   const errors=[];phone.on('pageerror',e=>errors.push(e.message));
   await phone.goto(new URL('mobile',baseUrl).href,{waitUntil:'domcontentloaded',timeout:60000});
   await phone.evaluate(()=>{window.scanRequests=0;window.monitterAndroid={postMessage:value=>{if(value==='scanQR')window.scanRequests++;}};});
@@ -58,6 +72,12 @@ try {
   await expect(phone.getByRole('tab',{name:'Activity view',exact:true})).toHaveAttribute('aria-selected','true');
   await phone.getByRole('tab',{name:'Standard view',exact:true}).click();
   await phone.getByRole('button',{name:'Controller test'}).click();
+  const nativeRecorder=phone.locator('.native-speech-recorder');
+  await nativeRecorder.getByRole('button',{name:'Record voice message on this device'}).click();
+  await expect(nativeRecorder.getByRole('button',{name:'Stop recording'})).toBeVisible();
+  await nativeRecorder.getByRole('button',{name:'Stop recording'}).click();
+  await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Android on-device transcript');
+  expect(await phone.evaluate(()=>window.__speechCalls.some(call=>call.action==='start'))).toBe(true);
   await phone.getByLabel('Message',{exact:true}).fill('Keep this draft');
   await phone.getByRole('button',{name:'Open chats menu'}).click();
   await phone.getByRole('button',{name:'Other test chat'}).click();

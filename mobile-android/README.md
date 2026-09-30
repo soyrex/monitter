@@ -1,6 +1,9 @@
 # Monitter Android shell
 
-This is a thin Android WebView container for the shared static `/mobile` route.
+This is an Android WebView container for the paired owner workspace. Its bundled
+`/mobile` route bootstraps pairing, then opens the same full owner relay workspace
+as iPhone at the bundled root `/`. The previous limited controller remains
+available at `/mobile?controller=1`.
 It builds fresh web assets with Vite and packages this checkout's `build/`
 directory. It does not run the desktop build or publish to the desktop LAN server.
 The app serves that bundle at Android's secure
@@ -32,18 +35,29 @@ or by opening the APK on the phone and allowing installation from that source.
 Pair with the desktop using the native QR scanner or nine-digit device key,
 then compare the verification numbers and approve on desktop.
 
-Version 0.3.0 mirrors the desktop sidebar in the paired mobile menu while keeping
-mobile navigation independent. It uses the existing controller capabilities;
+The full workspace requires a separate owner approval on the desktop after
+controller pairing. The bundled root uses that approved encrypted relay for
+desktop operations; it does not grant owner access to the limited controller.
+Desktop Whisper is the default voice mode; Settings → Conversation can select
+on-device speech recognition on Android 12+ with a local recognizer. Only the
+transcript enters the draft and agent message, with no WAV attachment.
+
+Version 0.3.0's limited mobile menu remains available through the controller
+fallback route. It uses the existing controller capabilities;
 desktop-only operations still require the desktop app.
 
 The mobile menu includes Standard, Activity and Projects views, channels, archived
 chats, and read-only terminal, Preferences, Hosts and Agent directory views.
 Navigation and drafts remain usable while controller requests are pending.
-Transcripts initially render 100 recent messages with an explicit earlier-history
-control; terminal output retains a labelled 120,000-character tail.
+The limited controller keeps a bounded recent message tail and marks earlier
+history as available in the owner workspace; terminal output retains a labelled
+120,000-character tail.
 
-`npm run test:android-bundle` tests the actual packaged assets, using a local
-encrypted relay and a test-only desktop bridge. It covers pairing, menu retention
+`npm run test:android-bundle` tests the packaged limited-controller fallback,
+using a local encrypted relay and a test-only desktop bridge. The paired owner
+workspace and both voice choices are covered by
+`MONITTER_OWNER_TEST_PLATFORM=android node scripts/owner-relay-ui-run.mjs`
+after a direct Vite build. These checks cover pairing, menu retention
 through slow refreshes, navigation/drafts during a slow send, history limits,
 single delivery and disconnect. Native QR scanning still needs a physical device.
 

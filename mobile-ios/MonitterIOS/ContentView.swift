@@ -1,6 +1,8 @@
 import SwiftUI
 import WebKit
 import Network
+import Speech
+import AVFoundation
 
 private enum ConnectionMode: Equatable {
     case chooser
@@ -386,6 +388,7 @@ private struct WebContentView: UIViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "scanQR")
         configuration.userContentController.add(context.coordinator, name: "changeConnection")
+        configuration.userContentController.add(context.coordinator, name: "monitterSpeech")
         let view = MonitterWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = context.coordinator
@@ -393,12 +396,14 @@ private struct WebContentView: UIViewRepresentable {
         view.isOpaque = false
         view.backgroundColor = .systemBackground
         webView = view
+        context.coordinator.speechWebView = view
         webViewReady(view)
         return view
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.pairedMode = url?.host == "127.0.0.1"
+        context.coordinator.speechWebView = uiView
         // SwiftUI can redraw while the paired page navigates from /mobile to
         // the owner workspace at /. Reload only when the chosen connection
         // changes, not whenever WebKit's current page differs from that entry.
@@ -414,12 +419,25 @@ private struct WebContentView: UIViewRepresentable {
         }
     }
 
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterSpeech")
+        coordinator.cancelSpeech()
+    }
+
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         private let requestScan: () -> Void
         private let requestConnectionChooser: () -> Void
         private let navigationError: (String) -> Void
         var pairedMode = false
         var requestedURL: URL?
+        private var speechEngine: AVAudioEngine?
+        private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
+        private var recognitionTask: SFSpeechRecognitionTask?
+        private var speechSessionId: String?
+        private var speechDeadline: DispatchWorkItem?
+        private var speechFinalizationWatchdog: DispatchWorkItem?
+        private var lastPartialTranscript: String?
+        weak var speechWebView: WKWebView?
         init(requestScan: @escaping () -> Void, requestConnectionChooser: @escaping () -> Void, navigationError: @escaping (String) -> Void) {
             self.requestScan = requestScan
             self.requestConnectionChooser = requestConnectionChooser
@@ -453,6 +471,15 @@ private struct WebContentView: UIViewRepresentable {
             DispatchQueue.main.async { self.navigationError(error.localizedDescription) }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "monitterSpeech" {
+                guard message.frameInfo.isMainFrame,
+                      message.frameInfo.securityOrigin.protocol == "http",
+                      message.frameInfo.securityOrigin.host == "127.0.0.1",
+                      message.frameInfo.securityOrigin.port == 31977,
+                      let body = message.body as? [String: Any] else { return }
+                handleSpeech(body)
+                return
+            }
             if message.name == "changeConnection" {
                 guard message.frameInfo.isMainFrame,
                       requestedURL != nil,
@@ -467,6 +494,201 @@ private struct WebContentView: UIViewRepresentable {
                   message.frameInfo.securityOrigin.host == "127.0.0.1",
                   message.frameInfo.securityOrigin.port == 31977 else { return }
             requestScan()
+        }
+
+        func cancelSpeech() {
+            finishSpeech(teardown: true)
+        }
+
+        private func finishSpeech(teardown: Bool) {
+            speechDeadline?.cancel()
+            speechDeadline = nil
+            speechFinalizationWatchdog?.cancel()
+            speechFinalizationWatchdog = nil
+            speechEngine?.inputNode.removeTap(onBus: 0)
+            speechEngine?.stop()
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            speechRequest?.endAudio()
+            recognitionTask?.cancel()
+            recognitionTask = nil
+            speechRequest = nil
+            speechEngine = nil
+            let oldSession = speechSessionId
+            speechSessionId = nil
+            lastPartialTranscript = nil
+            if teardown, let oldSession { emit(sessionId: oldSession, type: "stopped") }
+        }
+
+        private func emit(sessionId: String, type: String, available: Bool? = nil, text: String? = nil, error: String? = nil) {
+            guard let webView = speechWebView, pairedMode,
+                  let page = webView.url, page.scheme == "http", page.host == "127.0.0.1", page.port == 31977 else { return }
+            var detail: [String: Any] = ["sessionId": sessionId, "type": type]
+            if let available { detail["available"] = available }
+            if let text { detail["text"] = text }
+            if let error { detail["error"] = error }
+            guard let data = try? JSONSerialization.data(withJSONObject: detail, options: [.fragmentsAllowed]),
+                  var json = String(data: data, encoding: .utf8) else { return }
+            json = json.replacingOccurrences(of: "\\u2028", with: "\\\\u2028")
+                .replacingOccurrences(of: "\\u2029", with: "\\\\u2029")
+            webView.evaluateJavaScript("window.dispatchEvent(new CustomEvent('monitter:native-speech', {detail:\(json)}))")
+        }
+
+        private func speechRecognizer(localeIdentifier: String?) -> SFSpeechRecognizer? {
+            let locale = localeIdentifier.flatMap(Locale.init(identifier:)) ?? Locale.current
+            guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable,
+                  recognizer.supportsOnDeviceRecognition else { return nil }
+            return recognizer
+        }
+
+        private func handleSpeech(_ body: [String: Any]) {
+            guard pairedMode,
+                  requestedURL != nil,
+                  let webView = speechWebView,
+                  let pageURL = webView.url,
+                  pageURL.scheme == "http", pageURL.host == "127.0.0.1", pageURL.port == 31977 else { return }
+            guard let action = body["action"] as? String,
+                  let sessionId = body["sessionId"] as? String,
+                  !sessionId.isEmpty, sessionId.count <= 128 else { return }
+            let localeIdentifier = body["locale"] as? String
+            switch action {
+            case "status":
+                emit(sessionId: sessionId, type: "availability", available: speechRecognizer(localeIdentifier: localeIdentifier) != nil)
+            case "stop":
+                guard speechSessionId == sessionId else { return }
+                endCaptureAndScheduleFinalization(sessionId: sessionId)
+            case "cancel":
+                guard speechSessionId == sessionId else { return }
+                finishSpeech(teardown: true)
+            case "start":
+                startSpeech(sessionId: sessionId, localeIdentifier: localeIdentifier)
+            default:
+                return
+            }
+        }
+
+        private func startSpeech(sessionId: String, localeIdentifier: String?) {
+            guard speechSessionId == nil else {
+                emit(sessionId: sessionId, type: "error", error: "A speech session is already active.")
+                return
+            }
+            guard let recognizer = speechRecognizer(localeIdentifier: localeIdentifier) else {
+                emit(sessionId: sessionId, type: "error", error: "On-device speech recognition is unavailable for this locale.")
+                return
+            }
+            speechSessionId = sessionId
+            lastPartialTranscript = nil
+            requestSpeechAuthorization(sessionId: sessionId, recognizer: recognizer)
+        }
+
+        private func endCaptureAndScheduleFinalization(sessionId: String) {
+            guard speechSessionId == sessionId else { return }
+            speechDeadline?.cancel()
+            speechDeadline = nil
+            speechEngine?.stop()
+            speechRequest?.endAudio()
+            speechFinalizationWatchdog?.cancel()
+            let watchdog = DispatchWorkItem { [weak self] in
+                guard let self, self.speechSessionId == sessionId else { return }
+                if let transcript = self.lastPartialTranscript, !transcript.isEmpty {
+                    self.emit(sessionId: sessionId, type: "final", text: transcript)
+                } else {
+                    self.emit(sessionId: sessionId, type: "error", error: "Speech recognition did not return a final transcript.")
+                }
+                self.finishSpeech(teardown: false)
+            }
+            speechFinalizationWatchdog = watchdog
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: watchdog)
+        }
+
+        private func requestSpeechAuthorization(sessionId: String, recognizer: SFSpeechRecognizer) {
+            let requestMicrophone: (@escaping (Bool) -> Void) -> Void = { completion in
+                if #available(iOS 17.0, *) {
+                    AVAudioApplication.requestRecordPermission(completionHandler: completion)
+                } else {
+                    AVAudioSession.sharedInstance().requestRecordPermission(completion)
+                }
+            }
+            let begin: () -> Void = { [weak self] in
+                requestMicrophone { granted in
+                    DispatchQueue.main.async {
+                        guard let self, self.speechSessionId == sessionId else { return }
+                        guard granted else {
+                            self.finishSpeech(teardown: false)
+                            self.emit(sessionId: sessionId, type: "error", error: "Microphone access was denied.")
+                            return
+                        }
+                        self.beginRecognition(sessionId: sessionId, recognizer: recognizer)
+                    }
+                }
+            }
+            switch SFSpeechRecognizer.authorizationStatus() {
+            case .authorized: begin()
+            case .notDetermined:
+                SFSpeechRecognizer.requestAuthorization { status in
+                    DispatchQueue.main.async {
+                        guard self.speechSessionId == sessionId else { return }
+                        guard status == .authorized else {
+                            self.finishSpeech(teardown: false)
+                            self.emit(sessionId: sessionId, type: "error", error: "Speech recognition access was denied.")
+                            return
+                        }
+                        begin()
+                    }
+                }
+            default:
+                finishSpeech(teardown: false)
+                emit(sessionId: sessionId, type: "error", error: "Speech recognition access is unavailable or denied.")
+            }
+        }
+
+        private func beginRecognition(sessionId: String, recognizer: SFSpeechRecognizer) {
+            let engine = AVAudioEngine()
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            request.shouldReportPartialResults = true
+            request.requiresOnDeviceRecognition = true
+            do {
+                let audioSession = AVAudioSession.sharedInstance()
+                try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
+                try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+                let input = engine.inputNode
+                let format = input.outputFormat(forBus: 0)
+                input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+                    request.append(buffer)
+                }
+                engine.prepare()
+                try engine.start()
+                speechEngine = engine
+                speechRequest = request
+                emit(sessionId: sessionId, type: "started")
+                recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+                    DispatchQueue.main.async {
+                        guard let self, self.speechSessionId == sessionId else { return }
+                        if let result {
+                            let text = result.bestTranscription.formattedString
+                            if !result.isFinal, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                self.lastPartialTranscript = text
+                            }
+                            self.emit(sessionId: sessionId, type: result.isFinal ? "final" : "partial", text: text)
+                            if result.isFinal {
+                                self.finishSpeech(teardown: false)
+                            }
+                        }
+                        else if let error {
+                            self.finishSpeech(teardown: false)
+                            self.emit(sessionId: sessionId, type: "error", error: error.localizedDescription)
+                        }
+                    }
+                }
+                let deadline = DispatchWorkItem { [weak self] in
+                    guard let self, self.speechSessionId == sessionId else { return }
+                    self.endCaptureAndScheduleFinalization(sessionId: sessionId)
+                }
+                speechDeadline = deadline
+                DispatchQueue.main.asyncAfter(deadline: .now() + 90, execute: deadline)
+            } catch {
+                finishSpeech(teardown: false)
+                emit(sessionId: sessionId, type: "error", error: error.localizedDescription)
+            }
         }
     }
 }

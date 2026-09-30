@@ -50,6 +50,7 @@ xcrun swiftc \
   -framework SwiftUI \
   -framework WebKit \
   -framework AVFoundation \
+  -framework Speech \
   -framework Network \
   -framework UIKit \
   -o "$app_dir/MonitterIOS" \

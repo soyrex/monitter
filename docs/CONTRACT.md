@@ -1533,7 +1533,7 @@ Transcription accepts only bounded, valid PCM16 WAV input; temporary audio and o
 the command. First-run Whisper startup can spend additional time compiling local Metal kernels;
 the native process has a five-minute hard timeout. Errors and process output never contain audio content.
 The transcription command is available to the native owner, the owner LAN view,
-and the paired iPhone through its separately approved encrypted owner relay.
+and paired phones through its separately approved encrypted owner relay.
 The native macOS owner can set `Settings.voiceTranscriptionEngine` to `"apple"`
 instead of its `"whisper"` default. In that mode the desktop calls native-only
 `transcribe_voice_message_apple { audioBase64: string }` with the same bounded WAV
@@ -1544,13 +1544,32 @@ sending audio elsewhere. The Apple command is unavailable to LAN and paired
 clients; their `transcribe_voice_message` requests continue to use desktop Whisper.
 Both commands delete their temporary audio and send only editable text to the
 composer and eventual agent message.
-The iPhone shell grants microphone capture only to its bundled loopback owner
+The mobile shells grant browser microphone capture only to their bundled owner
 page. Shared visitors cannot invoke the owner command. It does not store the WAV or create an
 attachment ID. The separate `read_attachment_audio { attachmentId }` reader applies only
 to an already registered WAV attachment, validates MIME type, format, and duration, and
 remains desktop-only. The macOS bundle declares the microphone and speech-recognition
 purpose strings and the audio-input hardened-runtime entitlement required for recording.
 Setup and privacy details are in `docs/VOICE_MESSAGES.md`.
+
+Mobile on-device transcription is a separate shell-to-bundled-page path. The
+iPhone's `monitterSpeech` WKScriptMessageHandler accepts only paired main-frame
+requests from `http://127.0.0.1:31977`; Android's `monitterSpeechAndroid`
+WebView listener accepts only its bundled main frame at
+`https://appassets.androidplatform.net`. Both accept `{ action: "status" | "start" |
+"stop" | "cancel", sessionId: string, locale?: string }` and return a
+`monitter:native-speech` CustomEvent whose detail contains `sessionId`, `type`
+(`availability`, `started`, `partial`, `final`, `error`, or `stopped`), and the
+applicable `available`, `text`, or `error` field. Status checks do not request
+microphone permission. A session lasts at most 90 seconds of capture. Only a
+final transcript enters an editable draft; neither native shell sends audio to
+the desktop, another speech server, an attachment, or a harness prompt. Paired
+phone Settings stores a per-device `desktop`/`on-device` preference, defaulting
+to the existing desktop path. Android's bundled `/mobile` route bootstraps the
+same separately approved owner workspace as iPhone; `/mobile?controller=1`
+retains the earlier limited controller. Android local recognition is shown only
+where an on-device recognizer exists; unsupported devices keep text input and
+can choose the desktop path. No automatic recognition fallback sends audio elsewhere.
 Codex receives original attachment paths in its text prompt, not inline image input or thumbnails;
 the agent must open the file. This does not guarantee provider-internal full-resolution processing.
 
@@ -1885,7 +1904,11 @@ claims; the approved transport key is the authority for the active visitor sessi
 ## Mobile controller
 
 `docs/MOBILE-CONTROLLER.md` describes the paired mobile clients and relay.
-The iOS shell also offers an owner LAN mode. That mode loads the desktop's live
+Both bundled phone shells enter the separately approved owner workspace through
+the encrypted relay after initial controller pairing. The Android shell retains
+its limited-controller route as an explicit fallback; its bundled HTTPS root is
+the owner workspace, while the bundled `/mobile` route handles pairing. The iOS
+shell also offers an owner LAN mode. That mode loads the desktop's live
 `/` site in WKWebView at an explicitly entered port-18436 address, so its narrow
 layout uses the same owner LAN command surface as a phone browser. The address
 is saved locally without an access code; LAN authentication, when required,

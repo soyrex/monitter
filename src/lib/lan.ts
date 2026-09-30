@@ -4,11 +4,14 @@ import { OwnerRelayDisconnectedError } from './owner-relay-error.js';
 export { OwnerRelayDisconnectedError, isOwnerRelayDisconnectedError } from './owner-relay-error.js';
 export type { LanServerInfo } from './types';
 
-/** The installed iOS shell serves its bundled UI only from this private loopback origin. */
+/** Installed mobile shells serve their bundled UI from fixed private origins. */
 export const isIOSBundleOrigin = () => typeof window !== 'undefined' &&
   window.location.origin === 'http://127.0.0.1:31977';
-/** The bundled root is always an owner-relay workspace, even if WebKit drops the query. */
-export const isOwnerRelayBrowser = () => isIOSBundleOrigin() && window.location.pathname === '/';
+export const isAndroidBundleOrigin = () => typeof window !== 'undefined' &&
+  window.location.origin === 'https://appassets.androidplatform.net';
+export const isMobileBundleOrigin = () => isIOSBundleOrigin() || isAndroidBundleOrigin();
+/** The bundled root is always an owner-relay workspace, even if a WebView drops the query. */
+export const isOwnerRelayBrowser = () => isMobileBundleOrigin() && window.location.pathname === '/';
 
 export const isLanBrowser = () => typeof document !== 'undefined' && (
   (import.meta.env.DEV && (import.meta.env.MODE === 'monitter-web' || import.meta.env.MODE === 'monitter-app-ui')) ||

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { webkit, expect as baseExpect } from '@playwright/test';
+import { chromium, webkit, expect as baseExpect } from '@playwright/test';
 import WebSocket from 'ws';
 
 const { createResumableDesktopSession, generatePairingKeyPair, bytesToBase64url, randomBytes } =
@@ -9,6 +9,7 @@ const { createResumableDesktopSession, generatePairingKeyPair, bytesToBase64url,
 globalThis.WebSocket = WebSocket;
 const expect = baseExpect.configure({ timeout: 30_000 });
 const children = [];
+const android = process.env.MONITTER_OWNER_TEST_PLATFORM === 'android';
 
 function start(command, args, env, pattern) {
   const child = spawn(command, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -83,8 +84,21 @@ try {
   };
   desktop = await createResumableDesktopSession(desktopOptions);
 
-  browser = await webkit.launch();
+  browser = await (android ? chromium : webkit).launch(android ? { args: ['--disable-features=LocalNetworkAccessChecks'] } : {});
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  if (android) {
+    phone.on('pageerror', reason => console.error('Android-origin page error:', reason));
+    phone.on('console', message => { if (message.type() === 'error') console.error('Android-origin console:', message.text()); });
+  }
+  if (android) {
+    // Mirror WebViewAssetLoader's secure bundled origin while serving the
+    // exact Vite build under test. The relay remains a local test server.
+    await phone.route('https://appassets.androidplatform.net/**', async route => {
+      const requested = new URL(route.request().url());
+      const response = await fetch(new URL(requested.pathname + requested.search, baseUrl));
+      await route.fulfill({ status: response.status, contentType: response.headers.get('content-type') ?? 'application/octet-stream', body: Buffer.from(await response.arrayBuffer()) });
+    });
+  }
   await phone.addInitScript(() => {
     Object.defineProperty(navigator, 'mediaDevices', {
       configurable: true,
@@ -106,10 +120,33 @@ try {
       }
       async close() {}
     };
+    window.__nativeSpeechCalls = [];
+    const nativeSpeech = {
+      postMessage(rawMessage) {
+        const message = typeof rawMessage === 'string' ? JSON.parse(rawMessage) : rawMessage;
+        window.__nativeSpeechCalls.push(message);
+        const emit = (type, extra = {}) => window.dispatchEvent(new CustomEvent('monitter:native-speech', {
+          detail: { sessionId: message.sessionId, type, ...extra },
+        }));
+        if (message.action === 'status') emit('availability', { available: true });
+        if (message.action === 'start') {
+          emit('started');
+          emit('partial', { text: 'These words should be readable while I am still speaking.' });
+        }
+        if (message.action === 'stop') emit('final', { text: 'Transcript from on-device speech' });
+        if (message.action === 'cancel') emit('stopped');
+      },
+    };
+    if (window.location.origin === 'https://appassets.androidplatform.net') window.monitterSpeechAndroid = nativeSpeech;
+    else {
+      window.webkit ??= {};
+      window.webkit.messageHandlers ??= {};
+      window.webkit.messageHandlers.monitterSpeech = nativeSpeech;
+    }
   });
   // The shell's fixed private origin must enter owner bootstrap even if a
   // WebKit navigation drops the optional ?owner=1 query string.
-  await phone.goto(new URL('/mobile', baseUrl).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await phone.goto(android ? 'https://appassets.androidplatform.net/mobile' : new URL('/mobile', baseUrl).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await expect(phone.getByRole('button', { name: 'Scan desktop code' })).toBeVisible();
   await phone.evaluate(invitation => window.dispatchEvent(new CustomEvent('monitter:qr', { detail: invitation })), desktop.invitation);
   await expect.poll(() => desktop.getStatus()).toBe('pending');
@@ -166,6 +203,34 @@ try {
   assert.deepEqual(ownerSentMessages[0]?.attachmentIds ?? [], [], 'iPhone voice attached audio to the agent message');
   assert.equal(ownerSentMessages[0]?.text, 'Transcript from iPhone');
   assert.equal(ownerCommands.includes('store_attachment'), false, 'iPhone audio was stored as an attachment');
+  await phone.evaluate(() => {
+    const key = 'monitter:mobile-speech-mode:v1';
+    localStorage.setItem(key, 'on-device');
+    window.dispatchEvent(new StorageEvent('storage', { key, newValue: 'on-device' }));
+  });
+  const nativeRecorder = phone.locator('.composer .native-speech-recorder');
+  await expect(nativeRecorder.getByRole('button', { name: 'Record voice message on this device' })).toBeVisible();
+  await nativeRecorder.getByRole('button', { name: 'Record voice message on this device' }).click();
+  await expect(nativeRecorder.getByRole('button', { name: 'Stop recording' })).toBeVisible();
+  const speechPreview = phone.getByRole('region', { name: 'On-device speech transcript' });
+  await expect(speechPreview).toContainText('These words should be readable while I am still speaking.');
+  const previewRect = await speechPreview.boundingBox();
+  const composerRect = await composer.boundingBox();
+  assert.ok(previewRect && composerRect && previewRect.y + previewRect.height < composerRect.y,
+    'live transcript was not displayed above the composer input');
+  await nativeRecorder.getByRole('button', { name: 'Stop recording' }).click();
+  await expect(composer).toHaveValue('Transcript from on-device speech');
+  await expect(speechPreview).toContainText('Transcript from on-device speech');
+  assert.equal(ownerVoiceCalls.length, 1, 'on-device recognition uploaded audio to desktop Whisper');
+  await phone.getByRole('button', { name: 'Send task message', exact: true }).click();
+  await expect.poll(() => ownerSentMessages.length).toBe(2);
+  assert.equal(ownerSentMessages[1]?.text, 'Transcript from on-device speech');
+  assert.deepEqual(ownerSentMessages[1]?.attachmentIds ?? [], [], 'on-device speech attached audio');
+  await composer.fill('Readable transcript line. '.repeat(120));
+  await expect.poll(() => composer.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  const longDraftHeight = (await composer.boundingBox()).height;
+  const viewportHeight = await phone.evaluate(() => innerHeight);
+  assert.ok(longDraftHeight < viewportHeight * 0.4, 'a long transcript grew the mobile input beyond its visible review area');
   await composer.fill('Preserve this unsent draft');
   await phone.evaluate(() => { window.__networkRecoveryShell = document.querySelector('.app-shell'); });
   desktop.close();
@@ -178,17 +243,22 @@ try {
   assert.equal(await phone.locator('.owner-relay-content').evaluate(node => !!node.closest('[inert]')), false, 'outage blocked the workspace');
   assert.equal(await phone.getByTestId('connection-recovery-spinner').evaluate(node => getComputedStyle(node).pointerEvents), 'none');
   await phone.getByRole('button', { name: 'Send task message', exact: true }).click();
-  await expect(phone.locator('.alert.error')).toContainText('Reconnecting to your desktop. Try again once connected.');
+  await expect(phone.getByTestId('connection-recovery-spinner')).toBeVisible();
   await expect(composer).toHaveValue('Preserve this unsent draft');
-  assert.equal(ownerSentMessages.length, 1, 'offline send was dispatched');
+  assert.equal(ownerSentMessages.length, 2, 'offline send was dispatched');
   desktop = await createResumableDesktopSession(desktopOptions);
   await expect(phone.getByTestId('connection-recovery-spinner')).toHaveCount(0);
   await expect.poll(() => desktop.getOwnerWorkspaceState()).toBe('approved');
   assert.equal(desktop.getPeerControllerPublicKey(), phoneKey);
   assert.equal(await phone.evaluate(() => window.__networkRecoveryShell === document.querySelector('.app-shell')), true, 'reconnect remounted the workspace');
   await expect(composer).toHaveValue('Preserve this unsent draft');
-  assert.equal(ownerSentMessages.length, 1, 'reconnect replayed an unsent draft');
-  console.log('WebKit owner relay: transcript-only voice, approval, foreground recovery, quiet readable outage, and explicit send feedback passed.');
+  assert.equal(ownerSentMessages.length, 2, 'reconnect replayed an unsent draft');
+  await phone.getByRole('button', { name: 'Open chats menu' }).click();
+  await phone.getByRole('button', { name: 'Open Settings' }).click();
+  await phone.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await expect(phone.getByRole('radio', { name: /Desktop Whisper/ })).toBeVisible();
+  await expect(phone.getByRole('radio', { name: /On this (iPhone|Android phone)/ })).toBeChecked();
+  console.log(`${android ? 'Android-origin Chromium' : 'WebKit'} owner relay: desktop and on-device transcript-only voice, approval, foreground recovery, quiet readable outage, and explicit send feedback passed.`);
 } finally {
   desktop?.close();
   await browser?.close();

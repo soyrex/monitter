@@ -25,6 +25,8 @@
   import MessageMeta from '$lib/components/MessageMeta.svelte';
   import ResponseMetadata from '$lib/components/ResponseMetadata.svelte';
   import SparkleField from '$lib/components/SparkleField.svelte';
+  import NativeSpeechRecorder from '$lib/components/NativeSpeechRecorder.svelte';
+  import { nativeSpeechPlatform } from '$lib/mobile-speech';
   import { contrastForeground } from '$lib/accent-contrast';
   import { loadSidebarViewPreference, saveSidebarViewPreference } from '$lib/sidebar-view-preference';
   import { isCancellationMessage, isContextClearedMessage, modelSettingsChangeLabel } from '$lib/activity-grouping';
@@ -32,10 +34,11 @@
   import ProviderIcon from '$lib/components/ProviderIcon.svelte';
   import { autoGrowTextarea } from '$lib/textarea-autogrow';
   import { projectBoardChannels, projectBoardId } from '$lib/project-board-channels';
-  import { isIOSBundleOrigin } from '$lib/lan';
-  // This route is only a pairing bootstrap inside the iOS shell. Never fall
-  // through to the limited green controller UI if WebKit loses a query string.
-  const ownerWorkspaceMode = isIOSBundleOrigin();
+  import { isMobileBundleOrigin } from '$lib/lan';
+  // Bundled phone shells use this route as the owner-pairing bootstrap. The
+  // earlier limited controller remains available through ?controller=1.
+  const ownerWorkspaceMode = isMobileBundleOrigin() &&
+    (typeof window === 'undefined' || !new URLSearchParams(window.location.search).has('controller'));
 
   let deviceKey=$state(''), verificationCode=$state(''), connecting=$state(false), connectionGeneration=0;
   let status=$state('disconnected'), error=$state(''), connectionError=$state(''), remembered=$state(false), snapshot=$state<Snapshot|null>(null);
@@ -50,6 +53,7 @@
   let snapshotEpoch=0, refreshInFlight=false, refreshToken=0, snapshotRequestSeq=0, snapshotAppliedSeq=0, sidebarViewSession=-1, terminalSelectionEpoch=0, operationSeq=0;
   let sendOps=$state<Record<string,number>>({}), stopOps=$state<Record<string,number>>({});
   let chatDrafts=$state<Record<string,string>>({}), menu=$state<'workspace'|'archived'|'terminals'|'preferences'|'hosts'|'agents'>('workspace');
+  let androidSpeechBridge=$state(false);
   let mobileView=$state<SidebarView>('standard'), collapsedAgents=$state<Record<string,boolean>>({}), collapsedProjects=$state<Record<string,boolean>>({});
   let terminals=$state<TerminalSession[]>([]), terminalText=$state(''), terminalTruncated=$state(false), terminalSeq=$state(0), terminalReads=$state<Record<string,number>>({}), messageLimit=$state(100), terminalDecoder=new TextDecoder();
   let thread=$state<HTMLElement>(), atBottom=$state(true);
@@ -75,6 +79,14 @@
   const reconnecting=$derived(everConnected && status!=='connected' && status!=='rejected');
 
   function selectChat(id:string|null){ if(selected)chatDrafts[selected]=text; messageLimit=100;terminalSelectionEpoch++;selected=id;selectedChannelId=null;selectedTerminalId=null;text=id?chatDrafts[id]??'':''; }
+  function appendNativeTranscript(transcript:string, taskId:string){
+    if(!taskId || !snapshot?.tasks.some(task=>task.id===taskId && !task.archived))return;
+    const previous=selected===taskId?text:(chatDrafts[taskId]??'');
+    const next=previous?`${previous.replace(/\s+$/,'')}\n\n${transcript.trim()}`:transcript.trim();
+    if(!next)return;
+    chatDrafts[taskId]=next;
+    if(selected===taskId)text=next;
+  }
   function selectChannel(id:string){ if(selected)chatDrafts[selected]=text;messageLimit=100;terminalSelectionEpoch++;selected=null;selectedChannelId=id;selectedTerminalId=null;text=''; }
   async function selectTerminal(id:string){ if(selected)chatDrafts[selected]=text;terminalSelectionEpoch++;terminalDecoder=new TextDecoder();selected=null;selectedChannelId=null;selectedTerminalId=id;text='';terminalText='';terminalTruncated=false;terminalSeq=0;await readTerminal(id,0,true); }
   function backToMenu(){if(selected)chatDrafts[selected]=text;terminalSelectionEpoch++;selected=null;selectedChannelId=null;selectedTerminalId=null;text='';}
@@ -153,6 +165,7 @@
   function projectTasks(projectId:string|null){return activityTasks.filter(item=>item.projectId===projectId);}
   function isSnapshot(value: unknown): value is Snapshot { return !!value && typeof value === 'object' && Array.isArray((value as Snapshot).tasks) && Array.isArray((value as Snapshot).agents); }
   onMount(()=>{
+    androidSpeechBridge=nativeSpeechPlatform()==='android';
     let disposed=false;
     const stopScaleWatch=watchViewerInterfaceScales();
     const restore=async(force=false)=>{if(disposed||connecting||preparingPairing)return;const current=connectionGeneration;if(session){if(status==='rejected')return;if(force||status!=='connected')try{await session.reconnectNow();}catch(reason){if(current===connectionGeneration)error=String(reason);}return;}try{const record=await loadMobilePairing();if(!record||disposed||current!==connectionGeneration)return;await openPairing(record,false);}catch(reason){if(current===connectionGeneration)error=`Could not restore secure pairing: ${String(reason)}`;}};
@@ -174,7 +187,7 @@
     <main class="pair"><div class="mark"><QrCode size={38}/></div><h1>Your desktop.<br/>In your pocket.</h1>{#if status==='awaiting_approval'}<p>Compare this number with your desktop, then approve the connection there.</p><strong class="verification">{verificationCode}</strong>{:else if ownerWorkspaceMode && ownerUnsupported}<p>The desktop app needs an update before this phone can open the full workspace through the relay. You can still use the LAN connection.</p>{:else if ownerWorkspaceMode && status==='connected'}<p>Waiting for full-workspace approval on your desktop. This is separate from the existing controller pairing.</p>{:else if status==='waiting_for_peer' || connecting}<p>{connecting?'Connecting…':remembered?'Reconnecting to your saved desktop. Access will resume when it is online.':'Waiting for your desktop. Enable Remote control there and approve this phone.'}</p>{:else}<p>Follow your agents and keep the conversation moving. Work stays on your desktop.</p><button class="primary" onclick={scan}><QrCode size={20}/>Scan desktop code</button><label>Or enter a one-time device key<input aria-label="Device key" inputmode="numeric" autocomplete="one-time-code" maxlength="11" bind:value={deviceKey} placeholder="123 456 789" /></label><button class="secondary" disabled={!/^\d{9}$/.test(deviceKey.replace(/[\s-]/g,''))||connecting} onclick={()=>connect()}>Connect to desktop</button><small>Device keys expire after five minutes and work once. Compare the verification numbers before approving on desktop.</small>{/if}{#if session && status!=='connected'}<button class="secondary" onclick={disconnect}>Start again</button>{/if}</main>
   {:else if viewingConversation}
     <main class="thread" bind:this={thread} onscroll={()=>{if(thread)atBottom=thread.scrollHeight-thread.scrollTop-thread.clientHeight<60;}}>{#if channel}<div class="capability-note"><MessageCircle size={16}/><span>Channels are read-only on mobile. Continue this conversation on desktop.</span></div>{/if}{#if task?.archived}<div class="capability-note"><Archive size={16}/><span>This chat is archived. Restore it on desktop to continue.</span></div>{/if}{#if allConversationMessages.length>visibleMessages.length}<button class="load-earlier" onclick={()=>messageLimit+=100}>Load 100 earlier messages ({allConversationMessages.length-visibleMessages.length} remaining)</button>{/if}{#each visibleMessages as message (message.id)}{#if isContextClearedMessage(message)}<div class="context-cleared-event" role="separator"><span></span><time>{new Date(message.createdAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} · Context Cleared</time><span></span></div>{:else if modelSettingsChangeLabel(message)}<div class="context-cleared-event" role="separator"><span></span><time>{new Date(message.createdAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})} · {modelSettingsChangeLabel(message)}</time><span></span></div>{:else if isCancellationMessage(message)}<div class="cancellation-event" role="status"><CircleStop size={15} aria-hidden="true"/><MessageMeta name={message.text} createdAt={message.createdAt}/></div>{:else}<article class:user={message.role==='user'} class:final-answer={'phase' in message && message.phase==='final_answer'}><div class="message-bubble"><MessageMeta name={message.role==='user'?'You':channel ? snapshot.agents.find(a=>'agentId' in message && a.id===message.agentId)?.name??'Agent' : agentName(task!)} createdAt={message.createdAt}/><div class="message-body">{message.text}</div></div>{#if message.role==='assistant' && 'responseMetadata' in message && message.responseMetadata}<ResponseMetadata metadata={message.responseMetadata}/>{/if}</article>{/if}{:else}<p class="muted">No messages in this conversation yet.</p>{/each}{#if task?.status==='running'}<p class="working">Agent is working…</p>{/if}</main>
-    {#if conversationReadOnly}<div class="read-only">{channel?'Channel messages are view-only on this device.':'Archived chats are view-only on this device.'}</div>{:else}<div class="composer-glow"><SparkleField active={task?.status==='running'} animation={snapshot?.settings.activityAnimation ?? 'sparkles'}/></div><form onsubmit={event=>{event.preventDefault();void send();}}><textarea use:autoGrowTextarea={text} aria-label="Message" placeholder="Message your agent…" bind:value={text} rows="2"></textarea>{#if task?.status==='running'}<button type="button" aria-label="Stop agent" disabled={!!stopOps[task.id]} onclick={stop}><Square size={20}/></button>{/if}<button class="send" aria-label="Send message" disabled={!!sendOps[task?.id??'']||!text.trim()}><ArrowUp size={24}/></button></form>{/if}
+    {#if conversationReadOnly}<div class="read-only">{channel?'Channel messages are view-only on this device.':'Archived chats are view-only on this device.'}</div>{:else}<div class="composer-glow"><SparkleField active={task?.status==='running'} animation={snapshot?.settings.activityAnimation ?? 'sparkles'}/></div><form onsubmit={event=>{event.preventDefault();void send();}}>{#if androidSpeechBridge && selected}{#key selected}<NativeSpeechRecorder contextKey={selected} disabled={!!sendOps[selected]} ontranscript={appendNativeTranscript}/>{/key}{/if}<textarea use:autoGrowTextarea={text} aria-label="Message" placeholder="Message your agent…" bind:value={text} rows="2"></textarea>{#if task?.status==='running'}<button type="button" aria-label="Stop agent" disabled={!!stopOps[task.id]} onclick={stop}><Square size={20}/></button>{/if}<button class="send" aria-label="Send message" disabled={!!sendOps[task?.id??'']||!text.trim()}><ArrowUp size={24}/></button></form>{/if}
   {:else if selectedTerminal}
     <main class="terminal" bind:this={thread}><div class="capability-note"><Monitor size={16}/><span>Terminal output is read-only on mobile.</span></div>{#if terminalTruncated}<p class="view-hint">Showing the most recent 120,000 characters.</p>{/if}<pre>{terminalText || (terminalReads[selectedTerminal.id] ? 'Loading terminal output…' : 'No terminal output yet.')}</pre></main>
   {:else}

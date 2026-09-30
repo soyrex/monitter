@@ -70,7 +70,9 @@ try {
       await route.fulfill({ body: await readFile(file), contentType: ({ '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.woff2': 'font/woff2', '.json': 'application/json' })[extname(file)] ?? 'application/octet-stream' });
     } catch { await route.fulfill({ status: 404, body: 'Not found' }); }
   });
-  await page.goto('https://appassets.androidplatform.net/mobile');
+  // Keep exercising the previous limited controller as an explicit fallback.
+  // The default bundled /mobile entry now requests the full owner workspace.
+  await page.goto('https://appassets.androidplatform.net/mobile?controller=1');
   await expect(page.getByRole('button', { name: 'Connect to desktop', exact: true })).toBeVisible();
   assert.equal(await page.evaluate(() => window.isSecureContext && !!crypto.subtle), true);
   await page.evaluate(invitation => window.dispatchEvent(new CustomEvent('monitter:qr', { detail: invitation })), desktop.invitation);
@@ -91,14 +93,15 @@ try {
   await expect(page.getByRole('tab', { name: 'Projects view', exact: true })).toHaveAttribute('aria-selected', 'true');
   await page.screenshot({ path: 'verification/android-menu.png' });
   await page.getByRole('button', { name: /APK verification chat/ }).click();
-  await expect(page.locator('.thread article')).toHaveCount(100);
-  await page.getByRole('button', { name: /Load 100 earlier messages/ }).click();
-  await expect(page.locator('.thread article')).toHaveCount(150);
+  // The limited controller now projects 32 recent messages per task and a
+  // visible desktop-history notice. Full history belongs to the owner route.
+  await expect(page.locator('.thread article')).toHaveCount(33);
+  await expect(page.getByText('[Earlier messages are available on the desktop.]')).toBeVisible();
   await page.getByLabel('Message', { exact: true }).fill('Message from packaged APK');
   holdSend = true;
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => sendWaiting).toBe(true);
-  await page.getByRole('button', { name: 'Back to chats', exact: true }).click();
+  await page.getByRole('button', { name: 'Open chats menu', exact: true }).click();
   await page.getByRole('button', { name: /APK verification chat/ }).click();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Message from packaged APK');
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();

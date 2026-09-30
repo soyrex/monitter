@@ -55,6 +55,8 @@
 	<string>Monitter uses the camera to scan invitation QR codes.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Monitter uses the microphone to record voice messages for your paired workspace.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Monitter uses on-device speech recognition to transcribe your voice locally.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Monitter connects to your Monitter desktop workspace on your local network.</string>
 	<key>NSAppTransportSecurity</key>
