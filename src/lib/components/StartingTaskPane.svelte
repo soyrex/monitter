@@ -10,9 +10,9 @@
   import { autoGrowTextarea } from '$lib/textarea-autogrow';
 
   type StartingMessage={id:string;createdAt:number;displayText:string;attachments:Attachment[]};
-  let {title,agentName,messages,composer=$bindable(),showHeader=true,oncomposer,onkeydown,avatar,expand}:{
+  let {title,agentName,messages,composer=$bindable(),textarea=$bindable<HTMLTextAreaElement | undefined>(),showHeader=true,oncomposer,onkeydown,avatar,expand}:{
     title:string;agentName:string;messages:StartingMessage[];composer:string;showHeader?:boolean;
-    oncomposer:(value:string)=>void;onkeydown:(event:KeyboardEvent)=>void;avatar:Snippet;expand:Snippet;
+    textarea?:HTMLTextAreaElement;oncomposer:(value:string)=>void;onkeydown:(event:KeyboardEvent)=>void;avatar:Snippet;expand:Snippet;
   }=$props();
 </script>
 
@@ -31,7 +31,7 @@
       {/each}
     </MessagePane>
     <div class="composer">
-      <textarea bind:value={composer} use:autoGrowTextarea={composer} aria-label="Task message" placeholder={`Message ${agentName}…`} oninput={(event)=>oncomposer(event.currentTarget.value)} {onkeydown}></textarea>
+      <textarea bind:this={textarea} bind:value={composer} use:autoGrowTextarea={composer} aria-label="Task message" placeholder={`Message ${agentName}…`} oninput={(event)=>oncomposer(event.currentTarget.value)} {onkeydown}></textarea>
       <footer><button class="primary" aria-label="Starting task" title="Starting…" disabled><LoaderCircle class="spin" size={15}/></button></footer>
     </div>
   </section>

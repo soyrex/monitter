@@ -278,7 +278,48 @@
   let agentPicker = $state<DraftPickerHandle | null>(null);
   let projectPicker = $state<DraftPickerHandle | null>(null);
   let composerTextarea=$state<HTMLTextAreaElement>();
+  let startingTaskTextarea=$state<HTMLTextAreaElement>();
   let lastDraftFocusId=$state<string|null>(null);
+  type DraftComposerFocusTransfer = { draftId:string; phase:'starting'|'starting-focused'|'draft'|'task'; taskId?:string; token:number };
+  let draftComposerFocusTransfer=$state<DraftComposerFocusTransfer|null>(null);
+  let draftComposerFocusToken=0;
+  function queueDraftComposerFocusTransfer(draftId:string,phase:DraftComposerFocusTransfer['phase'],taskId?:string) {
+    draftComposerFocusTransfer={draftId,phase,taskId,token:++draftComposerFocusToken};
+  }
+  function beginDraftComposerFocusTransfer(draftId:string) {
+    if(document.activeElement instanceof HTMLElement && document.activeElement.closest('.draft-composer')) queueDraftComposerFocusTransfer(draftId,'starting');
+    else if(draftComposerFocusTransfer?.draftId===draftId) draftComposerFocusTransfer=null;
+  }
+  function finishDraftComposerFocusTransfer(draftId:string) {
+    const transfer=draftComposerFocusTransfer;
+    if(transfer?.draftId!==draftId || (transfer.phase!=='starting' && transfer.phase!=='starting-focused')) return;
+    if(document.activeElement===startingTaskTextarea) queueDraftComposerFocusTransfer(draftId,'draft');
+    else draftComposerFocusTransfer=null;
+  }
+  function focusTaskComposerAfterDraft(draftId:string,taskId:string) {
+    if(draftComposerFocusTransfer?.draftId===draftId && document.activeElement===startingTaskTextarea) queueDraftComposerFocusTransfer(draftId,'task',taskId);
+    else if(draftComposerFocusTransfer?.draftId===draftId) draftComposerFocusTransfer=null;
+  }
+  $effect(() => {
+    const transfer=draftComposerFocusTransfer;
+    if(!transfer) return;
+    if(transfer.phase!=='task' && currentDraftId!==transfer.draftId) { draftComposerFocusTransfer=null; return; }
+    const ready=transfer.phase==='starting' ? !!startingTaskDraft
+      : transfer.phase==='draft' ? !startingTaskDraft
+      : transfer.phase==='task' ? pane==='task' && !currentDraftId && selectedTaskId===transfer.taskId
+      : false;
+    if(!ready) return;
+    void tick().then(() => {
+      if(draftComposerFocusTransfer?.token!==transfer.token) return;
+      const active=document.activeElement;
+      if(active!==document.body && active!==document.documentElement) { draftComposerFocusTransfer=null; return; }
+      const target=transfer.phase==='starting' ? startingTaskTextarea : composerTextarea;
+      if(!target) { draftComposerFocusTransfer=null; return; }
+      target.focus({preventScroll:true});
+      if(transfer.phase==='starting') queueDraftComposerFocusTransfer(transfer.draftId,'starting-focused');
+      else draftComposerFocusTransfer=null;
+    });
+  });
   function focusAgentPicker() {
     void tick().then(() => agentPicker?.focusTrigger());
   }
@@ -3582,6 +3623,7 @@
     if (!draftId || !draft || !canSend || !taskAgentId) { error = "Choose an agent and write a message."; return; }
     const draftKey = `draft:${draftId}`;
     if (composerPending[draftKey]) return;
+    beginDraftComposerFocusTransfer(draftId);
     setComposerPending(draftKey, true);
     const textToSend = promptText(composer), attachmentIds=currentAttachments.map(item=>item.id), sentAttachments=[...currentAttachments];
     const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId, cwd: taskCwd, sandbox: draftSandbox };
@@ -3646,6 +3688,7 @@
         error = `Jev routing could not run: ${text(reason)}`;
         updateOptimisticMessage(optimistic.id, { status: 'not-confirmed', error: text(reason) });
         retainFailedTaskDraft(draftId, captured.text);
+        finishDraftComposerFocusTransfer(draftId);
         setComposerPending(draftKey, false);
         return;
       }
@@ -3694,6 +3737,7 @@
       if (wasOpen && !openTaskIds.includes(taskId)) openTaskIds = [...openTaskIds, taskId];
       paneLocal.order = paneLocal.order.map(tab=>tab.kind==='draft' && tab.id===draftId?{kind:'task' as const,id:taskId!}:tab);
       if (currentDraftId === draftId) {
+        focusTaskComposerAfterDraft(draftId, resolvedTaskId);
         currentDraftId = null;
         const created = snapshot?.tasks.find(task => task.id === taskId);
         if (created) openTask(created);
@@ -3703,7 +3747,7 @@
       updateOptimisticMessage(optimistic.id, { status: 'not-confirmed', error: text(reason) });
       retainFailedTaskDraft(draftId, captured.text);
     }
-    finally { setComposerPending(draftKey, false); }
+    finally { finishDraftComposerFocusTransfer(draftId); setComposerPending(draftKey, false); }
   }
 
   let agentEdits=$state<Record<string,Agent>>({});
@@ -5397,7 +5441,7 @@
       </aside>
       </section>
     {:else if startingTaskDraft}
-      <StartingTaskPane title={startingTaskDraft.title} agentName={taskFormAgent?.name ?? 'agent'} messages={optimisticMessages.filter(message=>message.kind==='draft'&&message.targetId===currentDraftId)} bind:composer showHeader={!mobileSidebar} oncomposer={updateSlash} onkeydown={handleComposerKeydown}>
+      <StartingTaskPane title={startingTaskDraft.title} agentName={taskFormAgent?.name ?? 'agent'} messages={optimisticMessages.filter(message=>message.kind==='draft'&&message.targetId===currentDraftId)} bind:composer bind:textarea={startingTaskTextarea} showHeader={!mobileSidebar} oncomposer={updateSlash} onkeydown={handleComposerKeydown}>
         {#snippet avatar()}<span class="avatar task-header-avatar" aria-label={taskFormAgent?.name ?? 'Agent'}>{@render avatarVisual(taskFormAgent,18)}</span>{/snippet}
         {#snippet expand()}{@render paneExpandControl()}{/snippet}
       </StartingTaskPane>
