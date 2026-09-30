@@ -142,6 +142,7 @@ fn flush_buffered_messages(
             &buffered.text,
             phase.as_deref(),
             complete,
+            None,
         )?;
         buffered.last_flush = Instant::now();
         buffered.flushed_len = buffered.text.len();
