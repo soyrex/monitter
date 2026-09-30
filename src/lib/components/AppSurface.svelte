@@ -514,6 +514,8 @@
   // across tabs so a late hide cannot cover a newly selected browser view.
   let browserLayoutTail: Promise<void> = Promise.resolve();
   const browserLayoutRevision = new Map<string, number>();
+  const browserAppliedLayouts = new Map<string, string>();
+  const browserRefreshes = new Map<string, Promise<void>>();
   const browserOpenings = new Map<string, Promise<boolean>>();
   const browserClosings = new Set<string>();
   const browserCloseTasks = new Map<string, Promise<void>>();
@@ -2949,12 +2951,26 @@
   function applyBrowserState(state: { tabId: string; url: string; title: string; canGoBack: boolean | null; canGoForward: boolean | null }, preserveAddress = false) {
     const tab = browserTabs[state.tabId];
     if (!tab) return;
-    browserTabs[state.tabId] = { ...tab, url: preserveAddress ? tab.url : state.url, title: state.title || tab.title, unloaded: false };
-    browserHistory[state.tabId] = { canGoBack: state.canGoBack, canGoForward: state.canGoForward };
+    const url = preserveAddress ? tab.url : state.url, title = state.title || tab.title;
+    if (tab.url !== url || tab.title !== title || tab.unloaded)
+      browserTabs[state.tabId] = { ...tab, url, title, unloaded: false };
+    const history = browserHistory[state.tabId];
+    if (!history || history.canGoBack !== state.canGoBack || history.canGoForward !== state.canGoForward)
+      browserHistory[state.tabId] = { canGoBack: state.canGoBack, canGoForward: state.canGoForward };
   }
-  async function refreshBrowserState(id: string) {
-    try { applyBrowserState(await bridge.browserGetState(id)); }
-    catch { /* The native child may still be creating or have been unloaded. */ }
+  function refreshBrowserState(id: string): Promise<void> {
+    const pending = browserRefreshes.get(id); if (pending) return pending;
+    const epoch = browserEpoch.get(id) ?? 0, requestedUrl = browserTabs[id]?.url;
+    const refresh = (async () => {
+      try {
+        const state = await bridge.browserGetState(id);
+        if ((browserEpoch.get(id) ?? 0) !== epoch || browserClosings.has(id) || !browserTabs[id] || browserTabs[id].unloaded || browserTabs[id].url !== requestedUrl) return;
+        applyBrowserState(state, browserRequestedUrls.has(id));
+      } catch { /* The native child may still be creating or have been unloaded. */ }
+    })();
+    browserRefreshes.set(id, refresh);
+    void refresh.finally(() => { if (browserRefreshes.get(id) === refresh) browserRefreshes.delete(id); });
+    return refresh;
   }
   async function ensureNativeBrowser(id: string): Promise<boolean> {
     const tab = browserTabs[id], bounds = browserBounds[id];
@@ -2969,6 +2985,7 @@
         const state = await bridge.browserOpen(id, 'about:blank', bounds);
         const current = browserTabs[id];
         if ((browserEpoch.get(id) ?? 0) !== epoch || !current) { try { await bridge.browserClose(id); } catch { /* Closing an already-removed child is harmless. */ } return false; }
+        browserAppliedLayouts.delete(id);
         applyBrowserState(state, true);
         return true;
       } catch (reason) { error = `Could not show browser tab: ${text(reason)}`; return false; }
@@ -3013,7 +3030,12 @@
       // Collapse bursts of resize/movement reports to the newest bounds for
       // this tab, and never resurrect a child after unload or close.
       if (browserLayoutRevision.get(id) !== revision || browserClosings.has(id) || !browserTabs[id] || browserTabs[id].unloaded) return;
-      try { await bridge.browserSetLayout(id, bounds, visible); }
+      const key = `${window.innerWidth}:${window.innerHeight}:${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}:${visible}`;
+      if (browserAppliedLayouts.get(id) === key) return;
+      try {
+        await bridge.browserSetLayout(id, bounds, visible);
+        browserAppliedLayouts.set(id, key);
+      }
       catch (reason) {
         if (browserLayoutRevision.get(id) === revision && !browserClosings.has(id) && browserTabs[id] && !browserTabs[id].unloaded)
           error = `Could not position browser tab: ${text(reason)}`;
@@ -3066,8 +3088,9 @@
   }
   async function unloadBrowser(id: string) {
     const tab = browserTabs[id]; if (!tab || tab.unloaded || !nativeRuntime || !bridge.available) return;
+    browserEpoch.set(id, (browserEpoch.get(id) ?? 0) + 1);
     browserLayoutRevision.set(id, (browserLayoutRevision.get(id) ?? 0) + 1);
-    try { await browserLayoutTail; await bridge.browserClose(id); if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true }; delete browserBounds[id]; delete browserHistory[id]; browserLayoutRevision.delete(id); browserRequestedUrls.delete(id); }
+    try { await browserLayoutTail; await bridge.browserClose(id); if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true }; delete browserBounds[id]; delete browserHistory[id]; browserLayoutRevision.delete(id); browserAppliedLayouts.delete(id); browserRequestedUrls.delete(id); }
     catch (reason) { error = `Could not unload browser tab: ${text(reason)}`; }
   }
   function retireNativeBrowser(id: string): Promise<void> {
@@ -3082,7 +3105,7 @@
       if (nativeRuntime && bridge.available) await bridge.browserClose(id);
       if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true };
       delete browserBounds[id]; delete browserHistory[id]; browserRequestedUrls.delete(id);
-      browserLayoutRevision.delete(id); browserEpoch.delete(id);
+      browserLayoutRevision.delete(id); browserAppliedLayouts.delete(id); browserEpoch.delete(id);
     })();
     browserCloseTasks.set(id, closing);
     void closing.finally(() => { if (browserCloseTasks.get(id) === closing) browserCloseTasks.delete(id); browserClosings.delete(id); }).catch(() => {});
@@ -3098,7 +3121,7 @@
       // child first, and invalidated layout revisions prevent new writes.
       await retireNativeBrowser(id);
       delete browserTabs[id]; delete browserBounds[id]; delete browserHistory[id]; browserRequestedUrls.delete(id); openBrowserIds = openBrowserIds.filter(item => item !== id); forgetTab({ kind: 'browser', id });
-      browserLayoutRevision.delete(id); browserEpoch.delete(id);
+      browserLayoutRevision.delete(id); browserAppliedLayouts.delete(id); browserEpoch.delete(id);
       if (selectedBrowserId === id) { selectedBrowserId = null; openOverview(); }
       if (collapse) collapseTablessPane();
     } catch (reason) {

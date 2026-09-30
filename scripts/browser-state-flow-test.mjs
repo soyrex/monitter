@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import ts from 'typescript';
+const surface=await readFile('src/lib/components/AppSurface.svelte','utf8');
+const script=surface.slice(surface.indexOf('>')+1,surface.indexOf('</script>'));
+const ast=ts.createSourceFile('surface.ts',script,ts.ScriptTarget.Latest,true);
+const names=['applyBrowserState','refreshBrowserState','layoutBrowser'];
+const functions=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&names.includes(n.name?.text)).map(n=>n.getText(ast)).join('\n');
+assert.equal(ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&names.includes(n.name?.text)).length,3);
+const js=ts.transpileModule(functions,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+const make=new Function('bridge',`${js.includes('use strict')?'':''}
+let browserTabs={tab:{id:'tab',url:'https://old.test',title:'Old',unloaded:false}},browserHistory={},browserBounds={};
+const browserRefreshes=new Map(),browserEpoch=new Map(),browserClosings=new Set(),browserRequestedUrls=new Map(),browserLayoutRevision=new Map(),browserAppliedLayouts=new Map();
+let browserLayoutTail=Promise.resolve(),nativeRuntime=true,activeInterfaceScale=125,embedded=false,active=true,sidebarSelected=false,activePaneId='main',snapshot={settings:{showActivePaneBorder:true}},error='';
+const window={innerWidth:1000,innerHeight:800},text=String;
+${js}
+return {refreshBrowserState,layoutBrowser,applyBrowserState,browserTabs,browserHistory,browserEpoch,browserRequestedUrls,browserClosings,window,get error(){return error},get tail(){return browserLayoutTail}};`);
+const deferred=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j});return {promise,resolve,reject};};
+let stateCalls=0;let state=deferred();const writes=[];let writeGate=null;let fail=false;
+const qa=make({available:true,browserGetState:()=>{stateCalls++;return state.promise},browserSetLayout:async(...args)=>{writes.push(args);if(writeGate)await writeGate.promise;if(fail)throw new Error('fixture failure')}});
+const refresh=qa.refreshBrowserState('tab');assert.equal(qa.refreshBrowserState('tab'),refresh);assert.equal(stateCalls,1);
+qa.browserRequestedUrls.set('tab','https://new.test');qa.browserTabs.tab.url='https://new.test';state.resolve({tabId:'tab',url:'https://old.test',title:'Old',canGoBack:false,canGoForward:false});await refresh;assert.equal(qa.browserTabs.tab.url,'https://new.test');
+const before=qa.browserTabs.tab;qa.applyBrowserState({tabId:'tab',url:'https://new.test',title:'Old',canGoBack:false,canGoForward:false});assert.equal(qa.browserTabs.tab,before);
+state=deferred();const stale=qa.refreshBrowserState('tab');qa.browserEpoch.set('tab',1);state.resolve({tabId:'tab',url:'https://stale.test',title:'Stale'});await stale;assert.equal(qa.browserTabs.tab,before);
+state=deferred();const oldRead=qa.refreshBrowserState('tab');qa.browserTabs.tab.url='https://completed-navigation.test';qa.browserRequestedUrls.delete('tab');state.resolve({tabId:'tab',url:'https://old.test',title:'Old'});await oldRead;assert.equal(qa.browserTabs.tab.url,'https://completed-navigation.test','a delayed pre-navigation poll cannot revert a completed navigation');
+const rect={x:100,y:40,width:400,height:300,visible:true};await qa.layoutBrowser('tab',rect);assert.deepEqual(writes.at(-1),['tab',{x:128,y:50,width:495,height:373},true]);
+await qa.layoutBrowser('tab',rect);assert.equal(writes.length,1,'unchanged rect skips native write');
+qa.window.innerWidth=1200;await qa.layoutBrowser('tab',rect);assert.equal(writes.length,2,'window resize must reapply even a fixed DOM rect');
+writeGate=deferred();const held=qa.layoutBrowser('tab',{...rect,x:110});await new Promise(resolve=>setTimeout(resolve,0));assert.equal(writes.length,3);const superseded=qa.layoutBrowser('tab',{...rect,x:120});const latest=qa.layoutBrowser('tab',{...rect,x:130});writeGate.resolve();await Promise.all([held,superseded,latest]);writeGate=null;assert.equal(writes.length,4,'intermediate queued bounds coalesce');assert.equal(writes.at(-1)[1].x,165);
+await qa.layoutBrowser('tab',{...rect,visible:false});assert.equal(writes.at(-1)[2],false);
+fail=true;await qa.layoutBrowser('tab',rect);assert.match(qa.error,/fixture failure/);const attempts=writes.length;fail=false;await qa.layoutBrowser('tab',rect);assert.equal(writes.length,attempts+1,'failed write can retry');
+qa.browserClosings.add('tab');await qa.layoutBrowser('tab',{...rect,x:200});assert.equal(writes.length,attempts+1,'closing child cannot reappear');
+console.log('browser state flow: polling coalescing/retirement, immutable updates, scaled bounds, native dedupe/window reapply, burst ordering, hide, failure retry and close guards passed');

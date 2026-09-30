@@ -100,13 +100,15 @@
   function cancelGeometryAnimations() {
     for (const animation of geometryAnimations) animation.cancel();
     geometryAnimations.clear();
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('monitter:pane-geometry'));
   }
   function addGeometryAnimation(animation: Animation | null) {
     if (!animation) return;
     geometryAnimations.add(animation);
+    window.dispatchEvent(new Event('monitter:pane-geometry'));
     void animation.finished.then(
-      () => geometryAnimations.delete(animation),
-      () => geometryAnimations.delete(animation),
+      () => { geometryAnimations.delete(animation); window.dispatchEvent(new Event('monitter:pane-geometry')); },
+      () => { geometryAnimations.delete(animation); window.dispatchEvent(new Event('monitter:pane-geometry')); },
     );
   }
   onDestroy(cancelGeometryAnimations);
