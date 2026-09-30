@@ -188,6 +188,32 @@ try {
   await page.locator('#compact').click();
   await expect(quiet).toHaveCount(0);
   await expect(providers).toHaveCount(4);
+  // Cycle each persisted layout phase across reloads without relying on a
+  // CSS-only rings selector, which conflates the two horizontal cycle steps.
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('monitter.sidebar-usage-layout.v2', JSON.stringify({ version: 2, phase: 1 }));
+  });
+  await page.reload();
+  let usageToggle = page.locator('.usage-toggle');
+  await expect(usageToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.usage-body')).toBeVisible();
+  await expect(usageToggle).toHaveAttribute('aria-label', /vertically/i);
+  await usageToggle.click();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('monitter.sidebar-usage-layout.v2')).phase)).toBe(2);
+  await page.reload();
+  usageToggle = page.locator('.usage-toggle');
+  await expect(usageToggle).toHaveAttribute('aria-label', /horizontally/i);
+  await usageToggle.click();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('monitter.sidebar-usage-layout.v2')).phase)).toBe(3);
+  await page.reload();
+  usageToggle = page.locator('.usage-toggle');
+  await expect(usageToggle).toHaveAttribute('aria-label', /hide provider usage/i);
+  await usageToggle.click();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('monitter.sidebar-usage-layout.v2')).phase)).toBe(0);
+  await page.reload();
+  await expect(page.locator('.usage-body')).toHaveCount(0);
+  await expect(page.locator('.usage-toggle')).toHaveAttribute('aria-expanded', 'false');
   console.log('Usage preserves detailed provider rows, folds providers without data into one line, adapts short-window details, and keeps ring geometry and reduced motion intact.');
 } finally {
   await browser?.close();
