@@ -723,6 +723,7 @@
   const forkSourceTask = $derived(snapshot?.tasks.find(task => task.id === forkSourceTaskId) ?? null);
   const forkTargetAgent = $derived(visibleAgents.find(agent => agent.id === forkAgentId) ?? null);
   let palette = $state<"switch" | "controls" | null>(null);
+  let paletteActionPending = $state(false);
   let jevPalette = $state<{ query: string; loading: boolean; error?: string; suggestion?: { candidateId: string; label: string; detail: string } }>({ query: '', loading: false });
   let jevPaletteRequest = 0;
   let tabPickerOpen = $state(false);
@@ -4604,7 +4605,7 @@
     ...(['standard','vim'] as const).map(mode=>({id:`shortcut-mode:${mode}`,label:`Shortcut mode: ${mode}`,checked:(snapshot?.settings.shortcutMode ?? 'standard')===mode,group:'Behaviour'})),
     ...(selectedTask ? [{id:"archive",label:"Archive current chat",group:"Current chat",disabled:selectedTask.status==="running"},
       ...(selectedTask.status==="running" ? [{id:"stop",label:"Stop current chat",group:"Current chat"}] : [])] : []),
-  ].map(item=>({...item,disabled:(!item.id.startsWith('sidebar:') && busy) || ("disabled" in item && item.disabled)})));
+  ].map(item=>({...item,disabled:(!item.id.startsWith('sidebar:') && (busy || paletteActionPending)) || ("disabled" in item && item.disabled)})));
   function resetJevPalette(query = '') {
     jevPaletteRequest += 1;
     jevPalette = { query, loading: false };
@@ -4652,6 +4653,22 @@
     resetJevPalette();
     palette = null;
   }
+  async function savePaletteSettings(patch: Partial<Settings>) {
+    if (paletteActionPending) return;
+    paletteActionPending = true;
+    error = '';
+    notice = 'Saving setting…';
+    try {
+      const ticket = ++snapshotIssued;
+      applySnapshot(await saveSettingsPatch(patch), ticket);
+      notice = 'Setting saved.';
+    } catch (reason) {
+      notice = '';
+      error = `Could not save settings: ${text(reason)}`;
+    } finally {
+      paletteActionPending = false;
+    }
+  }
   async function selectPalette(id: string) {
     if (palette === "switch") {
       palette = null;
@@ -4686,7 +4703,10 @@
     }
     if (id.startsWith('sidebar:')) { palette = null; setSidebarView(id.slice(8) as SidebarView); return; }
     const settings = snapshot?.settings;
-    if (!settings || busy) return;
+    if (!settings || busy || paletteActionPending) return;
+    // Close before starting asynchronous controls so their modal overlay cannot
+    // hold the workspace hostage while a settings bridge call is pending.
+    closeCommandPalette();
     if (id === "vim-command") { palette=null; openVimCommand(); }
     else if (id === "appearance" || id === "appearance-detail-settings") { palette=null; routeSettings('appearance'); }
     else if (id === "typography-settings") { palette=null; routeSettings('typography'); }
@@ -4698,26 +4718,26 @@
     else if (id === "autoname") { palette=null; await autonameCurrentPane(); }
     else if (id.startsWith('layout:')) {palette=null;setLayout(id.slice(7) as PaneLayoutPreset);}
     else if (id === 'balance-panes') { palette=null; balanceWorkspacePanes(); }
-    else if (id === "tools") await run(()=>saveSettingsPatch({showToolActivity:!settings.showToolActivity}));
-    else if (id === "reasoning") await run(()=>saveSettingsPatch({showReasoningSummaries:!settings.showReasoningSummaries}));
-    else if (id === "steer-busy") await run(()=>saveSettingsPatch({busyMessageMode:settings.busyMessageMode==='steer'?'queue':'steer'}));
-    else if (id === "focus-mouse") await run(()=>saveSettingsPatch({focusFollowsMouse:!settings.focusFollowsMouse}));
-    else if (id === "active-pane-border") await run(()=>saveSettingsPatch({showActivePaneBorder:!(settings.showActivePaneBorder ?? true)}));
-    else if (id === "dim-panes") await run(()=>saveSettingsPatch({dimInactivePanes:!(settings.dimInactivePanes ?? true)}));
-    else if (id === "enter") await run(()=>saveSettingsPatch({sendWithEnter:!settings.sendWithEnter}));
-    else if (id === "compress-tools") await run(()=>saveSettingsPatch({compressToolCalls:settings.compressToolCalls !== true}));
-    else if (id === "tint-messages") await run(()=>saveSettingsPatch({tintUserMessages:settings.tintUserMessages !== true}));
-    else if (id === "show-tab-close") await run(()=>saveSettingsPatch({showTabCloseButtons:settings.showTabCloseButtons === false}));
-    else if (id === "auto-hide-tabs") await run(()=>saveSettingsPatch({autoHideTabs:settings.autoHideTabs !== true}));
+    else if (id === "tools") await savePaletteSettings({showToolActivity:!settings.showToolActivity});
+    else if (id === "reasoning") await savePaletteSettings({showReasoningSummaries:!settings.showReasoningSummaries});
+    else if (id === "steer-busy") await savePaletteSettings({busyMessageMode:settings.busyMessageMode==='steer'?'queue':'steer'});
+    else if (id === "focus-mouse") await savePaletteSettings({focusFollowsMouse:!settings.focusFollowsMouse});
+    else if (id === "active-pane-border") await savePaletteSettings({showActivePaneBorder:!(settings.showActivePaneBorder ?? true)});
+    else if (id === "dim-panes") await savePaletteSettings({dimInactivePanes:!(settings.dimInactivePanes ?? true)});
+    else if (id === "enter") await savePaletteSettings({sendWithEnter:!settings.sendWithEnter});
+    else if (id === "compress-tools") await savePaletteSettings({compressToolCalls:settings.compressToolCalls !== true});
+    else if (id === "tint-messages") await savePaletteSettings({tintUserMessages:settings.tintUserMessages !== true});
+    else if (id === "show-tab-close") await savePaletteSettings({showTabCloseButtons:settings.showTabCloseButtons === false});
+    else if (id === "auto-hide-tabs") await savePaletteSettings({autoHideTabs:settings.autoHideTabs !== true});
     else if (id === "detail") showDetail = !showDetail;
     else if (id.startsWith("scale-")) { if (id === "scale-reset") { scaleQueued = 125; flushScale(); } else queueScale(id === "scale-up" ? 5 : -5); }
-    else if (id.startsWith('window-surface:')) await run(()=>saveSettingsPatch({windowSurface:id.slice(15) as 'opaque'|'translucent'|'glass'}));
+    else if (id.startsWith('window-surface:')) await savePaletteSettings({windowSurface:id.slice(15) as 'opaque'|'translucent'|'glass'});
     else if (id.startsWith('apply-theme:')) { palette=null; const theme=id.slice(12) as AppThemeId; setAppTheme('light',theme); setAppTheme('dark',theme); }
     else if (id.startsWith('app-theme-light:')) { palette=null; setAppTheme('light',id.slice(16) as AppThemeId); }
     else if (id.startsWith('app-theme-dark:')) { palette=null; setAppTheme('dark',id.slice(15) as AppThemeId); }
     else if (id.startsWith('motion:')) { palette=null; setMotionPreference(id.slice(7) as MotionPreference); }
-    else if (id.startsWith('density:')) await run(()=>saveSettingsPatch({interfaceDensity:id.slice(8) as 'tight'|'normal'|'spacious'}));
-    else if (id.startsWith('tab-style:')) await run(()=>saveSettingsPatch({tabStyle:id.slice(10) as 'classic'|'modern'}));
+    else if (id.startsWith('density:')) await savePaletteSettings({interfaceDensity:id.slice(8) as 'tight'|'normal'|'spacious'});
+    else if (id.startsWith('tab-style:')) await savePaletteSettings({tabStyle:id.slice(10) as 'classic'|'modern'});
     else if (id.startsWith('terminal-theme:')) { palette=null; setTerminalTheme(id.slice(15) as TerminalThemeId); }
     else if (id === 'contrast-reset') { palette=null; setAppThemeContrast(0); }
     else if (id === 'contrast-down') { palette=null; setAppThemeContrast($appTheme.contrast - 10); }
@@ -4729,10 +4749,10 @@
     else if (id === 'border-opacity-reset') { palette=null; setBorderOpacity(DEFAULT_BORDER_OPACITY); }
     else if (id === 'border-opacity-down') { palette=null; setBorderOpacity($borderOpacity - 5); }
     else if (id === 'border-opacity-up') { palette=null; setBorderOpacity($borderOpacity + 5); }
-    else if (id === 'inactive-opacity-down') await run(()=>saveSettingsPatch({inactivePaneOpacity:Math.max(0.1,Math.round(((settings.inactivePaneOpacity ?? 0.6) - 0.05) * 100) / 100)}));
-    else if (id === 'inactive-opacity-up') await run(()=>saveSettingsPatch({inactivePaneOpacity:Math.min(0.9,Math.round(((settings.inactivePaneOpacity ?? 0.6) + 0.05) * 100) / 100)}));
-    else if (id.startsWith('shortcut-mode:')) await run(()=>saveSettingsPatch({shortcutMode:id.slice(14) as 'standard'|'vim'}));
-    else if (id.startsWith("theme:")) await run(()=>saveSettingsPatch({theme:id.slice(6) as "light"|"dark"|"system"}));
+    else if (id === 'inactive-opacity-down') await savePaletteSettings({inactivePaneOpacity:Math.max(0.1,Math.round(((settings.inactivePaneOpacity ?? 0.6) - 0.05) * 100) / 100)});
+    else if (id === 'inactive-opacity-up') await savePaletteSettings({inactivePaneOpacity:Math.min(0.9,Math.round(((settings.inactivePaneOpacity ?? 0.6) + 0.05) * 100) / 100)});
+    else if (id.startsWith('shortcut-mode:')) await savePaletteSettings({shortcutMode:id.slice(14) as 'standard'|'vim'});
+    else if (id.startsWith("theme:")) await savePaletteSettings({theme:id.slice(6) as "light"|"dark"|"system"});
     else {
       palette = null;
       if (id === "new-task") openTaskComposer();
