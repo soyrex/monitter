@@ -6878,6 +6878,8 @@
   .sidebar {
     position: relative;
     container: sidebar / inline-size;
+    --sidebar-menu-hover: color-mix(in srgb, var(--accent) 5%, transparent);
+    --sidebar-menu-border: color-mix(in srgb, var(--accent) 12%, transparent);
     display: flex;
     min-height: 0;
     flex-direction: column;
@@ -6889,6 +6891,33 @@
   .sidebar.keyboard-active::after { content:none; }
   :global(.app-shell.native-mac:not(.native-fullscreen)) .sidebar.keyboard-active::after { border-radius:16px 0 0 16px; }
   :global(:root:has([data-active-modal])) .sidebar.keyboard-active::after { content:none; }
+  .sidebar .side-scroll :is(.agent-row, .task-row, .project-row, .channel-row) {
+    opacity:.75;
+    transition:opacity .14s ease, background-color .14s ease, box-shadow .14s ease;
+  }
+  .sidebar .side-scroll :is(.agent-row, .task-row, .project-row, .channel-row):hover,
+  .sidebar .side-scroll :is(.agent-row, .task-row, .project-row, .channel-row):focus-within {
+    opacity:1;
+    background:var(--sidebar-menu-hover);
+    box-shadow:inset 0 0 0 1px var(--sidebar-menu-border) !important;
+  }
+  .sidebar .side-scroll :is(.agent-row, .task-row, .project-row, .channel-row):focus-within button:focus-visible {
+    background:transparent !important;
+    box-shadow:none !important;
+  }
+  .sidebar .agent-rail .rail-avatar, .sidebar .project-rail .rail-project, .sidebar .activity-rail .rail-activity {
+    opacity:.75;
+    transition:opacity .14s ease, background-color .14s ease, border-color .14s ease;
+  }
+  .sidebar .agent-rail .rail-avatar:hover, .sidebar .agent-rail .rail-avatar:focus-visible,
+  .sidebar .project-rail .rail-project:hover, .sidebar .project-rail .rail-project:focus-visible,
+  .sidebar .activity-rail .rail-activity:hover, .sidebar .activity-rail .rail-activity:focus-visible {
+    opacity:1;
+    border-color:var(--sidebar-menu-border);
+    background:var(--sidebar-menu-hover);
+    box-shadow:none !important;
+  }
+  @media (prefers-reduced-motion:reduce) { .sidebar .side-scroll :is(.agent-row, .task-row, .project-row, .channel-row), .sidebar .agent-rail .rail-avatar, .sidebar .project-rail .rail-project, .sidebar .activity-rail .rail-activity { transition:none; } }
   .sidebar.sidebar-selected :is(.sidebar-tabs, .side-scroll, .agent-rail, .project-rail, .activity-rail, .rail-chats, .rail-project-chats) button:focus {
     outline:none !important;
     outline-offset:0;
