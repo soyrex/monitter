@@ -27,11 +27,12 @@ export function setMobileSpeechMode(mode: MobileSpeechMode): void {
 }
 
 type NativeSpeechPlatform = 'ios' | 'android';
-export type NativeSpeechEventType = 'availability' | 'started' | 'partial' | 'final' | 'error' | 'stopped';
+export type NativeSpeechEventType = 'availability' | 'started' | 'level' | 'partial' | 'final' | 'error' | 'stopped';
 export interface NativeSpeechEvent {
   sessionId: string;
   type: NativeSpeechEventType;
   available?: boolean;
+  level?: number;
   text?: string;
   error?: string;
 }
@@ -64,7 +65,7 @@ export function sendNativeSpeechCommand(action: 'status' | 'start' | 'stop' | 'c
   return false;
 }
 
-const eventTypes = new Set<NativeSpeechEventType>(['availability', 'started', 'partial', 'final', 'error', 'stopped']);
+const eventTypes = new Set<NativeSpeechEventType>(['availability', 'started', 'level', 'partial', 'final', 'error', 'stopped']);
 
 export function subscribeNativeSpeech(listener: (event: NativeSpeechEvent) => void): () => void {
   if (typeof window === 'undefined') return () => {};
@@ -74,6 +75,7 @@ export function subscribeNativeSpeech(listener: (event: NativeSpeechEvent) => vo
     const value = detail as Partial<NativeSpeechEvent>;
     if (typeof value.sessionId !== 'string' || value.sessionId.length > 100 ||
         typeof value.type !== 'string' || !eventTypes.has(value.type as NativeSpeechEventType)) return;
+    if (value.type === 'level' && (typeof value.level !== 'number' || !Number.isFinite(value.level) || value.level < 0 || value.level > 1)) return;
     listener(value as NativeSpeechEvent);
   };
   window.addEventListener('monitter:native-speech', handle);

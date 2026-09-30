@@ -1559,8 +1559,11 @@ WebView listener accepts only its bundled main frame at
 `https://appassets.androidplatform.net`. Both accept `{ action: "status" | "start" |
 "stop" | "cancel", sessionId: string, locale?: string }` and return a
 `monitter:native-speech` CustomEvent whose detail contains `sessionId`, `type`
-(`availability`, `started`, `partial`, `final`, `error`, or `stopped`), and the
-applicable `available`, `text`, or `error` field. Status checks do not request
+(`availability`, `started`, `level`, `partial`, `final`, `error`, or `stopped`), and the
+applicable `available`, `level`, `text`, or `error` field. On iOS, `level` is a
+throttled normalized 0–1 microphone amplitude for local UI animation only;
+it is scoped to the active recognition session and never sent to the desktop.
+Status checks do not request
 microphone permission. A session lasts at most 90 seconds of capture. Only a
 final transcript enters an editable draft; neither native shell sends audio to
 the desktop, another speech server, an attachment, or a harness prompt. Paired
@@ -1570,6 +1573,60 @@ same separately approved owner workspace as iPhone; `/mobile?controller=1`
 retains the earlier limited controller. Android local recognition is shown only
 where an on-device recognizer exists; unsupported devices keep text input and
 can choose the desktop path. No automatic recognition fallback sends audio elsewhere.
+
+The paired iOS owner page also exposes an explicitly activated foreground
+Companion Mode, named Mo. It uses the existing `monitterSpeech` recognition session and
+the iOS on-device recognizer to detect the spoken phrase “Hey Mo” (also
+accepting the common transcription “Hey Moe”) and capture the command that
+follows. This is ordinary foreground speech recognition, not a dedicated
+low-power keyword model; the microphone is not continuously active before the
+user enables listening, and audio is not uploaded for recognition. The
+selected chat ID is captured when listening starts; changing chats stops the
+session. Native results revise the entire utterance: a revised wake phrase alone
+never becomes a message, and an unrelated revision discards the earlier command.
+“A Mo” is stripped only after an actual wake phrase has already been recognized;
+it cannot activate listening by itself. A finalized wake-only utterance starts
+a separate command capture session. Mo's tap area toggles capture on and off
+and fills at least half the idle portrait viewport's height; the visible face
+is 60% of that area's width and height and centered within it.
+Mo blinks and floats gently at rest. During iOS speech capture, the face and
+mouth react to live microphone level, with motion suppressed by the system
+reduced-motion preference.
+The Hey Mo and optional pause-to-send toggles sit below it. The idle companion
+has no separate talk button, empty textarea or Send control.
+Captured voice text opens an outgoing review bubble with explicit Edit and Send
+controls. Auto-send is off by default.
+When enabled, recognition continues across short utterance boundaries and sends
+only after eleven seconds without new speech. New speech restarts that interval;
+duplicate partial/final text does not. An explicit Stop always produces a draft
+for review. Existing unsent draft text also requires explicit Send, even when
+auto-send is enabled. Changing chats, editing, or disconnecting cancels capture
+and prevents any pending automatic send.
+Recognition cannot resolve approval requests or submit approval inputs; these
+continue to use their existing explicit controls. Counts for pending requests
+in other chats remain visible.
+
+Completed desktop replies appear as dismissible speech-bubble popups over Mo,
+with source-chat labels and scrollable Markdown. Opening Companion Mode shows
+the latest selected-chat reply once; newly completed replies from eligible chats
+queue in arrival order. Streaming, interrupted, commentary and blank messages
+are excluded. Message IDs deduplicate repeated snapshots and reconnections
+during that visit. A popup never changes the voice target; switching to its chat
+requires an explicit action. The face and outgoing review controls remain reachable.
+
+Companion activation uses the separate iOS-only
+`webkit.messageHandlers.monitterCompanion.postMessage({ active: boolean })`
+handler. It accepts only the paired main frame at `http://127.0.0.1:31977`,
+with the same pairing and trusted-origin checks as `monitterSpeech`; the
+speech command/event contract above is unchanged. Native code keeps the screen
+awake while Companion Mode is visible and the app is foregrounded. Leaving the
+foreground, an audio interruption or route loss, page navigation/closure,
+Companion Mode closure, or desktop disconnect cancels active microphone
+capture. Start and finalization waits are bounded and failures remain visible;
+permission or availability errors require the user to re-enable listening.
+Send failures do not cause an automatic replay of a possibly delivered request.
+See `docs/IOS_COMPANION.md` for build checks and physical-device acceptance.
+
 Codex receives original attachment paths in its text prompt, not inline image input or thumbnails;
 the agent must open the file. This does not guarantee provider-internal full-resolution processing.
 

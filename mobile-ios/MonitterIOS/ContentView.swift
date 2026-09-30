@@ -389,6 +389,7 @@ private struct WebContentView: UIViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "scanQR")
         configuration.userContentController.add(context.coordinator, name: "changeConnection")
         configuration.userContentController.add(context.coordinator, name: "monitterSpeech")
+        configuration.userContentController.add(context.coordinator, name: "monitterCompanion")
         let view = MonitterWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = context.coordinator
@@ -421,7 +422,9 @@ private struct WebContentView: UIViewRepresentable {
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterSpeech")
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterCompanion")
         coordinator.cancelSpeech()
+        coordinator.teardownCompanion()
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
@@ -437,14 +440,100 @@ private struct WebContentView: UIViewRepresentable {
         private var speechDeadline: DispatchWorkItem?
         private var speechFinalizationWatchdog: DispatchWorkItem?
         private var lastPartialTranscript: String?
+        private var companionActive = false
+        private var appIsForeground = UIApplication.shared.applicationState == .active
+        private var idleTimerPriorValue: Bool?
+        private var lifecycleObservers: [NSObjectProtocol] = []
         weak var speechWebView: WKWebView?
         init(requestScan: @escaping () -> Void, requestConnectionChooser: @escaping () -> Void, navigationError: @escaping (String) -> Void) {
             self.requestScan = requestScan
             self.requestConnectionChooser = requestConnectionChooser
             self.navigationError = navigationError
+            super.init()
+            let center = NotificationCenter.default
+            lifecycleObservers.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.appIsForeground = false
+                self.syncIdleTimer()
+                // Permission prompts briefly resign active too. An authorization
+                // request may finish when the prompt closes, but active capture stops.
+                if self.speechEngine != nil {
+                    self.stopSpeechForLifecycle("Speech stopped because Monitter left the foreground.")
+                }
+            })
+            lifecycleObservers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.stopSpeechForLifecycle("Speech stopped because Monitter entered the background.")
+            })
+            lifecycleObservers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.appIsForeground = true
+                self.syncIdleTimer()
+            })
+            lifecycleObservers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), queue: .main) { [weak self] notification in
+                guard let self,
+                      let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      AVAudioSession.InterruptionType(rawValue: rawType) == .began else { return }
+                self.stopSpeechForLifecycle("Speech stopped because audio was interrupted.")
+            })
+            lifecycleObservers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: AVAudioSession.sharedInstance(), queue: .main) { [weak self] notification in
+                guard let self,
+                      let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                      AVAudioSession.RouteChangeReason(rawValue: rawReason) == .oldDeviceUnavailable else { return }
+                self.stopSpeechForLifecycle("Speech stopped because the audio route changed.")
+            })
+        }
+        deinit {
+            lifecycleObservers.forEach(NotificationCenter.default.removeObserver)
+            if idleTimerPriorValue != nil {
+                UIApplication.shared.isIdleTimerDisabled = idleTimerPriorValue ?? false
+            }
+        }
+        private func syncIdleTimer() {
+            let shouldKeepAwake = companionActive && appIsForeground
+            if shouldKeepAwake {
+                if idleTimerPriorValue == nil {
+                    idleTimerPriorValue = UIApplication.shared.isIdleTimerDisabled
+                }
+                UIApplication.shared.isIdleTimerDisabled = true
+            } else if let priorValue = idleTimerPriorValue {
+                UIApplication.shared.isIdleTimerDisabled = priorValue
+                idleTimerPriorValue = nil
+            }
+        }
+        private func stopSpeechForLifecycle(_ reason: String) {
+            guard let sessionId = speechSessionId else { return }
+            finishSpeech(teardown: false)
+            emit(sessionId: sessionId, type: "error", error: reason)
+        }
+        func teardownCompanion() {
+            companionActive = false
+            appIsForeground = false
+            syncIdleTimer()
+            stopSpeechForLifecycle("Speech stopped because the paired page closed.")
+            lifecycleObservers.forEach(NotificationCenter.default.removeObserver)
+            lifecycleObservers.removeAll()
+        }
+        private func handleCompanion(_ body: [String: Any]) {
+            guard pairedMode,
+                  requestedURL != nil,
+                  let webView = speechWebView,
+                  let pageURL = webView.url,
+                  pageURL.scheme == "http", pageURL.host == "127.0.0.1", pageURL.port == 31977,
+                  body.count == 1,
+                  let active = body["active"] as? Bool else { return }
+            companionActive = active
+            if !active {
+                stopSpeechForLifecycle("Speech stopped because companion mode ended.")
+            }
+            syncIdleTimer()
         }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             failed(error)
+        }
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            companionActive = false
+            syncIdleTimer()
+            stopSpeechForLifecycle("Speech stopped because the paired page navigated.")
         }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             failed(error)
@@ -471,6 +560,17 @@ private struct WebContentView: UIViewRepresentable {
             DispatchQueue.main.async { self.navigationError(error.localizedDescription) }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "monitterCompanion" {
+                guard pairedMode,
+                      requestedURL != nil,
+                      message.frameInfo.isMainFrame,
+                      message.frameInfo.securityOrigin.protocol == "http",
+                      message.frameInfo.securityOrigin.host == "127.0.0.1",
+                      message.frameInfo.securityOrigin.port == 31977,
+                      let body = message.body as? [String: Any] else { return }
+                handleCompanion(body)
+                return
+            }
             if message.name == "monitterSpeech" {
                 guard message.frameInfo.isMainFrame,
                       message.frameInfo.securityOrigin.protocol == "http",
@@ -519,13 +619,14 @@ private struct WebContentView: UIViewRepresentable {
             if teardown, let oldSession { emit(sessionId: oldSession, type: "stopped") }
         }
 
-        private func emit(sessionId: String, type: String, available: Bool? = nil, text: String? = nil, error: String? = nil) {
+        private func emit(sessionId: String, type: String, available: Bool? = nil, text: String? = nil, error: String? = nil, level: Double? = nil) {
             guard let webView = speechWebView, pairedMode,
                   let page = webView.url, page.scheme == "http", page.host == "127.0.0.1", page.port == 31977 else { return }
             var detail: [String: Any] = ["sessionId": sessionId, "type": type]
             if let available { detail["available"] = available }
             if let text { detail["text"] = text }
             if let error { detail["error"] = error }
+            if let level { detail["level"] = level }
             guard let data = try? JSONSerialization.data(withJSONObject: detail, options: [.fragmentsAllowed]),
                   var json = String(data: data, encoding: .utf8) else { return }
             json = json.replacingOccurrences(of: "\\u2028", with: "\\\\u2028")
@@ -641,19 +742,47 @@ private struct WebContentView: UIViewRepresentable {
             }
         }
 
-        private func beginRecognition(sessionId: String, recognizer: SFSpeechRecognizer) {
+        private func beginRecognition(sessionId: String, recognizer: SFSpeechRecognizer, foregroundAttempt: Int = 0) {
+            guard speechSessionId == sessionId else { return }
+            guard appIsForeground else {
+                // Authorization completion may precede didBecomeActive by one run loop.
+                // Never start audio in the background or revive a cancelled request.
+                if foregroundAttempt < 20 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                        self?.beginRecognition(sessionId: sessionId, recognizer: recognizer, foregroundAttempt: foregroundAttempt + 1)
+                    }
+                } else {
+                    stopSpeechForLifecycle("Return to Monitter and tap the microphone to start listening.")
+                }
+                return
+            }
             let engine = AVAudioEngine()
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true
             request.requiresOnDeviceRecognition = true
+            request.contextualStrings = ["Hey Mo", "Mo"]
             do {
                 let audioSession = AVAudioSession.sharedInstance()
                 try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
                 try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
                 let input = engine.inputNode
                 let format = input.outputFormat(forBus: 0)
+                var lastLevelSent = 0.0
                 input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
                     request.append(buffer)
+                    let now = ProcessInfo.processInfo.systemUptime
+                    guard now - lastLevelSent >= 0.06,
+                          let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+                    lastLevelSent = now
+                    var sum: Float = 0
+                    for index in 0..<Int(buffer.frameLength) { sum += samples[index] * samples[index] }
+                    let rms = sqrt(sum / Float(buffer.frameLength))
+                    let decibels = 20 * log10(max(rms, 0.00001))
+                    let level = Double(max(0, min(1, (decibels + 48) / 36)))
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.speechSessionId == sessionId else { return }
+                        self.emit(sessionId: sessionId, type: "level", level: level)
+                    }
                 }
                 engine.prepare()
                 try engine.start()

@@ -20,8 +20,18 @@ export const isLanBrowser = () => typeof document !== 'undefined' && (
 );
 type OwnerRelayInvoker = (command: string, args: Record<string, unknown>) => Promise<unknown>;
 let ownerRelayInvoker: OwnerRelayInvoker | null = null;
+const ownerRelayConnectionListeners = new Set<(connected: boolean) => void>();
 /** Only the owner relay gate registers this provider after an approved session. */
-export function setOwnerRelayInvoker(invoke: OwnerRelayInvoker | null): void { ownerRelayInvoker = invoke; }
+export function setOwnerRelayInvoker(invoke: OwnerRelayInvoker | null): void {
+  ownerRelayInvoker = invoke;
+  for (const listener of ownerRelayConnectionListeners) listener(invoke !== null);
+}
+/** Presentation signal only; every operation still checks the current owner grant. */
+export function subscribeOwnerRelayConnection(listener: (connected: boolean) => void): () => void {
+  ownerRelayConnectionListeners.add(listener);
+  listener(ownerRelayInvoker !== null);
+  return () => { ownerRelayConnectionListeners.delete(listener); };
+}
 export const isOwnerRelayReconnecting = () => isOwnerRelayBrowser() && !ownerRelayInvoker;
 /** A phone's connection to its paired desktop drops and recovers routinely on
  * cellular/Wi-Fi handoffs. Surfacing every transient drop as a popup is noisy;

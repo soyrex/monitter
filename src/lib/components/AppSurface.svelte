@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { localUuid, isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, isOwnerRelayReconnectPersistent, OwnerRelayDisconnectedError } from '$lib/lan';
+  import { localUuid, isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, isOwnerRelayReconnectPersistent, OwnerRelayDisconnectedError, subscribeOwnerRelayConnection } from '$lib/lan';
   import { OWNER_RELAY_DISCONNECTED_MESSAGE } from '$lib/owner-relay-error.js';
   import { workspaceShareOpen, workspaceShareTaskId } from '$lib/workspace-panels';
   import { responsiveBrand } from '$lib/responsive-brand';
@@ -20,6 +20,8 @@
   import RichMarkdownComposer from './LazyRichMarkdownComposer.svelte';
   import VoiceRecorder from './VoiceRecorder.svelte';
   import NativeSpeechRecorder from './NativeSpeechRecorder.svelte';
+  import CompanionMode from './CompanionMode.svelte';
+  import { isCompanionAvailable } from '$lib/companion-voice';
   import { mobileSpeechMode, nativeSpeechPlatform } from '$lib/mobile-speech';
   import ChatDateDivider from "./ChatDateDivider.svelte";
   import { chatDay } from '$lib/chat-dates';
@@ -450,6 +452,41 @@
   onMount(() => { void refreshCodexAccounts(); });
   let mobileNativeSpeechBridge = $state(false);
   onMount(() => { mobileNativeSpeechBridge = nativeSpeechPlatform() !== null; });
+  let companionAvailable = $state(false);
+  let companionOpen = $state(false);
+  let companionConnected = $state(false);
+  let companionInitialTaskId = $state<string | null>(null);
+  onMount(() => {
+    if (embedded || !isOwnerRelayBrowser()) return;
+    companionAvailable = isCompanionAvailable();
+    return subscribeOwnerRelayConnection(connected => { companionConnected = connected; });
+  });
+  function openCompanion() {
+    if (!companionAvailable || !snapshot) return;
+    companionInitialTaskId = activePaneId === 'main' ? selectedTaskId : paneSelections[activePaneId] ?? selectedTaskId;
+    companionOpen = true;
+  }
+  async function sendCompanionMessage(taskId: string, value: string) {
+    if (isOwnerRelayReconnecting()) throw new OwnerRelayDisconnectedError();
+    const target = snapshot?.tasks.find(task => task.id === taskId);
+    if (!target || target.archived || target.channelId || snapshot?.agents.find(agent => agent.id === target.agentId)?.internal) {
+      throw new Error('This chat is no longer available. Choose another chat.');
+    }
+    const message = value.trim();
+    if (!message) throw new Error('Enter a message first.');
+    const ticket = ++snapshotIssued;
+    const result = await bridge.sendMessage(taskId, operatorPrompt(taskId, message), []);
+    if (isSnapshot(result)) applySnapshot(result, ticket);
+    else void reload();
+  }
+  async function resolveCompanionRequest(request: ApprovalRequest, action: () => Promise<Snapshot>) {
+    if (isOwnerRelayReconnecting()) throw new OwnerRelayDisconnectedError();
+    if (!snapshot?.approvalRequests.some(item => item.id === request.id && item.taskId === request.taskId && item.status === 'pending')) {
+      throw new Error('This request has already been resolved or expired.');
+    }
+    const ticket = ++snapshotIssued;
+    applySnapshot(await action(), ticket);
+  }
   let motionReady = $state(false);
   onMount(() => { if (!embedded) motionReady = true; });
   onMount(() => {
@@ -4529,6 +4566,7 @@
     persistWorkspace();
   }
   function handleShortcuts(event: KeyboardEvent) {
+    if (companionOpen || (event.target instanceof Element && event.target.closest('.companion'))) return;
     tabIndexModifier = macPlatform ? event.metaKey : event.ctrlKey;
     if (event.key === 'Escape' && tabPickerOpen) { event.preventDefault(); tabPickerOpen = false; return; }
     if (!embedded && !sidebarSelected && tabIndexModifier && !event.altKey && !event.shiftKey && !event.isComposing && /^[1-9]$/.test(event.key) && !document.querySelector('[role="dialog"]')) {
@@ -5089,7 +5127,7 @@
 {/snippet}
 
 {#snippet voiceButton()}
-  {#if nativeRuntime || (isLanBrowser() && !embedded)}
+  {#if !companionOpen && (nativeRuntime || (isLanBrowser() && !embedded))}
     {#key `${currentDraftKey() ?? ''}:${attachmentScope}`}
       {#if isOwnerRelayBrowser() && mobileNativeSpeechBridge && $mobileSpeechMode==='on-device'}
         <NativeSpeechRecorder contextKey={currentDraftKey() ?? ''} disabled={filesBusy || draftSendPending || !!voiceProcessing[currentDraftKey() ?? '']} ontranscript={(transcript,key)=>appendVoiceTranscript(key,transcript)}/>
@@ -5177,6 +5215,7 @@
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Open chats menu" title="Open chats menu" onclick={()=>{tabPickerOpen=false;backToChats();}}><Menu size={20}/></button>
+        {#if companionAvailable}<button class="icon mobile-back" type="button" aria-label="Open Companion Mode" title="Companion Mode" onclick={openCompanion}><Bot size={20}/></button>{/if}
       {:else}
         {#if activeWorkspaceKey.startsWith('project:')}{@render workspaceContext()}{/if}
       {/if}
@@ -5678,15 +5717,19 @@
 {#if !embedded}<RootSurfaceLifecycle start={startRootLifecycle}/>{/if}
 {#if !embedded && !snapshot}<WorkspaceLoadingScreen {error} onretry={reload}/>{/if}
 
-  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:mobile-task-chat={mobileSidebar && pane === 'task' && !currentDraftId} class:embedded class="app-shell" inert={!embedded && !snapshot} ontouchstart={handleMobileEdgeSwipeStart} ontouchend={handleMobileEdgeSwipeEnd} ontouchcancel={handleMobileEdgeSwipeCancel}>
+  <main use:rootMotion use:rootMobileViewport class:preview={!bridge.available} class:native-mac={nativeMac} class:native-fullscreen={nativeFullscreen} class:web-runtime={!embedded && !nativeRuntime} class:sidebar-collapsed={sidebarCompressed} class:mobile-navigation={mobileSidebar} class:mobile-main={mobileMain} class:mobile-task-chat={mobileSidebar && pane === 'task' && !currentDraftId} class:embedded class="app-shell" inert={companionOpen || (!embedded && !snapshot)} ontouchstart={handleMobileEdgeSwipeStart} ontouchend={handleMobileEdgeSwipeEnd} ontouchcancel={handleMobileEdgeSwipeCancel}>
   {#if !embedded}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the sidebar delegates arrow navigation among its focusable controls) -->
   <aside bind:this={motionSidebar} class="sidebar" class:modern-tabs={snapshot?.settings.tabStyle === 'modern'} class:sidebar-compressed={sidebarCompressed} class:sidebar-selected={sidebarSelected} class:keyboard-active={sidebarSelected && (snapshot?.settings.showActivePaneBorder ?? true)} aria-label="Agents and tasks" tabindex="-1" inert={mobileSidebar && mobileMain} onfocusin={()=>{if(!mobileSidebar)sidebarSelected=true}} onpointerdowncapture={()=>{if(!mobileSidebar)sidebarSelected=true}} onkeydown={handleSidebarKeydown}>
     {#if !mobileSidebar}<SidebarResize side="left" collapsed={sidebarCompressed} oncollapse={value=>{sidebarCollapsed=value;railAgentId=null;railProjectId=null}}/>{/if}
     <div class="brand" use:responsiveBrand={sidebarCompressed}>
-      {#if mobileSidebar}<button class="icon brand-action" type="button" aria-label="Open Settings" title="Open Settings" onclick={()=>routeSettings()}><Cog size={18}/></button>{/if}
+      {#if mobileSidebar}
+        <button class="icon brand-action" type="button" aria-label="Open Settings" title="Open Settings" onclick={()=>routeSettings()}><Cog size={18}/></button>
+        {#if companionAvailable}<button class="icon brand-action" type="button" aria-label="Open Companion Mode" title="Companion Mode" onclick={openCompanion}><Bot size={18}/></button>{/if}
+      {/if}
       {#if sidebarCompressed}<button use:motionView={{key:"mark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-app-icon brand-logo brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><img src="/monitter-mark.png" alt="" draggable="false" /></button>{:else}<button use:motionView={{key:"wordmark",initial:motionReady,y:0,duration:160,opacity:0}} class="brand-logo-button" type="button" aria-label="Open global overview" title="Open global overview" onclick={openGlobalOverview}><strong class="brand-logo" aria-hidden="true"><span class="brand-full"><img src="/monitter-wordmark.webp" alt="" draggable="false" /></span><span class="brand-short"><img src="/monitter-mark.png" alt="" draggable="false" /></span></strong></button>{/if}
       {#if !sidebarCompressed}<div class="brand-actions" role="group" aria-label="Sidebar actions">
+        {#if companionAvailable && !mobileSidebar}<button class="icon brand-action" type="button" aria-label="Open Companion Mode" title="Companion Mode" onclick={openCompanion}><Bot size={18}/></button>{/if}
         <button class="icon brand-action" type="button" aria-label={terminalBusy?'Opening terminal':'New terminal'} title="New terminal in this host and folder" disabled={terminalBusy||!snapshot} onclick={newTerminal}>{#if terminalBusy}<LoaderCircle size={16} class="spin"/>{:else}<SquareTerminal size={16}/>{/if}</button>
         <button class="icon brand-action" type="button" aria-label="New chat" title="New chat" disabled={busy || !visibleAgents.length} onclick={()=>openTaskComposer()}><MessageSquarePlus size={16}/></button>
       </div>{/if}
@@ -5868,6 +5911,14 @@
   </div>{/if}
 </main>
 
+{#if !embedded && companionOpen && snapshot}
+  <CompanionMode tasks={visibleTasks} agents={visibleAgents} approvals={snapshot.approvalRequests} messages={snapshot.messages}
+    initialTaskId={companionInitialTaskId} connected={companionConnected}
+    onclose={()=>{companionOpen=false;}}
+    onresolve={(request,decision)=>resolveCompanionRequest(request,()=>bridge.resolveApproval(request.id,decision))}
+    oninput={(request,response)=>resolveCompanionRequest(request,()=>bridge.resolveInput(request.id,response as JsonValue))}
+    onsend={sendCompanionMessage}/>
+{/if}
 
 <CommandPalette open={palette !== null} title={palette === "switch" ? "Switch to" : "Controls"} placeholder={palette === "switch" ? "Find a channel, chat or agent…" : "Find a control or setting…"} items={palette === "switch" ? switchItems : controlItems} jev={palette === 'controls' ? jevPalette : undefined} oninterpret={palette === 'controls' ? interpretPaletteCommand : undefined} onquerychange={palette === 'controls' ? updateJevPaletteQuery : undefined} onselect={selectPalette} onclose={closeCommandPalette}/>
 {#if snapshot}<ArchivedChats {snapshot} open={modal === 'archived'} onclose={()=>modal=null}

@@ -28,6 +28,34 @@ the app never upgrades or changes that trust decision. If that local address is
 unavailable away from the LAN, choose the paired workspace to use the saved
 relay pairing instead.
 
+## Companion Mode
+
+In the paired iOS owner workspace, Mo is Monitter's foreground desk companion
+for a selected chat. Wake listening is explicitly activated and uses iOS
+on-device recognition for “Hey Mo” / “Hey Moe”; it is not a background or
+low-power keyword listener. “A Mo” alone does not trigger, and “Hey Mo” waits
+for a following command. Mo's talk area fills at least half the idle portrait
+screen; his visible face is 60% of that area and centered within it. Tap the
+face to listen, then tap again to stop. Mo's mouth responds to the local
+microphone level while listening; the face also has subtle idle motion that
+respects Reduce Motion. Hey Mo and
+pause-to-send toggles sit below it. Voice messages open a review bubble with
+Edit and Send controls; no empty text field is shown when idle.
+Optional auto-send waits eleven seconds without new speech and is
+off by default. Stop, editing, or an existing draft keeps the message for review.
+Desktop replies pop up as dismissible speech bubbles over Mo, with source-chat
+labels and a queue; they never automatically switch the pinned voice target.
+See [the iOS Companion guide](../docs/IOS_COMPANION.md)
+for privacy boundaries, lifecycle behavior, local checks, and the physical
+iPhone acceptance checklist.
+
+Focused checks are `node scripts/companion-voice-test.mjs`,
+`node scripts/companion-replies-test.mjs`,
+`node scripts/companion-ui-run.mjs`, and `npm run check`. `./build.sh` bundles
+the shared web assets into the iOS app; `./build-simulator.sh` also compiles the
+native Swift shell against the installed simulator SDK. None of these checks
+proves microphone operation on a physical iPhone.
+
 ## Build the web bundle
 
 From the repository root:
