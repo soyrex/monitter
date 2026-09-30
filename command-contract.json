@@ -608,6 +608,37 @@
         "native"
       ]
     },
+    "read_report_file": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "href",
+          "rustName": "href",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "basePath",
+          "rustName": "base_path",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "report_file::ReportDocument",
+      "resultTsType": "ReportDocument",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "get_lan_server_info": {
       "arguments": [],
       "resultRustType": "lan::Info",
@@ -2584,6 +2615,7 @@
       "ModelTarget",
       "ProbeResult",
       "ProcessMetricsSample",
+      "ReportDocument",
       "Sandbox",
       "Schedule",
       "SendAccepted",

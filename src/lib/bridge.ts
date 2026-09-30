@@ -46,6 +46,7 @@ import type {
   EventDetailChunk,
   MarkdownDocument,
   ImageDocument,
+  ReportDocument,
   SendAccepted,
   ExtensionConfig,
   EnvironmentSecretsConfig,
@@ -89,6 +90,7 @@ export interface MonitterBridge {
   getTaskEventDetail(taskId: string, eventId: string, offset?: number, limit?: number): Promise<EventDetailChunk>;
   readMarkdownFile(taskId: string, href: string, basePath?: string): Promise<MarkdownDocument>;
   readImageFile(taskId: string, href: string, basePath?: string): Promise<ImageDocument>;
+  readReportFile(taskId: string, href: string, basePath?: string): Promise<ReportDocument>;
   getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
@@ -440,6 +442,7 @@ const nativeBridge: MonitterBridge = {
   getTaskEventDetail: (taskId, eventId, offset, limit) => invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }),
   readMarkdownFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   readImageFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_image_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
+  readReportFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_report_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   getSubagentTranscript: (taskId, subagentId) => invoke('get_subagent_transcript', { taskId, subagentId }),
   saveHost: (host) => invoke("save_host", { host }),
   deleteHost: (id) => invoke("delete_host", { id }),
@@ -598,6 +601,7 @@ const previewBridge: MonitterBridge = {
   getTaskEventDetail: () => desktopOnly(),
   readMarkdownFile: () => desktopOnly(),
   readImageFile: () => desktopOnly(),
+  readReportFile: () => desktopOnly(),
   getSubagentTranscript: () => desktopOnly(),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
@@ -729,6 +733,7 @@ export function getBridge(): MonitterBridge {
       getTaskEventDetail: (taskId, eventId, offset, limit) => test.invoke('get_task_event_detail', { taskId, eventId, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) }) as Promise<EventDetailChunk>,
       readMarkdownFile: (taskId, href, basePath) => test.invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<MarkdownDocument>,
       readImageFile: (taskId, href, basePath) => test.invoke('read_image_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<ImageDocument>,
+      readReportFile: (taskId, href, basePath) => test.invoke('read_report_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<ReportDocument>,
       getSubagentTranscript: (taskId, subagentId) => test.invoke('get_subagent_transcript', { taskId, subagentId }) as Promise<SubagentTranscriptEntry[]>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,

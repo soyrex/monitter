@@ -276,6 +276,7 @@ export interface EventDetailChunk { chunk: string; nextOffset: number | null; to
 /** A local Markdown document explicitly scoped to one local task folder. */
 export interface MarkdownDocument { path: string; title: string; content: string; }
 export interface ImageDocument { path: string; title: string; mimeType: string; dataUrl: string; }
+export interface ReportDocument { path: string; title: string; mimeType: string; dataUrl: string; }
 export interface ChannelMessage {
   id: string; role: 'user' | 'assistant'; agentId: string | null;
   text: string; createdAt: number; taskId: string | null;
