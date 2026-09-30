@@ -1719,12 +1719,25 @@
     if (target !== activeWorkspaceKey) void switchWorkspace(target).then(changed => { if (changed) routeTask(task); });
     else routeTask(task);
   }
+  function scheduleWorkspaceChange() {
+    if (embedded) onWorkspaceChange?.();
+    else workspaceSave.schedule();
+  }
   $effect(() => {
-    // Stringifying tracks nested pane edits, but capture/storage is coalesced
-    // below so every composer keystroke does not clone the entire workspace.
-    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openGitTaskIds, selectedGitTaskId, openEmptyIds, selectedEmptyId, documents, openTaskIds, openDraftIds, openChannelIds, tabOrder:paneLocal.order, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, composer, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
+    // Track nested pane edits. Composer text has its own small effect below so
+    // typing does not serialize every retained draft and attachment preview.
+    JSON.stringify({ agentDraft, agentEdits, overviewOpen, settingsOpen, settingsCategory, openTerminalIds, selectedTerminalId, openGitTaskIds, selectedGitTaskId, openEmptyIds, selectedEmptyId, documents, openTaskIds, openDraftIds, openChannelIds, tabOrder:paneLocal.order, taskDrafts, drafts, selectedTaskId, currentDraftId, selectedChannelId, pane, taskTitle, taskAgentId, taskProjectId, taskParentId, taskNativeSessionId, taskCwd, focusedAgentId, focusedProjectId, showDetail, detailTab, queuedAttachments, attachmentContexts, channelRecipients, recipients, layout, activePaneId, sidebarCollapsed, collapsedAgents, collapsedProjects });
     workspaceReady;
-    untrack(() => { if (embedded) onWorkspaceChange?.(); else workspaceSave.schedule(); });
+    untrack(scheduleWorkspaceChange);
+  });
+  let composerPersistenceInitialized = false;
+  $effect(() => {
+    composer;
+    workspaceReady;
+    untrack(() => {
+      if (!composerPersistenceInitialized) { composerPersistenceInitialized = true; return; }
+      scheduleWorkspaceChange();
+    });
   });
   function layoutPending() { return hasPending() || paneIds(layout).some(id=>paneRefs[id]?.hasPending()); }
   function tabCount(state: Pick<PaneState, 'openTaskIds'|'openDraftIds'|'openChannelIds'|'openTerminalIds'|'openGitTaskIds'|'openEmptyIds'|'settingsOpen'>) { return paneTabCount(state); }

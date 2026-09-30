@@ -22,6 +22,7 @@
     "test:ui:palette-responsiveness": "node scripts/ui-palette-responsiveness-smoke.mjs",
     "test:ui:responsiveness": "node scripts/ui-responsiveness-smoke.mjs",
     "test:ui:access-picker": "node scripts/access-picker-test.mjs",
+    "test:ui:workspace-typing-persistence": "node scripts/ui-workspace-typing-persistence-test.mjs",
     "test:hot-ui": "node scripts/hot-ui-test.mjs",
     "test:extensions:ui": "node scripts/extensions-settings-ui-test.mjs",
     "test:mail-triage:ui": "node scripts/mail-triage-ui-test.mjs",
