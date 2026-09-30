@@ -7,6 +7,10 @@ export type UiDeltaApplication =
   | { kind: 'gap' };
 
 export function mergeMessagesById(current: readonly Message[], upserts: readonly Message[], removedIds: readonly string[] = []): Message[] {
+  // Metadata-only deltas are common (status, activity, settings) and carry no
+  // transcript edits. Keep the immutable page array shared instead of building
+  // a map and sorting every loaded message on each such refresh.
+  if (upserts.length === 0 && removedIds.length === 0) return current as Message[];
   const removed = new Set(removedIds);
   const byId = new Map(current.filter(message => !removed.has(message.id)).map(message => [message.id, message]));
   for (const message of upserts) if (!removed.has(message.id)) byId.set(message.id, message);
@@ -14,6 +18,9 @@ export function mergeMessagesById(current: readonly Message[], upserts: readonly
 }
 
 export function mergeChannelMessagesById(current: readonly ChannelMessage[], upserts: readonly ChannelMessage[], removedIds: readonly string[] = []): ChannelMessage[] {
+  // Channel metadata can advance independently from its transcript. Preserve
+  // the existing array when a delta has no channel-message changes.
+  if (upserts.length === 0 && removedIds.length === 0) return current as ChannelMessage[];
   const removed = new Set(removedIds);
   const byId = new Map(current.filter(message => !removed.has(message.id)).map(message => [message.id, message]));
   for (const message of upserts) if (!removed.has(message.id)) byId.set(message.id, message);
