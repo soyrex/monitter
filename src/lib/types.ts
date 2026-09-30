@@ -222,6 +222,7 @@ export interface Collaboration {
   text: string; requestId: string;
   status: 'queued' | 'running' | 'completed' | 'error' | 'interrupted';
   result: string | null; error: string | null; createdAt: number; updatedAt: number;
+  modelSelection?: CollaborationModelSelection | null;
 }
 /** Durable, provider-normalized delegated work. `source` is diagnostic and is never a UI label. */
 export interface SubagentSession {
@@ -564,3 +565,69 @@ export interface BrowserState {
 /** Result of loading a local unpacked extension. No manifest permissions or credentials are persisted. */
 export interface BrowserExtensionLoadResult { path: string; displayName: string | null; }
 export interface AutonameTarget { taskId?: string; channelId?: string; terminalId?: string; content?: string; }
+
+/** Persisted record of how a collaboration's requested model/effort was resolved. */
+export interface CollaborationModelSelection {
+  requestedTitle?: string | null;
+  requestedModel: string | null;
+  requestedEffort: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  source: string;
+  reason: string;
+}
+
+export type McpAgentPowerTier = 'fast' | 'balanced' | 'strong' | 'frontier' | 'unknown';
+export type McpAgentPowerSource = 'operator-configured' | 'unknown';
+export interface McpAgentPower {
+  tier: McpAgentPowerTier;
+  source: McpAgentPowerSource;
+}
+/** One advertised provider model, with operator-configured capacity metadata when known. */
+export interface McpAgentModel extends HarnessModel { power: McpAgentPower; powerTiers: Exclude<McpAgentPowerTier, 'unknown'>[]; }
+export interface McpAgentModelCatalogMetadata {
+  source: string;
+  warning: string | null;
+  complete: boolean;
+}
+/** Profile projection returned by collaboration MCP list_agents. */
+export interface McpAgentDirectoryEntry {
+  id: string;
+  name: string;
+  description: string;
+  expertise: string[];
+  responsibilities: string[];
+  skills: string[];
+  provider: string;
+  model: string;
+  defaultModel: string;
+  host: string | null;
+  configured: boolean;
+  active: boolean;
+  active_task_ids: string[];
+  current_task_id: string | null;
+  models: McpAgentModel[];
+  modelCatalog: McpAgentModelCatalogMetadata;
+}
+export interface McpListAgentsResult {
+  agents: McpAgentDirectoryEntry[];
+  caller_task_id: string;
+  active_only: boolean;
+}
+export interface McpListAgentModelsInput { to_agent_id: string; refresh?: boolean; }
+export interface McpListAgentModelsResult {
+  to_agent_id: string;
+  defaultModel: string;
+  models: McpAgentModel[];
+  modelCatalog: McpAgentModelCatalogMetadata;
+}
+export interface McpDelegateTaskInput {
+  to_agent_id: string;
+  title: string;
+  message: string;
+  request_id: string;
+  /** Omit for recipient saved default; "auto" requests Jev/default routing. */
+  model?: string;
+  /** Exact advertised effort ID; requires an explicit model ID. */
+  reasoning_effort?: string;
+}

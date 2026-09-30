@@ -1249,8 +1249,45 @@ The same Rust catalogue supplies the native harness tool allowlists:
   limits discovery to agents whose task has a currently active runtime turn, using the live run
   registry rather than persisted task status. Results expose `active`, `active_task_ids`, and the
   newest `current_task_id`; omitting the option keeps inactive profiles available for delegation.
-- `delegate_task`: create a child chat, inherit its parent's project, apply the recipient's saved
-  host/folder/model/permissions, and durably queue the supplied brief.
+  Each result also includes `defaultModel` (saved model, or the discovered harness default when
+  available), compact `models`, and `modelCatalog` metadata
+  (`source`, `warning`, and `complete`). Compact model entries use the advertised catalog's
+  camelCase fields (`id`, `name`, `description`, `reasoningEfforts`, `defaultEffort`,
+  `supportsFast`, `fastDescription`) plus `power: { tier, source }` and `powerTiers` (all operator
+  tier mappings). Directory lookup uses already-cached catalogs (at most 16 models per profile)
+  and never starts a model probe; missing catalog data yields an empty
+  model list with `complete: false` and points callers to `list_agent_models`. Power tiers are
+  `fast`, `balanced`, `strong`, `frontier`, or `unknown`; sources are
+  `operator-configured` or `unknown`. Unknown power means no unique operator mapping is available
+  (none or multiple); `powerTiers` preserves all mappings.
+- `list_agent_models { to_agent_id, refresh? }`: read the recipient's full advertised model and
+  reasoning-effort catalog, performing targeted discovery when needed. `refresh: true` bypasses
+  the short-lived catalog cache. Depending on provider, discovery may initialize a local ACP
+  session without sending a prompt. Catalog `reasoningEfforts` lists exact effort IDs accepted
+  for that model. An empty list in a complete
+  catalog means no effort choices are selectable through Monitter. This does not assert that the
+  underlying model cannot think: some harnesses control effort internally or do not expose it.
+  Consult `modelCatalog.warning` for provider limitations. `complete` describes model-ID menu
+  coverage only, not completeness of the provider's private capabilities.
+- `delegate_task { to_agent_id, title, message, request_id, model?, reasoning_effort? }`: create a
+  child chat, inherit its parent's project, apply the recipient's saved host/folder/permissions,
+  and durably queue the supplied brief. Retries retain the first selection; changed title, model,
+  or effort under the same request ID reject. Older records without saved title retain legacy
+  retry behavior. Omit `model` to retain the recipient's saved model default.
+  Set `model: "auto"` to ask the configured Jev service to select from a bounded shortlist of
+  advertised models, preserving the configured default and operator tier entries in the shortlist.
+  It falls back to the recipient's saved default when Jev is unavailable, abstains, is uncertain,
+  returns invalid evidence, or the input is sensitive or exceeds selection limits. The explicit
+  `auto` request uses this delegation policy independently of the chat composer's routing toggle.
+  Otherwise `model` must be
+  an exact model ID from that recipient's advertised catalog and unavailable choices are rejected.
+  `reasoning_effort` is optional, must be an exact effort ID advertised for the explicitly selected
+  model, and is rejected when model is omitted or set to `"auto"`. Model selection does not grant
+  permissions or change the saved host, folder, sandbox, or provider policy. Results and the durable
+  collaboration row include `modelSelection`: requested title/model/effort, resolved model/effort,
+  selection `source` (`explicit`, `jev`, or `configured_default`) and a bounded reason. A null
+  resolved model means the harness's native default is retained; it is not a claimed model turn.
+  Routed subagent sessions also expose the child task's configured model and effort.
 - `send_message`: send a brief to a peer, optionally using a directly connected collaboration chat.
 - `get_task_result`, `wait_for_task`: read the actual result and incoming peer messages.
 - `list_messages`: deliver queued messages to this active turn and return its durable inbox.

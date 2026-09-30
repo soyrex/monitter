@@ -315,6 +315,150 @@ mod tests {
     }
 
     #[test]
+    fn delegated_model_and_effort_reach_fixture_app_server_requests() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/fixtures/codex-app-server/mock.mjs");
+        let executable = std::env::temp_dir().join(format!(
+            "monitter-app-server-delegation-fixture-{}",
+            crate::id()
+        ));
+        let request_log = std::env::temp_dir().join(format!(
+            "monitter-app-server-delegation-requests-{}.jsonl",
+            crate::id()
+        ));
+        let script = format!(
+            "#!/bin/sh\n/usr/bin/tee -a {} | /usr/bin/env node {}\n",
+            crate::runner::posix_quote(&request_log.to_string_lossy()),
+            crate::runner::posix_quote(&fixture.to_string_lossy())
+        );
+        std::fs::write(&executable, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+
+        let state_dir = dir("delegated-model-wire");
+        let service = Service::open(None, state_dir.clone()).unwrap();
+        let executable_text = executable.to_string_lossy().into_owned();
+        service
+            .mutate(None, |snapshot| {
+                snapshot.hosts[0].codex_path = executable_text.clone();
+                Ok(())
+            })
+            .unwrap();
+        let root = running_task(&service, &executable_text);
+        let mut recipient_agent = service
+            .snapshot()
+            .unwrap()
+            .agents
+            .into_iter()
+            .find(|agent| agent.id == root.agent_id)
+            .unwrap();
+        recipient_agent.id.clear();
+        recipient_agent.name = "Fixture reviewer".into();
+        recipient_agent.model = "saved-default-model".into();
+        recipient_agent.collaboration_enabled = true;
+        service.save_agent(recipient_agent).unwrap();
+        let recipient = service
+            .snapshot()
+            .unwrap()
+            .agents
+            .into_iter()
+            .find(|agent| agent.name == "Fixture reviewer")
+            .unwrap();
+
+        let target = service.delegation_target(&root.id, &recipient.id).unwrap();
+        let catalog_key = crate::model_catalog_key(
+            &target.host,
+            &target.agent.provider,
+            &target.cwd,
+            target.agent.codex_home.as_deref(),
+            target.agent.acp.as_ref(),
+        );
+        service.model_catalogs.lock().unwrap().insert(
+            catalog_key,
+            (
+                Instant::now(),
+                ModelCatalog {
+                    models: vec![CatalogModel {
+                        id: "fixture-model".into(),
+                        name: "Fixture model".into(),
+                        description: "Local app-server test model".into(),
+                        reasoning_efforts: vec![ReasoningEffortOption {
+                            id: "low".into(),
+                            description: "Low effort".into(),
+                        }],
+                        default_effort: Some("low".into()),
+                        supports_fast: false,
+                        fast_description: None,
+                    }],
+                    current: ModelCatalogCurrent {
+                        model: "saved-default-model".into(),
+                        reasoning_effort: None,
+                        fast_mode: None,
+                    },
+                    source: "app-server fixture test".into(),
+                    warning: None,
+                },
+            ),
+        );
+
+        let mut cleanup = FixtureCleanup {
+            service: Some(service.clone()),
+            task_id: root.id.clone(),
+            state_dir: service.runtime_dir.clone(),
+            executable: executable.clone(),
+        };
+        let queued = service
+            .protocol(
+                &root.id,
+                "delegate_task",
+                json!({
+                    "to_agent_id": recipient.id,
+                    "title": "Wire model selection",
+                    "message": "Check the fixture request parameters.",
+                    "request_id": "fixture-model-wire-1",
+                    "model": "fixture-model",
+                    "reasoning_effort": "low"
+                }),
+            )
+            .unwrap();
+        let child_id = queued["to_task_id"].as_str().unwrap().to_string();
+        cleanup.task_id = child_id.clone();
+        service.dispatch_collaborations();
+
+        let timeout = Duration::from_secs(15);
+        resolve_fixture_requests_with_timeout(&service, &child_id, timeout);
+        wait_until(&service, &child_id, timeout, |snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == child_id && task.status == "completed")
+        });
+
+        let requests = std::fs::read_to_string(&request_log).unwrap();
+        let frames = requests
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let thread_start = frames
+            .iter()
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("fixture received thread/start");
+        assert_eq!(thread_start["params"]["model"], "fixture-model");
+        let turn_start = frames
+            .iter()
+            .find(|frame| frame["method"] == "turn/start")
+            .expect("fixture received turn/start");
+        assert_eq!(turn_start["params"]["model"], "fixture-model");
+        assert_eq!(turn_start["params"]["effort"], "low");
+        drop(cleanup);
+        let _ = std::fs::remove_file(request_log);
+    }
+
+    #[test]
     fn stale_app_server_turn_cannot_mutate_replacement_run() {
         let service = Service::open(None, dir("stale-turn")).unwrap();
         let task = running_task(&service, "/bin/echo");

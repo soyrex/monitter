@@ -42,6 +42,8 @@ mod claude_idle_runtime_tests;
 mod codex_app_server;
 mod codex_accounts;
 mod collaboration;
+mod delegation_models;
+mod delegation_catalog;
 #[cfg(test)]
 mod collaboration_client_tests;
 mod collaboration_mcp;
