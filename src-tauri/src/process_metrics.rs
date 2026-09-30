@@ -23,6 +23,9 @@ pub struct ProcessMetricsProcess {
     pub started_at: i64,
     pub cpu_time_ms: u64,
     pub resident_memory_bytes: u64,
+    /// Running task title when this process is the task's owned harness root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_title: Option<String>,
 }
 
 /// Process identities used to fence idle retirement, without reading command
@@ -229,6 +232,7 @@ pub fn sample() -> Result<ProcessMetricsSample, String> {
                 started_at,
                 cpu_time_ms: own_cpu / 1_000_000,
                 resident_memory_bytes: memory,
+                chat_title: None,
             });
         } else if pid == root {
             return Err("Could not read Monitter process metrics.".into());

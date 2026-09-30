@@ -269,7 +269,7 @@ export interface TaskMessagesPage { messages: Message[]; nextBeforeId: string | 
 export interface SendAccepted { accepted: true; }
 /** Full diagnostic activity is deliberately loaded only when its pane is opened. */
 export interface TaskEventsPage { events: RunEvent[]; nextBefore: number | null; }
-export interface ProcessMetricsProcess { pid: number; parentPid: number; name: string; commandLine: string; startedAt: number; cpuTimeMs: number; residentMemoryBytes: number; }
+export interface ProcessMetricsProcess { pid: number; parentPid: number; name: string; commandLine: string; startedAt: number; cpuTimeMs: number; residentMemoryBytes: number; chatTitle?: string; }
 export interface ProcessMetricsSample { cpuTimeMs: number; residentMemoryBytes: number; sampledAt: number; rootPid: number; processes: ProcessMetricsProcess[]; }
 export interface SystemFontFamily { family: string; monospace: boolean; }
 export interface EventDetailChunk { chunk: string; nextOffset: number | null; totalBytes: number; }

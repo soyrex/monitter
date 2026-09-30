@@ -1866,6 +1866,16 @@ fn codex_native_turn_frame(
 }
 
 impl RunControl {
+    /// PID of the owned child process currently attached to this run.
+    pub(crate) fn root_pid(&self) -> Option<libc::pid_t> {
+        self.child
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(Child::id)
+            .map(|pid| pid as libc::pid_t)
+    }
+
     pub fn new(remote_supervised: bool) -> Arc<Self> {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),

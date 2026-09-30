@@ -1405,6 +1405,38 @@ impl Service {
         Ok(self.committed_data()?.snapshot.clone())
     }
 
+    /// Adds chat titles to the owned harness roots in the local process sample.
+    fn process_metrics(&self) -> Result<process_metrics::ProcessMetricsSample, String> {
+        let mut sample = process_metrics::sample()?;
+        let controls = self
+            .runs
+            .lock()
+            .map(|runs| runs.tasks.clone())
+            .unwrap_or_default();
+        if controls.is_empty() {
+            return Ok(sample);
+        }
+        let titles: HashMap<String, String> = self
+            .committed_data()?
+            .snapshot
+            .tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.title.clone()))
+            .collect();
+        let pid_titles: HashMap<libc::pid_t, String> = controls
+            .into_iter()
+            .filter_map(|(task_id, control)| {
+                Some((control.root_pid()?, titles.get(&task_id)?.clone()))
+            })
+            .collect();
+        for process in &mut sample.processes {
+            if let Some(title) = pid_titles.get(&process.pid) {
+                process.chat_title = Some(title.clone());
+            }
+        }
+        Ok(sample)
+    }
+
     /// This private configuration is intentionally separate from Snapshot so
     /// LAN/controller/visitor projections cannot accidentally expose MCP
     /// headers, environment values, or skill text.
@@ -1656,7 +1688,7 @@ impl Service {
         match command {
             "get_command_capabilities" => value(command_capabilities("lan")?),
             "get_snapshot" => value(self.snapshot()?),
-            "get_process_metrics" => value(process_metrics::sample()?),
+            "get_process_metrics" => value(self.process_metrics()?),
             "get_ui_delta" => value(self.ui_delta(args.get("revision").and_then(|value| value.as_str()))?),
             "get_channel_messages" => value(self.channel_messages(
                 &arg::<String>(&args, "channelId")?,
@@ -7068,8 +7100,11 @@ async fn plan_jev_command(
 }
 
 #[tauri::command]
-async fn get_process_metrics() -> Result<process_metrics::ProcessMetricsSample, String> {
-    tauri::async_runtime::spawn_blocking(process_metrics::sample)
+async fn get_process_metrics(
+    state: State<'_, AppState>,
+) -> Result<process_metrics::ProcessMetricsSample, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.process_metrics())
         .await
         .map_err(|error| format!("Process metrics worker failed: {error}"))?
 }
