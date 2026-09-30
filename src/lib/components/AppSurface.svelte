@@ -3596,6 +3596,10 @@
   async function retryOptimisticMessage(id: string) {
     const message = optimisticMessages.find(item => item.id === id);
     if (!message || message.status === 'sending') return;
+    if (message.kind === 'draft') {
+      updateOptimisticMessage(message.id, { error: 'No chat is confirmed yet. Review this draft, then send it again.' });
+      return;
+    }
     const targetKey = `${message.kind}:${message.targetId}`;
     if (composerPending[targetKey]) return;
     // Reserve this target before the snapshot read so concurrent retries and
@@ -3611,8 +3615,6 @@
       } else if (message.kind === 'channel') {
         startOptimisticSend(message, () => bridge.sendChannelMessage(message.targetId, message.text, message.recipientIds ?? [], message.attachments.map(item => item.id)), message);
         handedOffToSend = true;
-      } else {
-        updateOptimisticMessage(message.id, { status: 'not-confirmed', error: 'The chat was not created. Keep or edit this draft, then send it again.' });
       }
     } finally {
       if (!handedOffToSend) setComposerPending(targetKey, false);
@@ -5112,7 +5114,7 @@
   </span>
   {#if message.status === 'not-confirmed'}
     {@const retryPending=composerPending[`${message.kind}:${message.targetId}`]}
-    <button class="delivery-retry" disabled={retryPending} aria-busy={retryPending} title={retryPending ? 'Checking before retry…' : 'Retry'} onclick={() => retryOptimisticMessage(message.id)}>{retryPending ? 'Checking…' : 'Retry'}</button>
+    <button class="delivery-retry" disabled={retryPending} aria-busy={retryPending} title={retryPending ? 'Waiting for this chat’s pending send or confirmation check' : 'Retry'} onclick={() => retryOptimisticMessage(message.id)}>{retryPending ? 'Waiting…' : 'Retry'}</button>
     {#if message.error}<small class="delivery-error">{message.error}</small>{/if}
   {/if}
 {/snippet}

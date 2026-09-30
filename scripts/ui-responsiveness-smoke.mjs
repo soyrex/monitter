@@ -207,6 +207,9 @@ for (const [engine, browserType] of [['WebKit', webkit], ['Chromium', chromium]]
     await expect(input(page)).toBeFocused();
     await expect(page.getByText('Not confirmed', { exact: true })).toBeVisible();
     await expect(page.getByText('Creation that will fail', { exact: true }).last()).toBeVisible();
+    await page.locator('.delivery-retry').click();
+    await expect(page.getByRole('region', { name: 'Starting chat', exact: true })).toHaveCount(0);
+    await expect(input(page)).toHaveValue('Do not erase this newer draft');
     expect(await calls(page, 'createTask')).toHaveLength(0);
     await page.close();
 

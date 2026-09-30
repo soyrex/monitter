@@ -9,6 +9,7 @@ Audited from local main `532909f` with three Luna workers and an integration rev
 | Controls palette | Preference actions awaited settings persistence before dismissing the palette and used the global busy flag. | Dismiss before saving; use a dedicated pending flag and visible success/error feedback. |
 | Permissions picker | The picker awaited `setTaskSandbox` before closing. | Close immediately; show a pending indicator, and show failures without reopening or taking focus. |
 | Task/channel composers | Unrelated foreground operations disabled send, attachment and voice controls. In-flight sends lacked a matching duplicate guard. | Scope submission guards to the current chat/draft; keep typing and other chats available. |
+| Failed-send retries | Multiple Retry clicks could pass the guard while awaiting a confirmation refresh. | Reserve the target before checking confirmation, prevent concurrent retry/send, and release the guard on refresh failure without resubmitting. |
 | New-chat creation | Routing/catalog lookup ran before capturing all context and clearing the submitted draft; later edits could be erased or another tab's context read. | Capture prompt, attachments, sandbox and destination before waiting; show the pending message immediately and preserve follow-up text through failures and tab switches. |
 | New-chat keyboard focus | Entering or leaving the pending-chat view replaced the focused textarea. | Transfer focus to the replacement composer when it still belongs to the same interaction, preserving focus chosen elsewhere. |
 | Transcript updates | Metadata-only updates rebuilt maps and sorted retained message arrays. | Preserve unchanged task/channel arrays, allowing downstream indexes to reuse them. |
@@ -19,7 +20,7 @@ Audited from local main `532909f` with three Luna workers and an integration rev
 
 - Production web assets: direct `vite build`, without the package script's LAN publication step.
 - Svelte/TypeScript: `npm run check` reports 0 errors and 25 existing warnings.
-- `scripts/ui-responsiveness-smoke.mjs`: WebKit and Chromium cover held/rejected task and channel sends, cross-chat sending during a pending stop, delayed routing/creation with tab switching, duplicate guards, failed creation with newer draft text, and keyboard focus across creation transitions.
+- `scripts/ui-responsiveness-smoke.mjs`: WebKit and Chromium pass held/rejected task and channel sends, cross-chat sending during a pending stop, delayed routing/creation with tab switching, double-click retries with delayed/failed confirmation, failed creation with newer draft text, and keyboard focus across creation transitions.
 - `scripts/ui-palette-responsiveness-smoke.mjs`: WebKit and Chromium pass delayed settings saves and visible errors after rejection.
 - `scripts/access-picker-test.mjs`: isolated permission-picker success/failure checks pass in Chromium and WebKit, including focus retention after failure.
 - `scripts/ui-sync-cache-test.mjs` and `scripts/snapshot-indexes-test.mjs`: no-op identity sharing and normal updates pass.
