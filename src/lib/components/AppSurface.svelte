@@ -5816,8 +5816,11 @@
     const profile = agent as AgentProfile;
     return [agent.name, agent.description, friendlyProviderName(agent), ...(profile.expertise ?? []), ...(profile.responsibilities ?? []), ...(profile.skills ?? [])].join(' ').toLowerCase();
   }}
-  {@const myAgents = visibleAgents.filter(agent => !localHost || agent.hostId === localHost.id)}
-  {@const peerAgents = localHost ? visibleAgents.filter(agent => agent.hostId !== localHost.id) : []}
+  <!-- Agent profiles are owned by this desktop's store, even when their
+       execution host is SSH. Treating a remote host as a peer made those
+       profiles read-only and hid their edit/delete controls. -->
+  {@const myAgents = visibleAgents}
+  {@const peerAgents = [] as typeof visibleAgents}
   {@const adminAgents = settingsAgents.filter(agent => agent.internal && (!localHost || agent.hostId === localHost.id))}
   <div class="agent-directory-shell">
     <header class="agent-directory-header">
