@@ -3596,11 +3596,27 @@
   async function retryOptimisticMessage(id: string) {
     const message = optimisticMessages.find(item => item.id === id);
     if (!message || message.status === 'sending') return;
-    const confirmedOrUnknown = await refreshForOptimisticRetry(message);
-    if (confirmedOrUnknown) return;
-    if (message.kind === 'task') startOptimisticSend(message, () => bridge.sendMessage(message.targetId, message.text, message.attachments.map(item => item.id)), message);
-    else if (message.kind === 'channel') startOptimisticSend(message, () => bridge.sendChannelMessage(message.targetId, message.text, message.recipientIds ?? [], message.attachments.map(item => item.id)), message);
-    else updateOptimisticMessage(message.id, { status: 'not-confirmed', error: 'The chat was not created. Keep or edit this draft, then send it again.' });
+    const targetKey = `${message.kind}:${message.targetId}`;
+    if (composerPending[targetKey]) return;
+    // Reserve this target before the snapshot read so concurrent retries and
+    // ordinary sends cannot both submit while confirmation is being checked.
+    setComposerPending(targetKey, true);
+    let handedOffToSend = false;
+    try {
+      const confirmedOrUnknown = await refreshForOptimisticRetry(message);
+      if (confirmedOrUnknown) return;
+      if (message.kind === 'task') {
+        startOptimisticSend(message, () => bridge.sendMessage(message.targetId, message.text, message.attachments.map(item => item.id)), message);
+        handedOffToSend = true;
+      } else if (message.kind === 'channel') {
+        startOptimisticSend(message, () => bridge.sendChannelMessage(message.targetId, message.text, message.recipientIds ?? [], message.attachments.map(item => item.id)), message);
+        handedOffToSend = true;
+      } else {
+        updateOptimisticMessage(message.id, { status: 'not-confirmed', error: 'The chat was not created. Keep or edit this draft, then send it again.' });
+      }
+    } finally {
+      if (!handedOffToSend) setComposerPending(targetKey, false);
+    }
   }
   function clearSentDraft(key: string, sentDraft: string) {
     if (currentDraftKey() === key) scrollRevision += 1;
@@ -5095,7 +5111,8 @@
     {#if message.status === 'sending'}<LoaderCircle size={13} class="spin" aria-hidden="true"/>{:else if message.status === 'sent'}<Check size={13} aria-hidden="true"/>{:else}Not confirmed{/if}
   </span>
   {#if message.status === 'not-confirmed'}
-    <button class="delivery-retry" onclick={() => retryOptimisticMessage(message.id)}>Retry</button>
+    {@const retryPending=composerPending[`${message.kind}:${message.targetId}`]}
+    <button class="delivery-retry" disabled={retryPending} aria-busy={retryPending} title={retryPending ? 'Checking before retry…' : 'Retry'} onclick={() => retryOptimisticMessage(message.id)}>{retryPending ? 'Checking…' : 'Retry'}</button>
     {#if message.error}<small class="delivery-error">{message.error}</small>{/if}
   {/if}
 {/snippet}
