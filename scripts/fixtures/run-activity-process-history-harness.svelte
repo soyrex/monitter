@@ -8,6 +8,7 @@
   let messages = $state<Message[]>([]);
   let events = $state<RunEvent[]>([]);
   let running = $state(false);
+  let compactLeafFixture = $state(false);
 
   const user = (id: string, text: string, createdAt: number): Message => ({
     id, taskId, role: 'user', text, createdAt, streamStatus: 'complete',
@@ -30,6 +31,7 @@
     messages = [];
     events = [];
     running = false;
+    compactLeafFixture = false;
   }
 
   onMount(() => {
@@ -65,12 +67,31 @@
         ];
         running = false;
       },
+      compactLeafScenario: () => {
+        reset();
+        compactLeafFixture = true;
+      },
     };
     return () => { delete (window as Window & { __PROCESS_HISTORY_QA__?: unknown }).__PROCESS_HISTORY_QA__; };
   });
 </script>
 
 <main aria-label="Process history fixture">
+  {#if compactLeafFixture}
+    <RunActivity
+      processTree
+      events={[
+        reasoning('empty-tree-thought', '{"summary":[]}', 4_000),
+        command('compact-command', 'git status --short && rg --files src/lib/components --glob "*.svelte"', 'completed', 4_100),
+        { id: 'compact-edit', taskId, kind: 'tool', title: 'fileChange', detail: JSON.stringify({ type: 'fileChange', changes: [{ path: '/repo/docs/CONTRACT.md', diff: '' }] }), createdAt: 4_200 },
+      ]}
+      processGroups={[
+        { type: 'reasoning-group', values: [reasoning('empty-tree-thought', '{"summary":[]}', 4_000)] },
+        { type: 'tool-group', values: [command('compact-command', 'git status --short && rg --files src/lib/components --glob "*.svelte"', 'completed', 4_100)] },
+        { type: 'tool-group', values: [{ id: 'compact-edit', taskId, kind: 'tool', title: 'fileChange', detail: JSON.stringify({ type: 'fileChange', changes: [{ path: '/repo/docs/CONTRACT.md', diff: '' }] }), createdAt: 4_200 }] },
+      ]}
+    />
+  {:else}
   {#each conversation as item (item.type === 'tool-group' || item.type === 'reasoning-group' || item.type === 'process-group' ? `${item.type}:${item.values[0].id}` : item.value.id)}
     {#if item.type === 'activity'}
       <RunActivity event={item.value}/>
@@ -85,6 +106,7 @@
       <article class={`message ${item.value.role}`} data-message-id={item.value.id}>{item.value.text}</article>
     {/if}
   {/each}
+  {/if}
 </main>
 
 <style>

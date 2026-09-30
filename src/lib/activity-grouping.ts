@@ -696,6 +696,33 @@ export function toolFileChanges(event: RunEvent): ToolFileChange[] {
   });
 }
 
+/** Concise, useful leaf text for the Turn tree; keep full output in the disclosure. */
+export function processToolLabel(event: RunEvent): string {
+  const category = toolCategory(event);
+  let detail: Record<string, unknown> | null = null;
+  try {
+    const parsed = parseToolDetail(event.detail);
+    detail = acpRecord(parsed) ? parsed : null;
+  } catch { /* Truncated and plain-text events can still use their title. */ }
+  const update = acpRecord(detail?.update) ? detail.update : null;
+  const input = acpRecord(update?.rawInput) ? update.rawInput : detail;
+  if (category === 'shell') {
+    const command = input?.command ?? input?.cmd;
+    const line = typeof command === 'string' ? command : Array.isArray(command) ? command.map(String).join(' ') :
+      commandFromRawDetail(event.detail) ?? (/^(?:\/[^\s]+\/)?(?:ba|z|fi|k|da)?sh\s/i.test(event.title) ? event.title : '');
+    return line.trim().replace(/\s+/g, ' ') || 'Command';
+  }
+  if (category === 'edit') {
+    const patch = typeof input?.patch === 'string' ? input.patch : '';
+    const patchPath = patch.match(/^\*\*\* (?:Update|Add|Delete) File:\s*(.+)$/m)?.[1] ?? '';
+    const path = toolFileChanges(event)[0]?.path ??
+      (typeof input?.file_path === 'string' ? input.file_path : typeof input?.path === 'string' ? input.path : patchPath);
+    const shortPath = path.split(/[\\/]/).filter(Boolean).slice(-2).join('/');
+    return shortPath ? `Edit: ${shortPath}` : 'Edit a file';
+  }
+  return toolPresentation(event, false).label;
+}
+
 /** Convert provider JSON into the useful human-readable part of a tool event. */
 export function readableToolDetail(event: RunEvent): string {
   const nativeSubagent = nativeSubagentActivity(event);

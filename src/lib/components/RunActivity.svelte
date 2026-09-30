@@ -27,7 +27,7 @@
   import X from "@lucide/svelte/icons/x";
   import type { ApprovalRequest, AttachmentFileData, RunEvent } from '$lib/types';
   import { getBridge } from '$lib/bridge';
-  import { contextCompactionId, contextCompactionPhase, isContextCompaction, nativeSubagentActivity, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, type ToolPresentation } from '$lib/activity-grouping';
+  import { contextCompactionId, contextCompactionPhase, isContextCompaction, nativeSubagentActivity, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, processToolLabel, type ToolPresentation } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
   import Markdown from './Markdown.svelte';
   import AnimatedTitle from './AnimatedTitle.svelte';
@@ -219,14 +219,20 @@
   {@const isThought=item.kind === 'reasoning'}
   {@const presentation=isThought ? {icon:'book-open' as const,label:'Thought process'} : toolPresentation(item, running)}
   {@const displayItem=expandedEvent(item)}
-  <details class="process-step">
-    <summary><ChevronRight size={12} class="call-chevron"/><span class:failed={presentation.label === 'Tool failed'}><svelte:component this={ICON_COMPONENT[presentation.icon]} size={14}/>{presentation.label}</span><time>{formatTime(item.createdAt)}</time></summary>
-    {#if isThought}<div class="process-thought"><Markdown text={reasoningSummary(displayItem.detail)}/></div>
-    {:else}<pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>{/if}
-    {@render imagePreview(displayItem)}
-    {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
-    {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
-  </details>
+  {@const thought= isThought ? reasoningSummary(displayItem.detail) : ''}
+  {#if isThought && !thought}
+    <div class="process-step process-step-static"><BookOpen size={14}/><span>Thinking</span><time>{formatTime(item.createdAt)}</time></div>
+  {:else}
+    {@const label=isThought ? 'Thought process' : processToolLabel(displayItem)}
+    <details class="process-step">
+      <summary title={label}><ChevronRight size={12} class="call-chevron"/><span class:failed={presentation.label === 'Tool failed'}><svelte:component this={ICON_COMPONENT[presentation.icon]} size={14}/><span class="process-step-label">{label}</span></span><time>{formatTime(item.createdAt)}</time></summary>
+      {#if isThought}<div class="process-thought"><Markdown text={thought}/></div>
+      {:else}<pre class="detail-summary" tabindex="0" aria-label={`Tool details: ${item.title}`}>{readableToolDetail(displayItem)}</pre>{/if}
+      {@render imagePreview(displayItem)}
+      {#if loadingDetails[item.id]}<p class="detail-state">Loading full detail…</p>{/if}
+      {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
+    </details>
+  {/if}
 {/snippet}
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 {#if primary && route}
@@ -247,12 +253,16 @@
     <summary aria-label={processLabel}><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>{processLabel}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary>
     <div class="process-steps" aria-label="Process steps">
       {#each treeGroups as group, index (group.values[0]?.id ?? index)}
-        <details class="process-branch">
-          <summary><ChevronRight size={12} class="call-chevron"/><span>{processGroupLabel(group)}</span><time>{formatTime(group.values.at(-1)?.createdAt ?? primary.createdAt)}</time></summary>
-          <div class="process-branch-steps">
-            {#each group.values as item (item.id)}{@render processStep(item)}{/each}
-          </div>
-        </details>
+        {#if group.type === 'reasoning-group' && group.values.every(item => !reasoningSummary(item.detail))}
+          <div class="process-branch process-branch-static"><BookOpen size={14}/><span>Thinking</span><time>{formatTime(group.values.at(-1)?.createdAt ?? primary.createdAt)}</time></div>
+        {:else}
+          <details class="process-branch">
+            <summary><ChevronRight size={12} class="call-chevron"/><span>{processGroupLabel(group)}</span><time>{formatTime(group.values.at(-1)?.createdAt ?? primary.createdAt)}</time></summary>
+            <div class="process-branch-steps">
+              {#each group.values as item (item.id)}{@render processStep(item)}{/each}
+            </div>
+          </details>
+        {/if}
       {/each}
       {#each approvals as approval (approval.id)}
         <button class="process-approval" type="button" onclick={() => onapproval?.(approval)} title="Open approval history">
@@ -325,11 +335,13 @@
   .process-tree > summary{padding:9px 0;color:var(--ink);font-size:calc(11px * var(--interface-font-ratio,1))}
   .process-steps{position:relative;display:grid;gap:2px;margin:0 0 10px 24px;padding-left:12px;border-left:1px solid var(--line)}
   .process-branch{position:relative;min-width:0}.process-branch > summary{gap:6px;padding:6px 5px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1))}.process-branch > summary span{display:flex;align-items:center;gap:6px}.process-branch > summary time{font-size:calc(9px * var(--interface-font-ratio,1))}.process-branch[open] > summary{color:var(--ink);background:color-mix(in srgb,var(--soft) 55%,transparent)}
+  .process-branch-static,.process-step-static{display:flex;align-items:center;gap:6px;padding:6px 5px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1))}
   .process-branch-steps{display:grid;gap:2px;margin:0 0 5px 17px;padding-left:12px;border-left:1px solid var(--line)}
   .process-step{position:relative;min-width:0;border:0;border-radius:5px}
   .process-step::before{content:"";position:absolute;left:-13px;top:16px;width:12px;border-top:1px solid var(--line)}
   .process-step > summary{gap:6px;padding:6px 5px;color:var(--muted);font-size:calc(11px * var(--interface-font-ratio,1))}
   .process-step > summary span{display:flex;align-items:center;gap:6px}.process-step > summary span.failed{color:var(--danger,#c44c79)}
+  .process-step > summary .process-step-label{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .process-step > summary :global(svg){flex:none}.process-step > summary time{font-size:calc(9px * var(--interface-font-ratio,1))}
   .process-step[open] > summary{color:var(--ink);background:color-mix(in srgb,var(--soft) 55%,transparent)}
   .process-step .detail-summary,.process-thought{margin:0 5px 7px 23px;padding:7px 8px;border-left:1px solid var(--line);color:var(--muted);font-size:calc(10px * var(--interface-font-ratio,1));line-height:1.45}

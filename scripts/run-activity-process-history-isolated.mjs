@@ -76,6 +76,21 @@ try {
   await summaryTree.locator(':scope > summary').click();
   await expect(summaryTree.locator('.process-thought')).toContainText('I checked the command output before replying.');
   await expect(summaryTree.locator('.process-step')).toHaveCount(3);
+
+  await qa('compactLeafScenario');
+  const compactTree = page.locator('details.process-tree');
+  await compactTree.locator(':scope > summary').click();
+  await expect(compactTree.locator('.process-branch-static')).toHaveText(/Thinking/);
+  await expect(compactTree.locator('.process-branch-static summary')).toHaveCount(0);
+  await page.setViewportSize({ width: 360, height: 700 });
+  const branches = compactTree.locator('details.process-branch');
+  await branches.nth(0).locator(':scope > summary').click();
+  const commandLabel = branches.nth(0).locator('.process-step-label');
+  await expect(commandLabel).toHaveText('git status --short && rg --files src/lib/components --glob "*.svelte"');
+  await expect(commandLabel).not.toContainText('Run a command');
+  expect(await commandLabel.evaluate(element => ({ clipped: element.scrollWidth > element.clientWidth, overflow: getComputedStyle(element).textOverflow }))).toEqual({ clipped: true, overflow: 'ellipsis' });
+  await branches.nth(1).locator(':scope > summary').click();
+  await expect(branches.nth(1).locator('.process-step-label')).toHaveText('Edit: docs/CONTRACT.md');
   expect(errors).toEqual([]);
   console.log('Process history: reasoning-first tree, nested command output, completed blank-reasoning retention, and separate summary scenario passed.');
 } finally {
