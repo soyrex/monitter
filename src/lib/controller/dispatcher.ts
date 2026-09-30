@@ -16,7 +16,7 @@ import {
 } from './protocol';
 
 export type MonitterControllerClient = Pick<MonitterBridge,
-  'getSnapshot' | 'getLegacySnapshot' | 'sendMessage' | 'cancelTask' | 'resumeTask' | 'listTerminals' | 'readTerminal'>;
+  'getSnapshot' | 'getLegacySnapshot' | 'sendMessage' | 'cancelTask' | 'resumeTask' | 'listTerminals' | 'readTerminal'> & Partial<Pick<MonitterBridge, 'getTaskMessages'>>;
 
 const CONTROLLER_SNAPSHOT_BUDGET_BYTES = CONTROLLER_MAX_RESPONSE_BYTES - 1024;
 const CONTROLLER_MESSAGE_TAIL_PER_TASK = 32;
@@ -248,6 +248,15 @@ export class ControllerDispatcher {
       let result: ControllerResult;
       switch (request.action) {
         case 'getSnapshot': result = controllerSnapshot(await (this.client.getLegacySnapshot?.() ?? this.client.getSnapshot())); break;
+        case 'getTaskMessages': {
+          if (!this.client.getTaskMessages) throw new Error('Task message history is unavailable on this desktop.');
+          const page = await this.client.getTaskMessages(request.params.taskId, request.params.beforeId, request.params.limit ?? 40);
+          result = { ...page, messages: page.messages.map(message => ({ ...message,
+            text: truncate(message.text, 8_000),
+            attachments: message.attachments?.map(attachment => ({ ...attachment, previewDataUrl: undefined })),
+          })) };
+          break;
+        }
         case 'sendMessage': {
           const sendResult = await this.client.sendMessage(request.params.taskId, request.params.text, request.params.attachmentIds);
           // Older mobile builds expect every send response to be a Snapshot.

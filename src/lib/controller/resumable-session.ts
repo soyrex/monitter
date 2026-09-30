@@ -134,6 +134,7 @@ export async function createResumableMobileSession(options: ResumableMobileOptio
   return {
     getStatus: () => current?.getStatus() ?? 'closed', getVerificationCode: () => current?.getVerificationCode() ?? null,
     supportsRememberedDevices: () => current?.supportsRememberedDevices() ?? false,
+    supportsMessagePages: () => current?.supportsMessagePages() ?? false,
     supportsOwnerWorkspace: () => current?.supportsOwnerWorkspace() ?? false,
     getOwnerWorkspaceState: () => current?.getOwnerWorkspaceState() ?? 'none',
     hasOwnerWorkspaceAccess: () => current?.hasOwnerWorkspaceAccess() ?? false,
@@ -145,6 +146,7 @@ export async function createResumableMobileSession(options: ResumableMobileOptio
     },
     close: () => { permanentlyClosed = true; generation += 1; cancelRetry(); unsubscribeState?.(); unsubscribeState = null; const previous = current; current = null; previous?.close(); notify({ status: 'closed' }); },
     getSnapshot: () => requireCurrent().getSnapshot(), sendMessage: (id, text) => requireCurrent().sendMessage(id, text) as Promise<Snapshot | ControllerSendReceipt>,
+    getTaskMessages: (id, beforeId, limit) => requireCurrent().getTaskMessages(id, beforeId, limit),
     requestOwnerWorkspace: () => requireCurrent().requestOwnerWorkspace(), invokeOwner: (command, args) => requireCurrent().invokeOwner(command, args),
     cancelTask: id => requireCurrent().cancelTask(id), resumeTask: id => requireCurrent().resumeTask(id), listTerminals: () => requireCurrent().listTerminals(), readTerminal: (id, seq) => requireCurrent().readTerminal(id, seq),
   };

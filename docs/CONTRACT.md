@@ -92,11 +92,13 @@ No fake conversations, progress, token counts, host connections or model replies
   snapshots contain at most 300 recent activity events (60 per task), omit output/log payloads,
   and bound details to 1,000 bytes (300 for error summaries) rather than full diagnostic history.
   Task/channel messages remain complete for legacy consumers. The owner-side controller v1
-  adapter uses a bounded compatibility projection because its wire protocol does not support
-  history paging: it retains task/agent identities, recent chronological conversation tails,
+  adapter uses a bounded compatibility projection for older clients: it retains task/agent identities, recent chronological conversation tails,
   and a visible per-task desktop-history notice while measuring the serialized response below
-  its 1 MiB ceiling. This does not replace the desktop's paged cache or bypass visitor
-  projection/revocation checks.
+  its 1 MiB ceiling. Newer paired clients may request older task messages through the optional
+  `task-message-pages-v1` capability and `getTaskMessages { taskId, beforeId?, limit? }` action.
+  The cursor is a message UUID, the limit is 1-40, and the response is `TaskMessagesPage`
+  (`messages`, `nextBeforeId`, `revision`). The action remains within the controller response
+  ceiling and never bypasses visitor projection or revocation checks.
 - `get_ui_delta { revision?: string }` -> `UiDeltaResponse`.
   Native and owner-LAN only. Initial reads or expired, foreign, oversized or unrepresentable journal
   revisions reset with a compact snapshot containing the latest 64 messages per task and channel. Incremental
@@ -1955,6 +1957,10 @@ paths, source IDs and attachment-reading APIs remain private.
 Visitor snapshots use an explicit field projection; new desktop snapshot fields
 must be reviewed before they are exposed to visitors. Harness approvals remain
 with the desktop owner, even for a shared chat.
+The initial visitor transcript is bounded. Optional older-message pages are authorized
+against the active share both before and after the owner read, filtered to the same
+approved task, and projected without owner-local attachment paths or saved system
+instructions. Ending or changing a share rejects in-flight pages.
 Visitor projections omit the owner's Profile name and saved system instructions;
 peer-attributed system messages remain visible as shared conversation content.
 Ending sharing revokes the in-memory session immediately. A reconnect needs a

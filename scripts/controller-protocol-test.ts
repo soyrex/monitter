@@ -147,6 +147,16 @@ for (const selection of [{ taskIds: [task, 'admin-task'], projectIds: [] }, { ta
   assert.ok(!JSON.stringify(guarded).includes('admin-task'));
 }
 const dispatcher = new ControllerDispatcher(client, { maxMutationReceipts: 3 });
+const pageRequest = request('abababab-abab-4bab-8bab-abababababab', 'getTaskMessages', { taskId: task, limit: 40 });
+const pageClient: ControllerClient = { ...client, getTaskMessages: async () => ({
+  messages: [{ id: 'page-message', taskId: task, role: 'assistant', text: 'x'.repeat(10_000), createdAt: 1 }],
+  nextBeforeId: null, revision: 'revision',
+}) };
+const pageResponse = JSON.parse(await new ControllerDispatcher(pageClient).dispatchJson(pageRequest, context));
+assert.equal(pageResponse.ok, true);
+assert.equal(pageResponse.result.messages[0].text.length, 8_000);
+assert.equal(JSON.parse(await dispatcher.dispatchJson(pageRequest, context)).ok, false, 'Old desktops do not expose paging.');
+assert.equal(JSON.parse(await dispatcher.dispatchJson(request('cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd', 'getTaskMessages', { taskId: task, limit: 41 }), context)).error.code, 'invalid_request');
 
 // A current bridge can acknowledge a durable send without returning a large
 // Snapshot. The dispatcher exposes that shape only when the peer negotiated it;

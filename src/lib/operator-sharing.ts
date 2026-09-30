@@ -125,6 +125,23 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
   const agentIds = new Set(tasks.map(task => task.agentId));
   const projectIds = new Set(tasks.flatMap(task => task.projectId ? [task.projectId] : []));
   const previewBudget = { remaining: MAX_SHARED_PREVIEW_BYTES };
+  const recent = snapshot.messages.filter(message => ids.has(message.taskId) && (message.role !== 'system' || !!message.senderAgentId))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  const retained: Message[] = [], perTask = new Map<string, number>();
+  let usedBytes = 0;
+  for (const message of recent) {
+    if (retained.length >= 200 || (perTask.get(message.taskId) ?? 0) >= 24) continue;
+    const budget = { remaining: previewBudget.remaining };
+    const projected = safeMessage(message, budget);
+    projected.text = projected.text.slice(0, 8_000);
+    if (projected.role === 'user' && share.primary && !splitOperatorMessage(projected.text).name) projected.text = `@(${share.primary.name}): ${projected.text}`;
+    const bytes = new TextEncoder().encode(JSON.stringify(projected)).byteLength;
+    if (usedBytes + bytes > 200 * 1024) continue;
+    usedBytes += bytes; previewBudget.remaining = budget.remaining;
+    perTask.set(message.taskId, (perTask.get(message.taskId) ?? 0) + 1);
+    retained.push(projected);
+  }
+  retained.sort((a, b) => a.createdAt - b.createdAt);
   const projectedAppearance = safeAppearance(appearance);
   return {
     // Explicit projection: new owner-only Snapshot fields must never become
@@ -136,21 +153,7 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
     // Internal agents are explicitly excluded so a crafted share never leaks them.
     agents: snapshot.agents.filter(agent => agentIds.has(agent.id) && agent.internal !== true).map(safeAgent),
     tasks,
-    messages: snapshot.messages
-      .filter(message => ids.has(message.taskId))
-      // Saved agent profile/instruction records are owner-only system context.
-      // Keep peer-attributed system records, which are part of a shared chat.
-      .filter(message => message.role !== 'system' || !!message.senderAgentId)
-      .map(message => {
-        const projected = safeMessage(message, previewBudget);
-        // Existing untagged user turns were authored by the owner, not the
-        // newly joined visitor. This is display projection, never a rewrite
-        // of the owner's persisted transcript or native agent history.
-        if (projected.role === 'user' && share.primary && !splitOperatorMessage(projected.text).name) {
-          projected.text = `@(${share.primary.name}): ${projected.text}`;
-        }
-        return projected;
-      }),
+    messages: retained,
     events: [],
     channels: [],
     projects: snapshot.projects.filter(project => projectIds.has(project.id)).map(safeProject),
@@ -167,7 +170,7 @@ export function sharedSnapshot(snapshot: Snapshot, share: Pick<ActiveOperatorSha
  * Revoking or changing it invalidates in-flight reads before any dispatch/response.
  */
 export function createOperatorScopedBridge(
-  bridge: Pick<MonitterBridge, 'getSnapshot' | 'sendMessage'> & Partial<Pick<MonitterBridge, 'getLegacySnapshot' | 'storeAttachment' | 'getUsageOverview' | 'getModelCatalog'>>,
+  bridge: Pick<MonitterBridge, 'getSnapshot' | 'sendMessage'> & Partial<Pick<MonitterBridge, 'getLegacySnapshot' | 'getTaskMessages' | 'storeAttachment' | 'getUsageOverview' | 'getModelCatalog'>>,
   getShare: () => ActiveOperatorShare | null,
   getAppearance?: () => SharedChatAppearance | undefined,
 ): DesktopBridge {
@@ -261,6 +264,26 @@ export function createOperatorScopedBridge(
     visitorAttachments.set(attachment.id, { share, taskId });
     return safeAttachment(attachment, { remaining: MAX_SHARED_PREVIEW_BYTES });
   } : undefined;
+  const getTaskMessages = bridge.getTaskMessages ? async (taskId: string, beforeId?: string, limit?: number) => {
+    const share = current();
+    const before = await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+    check(share);
+    if (!sharedTaskIds(before, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
+    const page = await bridge.getTaskMessages!(taskId, beforeId, Math.min(limit ?? 40, 40));
+    check(share);
+    const after = await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+    check(share);
+    if (!sharedTaskIds(after, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
+    const budget = { remaining: MAX_SHARED_PREVIEW_BYTES };
+    return { ...page, messages: page.messages
+      .filter(message => message.taskId === taskId && (message.role !== 'system' || !!message.senderAgentId))
+      .map(message => {
+        const safe = safeMessage(message, budget);
+        safe.text = safe.text.slice(0, 8_000);
+        if (safe.role === 'user' && share.primary && !splitOperatorMessage(safe.text).name) safe.text = `@(${share.primary.name}): ${safe.text}`;
+        return safe;
+      }) };
+  } : undefined;
   return {
     async getSnapshot() {
       const share = current();
@@ -268,6 +291,7 @@ export function createOperatorScopedBridge(
       check(share);
       return project(snapshot, share);
     },
+    ...(getTaskMessages ? { getTaskMessages } : {}),
     async sendMessage(taskId, text, attachmentIds = []) {
       const share = current();
       cleanAttachments(share);

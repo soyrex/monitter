@@ -242,8 +242,7 @@ release();
 await assert.rejects(inFlight, /revoked|not shared/i);
 assert.equal(sent, 1, 'Revocation during the snapshot await must prevent dispatch.');
 
-// Visitor protocol v1 cannot page. Read full history owner-side, then apply the
-// same explicit share projection; never give the visitor that owner capability.
+// The initial visitor read is bounded; older pages use the same share scope.
 const fullHistory: Snapshot = { ...source, messages: [
   ...source.messages,
   ...Array.from({ length: 105 }, (_, i) => ({ id: `older-${i}`, taskId: selectedId,
@@ -254,17 +253,39 @@ let compatibilityReads = 0, compatibilitySends = 0;
 const compatibilityBridge = createOperatorScopedBridge({
   getSnapshot: async () => ({ ...fullHistory, messages: fullHistory.messages.slice(-64) }),
   getLegacySnapshot: async () => { compatibilityReads += 1; return fullHistory; },
+  getTaskMessages: async () => ({ messages: [
+    { id: 'page-visible', taskId: selectedId, role: 'user', text: 'older', createdAt: 0,
+      attachments: [{ id: 'page-file', name: 'file', mimeType: 'text/plain', size: 1, path: '/private/page-file' }] },
+    { id: 'page-hidden', taskId: hiddenId, role: 'user', text: 'hidden page', createdAt: 0 },
+    { id: 'page-profile', taskId: selectedId, role: 'system', text: 'secret system profile', createdAt: 0 },
+  ], nextBeforeId: null, revision: 'one' }),
   sendMessage: async () => { compatibilitySends += 1; return { accepted: true }; },
 }, () => compatibilityGrant);
 const compatibilityRead = await compatibilityBridge.getSnapshot();
-assert.equal(compatibilityRead.messages.length, 106);
-assert.ok(compatibilityRead.messages.some(message => message.id === 'visible'));
+assert.equal(compatibilityRead.messages.length, 24);
 assert.ok(compatibilityRead.messages.every(message => message.taskId === selectedId));
+const page = await compatibilityBridge.getTaskMessages!(selectedId);
+assert.deepEqual(page.messages.map(message => message.id), ['page-visible']);
+assert.equal(page.messages[0].attachments?.[0].path, '');
+await assert.rejects(compatibilityBridge.getTaskMessages!(hiddenId), /not shared/i);
 assert.equal('getLegacySnapshot' in compatibilityBridge, false);
 const compatibilityReceipt = await compatibilityBridge.sendMessage(selectedId, 'Continue');
-assert.equal(compatibilityReceipt.messages.length, 106);
+assert.equal(compatibilityReceipt.messages.length, 24);
 assert.equal(compatibilitySends, 1);
-assert.equal(compatibilityReads, 3);
+assert.equal(compatibilityReads, 6);
+let releasePage!: () => void;
+const pageGate = new Promise<void>(resolve => { releasePage = resolve; });
+let pageShare: ActiveOperatorShare | null = grant();
+const revocablePage = createOperatorScopedBridge({
+  getSnapshot: async () => source,
+  getTaskMessages: async () => { await pageGate; return { messages: source.messages, nextBeforeId: null, revision: 'one' }; },
+  sendMessage: async () => source,
+}, () => pageShare);
+const inFlightPage = revocablePage.getTaskMessages!(selectedId);
+await new Promise(resolve => setTimeout(resolve, 0));
+pageShare = null;
+releasePage();
+await assert.rejects(inFlightPage, /revoked|changed/i);
 for (const result of [compatibilityRead, compatibilityReceipt]) {
   assert.deepEqual(result.hosts, []);
   assert.deepEqual(result.approvalRequests, []);

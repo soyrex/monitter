@@ -1,4 +1,4 @@
-import type { Attachment, AttachmentFileData, Snapshot, TerminalRead, TerminalSession } from '../types';
+import type { Attachment, AttachmentFileData, Snapshot, TaskMessagesPage, TerminalRead, TerminalSession } from '../types';
 
 /**
  * Wire format for the future paired-controller relay.  This module deliberately
@@ -19,6 +19,7 @@ export interface ControllerSendReceipt { readonly accepted: true; }
 
 export type ControllerAction =
   | 'getSnapshot'
+  | 'getTaskMessages'
   | 'sendMessage'
   | 'beginAttachmentUpload'
   | 'appendAttachmentUpload'
@@ -29,6 +30,7 @@ export type ControllerAction =
   | 'readTerminal';
 
 export interface GetSnapshotRequest { readonly action: 'getSnapshot'; readonly params: Record<string, never>; }
+export interface GetTaskMessagesRequest { readonly action: 'getTaskMessages'; readonly params: { taskId: string; beforeId?: string; limit?: number }; }
 export interface SendMessageRequest { readonly action: 'sendMessage'; readonly params: { taskId: string; text: string; attachmentIds?: string[] }; }
 export interface BeginAttachmentUploadRequest { readonly action: 'beginAttachmentUpload'; readonly params: { taskId: string; filename: string; mimeType: string; size: number; previewDataUrl?: string }; }
 export interface AppendAttachmentUploadRequest { readonly action: 'appendAttachmentUpload'; readonly params: { uploadId: string; dataBase64: string }; }
@@ -40,6 +42,7 @@ export interface ReadTerminalRequest { readonly action: 'readTerminal'; readonly
 
 export type ControllerRequest =
   | GetSnapshotRequest
+  | GetTaskMessagesRequest
   | SendMessageRequest
   | BeginAttachmentUploadRequest
   | AppendAttachmentUploadRequest
@@ -49,7 +52,7 @@ export type ControllerRequest =
   | ListTerminalsRequest
   | ReadTerminalRequest;
 
-export type ControllerResult = Snapshot | ControllerSendReceipt | TerminalSession[] | TerminalRead | Attachment | { uploadId: string };
+export type ControllerResult = Snapshot | TaskMessagesPage | ControllerSendReceipt | TerminalSession[] | TerminalRead | Attachment | { uploadId: string };
 
 export type ControllerErrorCode =
   | 'unauthenticated'
@@ -82,6 +85,7 @@ export interface AuthenticatedControllerContext {
 
 export interface ControllerClient {
   getSnapshot(): Promise<Snapshot>;
+  getTaskMessages?(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage>;
   /** Owner-side compatibility read for clients without transcript paging. Not a wire action. */
   getLegacySnapshot?(): Promise<Snapshot>;
   /**
@@ -103,7 +107,7 @@ export const CONTROLLER_MUTATING_ACTIONS: ReadonlySet<ControllerAction> = new Se
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ACTIONS: ReadonlySet<string> = new Set<ControllerAction>([
-  'getSnapshot', 'sendMessage', 'beginAttachmentUpload', 'appendAttachmentUpload', 'finishAttachmentUpload', 'cancelTask', 'resumeTask', 'listTerminals', 'readTerminal',
+  'getSnapshot', 'getTaskMessages', 'sendMessage', 'beginAttachmentUpload', 'appendAttachmentUpload', 'finishAttachmentUpload', 'cancelTask', 'resumeTask', 'listTerminals', 'readTerminal',
 ]);
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -162,6 +166,20 @@ export function parseControllerRequest(value: unknown): { id: string; request: C
       return exactKeys(value.params, [])
         ? { id: value.id, request: { action: value.action, params: {} } }
         : invalid(value.id, 'This action does not accept params.');
+    case 'getTaskMessages': {
+      const params = value.params;
+      const keys = Object.keys(params);
+      if (!keys.every(key => ['taskId', 'beforeId', 'limit'].includes(key)) || !keys.includes('taskId') ||
+        !idParameter(params.taskId) || (params.beforeId !== undefined && !idParameter(params.beforeId)) ||
+        (params.limit !== undefined && (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > 40))) {
+        return invalid(value.id, 'getTaskMessages requires a task UUID, optional message UUID cursor, and limit 1-40.');
+      }
+      return { id: value.id, request: { action: 'getTaskMessages', params: {
+        taskId: params.taskId as string,
+        ...(params.beforeId === undefined ? {} : { beforeId: params.beforeId as string }),
+        ...(params.limit === undefined ? {} : { limit: params.limit as number }),
+      } } };
+    }
     case 'sendMessage': {
       const attachmentIds = value.params.attachmentIds;
       if (!(exactKeys(value.params, ['taskId', 'text']) || exactKeys(value.params, ['taskId', 'text', 'attachmentIds'])) || !idParameter(value.params.taskId) ||

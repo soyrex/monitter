@@ -2,7 +2,7 @@ import { ControllerDispatcher } from './dispatcher';
 import { OwnerRelayDisconnectedError } from '../owner-relay-error.js';
 import { CONTROLLER_MAX_UPLOAD_BYTES, CONTROLLER_MAX_UPLOAD_PREVIEW_CHARS, CONTROLLER_PROTOCOL_VERSION, CONTROLLER_UPLOAD_CHUNK_BYTES, parseControllerRequest, type ControllerRequest, type ControllerResponse, type ControllerResult, type ControllerSendReceipt } from './protocol';
 import { SecureChannel, base64urlToBytes, bytesToBase64url, deriveDirectionalKeys, deriveEcdhSecret, exportPairingPublicKey, generatePairingKeyPair, pairingCommitment, randomBytes, verificationCode, type SecureEnvelope } from './secure-session';
-import type { Attachment, AttachmentFileData, Snapshot, TerminalRead, TerminalSession } from '../types';
+import type { Attachment, AttachmentFileData, Snapshot, TaskMessagesPage, TerminalRead, TerminalSession } from '../types';
 import type { ControllerClient } from './protocol';
 
 export type RemoteConnectionStatus = 'connecting' | 'waiting_for_peer' | 'pending' | 'awaiting_approval' | 'connected' | 'rejected' | 'closed' | 'error';
@@ -54,10 +54,12 @@ export interface MobileSession {
   getVerificationCode(): string | null;
   /** True only when this connected desktop advertised durable device trust. */
   supportsRememberedDevices(): boolean;
+  supportsMessagePages(): boolean;
   /** The peer advertised the separate full owner workspace extension. */
   supportsOwnerWorkspace(): boolean;
   subscribe(listener: (state: RemoteConnectionState) => void): () => void;
   getSnapshot(): Promise<Snapshot>;
+  getTaskMessages(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage>;
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | ControllerSendReceipt>;
   cancelTask(taskId: string): Promise<Snapshot>;
   resumeTask(taskId: string): Promise<Snapshot>;
@@ -92,6 +94,7 @@ const RELAY_PONG = '{"type":"pong"}';
 const MAX_CONCURRENT_DESKTOP_RPCS = 32;
 const SEND_RECEIPT_CAPABILITY = 'send-receipt-v1';
 const REMEMBERED_DEVICE_CAPABILITY = 'remembered-device-v1';
+const TASK_MESSAGE_PAGES_CAPABILITY = 'task-message-pages-v1';
 const OWNER_WORKSPACE_CAPABILITY = 'owner-workspace-v1';
 const OWNER_LARGE_CHUNKS_CAPABILITY = 'owner-chunks-512k-v1';
 /** Owner RPC is deliberately separate from controller v1's 1 MiB protocol. */
@@ -384,6 +387,7 @@ export async function createDesktopSession(relayUrl: string, bridge: DesktopBrid
         const capabilities = [
           ...(this.peerSupportsSendReceipt ? [SEND_RECEIPT_CAPABILITY] : []),
           ...(options?.isTrustedController ? [REMEMBERED_DEVICE_CAPABILITY] : []),
+          ...(bridge.getTaskMessages ? [TASK_MESSAGE_PAGES_CAPABILITY] : []),
           ...(!this.peer && options?.isTrustedOwnerWorkspace && options.onOwnerInvoke ? [OWNER_WORKSPACE_CAPABILITY] : []),
           ...(!this.peer && options?.isTrustedOwnerWorkspace && options.onOwnerInvoke ? [OWNER_LARGE_CHUNKS_CAPABILITY] : []),
         ];
@@ -566,11 +570,13 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     private activeOwnerRpcs = 0;
     private readonly incomingOwnerResponses = new Map<string, OwnerTransfer>();
     private rememberedDevices = false;
+    private messagePages = false;
     private ownerWorkspaceSupported = false;
     private ownerLargeChunksSupported = false;
     private ownerWorkspaceState: OwnerWorkspaceState = 'none';
     private ownerRequest: { resolve: () => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
     supportsRememberedDevices() { return this.rememberedDevices; }
+    supportsMessagePages() { return this.messagePages; }
     supportsOwnerWorkspace() { return this.ownerWorkspaceSupported; }
     getOwnerWorkspaceState() { return this.ownerWorkspaceState; }
     hasOwnerWorkspaceAccess() { return this.ownerWorkspaceState === 'approved'; }
@@ -578,7 +584,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
       if (value.type === 'pair-request') return;
-      if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.ownerWorkspaceSupported = invitationData.version === 2 && hasCapability(value.capabilities, OWNER_WORKSPACE_CAPABILITY); this.ownerLargeChunksSupported = this.ownerWorkspaceSupported && hasCapability(value.capabilities, OWNER_LARGE_CHUNKS_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
+      if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.messagePages = hasCapability(value.capabilities, TASK_MESSAGE_PAGES_CAPABILITY); this.ownerWorkspaceSupported = invitationData.version === 2 && hasCapability(value.capabilities, OWNER_WORKSPACE_CAPABILITY); this.ownerLargeChunksSupported = this.ownerWorkspaceSupported && hasCapability(value.capabilities, OWNER_LARGE_CHUNKS_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
       if (value.type === 'rejected') { this.disconnect(); this.setStatus('rejected'); this.socket?.close(); return; }
       if (value.type === 'owner-workspace-approved') { this.ownerWorkspaceState = 'approved'; this.settleOwnerRequest(); return; }
       if (value.type === 'owner-workspace-rejected') { this.ownerWorkspaceState = 'rejected'; this.settleOwnerRequest(new Error('Desktop declined owner workspace access.')); return; }
@@ -704,6 +710,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       const callback = this.pendingOwner.get(id); if (callback) { clearTimeout(callback.timer); this.pendingOwner.delete(id); callback.reject(new Error(error)); }
     }
     async getSnapshot() { return this.call('getSnapshot', {}) as Promise<Snapshot>; }
+    async getTaskMessages(taskId: string, beforeId?: string, limit?: number) { return this.call('getTaskMessages', { taskId, ...(beforeId ? { beforeId } : {}), ...(limit ? { limit } : {}) }) as Promise<TaskMessagesPage>; }
     async sendMessage(taskId: string, text: string, attachmentIds?: string[]) { return this.call('sendMessage', { taskId, text, ...(attachmentIds?.length ? { attachmentIds } : {}) }) as Promise<Snapshot | ControllerSendReceipt>; }
     async storeAttachment(taskId: string, file: AttachmentFileData & { previewDataUrl?: string | null }): Promise<Attachment> {
       if (typeof file?.filename !== 'string' || typeof file.mimeType !== 'string' || typeof file.dataBase64 !== 'string') throw new Error('Attachment data is invalid.');

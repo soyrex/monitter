@@ -74,7 +74,7 @@ matches(
   "failed sends are visibly not confirmed",
 );
 matches(
-  /if\(draft\.trim\(\)===text\)draft=''/,
+  /if\(draft===text\)draft=''/,
   "new typing is preserved while the captured send is in flight",
 );
 matches(

@@ -44,7 +44,8 @@ type LocalOutgoing = DisplayMessage & {
 };
 let invite = $state(''), code = $state(''), name = $state(''), status = $state('disconnected'), verification = $state(''), error = $state(''), connecting = $state(false), sending = $state(false), uploading = $state(false);
 let session = $state<VisitorSession | null>(null), snapshot = $state<SharedChatSnapshot | null>(null), selectedId = $state<string | null>(null), draft = $state(''), messagesPane = $state<HTMLElement>(), picker = $state<HTMLInputElement>();
-let localOutgoing = $state<LocalOutgoing[]>([]), attachments = $state<Attachment[]>([]), sidebarOpen = $state(false), detailsOpen = $state(false), following = true;
+let localOutgoing = $state<LocalOutgoing[]>([]), attachments = $state<Attachment[]>([]), sidebarOpen = $state(false), detailsOpen = $state(false), following = true, queuedTranscriptSnapshot = $state<SharedChatSnapshot|null>(null), touchY:number|null=null;
+let olderMessages = $state<Record<string, Message[]>>({}), historyCursors = $state<Record<string, string | null>>({}), historyLoading = $state<Record<string, boolean>>({}), historyErrors = $state<Record<string, string>>({});
 let lightbox = $state<{
     src: string;
     alt: string;
@@ -55,11 +56,12 @@ const chatDrafts = new Map<string, {
     text: string;
     files: Attachment[];
 }>();
-let unlisten: (() => void) | undefined, generation = 0, refreshing = false;
+let unlisten: (() => void) | undefined, generation = 0, refreshing = false, lastMessagesScrollTop = 0;
 const validName = $derived(/^[\p{L}\p{N}][\p{L}\p{N} ._'’-]{1,47}$/u.test(name.trim()));
 const validCode = $derived(/^\d{9}$/.test(code.replace(/[\s-]/g, '')));
 const task = $derived(snapshot?.tasks.find(x => x.id === selectedId) ?? null);
-const messages = $derived(snapshot?.messages.filter(x => x.taskId === selectedId) ?? []);
+function mergeMessages(...groups: Message[][]) { const byId=new Map<string,Message>();for(const group of groups)for(const message of group)byId.set(message.id,message);return [...byId.values()].sort((a,b)=>a.createdAt-b.createdAt); }
+const messages = $derived(selectedId ? mergeMessages(olderMessages[selectedId]??[],snapshot?.messages.filter(x => x.taskId === selectedId) ?? []) : []);
 const uploadLimits = $derived(snapshot?.sharing?.uploads ?? { maxFileBytes: 0, maxFiles: 0 });
 const composerInfo = $derived(selectedId ? snapshot?.sharing?.composerByTask?.[selectedId] : undefined);
 const modelLabel = $derived(composerInfo?.model.label || composerInfo?.model.id || task?.modelSettings?.model || task?.model || 'Harness default');
@@ -79,11 +81,30 @@ const initials = (value: string) => (value.trim().split(/\s+/).filter(Boolean).s
 function isSnapshot(x: unknown): x is SharedChatSnapshot { return !!x && typeof x === 'object' && Array.isArray((x as Snapshot).tasks) && Array.isArray((x as Snapshot).agents); }
 function display(message: Message): DisplayMessage { const tagged = message.role === 'user' ? splitOperatorMessage(message.text) : { name: null, text: message.text }; const agent = message.senderAgentId ? snapshot?.agents.find(x => x.id === message.senderAgentId) : task?.agentId ? snapshot?.agents.find(x => x.id === task.agentId) : null; return { id: message.id, name: tagged.name || (message.role === 'assistant' ? agent?.name || 'Agent' : message.role === 'system' ? 'Monitter' : snapshot?.sharing?.primary.name || 'Shared participant'), text: tagged.text, timestamp: message.createdAt, attachments: message.attachments ?? [], role: message.role, streamStatus: message.streamStatus, phase: message.phase, responseMetadata: message.responseMetadata }; }
 function isHuman(item: DisplayMessage) { return item.role === 'user'; }
-function scrollLatest() { if (messagesPane)
-    messagesPane.scrollTop = messagesPane.scrollHeight; }
-function trackScroll() { if (messagesPane)
-    following = messagesPane.scrollHeight - messagesPane.scrollTop - messagesPane.clientHeight < 32; }
+function releaseQueuedTranscriptUpdates() {
+    const pending = queuedTranscriptSnapshot;
+    following = true;
+    if (pending) {
+        queuedTranscriptSnapshot = null;
+        apply(pending, true);
+    }
+    void tick().then(() => { if (messagesPane) { messagesPane.scrollTop = messagesPane.scrollHeight; lastMessagesScrollTop = messagesPane.scrollTop; } });
+}
+function scrollLatest() { releaseQueuedTranscriptUpdates(); }
+function trackScroll() {
+    if (!messagesPane) return;
+    const top = messagesPane.scrollTop;
+    const reachedBottom = messagesPane.scrollHeight - top - messagesPane.clientHeight <= 1;
+    if (reachedBottom) following = true;
+    else if (top < lastMessagesScrollTop) following = false;
+    lastMessagesScrollTop = top;
+    if (following && queuedTranscriptSnapshot) releaseQueuedTranscriptUpdates();
+}
+function touchStart(event:TouchEvent) { touchY = event.touches[0]?.clientY ?? null; }
+function touchMove(event:TouchEvent) { const y = event.touches[0]?.clientY; if (y == null) return; if (touchY != null && y > touchY) following = false; touchY = y; }
+function transcriptKeydown(event:KeyboardEvent) { if (event.target === messagesPane && ['ArrowUp','PageUp','Home'].includes(event.key)) following = false; }
 function select(item: Task) {
+    if (queuedTranscriptSnapshot) releaseQueuedTranscriptUpdates();
     if (selectedId)
         chatDrafts.set(selectedId, { text: draft, files: attachments });
     selectedId = item.id;
@@ -115,7 +136,7 @@ function reconcile(next: SharedChatSnapshot) {
         return false;
     });
 }
-function apply(next: SharedChatSnapshot) { snapshot = next; applySharedAppearance(next.sharing?.appearance); reconcile(next); if (selectedId && !next.tasks.some(x => x.id === selectedId)) {
+function apply(next: SharedChatSnapshot, releaseTranscript = false) { const current = snapshot, frozen = Boolean(current && !following && !releaseTranscript); if (frozen && current) { queuedTranscriptSnapshot = next; snapshot = { ...next, messages: current.messages }; } else { snapshot = next; if (releaseTranscript) queuedTranscriptSnapshot = null; } applySharedAppearance(next.sharing?.appearance); if (!frozen) reconcile(next); if (selectedId && !next.tasks.some(x => x.id === selectedId)) {
     selectedId = null;
     attachments = [];
 } if (!selectedId && next.tasks.length)
@@ -138,8 +159,39 @@ catch (reason) {
 finally {
     refreshing = false;
 } }
+async function loadEarlierMessages() {
+    const taskId = selectedId, current = session;
+    if (!taskId || !current || !current.supportsMessagePages() || historyLoading[taskId] || historyCursors[taskId] === null)
+        return;
+    following = false;
+    const currentGeneration = generation;
+    const initial = (snapshot?.messages ?? []).filter(message => message.taskId === taskId).sort((a, b) => a.createdAt - b.createdAt);
+    const before = Object.hasOwn(historyCursors, taskId) ? historyCursors[taskId] ?? undefined : initial[0]?.id;
+    const oldHeight = messagesPane?.scrollHeight ?? 0, oldTop = messagesPane?.scrollTop ?? 0;
+    historyLoading = { ...historyLoading, [taskId]: true };
+    historyErrors = { ...historyErrors, [taskId]: '' };
+    try {
+        const page = await current.getTaskMessages(taskId, before, 40);
+        if (session !== current || currentGeneration !== generation)
+            return;
+        olderMessages = { ...olderMessages, [taskId]: mergeMessages(page.messages, olderMessages[taskId] ?? []) };
+        historyCursors = { ...historyCursors, [taskId]: page.nextBeforeId };
+        await tick();
+        if (selectedId === taskId && messagesPane)
+            messagesPane.scrollTop = oldTop + (messagesPane.scrollHeight - oldHeight);
+    }
+    catch (reason) {
+        if (session === current && currentGeneration === generation)
+            historyErrors = { ...historyErrors, [taskId]: String(reason) };
+    }
+    finally {
+        if (session === current) {
+            const next = { ...historyLoading }; delete next[taskId]; historyLoading = next;
+        }
+    }
+}
 async function connect() { if (connecting || !validName || (!invite && !validCode))
-    return; const current = ++generation; connecting = true; error = ''; verification = ''; snapshot = null; selectedId = null; unlisten?.(); session?.close(); session = null; status = 'connecting'; try {
+    return; const current = ++generation; connecting = true; error = ''; verification = ''; snapshot = null; queuedTranscriptSnapshot = null; following = true; lastMessagesScrollTop = 0; selectedId = null; unlisten?.(); session?.close(); session = null; status = 'connecting'; try {
     const token = invite || await redeemPairingCode(code);
     if (current !== generation)
         return;
@@ -162,7 +214,7 @@ finally {
     if (current === generation)
         connecting = false;
 } }
-function leave() { generation++; unlisten?.(); unlisten = undefined; session?.close(); session = null; snapshot = null; selectedId = null; draft = ''; attachments = []; localOutgoing = []; verification = ''; status = 'disconnected'; uploading = false; sending = false; error = ''; refreshError = ''; chatDrafts.clear(); }
+function leave() { generation++; unlisten?.(); unlisten = undefined; session?.close(); session = null; snapshot = null; queuedTranscriptSnapshot = null; following = true; lastMessagesScrollTop = 0; selectedId = null; draft = ''; attachments = []; localOutgoing = []; olderMessages = {}; historyCursors = {}; historyLoading = {}; historyErrors = {}; verification = ''; status = 'disconnected'; uploading = false; sending = false; error = ''; refreshError = ''; chatDrafts.clear(); }
 async function fileData(file: File): Promise<AttachmentFileData> { const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''; for (let i = 0; i < bytes.length; i += 0x8000)
     binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return { filename: file.name || 'attachment', mimeType: file.type || 'application/octet-stream', dataBase64: btoa(binary) }; }
 async function thumbnail(file: File): Promise<string | undefined> {
@@ -234,7 +286,7 @@ function pasteFiles(event: ClipboardEvent) { const files = Array.from(event.clip
     void attachFiles(files);
 } }
 async function send() { if (!session || !selectedId || (!draft.trim() && !attachments.length) || sending || uploading || status !== 'connected')
-    return; const current = session, taskId = selectedId, text = draft, sentAttachments = [...attachments], localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`, baselineIds = new Set((snapshot?.messages ?? []).filter(x => x.taskId === taskId).map(x => x.id)); sending = true; localOutgoing = [...localOutgoing, { id: localId, taskId, name: name.trim(), text, timestamp: Date.now(), attachments: sentAttachments, role: 'user', delivery: 'sending', baselineIds }]; if (draft === text)
+    return; if (queuedTranscriptSnapshot) releaseQueuedTranscriptUpdates(); following = true; const current = session, taskId = selectedId, text = draft, sentAttachments = [...attachments], localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`, baselineIds = new Set((snapshot?.messages ?? []).filter(x => x.taskId === taskId).map(x => x.id)); sending = true; localOutgoing = [...localOutgoing, { id: localId, taskId, name: name.trim(), text, timestamp: Date.now(), attachments: sentAttachments, role: 'user', delivery: 'sending', baselineIds }]; if (draft === text)
     draft = ''; attachments = []; try {
     const next = await current.sendMessage(taskId, text, sentAttachments.map(x => x.id));
     if (session !== current)
@@ -371,7 +423,10 @@ onMount(() => {
 <dt>Access</dt>
 <dd>Shared chat only</dd>
 </dl>
-</aside>{/if}<div role="log" aria-label="Chat messages" class="messages" bind:this={messagesPane} onscroll={trackScroll} onwheel={e=>{if(e.deltaY<0)following=false}} ontouchmove={()=>following=false} aria-live="polite">{#each visibleMessages as item (item.id??`${item.timestamp}-${item.text}`)}<article class:final-answer={item.phase==='final_answer'} data-stream-status={item.streamStatus} class:user={item.role==='user'} style={isHuman(item)?`--participant:${participantColour(item.name)}`:''}>
+</aside>{/if}
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div role="log" aria-label="Chat messages" class="messages" bind:this={messagesPane} tabindex="0" onscroll={trackScroll} onwheel={e=>{if(e.deltaY<0)following=false}} ontouchstart={touchStart} ontouchmove={touchMove} onkeydown={transcriptKeydown} aria-live="polite">{#if selectedId&&session?.supportsMessagePages()&&historyCursors[selectedId]!==null}<button class="load-earlier" disabled={historyLoading[selectedId]} onclick={loadEarlierMessages}>{historyLoading[selectedId]?'Loading…':'Load earlier messages'}</button>{#if historyErrors[selectedId]}<p class="history-error" role="alert">{historyErrors[selectedId]}</p>{/if}{/if}{#each visibleMessages as item (item.id??`${item.timestamp}-${item.text}`)}<article class:final-answer={item.phase==='final_answer'} data-stream-status={item.streamStatus} class:user={item.role==='user'} style={isHuman(item)?`--participant:${participantColour(item.name)}`:''}>
 <div class="bubble">
 <MessageMeta name={item.name} createdAt={item.timestamp}>{#snippet avatar()}<span class="avatar" style={isHuman(item)?`background:${participantColour(item.name)}`:''}>{initials(item.name)}</span>{/snippet}{#if item.delivery}<span class:uncertain={item.delivery==='uncertain'} class="delivery">{item.delivery==='sending'?'Sending…':item.delivery==='sent'?'Sent':'Not confirmed'}</span>{/if}</MessageMeta>
 <Markdown text={item.text} preserveLineBreaks={item.role==='user'}/>{#if item.streamStatus==='streaming'}<small class="stream-state" role="status">Receiving…</small>{:else if item.streamStatus==='interrupted'}<small class="stream-state">Response interrupted</small>{/if}{#if item.attachments.length}<div class="attachment-list">{#each item.attachments as attachment (attachment.id)}<div>
@@ -381,7 +436,7 @@ onMount(() => {
 <img src={attachment.previewDataUrl} alt={`Preview of ${attachment.name}`}/>
 </button>{/if}</div>{/each}</div>{/if}</div>
 {#if item.role==='assistant' && item.responseMetadata}<ResponseMetadata metadata={item.responseMetadata}/>{/if}
-</article>{:else}<p class="empty">No messages are shared in this chat.</p>{/each}</div>{#if task.status==='running'}<p class="agent-status" role="status">
+</article>{:else}<p class="empty">No messages are shared in this chat.</p>{/each}</div>{#if queuedTranscriptSnapshot}<button class="jump-latest" onclick={scrollLatest}>New activity · Jump to latest</button>{/if}{#if task.status==='running'}<p class="agent-status" role="status">
 <LoaderCircle class="spin" size={13}/>Agent is working…</p>{/if}<form onsubmit={e=>{e.preventDefault();void send()}}>
 <div class="composer">
   {#if attachments.length}
@@ -462,6 +517,7 @@ small{color:var(--muted);font-size:11px}
 .details dt{color:var(--muted);font-size:11px}
 .details dd{display:flex;gap:5px;align-items:center;min-width:0;margin:0;overflow-wrap:anywhere}
 .messages{flex:1;scrollbar-gutter:stable;min-height:500px;max-height:80vh;overflow:auto;overscroll-behavior:contain;padding:28px clamp(18px,4vw,50px)}
+.load-earlier{display:block;min-height:36px;margin:0 auto 18px;padding:0 14px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--muted);font:11px var(--mono,monospace)}.load-earlier:disabled{opacity:.55}.history-error{margin:0 auto 16px;color:#d88976;font-size:12px;text-align:center}.jump-latest{position:fixed;left:50%;bottom:118px;z-index:8;transform:translateX(-50%);width:max-content;max-width:calc(100% - 32px);min-height:38px;padding:0 16px;border:1px solid var(--line);border-radius:999px;background:var(--panel);box-shadow:0 5px 20px #0005;color:var(--ink);font-size:12px}
 article{max-width:100%;margin:0 0 24px}
 .bubble{max-width:900px}
 .conversation :global(.avatar){display:grid;flex:none;place-items:center;width:21px;height:21px;border-radius:5px;background:var(--soft);color:#fff;font:600 10px var(--mono,monospace)}
