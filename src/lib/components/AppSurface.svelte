@@ -5569,11 +5569,10 @@
       </section>
     {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
         {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Task detail views">
-<div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Details</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='run'}><button class="detail-tab" role="tab" aria-selected={detailTab==='run'} onclick={()=>detailTab='run'}>Details</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>Approvals</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>Subagents <span>{taskSubagents.length}</span></button></div>
-          {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
         </div>{/snippet}
         {#snippet taskQueuedMessages()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
