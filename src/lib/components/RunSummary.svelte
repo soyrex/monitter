@@ -37,4 +37,4 @@
 .git-branch{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 calc(12px * var(--interface-font-ratio,1))/1.4 var(--mono)}
 .git-status{font:400 calc(10px * var(--interface-font-ratio,1))/1.5 var(--sans, sans-serif);color:var(--muted);white-space:normal;overflow-wrap:anywhere}
 .git-chevron{display:flex;flex:none;color:var(--muted)}
-.processes{border-top:1px solid var(--line);padding-top:11px}.processes h3{margin:2px 0 5px;font-size:calc(10px * var(--interface-font-ratio, 1));color:var(--muted)}.processes p{display:flex;align-items:center;gap:5px;margin:3px 0;font-size:calc(11px * var(--interface-font-ratio, 1));min-width:0;overflow-wrap:anywhere}.empty{color:var(--muted)}</style>
+.processes{border-top:1px solid var(--line);padding-top:11px}/* Matches the run-detail section headings in AppSurface. */.processes h3{margin:2px 0 7px;font:400 calc(10px * var(--interface-font-ratio, 1)) var(--mono);letter-spacing:.08em;color:var(--muted)}.processes p{display:flex;align-items:center;gap:5px;margin:3px 0;font-size:calc(11px * var(--interface-font-ratio, 1));min-width:0;overflow-wrap:anywhere}.empty{color:var(--muted)}</style>

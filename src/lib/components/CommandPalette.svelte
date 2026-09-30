@@ -1,18 +1,23 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from "svelte";
-  import Archive from "@lucide/svelte/icons/archive";
+import Archive from "@lucide/svelte/icons/archive";
   import Bot from "@lucide/svelte/icons/bot";
   import Brain from "@lucide/svelte/icons/brain";
   import Columns2 from "@lucide/svelte/icons/columns-2";
+  import Columns3 from "@lucide/svelte/icons/columns-3";
+  import Columns4 from "@lucide/svelte/icons/columns-4";
   import Command from "@lucide/svelte/icons/command";
   import CornerDownLeft from "@lucide/svelte/icons/corner-down-left";
   import Folder from "@lucide/svelte/icons/folder";
   import Grid2X2 from "@lucide/svelte/icons/grid-2-x-2";
+  import Grid3x2 from "@lucide/svelte/icons/grid-3x2";
+  import LayoutGrid from "@lucide/svelte/icons/layout-grid";
   import MessageSquare from "@lucide/svelte/icons/message-square";
   import Monitor from "@lucide/svelte/icons/monitor";
   import Moon from "@lucide/svelte/icons/moon";
   import MousePointer2 from "@lucide/svelte/icons/mouse-pointer-2";
   import PanelRight from "@lucide/svelte/icons/panel-right";
+  import Proportions from "@lucide/svelte/icons/proportions";
   import Radio from "@lucide/svelte/icons/radio";
   import Search from "@lucide/svelte/icons/search";
   import Settings2 from "@lucide/svelte/icons/settings-2";
@@ -44,6 +49,11 @@
     if (id === 'stop' || id === 'layout:single') return Square;
     if (id === 'layout:columns') return Columns2;
     if (id === 'layout:grid') return Grid2X2;
+    if (id === 'layout:columns-3') return Columns3;
+    if (id === 'layout:columns-4') return Columns4;
+    if (id === 'layout:grid-3x2') return Grid3x2;
+    if (id === 'layout:grid-4x2') return LayoutGrid;
+    if (id === 'balance-panes') return Proportions;
     if (id === 'focus-mouse') return MousePointer2;
     if (id === 'enter') return CornerDownLeft;
     if (id === 'scale-up') return ZoomIn;

@@ -311,19 +311,31 @@
     const next = accounts[(index + delta + accounts.length) % accounts.length];
     selectedAccountKeys[providerId] = next.key;
   }
+  /**
+   * Providers with no reading and nothing to act on add a full row of repeated
+   * "unavailable" copy. The detailed layout folds them into one line; errors,
+   * stale readings, loading and multi-account providers keep their own rows.
+   */
+  function quiet(data: UsageRingData | undefined): boolean {
+    return (data?.status ?? 'unavailable') === 'unavailable' && !showValue(data) && !(data?.accounts && data.accounts.length > 1);
+  }
+  const foldQuiet = $derived(!compact && !ringsOnly);
+  const quietProviders = $derived(foldQuiet ? providers.filter(provider => quiet(usage[provider.id])) : []);
+  const reportingCount = $derived(providers.length - providers.filter(provider => quiet(usage[provider.id])).length);
+
 </script>
 
 <section bind:this={pane} class:compact class:expanded class:horizontal class:rings-only={ringsOnly} class:simple class:icon-only={iconOnly} class:codex-multi={iconOnly && (usage.codex?.accounts?.length ?? 0) > 1} class={`usage-rings ${className}`.trim()} aria-label="Provider usage">
   {#if !compact && showHeader}
     <button class="usage-toggle" type="button" aria-expanded={expanded} aria-controls="sidebar-usage-body" aria-label={toggleAction()} title={toggleAction()} onclick={toggle}>
       <span>MODEL USAGE</span>
-      <small>{providers.length} PROVIDERS</small>
+      <small>{reportingCount} OF {providers.length} REPORTING</small>
       <ChevronDown class="usage-chevron" size={13} aria-hidden="true" />
     </button>
   {/if}
   {#if expanded || compact || simple}
     <div class="usage-body" id="sidebar-usage-body">
-      {#each providers as provider (provider.id)}
+      {#each providers.filter(provider => !quietProviders.includes(provider)) as provider (provider.id)}
         {@const sourceData = usage[provider.id]}
         {@const selectedAccount = sourceData?.accounts?.find(account => account.key === selectedAccountKeys[provider.id]) ?? sourceData?.accounts?.[0]}
         {@const data = selectedAccount ?? sourceData}
@@ -411,23 +423,23 @@
               <div class="usage-detail">
                 <span>
                   <span class="usage-detail-long">{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used.`}</span>
-                  <span class="usage-detail-short">{active?.unlimited ? 'U: ∞' : `U: ${percentText(active?.usedPercent)}`}</span>
+                  <span class="usage-detail-short">{active?.unlimited ? 'Unlimited' : `${percentText(active?.usedPercent)} used`}</span>
                 </span>
                 {#if resetTimestamp(active) !== null}
                   {@const activeReset = resetTimestamp(active)!}
                   <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}>
                     {#if showAbsoluteResets}
-                      <span class="usage-reset-long">Resets {absoluteReset(activeReset)}</span><span class="usage-reset-short">R: {absoluteReset(activeReset)}</span>
+                      <span class="usage-reset-long">Resets {absoluteReset(activeReset)}</span><span class="usage-reset-short">resets {absoluteReset(activeReset)}</span>
                     {:else}
                       {@const relative = relativeReset(activeReset)}
-                      <span class="usage-reset-long">{relative.prefix} <strong>{relative.value}</strong></span><span class="usage-reset-short">R: {relative.value}</span>
+                      <span class="usage-reset-long">{relative.prefix} <strong>{relative.value}</strong></span><span class="usage-reset-short">resets in {relative.value}</span>
                     {/if}
                   </button>
                 {:else}
                   {#if active?.resetLabel?.trim()}
-                    <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}><span class="usage-reset-long">{resetText(active)}</span><span class="usage-reset-short">R: {resetText(active)}</span></button>
+                    <button class="usage-reset" type="button" aria-label={resetToggleLabel(active)} title={resetToggleAction()} onclick={toggleResetDisplay}><span class="usage-reset-long">{resetText(active)}</span><span class="usage-reset-short">{resetText(active)}</span></button>
                   {:else}
-                    <span class="usage-reset" title={resetText(active)}><span class="usage-reset-long">{resetText(active)}</span><span class="usage-reset-short">R: {resetText(active)}</span></span>
+                    <span class="usage-reset" title={resetText(active)}><span class="usage-reset-long">{resetText(active)}</span><span class="usage-reset-short">{resetText(active)}</span></span>
                   {/if}
                 {/if}
               </div>
@@ -438,19 +450,19 @@
                     {@const weeklyReset = resetTimestamp(weekly)!}
                     <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}>
                       {#if showAbsoluteResets}
-                        <span class="usage-reset-long">Resets {absoluteReset(weeklyReset)}</span><span class="usage-reset-short">R: {absoluteReset(weeklyReset)}</span>
+                        <span class="usage-reset-long">Resets {absoluteReset(weeklyReset)}</span><span class="usage-reset-short">resets {absoluteReset(weeklyReset)}</span>
                       {:else}
                         {@const relative = relativeReset(weeklyReset)}
-                        <span class="usage-reset-long">{relative.prefix} <strong>{relative.value}</strong></span><span class="usage-reset-short">R: {relative.value}</span>
+                        <span class="usage-reset-long">{relative.prefix} <strong>{relative.value}</strong></span><span class="usage-reset-short">resets in {relative.value}</span>
                       {/if}
                     </button>
                   {:else}
                   {#if weekly.unlimited}
-                      <span class="usage-reset"><span class="usage-reset-long">Unlimited</span><span class="usage-reset-short">R: ∞</span></span>
+                      <span class="usage-reset"><span class="usage-reset-long">Unlimited</span><span class="usage-reset-short">Unlimited</span></span>
                     {:else if weekly.resetLabel?.trim()}
-                      <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}><span class="usage-reset-long">{resetText(weekly)}</span><span class="usage-reset-short">R: {resetText(weekly)}</span></button>
+                      <button class="usage-reset" type="button" aria-label={resetToggleLabel(weekly)} title={resetToggleAction()} onclick={toggleResetDisplay}><span class="usage-reset-long">{resetText(weekly)}</span><span class="usage-reset-short">{resetText(weekly)}</span></button>
                     {:else}
-                      <span class="usage-reset"><span class="usage-reset-long">{resetText(weekly)}</span><span class="usage-reset-short">R: {resetText(weekly)}</span></span>
+                      <span class="usage-reset"><span class="usage-reset-long">{resetText(weekly)}</span><span class="usage-reset-short">{resetText(weekly)}</span></span>
                     {/if}
                   {/if}
                 </div>
@@ -464,6 +476,12 @@
           {/if}
         </article>
       {/each}
+      {#if quietProviders.length}
+        <p class="usage-quiet" title={quietProviders.map(provider => `${provider.label}: ${usage[provider.id]?.message?.trim() || 'Usage data is not available.'}`).join('\n')}>
+          <span class="usage-quiet-label">No usage data</span>
+          {#each quietProviders as provider (provider.id)}<span class="usage-quiet-provider"><span class="usage-provider-icon"><ProviderIcon provider={provider.id} size={11} /></span>{provider.label}</span>{/each}
+        </p>
+      {/if}
     </div>
   {/if}
 </section>
@@ -532,6 +550,12 @@
   .usage-simple-detail { overflow:hidden; color:var(--muted); font:calc(10.5px * var(--interface-font-ratio,1)) var(--mono); text-overflow:ellipsis; white-space:nowrap; }
   .simple-account-cycle { grid-column:auto; grid-row:auto; gap:0; margin:0; }
   .simple-account-cycle .account-cycle-arrow { width:15px; height:20px; }
+  .usage-quiet { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; margin:0; padding:6px 8px 5px; border-top:1px dashed color-mix(in srgb,var(--line) 70%,transparent); color:var(--muted); font:calc(9.5px * var(--interface-font-ratio,1)) var(--mono); }
+  .usage-quiet-label { width:100%; color:color-mix(in srgb,var(--muted) 80%,transparent); letter-spacing:.04em; }
+  .usage-quiet-provider { display:inline-flex; align-items:center; gap:4px; font-family:var(--interface-font, inherit); font-size:calc(10.5px * var(--interface-font-ratio,1)); }
+  .usage-quiet .usage-provider-icon { width:12px; height:12px; opacity:.75; }
+  .usage-quiet .usage-provider-icon :global(.provider-icon) { width:10px; height:10px; }
+
   .unavailable .ring-active { stroke:var(--muted); stroke-dasharray:2 4; opacity:.42; }
   .unavailable .ring-value { color:var(--muted); }
   .loading .ring-active { stroke-dasharray:4 4; animation:usage-ring-spin 1.15s linear infinite; }
@@ -560,10 +584,13 @@
     .usage-provider { align-items:start; }
     .usage-ring { margin-top:2px; }
     .usage-copy { gap:2px; }
-    .usage-detail,.usage-weekly { display:grid; grid-template-columns:minmax(0,1fr); gap:1px; align-items:baseline; white-space:normal; }
+    .usage-detail,.usage-weekly { display:flex; flex-wrap:wrap; gap:0 6px; align-items:baseline; white-space:normal; }
     .usage-detail-long,.usage-reset-long { display:none; }
     .usage-detail-short,.usage-reset-short { display:inline; }
     .usage-reset { overflow:visible; text-overflow:clip; }
+    .usage-detail { flex-wrap:nowrap; white-space:nowrap; }
+    .usage-detail .usage-reset { overflow:hidden; text-overflow:ellipsis; }
+    .usage-detail .usage-reset-short::before { content:'· '; }
   }
   .rings-only .account-cycle,.compact .account-cycle { grid-column:1; grid-row:3; width:100%; font-size:calc(9px * var(--interface-font-ratio,1)); }
   @keyframes usage-ring-spin { to { transform:rotate(360deg); } }

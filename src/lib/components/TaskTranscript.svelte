@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, setContext, type Snippet } from 'svelte';
-  import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
+import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import Check from "@lucide/svelte/icons/check";
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import CircleStop from "@lucide/svelte/icons/circle-stop";
   import Copy from "@lucide/svelte/icons/copy";
   import GitFork from "@lucide/svelte/icons/git-fork";
@@ -390,7 +391,10 @@
           {/if}
         {/snippet}
         {#snippet footer()}
-          {#if !displayItems.length && !display.hasPendingApprovals}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
+          {#if !displayItems.length && !display.hasPendingApprovals}
+            {#if displayTask.status === 'error'}<div class="blank-conversation failed" role="status"><CircleAlert size={24}/><h2>This chat stopped before replying</h2><p>{liveError || 'The harness reported an error before any output arrived.'}</p><p class="blank-hint">Send a message to try again, or check Timeline for details.</p></div>
+            {:else}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
+          {/if}
           {#if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}
             <ThinkingStatus active={active && !transcriptBuffer.held()} starting={displayTask.status!=='running'} running={displayTask.status==='running'} startedAt={displayLatestUserRequest?.createdAt}>{#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}</ThinkingStatus>
           {/if}
@@ -509,8 +513,13 @@
   .blank-conversation :global(svg) { color:var(--accent); }
   .blank-conversation h2 { margin:10px 0 5px; color:var(--ink); font-size:calc(15px * var(--interface-font-ratio,1)); }
   .blank-conversation p { margin:0; font-size:calc(12.5px * var(--interface-font-ratio,1)); line-height:1.55; }
-  @media (hover:none),(pointer:coarse) { .task-title-edit { opacity:1; pointer-events:auto; } .message-actions { max-width:none; overflow:visible; opacity:1; visibility:visible; pointer-events:auto; transform:none; } .approval-inline { min-height:44px; padding-block:8px; } }
-  @media (prefers-reduced-motion:reduce) { :global(:root:not([data-motion="on"])) .message-actions { transition:none; } }
+  .blank-conversation.failed { max-width:440px; }
+  .blank-conversation.failed :global(svg) { color:var(--danger,#bd655b); }
+  .blank-conversation.failed p:not(.blank-hint) { color:var(--ink); font-family:var(--mono); font-size:calc(12px * var(--interface-font-ratio,1)); overflow-wrap:anywhere; }
+  .blank-conversation .blank-hint { margin-top:10px; }
+  @media (hover:none),(pointer:coarse) { .task-title-edit { opacity:1; pointer-events:auto; } .message-actions { max-width:78px; opacity:1; pointer-events:auto; transform:none; } .approval-inline { min-height:44px; padding-block:8px; } }
+  @media (prefers-reduced-motion:reduce) { .message-actions { transition:none; } }
+
   @container workspace-pane (width < 1000px) { .conversation { --chat-side-padding:20px; } .conversation-head { padding-left:20px; padding-right:20px; } }
   @media (max-width:640px) { .conversation-head { padding:12px; gap:8px; } .conversation-head h1 { font-size:calc(18px * var(--interface-font-ratio,1)); } .task-actions { flex-wrap:wrap; } }
   @media (max-height:500px) { .conversation-head { padding-top:10px; padding-bottom:10px; gap:6px; } .task-heading { padding-top:10px; } }

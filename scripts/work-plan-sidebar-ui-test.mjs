@@ -6,7 +6,7 @@ import { join } from 'node:path';
 const expect = baseExpect.configure({ timeout: 30000 });
 const root = process.cwd();
 const surface = readFileSync(join(root, 'src/lib/components/AppSurface.svelte'), 'utf8');
-expect(surface).toContain('>Task detail</button>');
+expect(surface).toContain('>Details</button>');
 expect(surface).toContain('workPlans={snapshot.workPlans?.filter(plan=>plan.taskId===selectedTask.id)}');
 
 mkdirSync(join(root, 'verification'), { recursive: true });

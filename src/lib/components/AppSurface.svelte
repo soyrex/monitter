@@ -5393,9 +5393,9 @@
             </div>
           </section>{/if}
         <div class="overview-grid">
-          {#each [["running", "Running"], ["idle", "Ready"], ["completed", "Finished"], ["error", "Needs attention"]] as [status, label]}{@const tasks =
+          {#each [["error", "Needs attention", "Nothing needs you."], ["running", "Running", "No agents are working."], ["idle", "Ready", "No chats are waiting."], ["completed", "Finished", "Nothing has finished yet."]] as [status, label, empty]}{@const tasks =
               scopedTasks.filter((task) => task.status === status)}
-            <section class="status-group">
+            <section class="status-group" data-status={status} class:attention={status === "error" && tasks.length > 0}>
               <header>
                 <h2>{label}</h2>
                 <span>{tasks.length}</span>
@@ -5412,7 +5412,7 @@
                       >
                     </div>
                     <span>{relative(task.updatedAt)}</span></button
-                  >{/each}{:else}<p>No tasks here.</p>{/if}
+                  >{/each}{:else}<p>{empty}</p>{/if}
             </section>{/each}
         </div>
       </section>
@@ -5569,10 +5569,11 @@
       </section>
     {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
         {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Task detail views">
-          <div class="detail-tab-entry" class:active={detailTab==='run'}><button class="detail-tab" role="tab" aria-selected={detailTab==='run'} onclick={()=>detailTab='run'}>INFO</button></div>
-          <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>SUBAGENTS <span>{taskSubagents.length}</span></button></div>
-          <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>TIMELINE</button></div>
-          <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>APPROVALS</button></div>
+<div class="detail-tab-entry" class:active={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)}><button class="detail-tab" role="tab" aria-selected={detailTab==='run' || (detailTab==='git' && gitState.repository!==true)} onclick={()=>detailTab='run'}>Details</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='approvals'}><button class="detail-tab" role="tab" aria-selected={detailTab==='approvals'} onclick={()=>detailTab='approvals'}>Approvals</button></div>
+          <div class="detail-tab-entry" class:active={detailTab==='subagents'}><button class="detail-tab" role="tab" aria-selected={detailTab==='subagents'} onclick={()=>detailTab='subagents'}>Subagents <span>{taskSubagents.length}</span></button></div>
+          {#if gitState.repository}<div class="detail-tab-entry" class:active={detailTab==='git'}><button class="detail-tab" role="tab" aria-selected={detailTab==='git'} onclick={()=>detailTab='git'}>Git changes</button></div>{/if}
         </div>{/snippet}
         {#snippet taskQueuedMessages()}
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
@@ -7675,12 +7676,13 @@
   .overview-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
     gap: 18px;
     max-width: 1040px;
     margin: 30px auto;
   }
   .status-group {
-    min-height: 154px;
+    overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: var(--panel);
@@ -7704,8 +7706,11 @@
     background: var(--soft);
     font: calc(10px * var(--interface-font-ratio, 1)) var(--mono);
   }
+  /* Failed chats lead the board; the badge carries the state without recolouring the card. */
+  .status-group.attention { border-color: color-mix(in srgb, var(--danger, #bd655b) 45%, var(--line)); }
+  .status-group.attention header span { color: var(--danger, #bd655b); background: color-mix(in srgb, var(--danger, #bd655b) 14%, transparent); }
   .status-group > p {
-    margin: 17px 15px;
+    margin: 15px;
     color: var(--muted);
     font-size: calc(12px * var(--interface-font-ratio, 1));
   }
@@ -7721,6 +7726,7 @@
   .overview-task:hover {
     background: var(--soft);
   }
+  .overview-task:last-child { border-bottom: 0; }
   .overview-task div {
     display: grid;
     flex: 1;
@@ -8164,6 +8170,8 @@
     color: var(--muted);
     font-size: calc(10.5px * var(--interface-font-ratio, 1));
     text-transform: uppercase;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .detail-tab:hover { background: var(--soft); color: var(--ink); }
   .detail-tab-entry.active { position:relative; z-index:1; margin-bottom:-1px; color: var(--ink); border-color: var(--line); background: var(--sidebar); }

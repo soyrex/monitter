@@ -9,6 +9,8 @@
     pointerDrag?: {tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null; onPointerDragStart?:()=>void; onPointerDragEnd?:()=>void; ondropTab: (id: string, edge: Edge, data: PaneTabTransfer, before?: {kind:PaneTabTransfer['kind'];id:string}) => void | Promise<void>;
     children: import('svelte').Snippet<[string]>;
   } = $props();
+  // A lone pane is always the active one, so its outline carries no information.
+  const showLeafBorder=$derived(showActivePaneBorder && 'axis' in layout);
   let over = $state<{id:string;edge:Edge}|null>(null);
   let pointerResizing = false;
   let geometryReady = false;
@@ -261,7 +263,7 @@
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions (contains independently interactive chat controls) -->
-    <section use:traceActiveTab={activePaneId===item.id && showActivePaneBorder} class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:show-active-border={showActivePaneBorder} class:window-top-right={!!expandedPaneId || topRight} class:window-bottom-right={!!expandedPaneId || bottomRight} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
+    <section use:traceActiveTab={activePaneId===item.id && showLeafBorder} class="pane-leaf" data-pane-id={item.id} data-focus-follows-mouse={focusFollowsMouse} class:active={activePaneId===item.id} class:show-active-border={showLeafBorder} class:window-top-right={!!expandedPaneId || topRight} class:window-bottom-right={!!expandedPaneId || bottomRight} class:dimmed={dimInactivePanes && activePaneId!==item.id} style:--pane-dim-strength={activePaneId===item.id || !dimInactivePanes ? 0 : 1-Math.max(.1,Math.min(.9,inactivePaneOpacity))} style:--pane-dim-visible={dimInactivePanes && activePaneId!==item.id ? 1 : 0} aria-label="Workspace pane" tabindex="-1" onpointerenter={event=>hoverPane(event,item.id)} onfocusin={()=>onactivate(item.id)} onpointerdowncapture={()=>onactivate(item.id)} ondragover={event=>dragover(event,item.id)} ondragleave={event=>{if(!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))over=null}} ondrop={event=>drop(event,item.id)}>
       {@render children(item.id)}
       <div class="pane-dim-overlay" aria-hidden="true"></div>
       <svg class="active-pane-contour" aria-hidden="true" preserveAspectRatio="none"><path vector-effect="non-scaling-stroke"/></svg>

@@ -23,6 +23,7 @@ writeFileSync(join(harness, 'App.svelte'), `<script>
     minimax: { status: 'ready', active: { label: 'general 5-hour', usedPercent: 25, resetsAt: resetAfter(0, 4, 30) } },
     'opencode-go': { status: 'error', message: 'Router unavailable.' },
   });
+  window.setUnavailable = () => { usage = { ...usage, minimax: { status: 'unavailable', message: 'Quota unavailable.' }, 'opencode-go': { status: 'unavailable' } }; };
   window.setCodexAccounts = (personalFailed = false) => {
     const accounts = [
       { key: 'personal', label: 'Personal', status: personalFailed ? 'error' : 'ready', message: personalFailed ? 'Personal unavailable' : null, active: personalFailed ? null : { label: '5-hour', usedPercent: 12 }, weekly: { label: 'Week', usedPercent: 20 } },
@@ -129,10 +130,11 @@ try {
   await page.setViewportSize({ width: 760, height: 700 });
   await expect(page.locator('.usage-rings')).toHaveClass(/horizontal/);
   await expect(page.locator('.usage-toggle')).toBeVisible();
-  await expect(codex).toContainText(/U:\s*98%/);
+  await expect(codex).toContainText(/98% used/);
+  await expect(codex.locator('.usage-reset-short').first()).toContainText(/resets in 3d 6h 23m/);
   await expect(codex.locator('.usage-copy')).toBeVisible();
-  await expect(codex.locator('.usage-detail-short')).toBeVisible();
-  await expect(codex.locator('.usage-reset-short')).toBeVisible();
+  await expect(codex.locator('.usage-detail-short').first()).toBeVisible();
+  await expect(codex.locator('.usage-reset-short').first()).toBeVisible();
   const providerRows = await page.locator('.usage-provider').evaluateAll(nodes => nodes.map(node => {
     const rect = node.getBoundingClientRect();
     return { left: rect.left, top: rect.top };
@@ -175,7 +177,18 @@ try {
   await accountSelector.selectOption('work');
   await expect(ringValue).toHaveText('67');
   await expect(codex).not.toHaveClass(/error/);
-  console.log('Usage preserves detailed provider rows, adapts short-window details, and keeps ring geometry and reduced motion intact.');
+  await page.locator('#compact').click();
+  await page.evaluate(() => window.setUnavailable());
+  const quiet = page.locator('.usage-quiet');
+  await expect(quiet).toContainText('MiniMax');
+  await expect(quiet).toContainText('OpenCode Go');
+  await expect(quiet).toHaveAttribute('title', /MiniMax: Quota unavailable\./);
+  await expect(providers).toHaveCount(2);
+  await expect(page.locator('.usage-toggle small')).toHaveText('2 OF 4 REPORTING');
+  await page.locator('#compact').click();
+  await expect(quiet).toHaveCount(0);
+  await expect(providers).toHaveCount(4);
+  console.log('Usage preserves detailed provider rows, folds providers without data into one line, adapts short-window details, and keeps ring geometry and reduced motion intact.');
 } finally {
   await browser?.close();
   if (child.exitCode === null && child.signalCode === null) {
