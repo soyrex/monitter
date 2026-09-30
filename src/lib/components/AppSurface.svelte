@@ -7792,6 +7792,7 @@
   .compact-detail > .pane-task-header { position:relative; z-index:13; }
   .conversation {
     --chat-content-max-width: 900px;
+    position:relative;
     display: flex;
     min-width: 0;
     min-height: 0;
@@ -8001,7 +8002,7 @@
     font-size: calc(12.5px * var(--interface-font-ratio, 1));
     line-height: 1.55;
   }
-  .draft-layout { --scroll-fade:20px; -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; display:grid; align-content:center; padding:clamp(24px, 5vh, 60px) clamp(16px, 5vw, 64px); }
+  .draft-layout { --scroll-fade:20px; position:relative; -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; display:grid; align-content:center; padding:clamp(24px, 5vh, 60px) clamp(16px, 5vw, 64px); }
   .draft-content { width:100%; max-width:700px; margin:auto; }
   .draft-intro { margin-bottom: 22px; }
   .draft-intro h1 { margin: 8px 0; font-size: clamp(22px, 2.6vw, 32px); font-weight: 500; }
@@ -8049,22 +8050,25 @@
   .composer-box :global(.context-usage-bar) { border-radius: 0 0 9px 9px; background: color-mix(in srgb, var(--ink) 20%, transparent); }
   .composer.expanded .composer-box { flex: 1; min-height: 0; background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
   .composer.expanded {
-    position: fixed;
-    inset: calc(var(--composer-pane-top) + 12px) auto auto calc(var(--composer-pane-left) + var(--density-composer-margin-inline));
-    width: calc(var(--composer-pane-width) - 2 * var(--density-composer-margin-inline));
+    position: absolute;
+    inset: 0;
+    width: 100%;
     max-width: none;
-    height: calc(var(--composer-pane-height) - 12px - var(--density-composer-margin-bottom));
+    height: 100%;
     max-height: none;
     min-width: 0;
     min-height: 0;
     margin: 0;
     padding: 38px 18px 12px;
     z-index: 1000;
-    background: var(--panel);
-    box-shadow: 0 22px 80px #0008;
+    border:0;
+    border-radius:0;
+    background:var(--paper);
+    box-shadow:none;
+    backdrop-filter:none;
+    -webkit-backdrop-filter:none;
   }
-  .workspace:has(.composer.expanded)::after { content:''; position:absolute; z-index:999; inset:var(--pane-tabbar-height) 0 0; background:#0009; backdrop-filter:blur(5px); pointer-events:none; }
-  .workspace:has(.composer.expanded) .draft-layout { mask-image:none; -webkit-mask-image:none; }
+  .workspace:has(.composer.expanded) .draft-layout { overflow:hidden; mask-image:none; -webkit-mask-image:none; }
   .composer-expand { position:absolute; top:6px; right:8px; z-index:2; display:grid; place-items:center; width:27px; height:27px; padding:0; border:1px solid transparent; border-radius:6px; color:var(--muted); background:transparent; cursor:pointer; }
   .composer-expand:hover, .composer-expand:focus-visible { border-color:var(--line); color:var(--ink); background:var(--soft); }
   .composer-longform-hint { position:absolute; top:15px; left:18px; max-width:calc(100% - 60px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font:calc(10px * var(--interface-font-ratio,1)) var(--mono); }

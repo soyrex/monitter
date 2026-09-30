@@ -440,6 +440,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .queued-messages-float { position:relative; z-index:2; flex-shrink:0; filter:drop-shadow(0 3px 8px #0002) drop-shadow(0 10px 24px #0004); }
   .composer-area { position:relative; flex-shrink:0; }
+  .composer-area:has(:global(.composer.expanded)) { position:static; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }
   .composer-area.git-docked :global(.composer-box) { border-top-left-radius:0; border-top-right-radius:0; }
   .git-changes-bar { display:flex; align-items:center; gap:7px; width:min(var(--chat-content-max-width, 900px), calc(100% - (2 * var(--density-composer-margin-inline, 12px)))); box-sizing:border-box; margin:0 auto -1px; padding:6px 9px; overflow:hidden; border:1px solid var(--line); border-bottom-left-radius:0; border-bottom-right-radius:0; border-top-left-radius:7px; border-top-right-radius:7px; color:var(--muted); background:color-mix(in srgb, var(--panel) 92%, var(--ink)); font:500 calc(10px * var(--interface-font-ratio, 1)) / 1.2 var(--mono); text-align:left; }
