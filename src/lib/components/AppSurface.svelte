@@ -711,6 +711,7 @@
   let taskDrafts = $state<Record<string, TaskDraft>>({});
   let openDraftIds = $state<string[]>([]);
   let currentDraftId = $state<string | null>(null);
+  const draftSendPending=$derived(Boolean(currentDraftId && composerPending[`draft:${currentDraftId}`]));
   let taskAgentId = $state(""),
     taskProjectId = $state(""),
     taskParentId = $state<string | null>(null),
@@ -2002,7 +2003,7 @@
   function clearAttachments(key:string,ids:string[]) {queuedAttachments[key]=(queuedAttachments[key]??[]).filter(item=>!ids.includes(item.id)); publishComposer(key, currentDraftKey() === key ? composer : drafts[key] ?? sharedComposers.get(key)?.text ?? '');}
   async function attachFiles(items:(File|string|AttachmentFileData)[], captured?:{key:string;targets:{target:AttachmentTarget;scope:string}[];scope:string}):Promise<boolean> {
     const key=captured?.key ?? currentDraftKey(), targets=captured?.targets ?? attachmentTargets(), scope=captured?.scope ?? attachmentScope;
-    if(!key || (pendingUploads[key] ?? false) || (!captured && busy))return false;
+    if(!key || (pendingUploads[key] ?? false) || (key.startsWith('draft:') && composerPending[key]))return false;
     if(!captured && pane==='channel' && selectedChannelId && projectBoardId(selectedChannelId)) {error='Project board notes support text only.';return false;}
     if(!targets.length) {error='Choose an agent to receive these files.';return false;}
     pendingUploads[key]=true;error='';
@@ -3485,10 +3486,11 @@
   }
   async function send() {
     if (reportUnavailableConnection()) return;
-    if (busy || handleSlashSubmit()) return;
+    if (handleSlashSubmit()) return;
     if (currentDraftId) { await createTask(); return; }
-    if (!selectedTask || !canSend || busy) return;
+    if (!selectedTask || !canSend) return;
     const taskId = selectedTask.id;
+    if (composerPending[`task:${taskId}`]) return;
     const sentDraft = composer;
     const key = `task:${taskId}`, attachmentIds=currentAttachments.map(item=>item.id);
     const sentText = operatorPrompt(taskId, promptText(sentDraft));
@@ -3547,6 +3549,12 @@
     if (currentDraftKey() === key && composer === sentDraft) composer = "";
     if (drafts[key] === sentDraft) { delete drafts[key]; publishComposer(key, ''); }
   }
+  function retainFailedTaskDraft(draftId: string, sentText: string) {
+    if (currentDraftId !== draftId) return;
+    if (!composer) composer = sentText;
+    const draft = taskDrafts[draftId];
+    if (draft && draft.text !== composer) taskDrafts[draftId] = { ...draft, text: composer };
+  }
   async function browseTaskFolder() {
     if (!taskFormAgent || snapshot?.hosts.find(host => host.id === taskFormAgent.hostId)?.kind !== 'local') return;
     try {
@@ -3556,12 +3564,21 @@
   }
   async function createTask() {
     if (reportUnavailableConnection()) return;
-    if (busy) return;
     const draftId = currentDraftId;
     const draft = draftId ? taskDrafts[draftId] : null;
     if (!draftId || !draft || !canSend || !taskAgentId) { error = "Choose an agent and write a message."; return; }
-    const textToSend = promptText(composer), attachmentIds=currentAttachments.map(item=>item.id);
-    const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId, cwd: taskCwd };
+    const draftKey = `draft:${draftId}`;
+    if (composerPending[draftKey]) return;
+    setComposerPending(draftKey, true);
+    const textToSend = promptText(composer), attachmentIds=currentAttachments.map(item=>item.id), sentAttachments=[...currentAttachments];
+    const captured = { text: composer, title: taskTitle, agentId: taskAgentId, projectId: taskProjectId, parentId: taskParentId, nativeSessionId: taskNativeSessionId, cwd: taskCwd, sandbox: draftSandbox };
+    // Replacing an identical failed draft attempt avoids stacking duplicate
+    // error bubbles when the user resends the restored prompt.
+    optimisticMessages = optimisticMessages.filter(message => !(message.kind === 'draft' && message.targetId === draftId && message.status === 'not-confirmed' && message.text === textToSend));
+    const optimistic = beginOptimisticMessage({ kind: 'draft', targetId: draftId, text: textToSend, displayText: captured.text, attachments: sentAttachments, baselineIds: new Set(), baselineQueuedIds: new Set() });
+    // Move the submitted text into the pending item immediately. Anything the
+    // user types after this point is a separate draft and must survive routing.
+    if (currentDraftId === draftId && composer === captured.text) composer = '';
     let modelSettings = draftModelSettings;
     let routingNotice = '';
     let routePlan: JevRoutePlan | null = null;
@@ -3570,7 +3587,7 @@
     // never changes the sandbox or approval path. Jev's permission signal is
     // advisory and does not create a separate review step.
     if (!draft.createdTaskId && routeAgent?.jevRouting && routeAgent.jevRouting !== 'off' && !modelSettings) {
-      busy = true; error = ''; notice = '';
+      error = ''; notice = '';
       try {
         routePlan = await bridge.planJevRoute(routeAgent.id, textToSend);
         const decision = routePlan.decision;
@@ -3614,19 +3631,20 @@
         }
       } catch (reason) {
         error = `Jev routing could not run: ${text(reason)}`;
+        updateOptimisticMessage(optimistic.id, { status: 'not-confirmed', error: text(reason) });
+        retainFailedTaskDraft(draftId, captured.text);
+        setComposerPending(draftKey, false);
         return;
-      } finally { busy = false; }
+      }
     }
-    const values = { modelSettings, sandbox:draftSandbox, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null, cwd: captured.projectId ? null : captured.cwd.trim() || null };
-    taskDrafts[draftId] = { ...draft, ...captured, title: values.title };
-    taskTitle = values.title;
-    // The draft itself retains a recovery copy if task creation fails, while
-    // the visible composer is ready for the next thought immediately.
-    composer = '';
-    const optimistic = beginOptimisticMessage({ kind: 'draft', targetId: draftId, text: textToSend, displayText: captured.text, attachments: [...currentAttachments], baselineIds: new Set(), baselineQueuedIds: new Set() });
+    const values = { modelSettings, sandbox:captured.sandbox, agentId: captured.agentId, title: captured.title.trim() || textToSend.slice(0, 72) || 'New chat', nativeSessionId: captured.nativeSessionId.trim() || null, parentTaskId: captured.parentId, channelId: null, projectId: captured.projectId || null, cwd: captured.projectId ? null : captured.cwd.trim() || null };
+    const latestDraftText = currentDraftId === draftId
+      ? composer
+      : drafts[draftKey] ?? taskDrafts[draftId]?.text ?? captured.text;
+    taskDrafts[draftId] = { ...draft, ...captured, text: latestDraftText, title: values.title };
+    if (currentDraftId === draftId) taskTitle = values.title;
     let taskId = draft.createdTaskId;
-    busy = true; error = ''; notice = routingNotice;
-    setComposerPending(`draft:${draftId}`, true);
+    error = ''; notice = routingNotice;
     try {
       if (!taskId) {
         const task = await bridge.createTask(values);
@@ -3670,9 +3688,9 @@
     } catch (reason) {
       error = text(reason);
       updateOptimisticMessage(optimistic.id, { status: 'not-confirmed', error: text(reason) });
-      if (currentDraftId === draftId && !composer) composer = captured.text;
+      retainFailedTaskDraft(draftId, captured.text);
     }
-    finally { busy = false; setComposerPending(`draft:${draftId}`, false); }
+    finally { setComposerPending(draftKey, false); }
   }
 
   let agentEdits=$state<Record<string,Agent>>({});
@@ -4817,7 +4835,9 @@
   async function removeQueuedMessage(id:string) { await run(()=>bridge.cancelQueuedMessage(id)); }
   async function sendChannel() {
     if (reportUnavailableConnection()) return;
-    if (busy) return;
+    if (!activeChannel) return;
+    const channelKey = `channel:${activeChannel.id}`;
+    if (composerPending[channelKey]) return;
     const boardProjectId = activeChannel ? projectBoardId(activeChannel.id) : null;
     if (boardProjectId) {
       if (!canSend) return;
@@ -4827,15 +4847,18 @@
       const retry = boardPostRetries.get(boardProjectId);
       const requestId = retry?.text === sentText ? retry.requestId : localUuid();
       boardPostRetries.set(boardProjectId, { text: sentText, requestId });
-      if (await run(() => bridge.postProjectBoardNote(boardProjectId, sentText, requestId), 'Project note posted.')) {
-        boardPostRetries.delete(boardProjectId);
-        clearSentDraft(`channel:${activeChannel!.id}`, sentDraft);
-      }
+      setComposerPending(channelKey, true);
+      try {
+        if (await run(() => bridge.postProjectBoardNote(boardProjectId, sentText, requestId), 'Project note posted.')) {
+          boardPostRetries.delete(boardProjectId);
+          clearSentDraft(channelKey, sentDraft);
+        }
+      } finally { setComposerPending(channelKey, false); }
       return;
     }
     if (handleSlashSubmit()) return;
     if (!activeChannel || !canSend || !effectiveRecipients.length) { error = "Choose at least one agent to receive this channel message."; return; }
-    const channelId = activeChannel.id, sentDraft = composer, agentIds = [...effectiveRecipients], key = `channel:${channelId}`, attachmentIds=currentAttachments.map(item=>item.id);
+    const channelId = activeChannel.id, sentDraft = composer, agentIds = [...effectiveRecipients], key = channelKey, attachmentIds=currentAttachments.map(item=>item.id);
     const sentText = promptText(sentDraft);
     startOptimisticSend({ kind: 'channel', targetId: channelId, text: sentText, displayText: sentDraft, attachments: [...currentAttachments], recipientIds: agentIds, baselineIds: new Set(activeChannel.messages.map(message => message.id)), baselineQueuedIds: new Set((snapshot?.queuedMessages ?? []).filter(message => message.channelId === channelId).map(message => message.id)) }, () => bridge.sendChannelMessage(channelId, sentText, agentIds, attachmentIds));
     clearSentDraft(key, sentDraft); clearAttachments(key, attachmentIds);
@@ -4975,14 +4998,14 @@
 {/snippet}
 
 {#snippet attachmentTools()}
-  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={busy || filesBusy} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip class="composer-paperclip" size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
+  <div class="attachment-tools"><button class="icon" aria-label="Attach files" title="Attach files, or drop or paste them here" disabled={filesBusy || draftSendPending} onclick={()=>filePicker?.click()}>{#if filesBusy}<LoaderCircle class="spin" size={16}/>{:else}<Paperclip class="composer-paperclip" size={16}/>{/if}</button>{#if filesBusy}<small role="status">Saving attachments…</small>{/if}</div>
   <input class="attachment-input" bind:this={filePicker} type="file" multiple aria-label="Choose attachments" onchange={event=>{const files=Array.from(event.currentTarget.files??[]);event.currentTarget.value='';void attachFiles(files)}}/>
 {/snippet}
 
 {#snippet voiceButton()}
   {#if nativeRuntime || (isLanBrowser() && !embedded)}
     {#key `${currentDraftKey() ?? ''}:${attachmentScope}`}
-      <VoiceRecorder disabled={busy || filesBusy || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
+      <VoiceRecorder disabled={filesBusy || draftSendPending || !!voiceProcessing[currentDraftKey() ?? '']} onrecorded={processVoiceRecording}/>
     {/key}
   {/if}
 {/snippet}
@@ -5336,7 +5359,7 @@
           <div class="composer-input-row" use:watchComposerLines>
             {#if !projectBoardId(activeChannel.id)}{@render attachmentTools()}{/if}
             {@render composerEditor(projectBoardId(activeChannel.id) ? 'Write a project coordination note…' : 'Message this channel… Use @ to mention an agent', true)}
-            <div class="composer-actions">{#if !projectBoardId(activeChannel.id)}{@render voiceButton()}{/if}{#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={busy || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
+            <div class="composer-actions">{#if !projectBoardId(activeChannel.id)}{@render voiceButton()}{/if}{#if activeChannelTasks.length}<button class="danger composer-control" aria-label="Stop channel tasks" title={activeChannelStarting ? "Starting channel — stop" : "Stop channel tasks"} onclick={stopChannel}>{#if activeChannelStarting}<LoaderCircle class="spin" size={15}/>{:else}<Square size={15}/>{/if}</button>{/if}<button class="primary composer-control" aria-label={composerPending[`channel:${activeChannel.id}`] ? "Starting channel message" : "Send channel message"} title={composerPending[`channel:${activeChannel.id}`] ? "Starting…" : "Send"} disabled={composerPending[`channel:${activeChannel.id}`] || !canSend} onclick={sendChannel}>{#if composerPending[`channel:${activeChannel.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
           </div>
           </div>
           <div class="composer-footer">
@@ -5374,10 +5397,10 @@
             <p>Ask a question, explore a project, or describe a change. Your agent starts when you send.</p>
           </div>
           <div class="draft-options form-grid">
-            <label>Agent<DraftPicker bind:this={agentPicker} options={draftAgentOptions} bind:value={taskAgentId} ariaLabel="Agent" placeholder="Choose an agent" searchPlaceholder="Search agents…" onchange={routeChangedDraft} onselect={focusProjectPicker} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId} /></label>
-            <label>Project<DraftPicker bind:this={projectPicker} options={draftProjectOptions} bind:value={taskProjectId} ariaLabel="Project" placeholder="No project" searchPlaceholder="Search projects…" onchange={routeChangedDraft} onselect={focusComposerTextarea} disabled={busy || filesBusy || !!currentTaskDraft.createdTaskId} /></label>
+            <label>Agent<DraftPicker bind:this={agentPicker} options={draftAgentOptions} bind:value={taskAgentId} ariaLabel="Agent" placeholder="Choose an agent" searchPlaceholder="Search agents…" onchange={routeChangedDraft} onselect={focusProjectPicker} disabled={draftSendPending || filesBusy || !!currentTaskDraft.createdTaskId} /></label>
+            <label>Project<DraftPicker bind:this={projectPicker} options={draftProjectOptions} bind:value={taskProjectId} ariaLabel="Project" placeholder="No project" searchPlaceholder="Search projects…" onchange={routeChangedDraft} onselect={focusComposerTextarea} disabled={draftSendPending || filesBusy || !!currentTaskDraft.createdTaskId} /></label>
           </div>
-          {#if taskFormAgent && !taskProjectId}<label class="task-workspace-editor"><span><Folder size={13}/>Working folder</span><div><input aria-label="Working folder" bind:value={taskCwd} placeholder={inheritedTaskCwd || '/path/to/project'} disabled={busy || !!currentTaskDraft.createdTaskId}/>{#if nativeRuntime && snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.kind === 'local'}<button class="icon" aria-label="Browse working folder" title="Choose folder" disabled={busy || !!currentTaskDraft.createdTaskId} onclick={browseTaskFolder}><Folder size={15}/></button>{/if}</div></label>{:else if taskFormAgent}<p class="task-workspace-preview"><Folder size={13}/><span><b>{snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.name ?? 'Host'}</b><code>{taskFormCwd}</code></span></p>{/if}
+          {#if taskFormAgent && !taskProjectId}<label class="task-workspace-editor"><span><Folder size={13}/>Working folder</span><div><input aria-label="Working folder" bind:value={taskCwd} placeholder={inheritedTaskCwd || '/path/to/project'} disabled={draftSendPending || !!currentTaskDraft.createdTaskId}/>{#if nativeRuntime && snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.kind === 'local'}<button class="icon" aria-label="Browse working folder" title="Choose folder" disabled={draftSendPending || !!currentTaskDraft.createdTaskId} onclick={browseTaskFolder}><Folder size={15}/></button>{/if}</div></label>{:else if taskFormAgent}<p class="task-workspace-preview"><Folder size={13}/><span><b>{snapshot.hosts.find(host=>host.id===taskFormAgent.hostId)?.name ?? 'Host'}</b><code>{taskFormCwd}</code></span></p>{/if}
           {#each optimisticMessages.filter(message => message.kind === 'draft' && message.targetId === currentDraftId) as message (message.id)}
             <article class="message user optimistic-message" data-delivery-status={message.status}>
               <MessageMeta name="You" createdAt={message.createdAt}>{@render deliveryStatus(message)}</MessageMeta>
@@ -5394,10 +5417,10 @@
             <div class="composer-input-row" use:watchComposerLines>
               {@render attachmentTools()}
               {@render composerEditor('Describe what you want this agent to do…')}
-              <div class="composer-actions">{@render voiceButton()}<button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={busy || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
+              <div class="composer-actions">{@render voiceButton()}<button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={composerPending[`draft:${currentDraftId}`] || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
             </div>
             </div>
-      <div class="composer-footer"><div class="composer-left">{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={busy||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={busy||filesBusy} jevMode={taskFormAgent?.jevRouting ?? 'off'} onchange={changeModel}/></div></div>
+      <div class="composer-footer"><div class="composer-left">{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={draftSendPending||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={draftSendPending||filesBusy} jevMode={taskFormAgent?.jevRouting ?? 'off'} onchange={changeModel}/></div></div>
           </dialog>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -5436,7 +5459,7 @@
             <div class="composer-input-row" use:watchComposerLines>
               {@render attachmentTools()}
               {@render composerEditor(`Message ${selectedAgent?.name ?? 'agent'}…`)}
-              <div class="composer-actions">{@render voiceButton()}{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}<button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={busy || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
+              <div class="composer-actions">{@render voiceButton()}{#if selectedTask.status === "running"}<button class="danger composer-control" aria-label="Stop current task" title="Stop current task" onclick={() => run(() => bridge.cancelTask(selectedTask.id), "Stopping task…")}><Square size={15}/></button>{/if}<button class="primary composer-control" aria-label="Send task message" title={selectedTask.status==='running' ? (snapshot?.settings.busyMessageMode==='steer'?'Send follow-up (steer if supported, otherwise queue)':'Queue message') : 'Send'} disabled={composerPending[`task:${selectedTask.id}`] || !canSend} onclick={send}>{#if composerPending[`task:${selectedTask.id}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
             </div>
             <ContextUsageBar usage={selectedTaskContextUsage}/>
             </div>
