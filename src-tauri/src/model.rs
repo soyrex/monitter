@@ -455,6 +455,8 @@ pub struct SubagentTranscriptEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Collaboration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<DelegationModelSelection>,
     pub id: String,
     pub kind: String,
     pub from_agent_id: String,
@@ -468,6 +470,20 @@ pub struct Collaboration {
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Persisted request intent and resolved selection; retries never rerun inference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationModelSelection {
+    #[serde(default)]
+    pub requested_title: Option<String>,
+    pub requested_model: Option<String>,
+    pub requested_effort: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub source: String,
+    pub reason: String,
 }
 
 /// A compact, durable projection of either a native Codex sub-agent or a
@@ -1476,8 +1492,8 @@ pub fn sync_collaboration_subagent_sessions(snapshot: &mut Snapshot) {
             agent_path: None,
             agent_thread_id: None,
             prompt: Some(item.text.clone()),
-            model: None,
-            reasoning_effort: None,
+            model: snapshot.tasks.iter().find(|task| task.id == item.to_task_id).and_then(|task| (!task.model.is_empty()).then(|| task.model.clone())),
+            reasoning_effort: snapshot.tasks.iter().find(|task| task.id == item.to_task_id).and_then(|task| task.model_settings.as_ref()).and_then(|settings| settings.reasoning_effort.clone()),
             status: Some(item.status.clone()),
             result: item.result.clone(),
             error: item.error.clone(),
@@ -2056,7 +2072,7 @@ mod task_migration_tests {
     #[test]
     fn routed_delegation_has_the_same_durable_session_projection() {
         let mut snapshot = default_snapshot();
-        snapshot.collaborations.push(Collaboration {
+        snapshot.collaborations.push(Collaboration { model_selection: None,
             id: "delegation-1".into(),
             kind: "delegation".into(),
             from_agent_id: "parent-agent".into(),

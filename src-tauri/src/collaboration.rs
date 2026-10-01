@@ -54,6 +54,7 @@ impl Service {
                 string_arg(args, "query")?,
                 bool_arg(args, "active_only")?.unwrap_or(false),
             ),
+            "list_agent_models" => self.list_agent_models_protocol(caller_task, &required_string(args, "to_agent_id")?, bool_arg(args, "refresh")?.unwrap_or(false)),
             "delegate_task" => self.queue_protocol(caller_task, args, "delegation"),
             "send_message" => self.queue_protocol(caller_task, args, "message"),
             "get_task_result" => {
@@ -189,7 +190,20 @@ impl Service {
                     .iter()
                     .find(|host| host.id == agent.host_id);
                 let current_task_id = active_task_ids.first().cloned();
+                let target = crate::delegation_catalog::DelegationTarget::from_snapshot(
+                    &data.snapshot,
+                    caller_task,
+                    &agent.id,
+                )
+                .ok();
+                let catalog = target
+                    .as_ref()
+                    .and_then(|target| self.delegation_cached_catalog(target));
+                let menu = crate::delegation_catalog::summary_value(agent, catalog.as_ref());
                 json!({
+                    "models": menu["models"],
+                    "defaultModel": menu["defaultModel"],
+                    "modelCatalog": menu["modelCatalog"],
                     "id": agent.id,
                     "name": truncate(&agent.name, 120),
                     "description": truncate(&agent.description, 320),
@@ -343,6 +357,123 @@ impl Service {
         validate_request(&to_agent_id, &title, &text, &request_id)?;
         let target_task_arg = string_arg(args, "task_id")?.map(str::to_owned);
 
+        let requested_model = if kind == "delegation" {
+            string_arg(args, "model")?.map(str::to_owned)
+        } else {
+            None
+        };
+        let requested_effort = if kind == "delegation" {
+            string_arg(args, "reasoning_effort")?.map(str::to_owned)
+        } else {
+            None
+        };
+        if requested_model
+            .as_deref()
+            .is_some_and(|s| s.trim().is_empty() || s.len() > 512 || s.contains('\0'))
+            || requested_effort
+                .as_deref()
+                .is_some_and(|s| s.trim().is_empty() || s.len() > 128 || s.contains('\0'))
+        {
+            return Err(
+                "Model and effort must be bounded nonempty strings without NUL characters.".into(),
+            );
+        }
+        if requested_effort.is_some() && requested_model.as_deref().is_none_or(|m| m == "auto") {
+            return Err("Choose an explicit model before setting reasoning effort.".into());
+        }
+        // Idempotent retries never probe a provider or call Jev again.
+        {
+            let data = self
+                .data
+                .lock()
+                .map_err(|_| "Monitter state lock failed.")?;
+            if let Some(existing) = data
+                .snapshot
+                .collaborations
+                .iter()
+                .find(|c| c.from_task_id == caller_task && c.request_id == request_id)
+            {
+                if !same_request(
+                    existing,
+                    &to_agent_id,
+                    kind,
+                    &title,
+                    &text,
+                    target_task_arg.as_deref(),
+                    requested_model.as_deref(),
+                    requested_effort.as_deref(),
+                ) {
+                    return Err(
+                        "request_id was already used with different collaboration details.".into(),
+                    );
+                }
+                return Ok(collaboration_value(existing, false));
+            }
+            enforce_budget(&data.snapshot, caller_task)?;
+            if target_task_arg.is_none()
+                && is_agent_ancestor(&data.snapshot, caller_task, &to_agent_id)
+            {
+                return Err("This delegation would create an agent ancestry cycle.".into());
+            }
+        }
+        let mut target = None;
+        let mut selected_settings = None;
+        let mut selection = None;
+        if kind == "delegation" {
+            if let Some(model) = requested_model.as_deref() {
+                let context = self.delegation_target(caller_task, &to_agent_id)?;
+                if context.agent.id == self.require_collaboration_caller(caller_task)?.0.agent_id {
+                    return Err("An agent cannot delegate or message itself.".into());
+                }
+                let (source, reason) = if model == "auto" {
+                    match self.delegation_catalog(&context, false) {
+                        Ok(catalog) => {
+                            let chosen = crate::delegation_models::auto_select_model(
+                                &title,
+                                &text,
+                                &catalog,
+                                &context.agent,
+                            );
+                            selected_settings = chosen.settings;
+                            (chosen.source, chosen.reason)
+                        }
+                        Err(_) => ("configured_default".into(), "catalog_unavailable".into()),
+                    }
+                } else {
+                    let catalog = self.delegation_catalog(&context, false)?;
+                    selected_settings = Some(crate::delegation_models::validate_settings(
+                        &catalog,
+                        model,
+                        requested_effort.as_deref(),
+                    )?);
+                    ("explicit".into(), "requested_model".into())
+                };
+                selection = Some(crate::model::DelegationModelSelection {
+                    requested_title: Some(title.clone()),
+                    requested_model: requested_model.clone(),
+                    requested_effort: requested_effort.clone(),
+                    model: selected_settings.as_ref().map(|s| s.model.clone()).or_else(|| (!context.agent.model.is_empty()).then(|| context.agent.model.clone())),
+                    reasoning_effort: selected_settings
+                        .as_ref()
+                        .and_then(|s| s.reasoning_effort.clone()),
+                    source,
+                    reason,
+                });
+                target = Some(context);
+            } else {
+                let context = self.delegation_target(caller_task, &to_agent_id)?;
+                selection = Some(crate::model::DelegationModelSelection {
+                    requested_title: Some(title.clone()),
+                    requested_model: None,
+                    requested_effort: None,
+                    model: (!context.agent.model.is_empty()).then(|| context.agent.model.clone()),
+                    reasoning_effort: None,
+                    source: "configured_default".into(),
+                    reason: "model_omitted".into(),
+                });
+                target = Some(context);
+            }
+        }
         let collaboration = self.mutate_data(Some(caller_task.to_string()), |data| {
             let caller = collaboration_caller(&data.snapshot, caller_task)?;
             let target_agent = data
@@ -364,19 +495,30 @@ impl Service {
                 .find(|item| item.from_task_id == caller_task && item.request_id == request_id)
                 .cloned()
             {
-                if existing.to_agent_id != to_agent_id
-                    || existing.kind != kind
-                    || existing.text != text
-                    || (kind == "message"
-                        && target_task_arg
-                            .as_deref()
-                            .is_some_and(|target| target != existing.to_task_id.as_str()))
-                {
+                if !same_request(
+                    &existing,
+                    &to_agent_id,
+                    kind,
+                    &title,
+                    &text,
+                    target_task_arg.as_deref(),
+                    requested_model.as_deref(),
+                    requested_effort.as_deref(),
+                ) {
                     return Err(
                         "request_id was already used with different collaboration details.".into(),
                     );
                 }
                 return Ok(existing);
+            }
+            if target
+                .as_ref()
+                .is_some_and(|context| !context.unchanged(&data.snapshot, caller_task))
+            {
+                return Err(
+                    "Recipient configuration changed during model selection; retry the request."
+                        .into(),
+                );
             }
             enforce_budget(&data.snapshot, caller_task)?;
             if target_task_arg.is_none()
@@ -414,7 +556,7 @@ impl Service {
                             channel_id: None,
                             project_id: caller.project_id.clone(),
                             cwd: None,
-                            model_settings: None,
+                            model_settings: selected_settings.clone(),
                             sandbox: None,
                         },
                     )?
@@ -424,6 +566,7 @@ impl Service {
             };
             let timestamp = now();
             let collaboration = Collaboration {
+                model_selection: selection.clone(),
                 id: id(),
                 kind: kind.to_string(),
                 from_agent_id: caller.agent_id,
@@ -1060,7 +1203,8 @@ fn fail_queued_delivery(snapshot: &mut Snapshot, index: usize, error: &str) {
 fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Result<(), String> {
     let allowed: &[&str] = match tool {
         "list_agents" => &["query", "active_only"],
-        "delegate_task" => &["to_agent_id", "title", "message", "request_id"],
+        "list_agent_models" => &["to_agent_id", "refresh"],
+        "delegate_task" => &["to_agent_id", "title", "message", "request_id", "model", "reasoning_effort"],
         "send_message" => &["to_agent_id", "message", "request_id", "task_id"],
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
         "wait_for_task" => &["collaboration_id", "timeout_seconds"],
@@ -1304,8 +1448,42 @@ fn collaboration_message_value(item: &Collaboration) -> Value {
     }
     value
 }
+fn same_request(
+    item: &Collaboration,
+    agent: &str,
+    kind: &str,
+    title: &str,
+    text: &str,
+    task: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> bool {
+    item.to_agent_id == agent
+        && item.kind == kind
+        && item.text == text
+        && (kind != "delegation"
+            || item
+                .model_selection
+                .as_ref()
+                .and_then(|s| s.requested_title.as_deref())
+                .is_none_or(|saved| saved == title))
+        && (kind != "message" || task.is_none_or(|t| t == item.to_task_id))
+        && item
+            .model_selection
+            .as_ref()
+            .and_then(|s| s.requested_model.as_deref())
+            == model
+        && item
+            .model_selection
+            .as_ref()
+            .and_then(|s| s.requested_effort.as_deref())
+            == effort
+}
 fn collaboration_value(item: &Collaboration, include_result: bool) -> Value {
     let mut value = json!({"collaboration_id":item.id,"id":item.id,"kind":item.kind,"to_agent_id":item.to_agent_id,"to_task_id":item.to_task_id,"status":item.status,"created_at":item.created_at,"updated_at":item.updated_at});
+    if let Some(selection) = &item.model_selection {
+        value["modelSelection"] = json!(selection);
+    }
     if include_result {
         value["result"] = json!(item
             .result
@@ -1383,6 +1561,76 @@ mod tests {
     }
     fn delegate_args(agent: &Agent, request: &str, body: &str) -> Value {
         json!({"to_agent_id":agent.id,"title":"Review this","message":body,"request_id":request})
+    }
+
+    fn seed_delegation_catalog(service: &Service, caller: &str, agent: &Agent) {
+        let target = service.delegation_target(caller, &agent.id).unwrap();
+        let key = crate::model_catalog_key(&target.host, &agent.provider, &target.cwd, agent.codex_home.as_deref(), agent.acp.as_ref());
+        service.model_catalogs.lock().unwrap().insert(key, (Instant::now(), crate::model::ModelCatalog {
+            models: vec![crate::model::CatalogModel {
+                id:"fixture-model".into(), name:"Fixture".into(), description:"Focused checks".into(),
+                reasoning_efforts:vec![crate::model::ReasoningEffortOption {id:"low".into(),description:"Low".into()}],
+                default_effort:Some("low".into()),supports_fast:false,fast_description:None,
+            }],
+            current:crate::model::ModelCatalogCurrent {model:agent.model.clone(),reasoning_effort:None,fast_mode:None},
+            source:"fixture".into(),warning:None,
+        }));
+    }
+
+    #[test]
+    fn delegation_model_selection_is_validated_persisted_and_retry_stable() {
+        let (service, dir) = service("model-selection");
+        let recipient = add_agent(&service, "Reviewer");
+        let caller = service.snapshot().unwrap().agents[0].clone();
+        let root = task(&service, &caller, "Root", None, None);
+        running(&service, &root.id);
+        seed_delegation_catalog(&service, &root.id, &recipient);
+        let args=json!({"to_agent_id":recipient.id,"title":"Check expression","message":"Check expression","request_id":"model-1","model":"fixture-model","reasoning_effort":"low"});
+        let first=service.protocol(&root.id,"delegate_task",args.clone()).unwrap();
+        let child=first["to_task_id"].as_str().unwrap();
+        let snapshot=service.snapshot().unwrap();
+        let created=snapshot.tasks.iter().find(|t|t.id==child).unwrap();
+        assert_eq!(created.model,"fixture-model");
+        assert_eq!(created.model_settings.as_ref().unwrap().reasoning_effort.as_deref(),Some("low"));
+        assert_eq!(first["modelSelection"]["source"],"explicit");
+        service.model_catalogs.lock().unwrap().clear();
+        assert_eq!(service.protocol(&root.id,"delegate_task",args.clone()).unwrap(),first);
+        for (field,value) in [("model","other"),("reasoning_effort","high"),("title","Different title")] {
+            let mut changed=args.clone(); changed[field]=json!(value);
+            assert!(service.protocol(&root.id,"delegate_task",changed).unwrap_err().contains("request_id"));
+        }
+        drop(service);
+        let reopened=Service::open(None,dir.clone()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().collaborations[0].model_selection.as_ref().unwrap().model.as_deref(),Some("fixture-model"));
+        drop(reopened); let _=fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn model_menu_and_invalid_selection_never_create_orphan_tasks() {
+        let (service, dir) = service("model-menu");
+        let recipient = add_agent(&service,"Reviewer");
+        let caller=service.snapshot().unwrap().agents[0].clone();
+        let root=task(&service,&caller,"Root",None,None);running(&service,&root.id);
+        seed_delegation_catalog(&service,&root.id,&recipient);
+        let menu=service.protocol(&root.id,"list_agent_models",json!({"to_agent_id":recipient.id})).unwrap();
+        assert_eq!(menu["models"][0]["id"],"fixture-model");
+        assert_eq!(menu["models"][0]["reasoningEfforts"][0]["id"],"low");
+        assert_eq!(menu["models"][0]["power"]["tier"],"unknown");
+        let directory=service.protocol(&root.id,"list_agents",json!({"query":"Reviewer"})).unwrap();
+        assert_eq!(directory["agents"][0]["models"],menu["models"]);
+        let before=service.snapshot().unwrap().tasks.len();
+        for extra in [json!({"model":"unknown"}),json!({"model":"fixture-model","reasoning_effort":"unsupported"}),json!({"model":"auto","reasoning_effort":"low"}),json!({"reasoning_effort":"low"}),json!({"model":false})] {
+            let mut args=delegate_args(&recipient,"invalid","Explain");
+            args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(service.protocol(&root.id,"delegate_task",args).is_err());
+            assert_eq!(service.snapshot().unwrap().tasks.len(),before);
+        }
+        let mut auto=delegate_args(&recipient,"auto","Review credential handling");auto["model"]=json!("auto");
+        let result=service.protocol(&root.id,"delegate_task",auto).unwrap();
+        assert_eq!(result["modelSelection"]["source"],"configured_default");
+        let snap=service.snapshot().unwrap();
+        assert!(snap.tasks.iter().find(|t|t.id==result["to_task_id"].as_str().unwrap()).unwrap().model_settings.is_none());
+        drop(service);let _=fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1774,7 +2022,7 @@ mod tests {
         let (store, mut snapshot, hosts, attachments) =
             crate::store::Store::open(dir.clone()).unwrap();
         snapshot.collaborations = vec![
-            Collaboration {
+            Collaboration { model_selection: None,
                 id: "run".into(),
                 kind: "delegation".into(),
                 from_agent_id: "a".into(),
@@ -1789,7 +2037,7 @@ mod tests {
                 created_at: 1,
                 updated_at: 1,
             },
-            Collaboration {
+            Collaboration { model_selection: None,
                 id: "queued".into(),
                 kind: "delegation".into(),
                 from_agent_id: "a".into(),
@@ -1870,7 +2118,7 @@ mod tests {
         running(&service, &sender_task.id);
         service
             .mutate(None, |snapshot| {
-                snapshot.collaborations.push(Collaboration {
+                snapshot.collaborations.push(Collaboration { model_selection: None,
                     id: "mail".into(),
                     kind: "message".into(),
                     from_agent_id: sender.id.clone(),
@@ -1953,7 +2201,7 @@ mod tests {
         assert!(is_agent_ancestor(&snapshot, &parent, &agent.id));
         assert!(enforce_budget(&snapshot, &parent).is_err());
         for index in 0..MAX_PER_TASK {
-            snapshot.collaborations.push(Collaboration {
+            snapshot.collaborations.push(Collaboration { model_selection: None,
                 id: index.to_string(),
                 kind: "delegation".into(),
                 from_agent_id: "a".into(),
