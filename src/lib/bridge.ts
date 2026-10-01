@@ -113,6 +113,7 @@ export interface MonitterBridge {
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
   sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | SendAccepted>;
+  refreshMailInbox(taskId: string, accountId: string, query: string): Promise<unknown>;
   requestMailDetail(taskId: string, mailId: string): Promise<MailDetailRequestResult>;
   getMailDetail(taskId: string, mailId: string): Promise<MailDetail | null>;
   getMailConfig(): Promise<MailConfig>;
@@ -467,6 +468,7 @@ const nativeBridge: MonitterBridge = {
   deleteProject: id => invoke("delete_project", {id}),
   setTaskProject: (taskId, projectId) => invoke("set_task_project", {taskId, projectId}),
   sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
+  refreshMailInbox: (taskId, accountId, query) => isLanBrowser() ? desktopOnly() : invoke('refresh_mail_inbox', { taskId, accountId, query }),
   requestMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('request_mail_detail', { taskId, mailId }),
   getMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('get_mail_detail', { taskId, mailId }),
   getMailConfig: () => isLanBrowser() ? desktopOnly() : invoke('mail_get_config'),
@@ -628,6 +630,7 @@ const previewBridge: MonitterBridge = {
   sendMessage: () => desktopOnly(),
   requestMailDetail: () => desktopOnly(),
   getMailDetail: () => desktopOnly(),
+  refreshMailInbox: () => desktopOnly(),
   getMailConfig: () => desktopOnly(),
   configureGmail: () => desktopOnly(),
   startMailConnect: () => desktopOnly(),
@@ -768,6 +771,7 @@ export function getBridge(): MonitterBridge {
       setTaskProject: (taskId, projectId) => test.invoke("set_task_project", {taskId, projectId}) as Promise<Snapshot>,
       sendMessage: (taskId, text, attachmentIds = []) =>
         test.invoke("send_message", { taskId, text, attachmentIds }) as Promise<Snapshot>,
+      refreshMailInbox: (taskId, accountId, query) => test.invoke('refresh_mail_inbox', { taskId, accountId, query }),
       requestMailDetail: (taskId, mailId) => test.invoke('request_mail_detail', { taskId, mailId }) as Promise<MailDetailRequestResult>,
       getMailDetail: (taskId, mailId) => test.invoke('get_mail_detail', { taskId, mailId }) as Promise<MailDetail | null>,
       getMailConfig: () => test.invoke('mail_get_config') as Promise<MailConfig>,

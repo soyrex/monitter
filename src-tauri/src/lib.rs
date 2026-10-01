@@ -389,10 +389,9 @@ pub(crate) struct Service {
     // assistant message. It is never a path reader or a persisted capability.
     pending_codex_images: Mutex<HashMap<String, Vec<attachments::Attachment>>>,
     app_server_message_ids: Mutex<HashMap<(String, String, String), String>>,
-    // Full mail bodies and the click-to-fetch grants are deliberately
-    // process-local. Durable state contains only bounded envelope cards.
+    // Full native Gmail bodies are deliberately process-local.
+    // Durable state contains only bounded envelope cards.
     mail_details: Mutex<HashMap<(String, String), mail_triage::CachedMailDetail>>,
-    pending_mail_details: Mutex<HashMap<(String, String), mail_triage::PendingMailDetail>>,
     collaboration: Mutex<Option<collaboration_transport::Broker>>,
     collaboration_grants: Mutex<HashMap<String, collaboration_transport::SessionGrant>>,
     collaboration_started: std::sync::atomic::AtomicBool,
@@ -796,7 +795,6 @@ impl Service {
             pending_codex_images: Mutex::new(HashMap::new()),
             app_server_message_ids: Mutex::new(HashMap::new()),
             mail_details: Mutex::new(HashMap::new()),
-            pending_mail_details: Mutex::new(HashMap::new()),
             collaboration: Mutex::new(None),
             collaboration_grants: Mutex::new(HashMap::new()),
             collaboration_started: std::sync::atomic::AtomicBool::new(false),
@@ -8273,6 +8271,15 @@ async fn send_message_fast(
 }
 
 #[tauri::command]
+async fn refresh_mail_inbox(
+    state: State<'_, AppState>, task_id: String, account_id: String, query: String,
+) -> Result<serde_json::Value, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.refresh_mail_inbox(task_id, account_id, query))
+        .await.map_err(|error| format!("Mail inbox worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn request_mail_detail(
     state: State<'_, AppState>,
     task_id: String,
@@ -9762,6 +9769,7 @@ pub fn run() {
             clear_task_context,
             send_message,
             send_message_fast,
+            refresh_mail_inbox,
             request_mail_detail,
             get_mail_detail,
             resume_task,

@@ -275,6 +275,8 @@ pub struct MailBatch {
     pub task_id: String,
     pub source: String,
     pub account_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_account_id: Option<String>,
     pub query_label: String,
     pub created_at: i64,
     /// Last successful projection update. Older snapshots deserialize this as
