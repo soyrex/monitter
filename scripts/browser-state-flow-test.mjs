@@ -11,10 +11,11 @@ const js=ts.transpileModule(functions,{compilerOptions:{target:ts.ScriptTarget.E
 const make=new Function('bridge',`${js.includes('use strict')?'':''}
 let browserTabs={tab:{id:'tab',url:'https://old.test',title:'Old',unloaded:false}},browserHistory={},browserBounds={};
 const browserRefreshes=new Map(),browserEpoch=new Map(),browserClosings=new Set(),browserRequestedUrls=new Map(),browserLayoutRevision=new Map(),browserAppliedLayouts=new Map();
-let browserLayoutTail=Promise.resolve(),nativeRuntime=true,activeInterfaceScale=125,embedded=false,active=true,sidebarSelected=false,activePaneId='main',snapshot={settings:{showActivePaneBorder:true}},error='';
+const browserLayoutRuntime={tail:Promise.resolve()}; let nativeRuntime=true,activeInterfaceScale=125,embedded=false,active=true,sidebarSelected=false,activePaneId='main',snapshot={settings:{showActivePaneBorder:true}},error='';
+const liveBrowserTabs=new Set(['tab']);
 const window={innerWidth:1000,innerHeight:800},text=String;
 ${js}
-return {refreshBrowserState,layoutBrowser,applyBrowserState,browserTabs,browserHistory,browserEpoch,browserRequestedUrls,browserClosings,window,get error(){return error},get tail(){return browserLayoutTail}};`);
+return {refreshBrowserState,layoutBrowser,applyBrowserState,browserTabs,browserHistory,browserEpoch,browserRequestedUrls,browserClosings,window,get error(){return error},get tail(){return browserLayoutRuntime.tail}};`);
 const deferred=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j});return {promise,resolve,reject};};
 let stateCalls=0;let state=deferred();const writes=[];let writeGate=null;let fail=false;
 const qa=make({available:true,browserGetState:()=>{stateCalls++;return state.promise},browserSetLayout:async(...args)=>{writes.push(args);if(writeGate)await writeGate.promise;if(fail)throw new Error('fixture failure')}});

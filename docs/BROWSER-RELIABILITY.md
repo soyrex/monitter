@@ -81,3 +81,24 @@ splitter drag changed the ratio from 40% to 64% and revealed the page aligned
 with the final pane. Chromium/WebKit regressions, Svelte check (0 errors, 25
 baseline warnings) and the production UI build also passed. This verifies the
 isolated fixture, not activation in the installed desktop.
+
+## Live workspace pages and overlay ownership
+
+Workspace switches park native pages with `browser_set_layout(..., false)`;
+they never close or navigate them. A process-local registry reconnects restored
+pane metadata to the same native child. Page DOM, input, scroll, history and JS
+state remain native; an app restart or explicit unload still ends that page.
+Layout bounds, revisions, deduplication and the write queue are shared across
+panes. Viewport leases suppress stale teardown from a prior pane, and orphan
+cleanup can hide a page even after its old tab metadata has moved. Browser moves
+wait for pending creation/navigation to avoid closing a destination's child.
+Mounted dialogs suspend overlays until exit completes, including usage and
+process metrics. Terminal/Browser choices replace only a blank new-tab screen.
+
+Focused checks: `browser-workspace-state-test.mjs`, `browser-state-flow-test.mjs`,
+`browser-tab-ui-contract-test.mjs`, Chromium/WebKit pane geometry, address and
+`browser-modal-visibility-test.mjs`. The existing modal-active-highlight test
+fails its initial active-pane pseudo-element assertion on unchanged main too
+(expected empty content, observed none); that unrelated styling test is not
+claimed as passing. These follow-up checks exercise production functions and
+web fixtures, not activation of this branch in the installed desktop.
