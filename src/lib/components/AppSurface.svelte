@@ -7905,6 +7905,7 @@
   @media (hover:hover) and (pointer:fine) { .tab-entry:hover .close-tab { opacity:1; pointer-events:auto; } }
   .close-tab:hover, .tab:hover { background: var(--soft); }
   .tab.active:hover, .tab-entry.active .tab:hover { background: var(--paper); }
+  .browser-tab.active, .browser-tab.active .tab:hover { background: var(--panel); }
   .terminal-tab.active, .terminal-tab.active .tab:hover { background: var(--terminal-background); }
   .terminal-tab.active .tab, .terminal-tab.active .close-tab { color: var(--terminal-foreground); }
   .terminal-tab.active .close-tab:hover { background: #252a31; }
