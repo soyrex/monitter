@@ -69,6 +69,7 @@ mod history;
 mod image_file;
 mod local_file_link;
 mod markdown;
+mod open_file;
 mod report_file;
 mod mail_triage;
 mod mail;
@@ -7363,6 +7364,20 @@ async fn read_report_file(
     .map_err(|_| "Report reader worker failed.".to_string())?
 }
 
+/// Native desktop only. This is intentionally absent from the LAN dispatcher.
+#[tauri::command]
+async fn open_task_file(
+    state: State<'_, AppState>,
+    task_id: String,
+    href: String,
+    base_path: Option<String>,
+) -> Result<(), String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.open_task_file(&task_id, &href, base_path.as_deref()))
+        .await
+        .map_err(|_| "File opener worker failed.".to_string())?
+}
+
 /// The token is generated in memory on each app launch and is never written to
 /// the workspace. It is intentionally returned only to the native renderer.
 #[tauri::command]
@@ -9710,6 +9725,7 @@ pub fn run() {
             read_markdown_file,
             read_image_file,
             read_report_file,
+            open_task_file,
             get_lan_server_info,
             owner_relay_invoke,
             resolve_approval,

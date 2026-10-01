@@ -639,6 +639,37 @@
         "native"
       ]
     },
+    "open_task_file": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "href",
+          "rustName": "href",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "basePath",
+          "rustName": "base_path",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
+        }
+      ],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "get_lan_server_info": {
       "arguments": [],
       "resultRustType": "lan::Info",

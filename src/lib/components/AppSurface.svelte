@@ -399,9 +399,13 @@
   const openMarkdownDocument = (taskId: string, href: string, basePath?: string) => openFileDocument('markdown', taskId, href, basePath);
   const openImageDocument = (taskId: string, href: string, basePath?: string) => openFileDocument('image', taskId, href, basePath);
   const openReportDocument = (taskId: string, href: string, basePath?: string) => openFileDocument(/\.(?:htm|html)(?:[?#]|$)/i.test(href) ? 'html' : 'pdf', taskId, href, basePath);
+  // Every other local file type has no internal viewer; hand it to the OS
+  // default application instead of leaving the link inert.
+  const openFileExternally = (taskId: string, href: string, basePath?: string) => bridge.openTaskFile(taskId, href, basePath);
   setContext('monitter-open-markdown', openMarkdownDocument);
   setContext('monitter-open-image', openImageDocument);
   setContext('monitter-open-report', openReportDocument);
+  setContext('monitter-open-file', openFileExternally);
   async function loadDocument(id: string) {
     const doc = documents[id];
     if (!doc || documentLoading[id]) return;

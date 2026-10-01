@@ -8,8 +8,12 @@ use std::{
 };
 
 /// Resolve `href` (optionally relative to `base_path`, otherwise to `cwd`)
-/// into a canonical path that is confirmed to stay inside `cwd`, exist as a
-/// regular file, and carry one of `allowed_extensions` (already lowercase).
+/// into a canonical path that is confirmed to stay inside `cwd` and exist as
+/// a regular file. An empty `allowed_extensions` means any extension is
+/// accepted (used by readers that hand a file to the OS rather than parsing
+/// its contents, so there is no type-specific reason to restrict it); a
+/// non-empty slice requires the path's extension (already lowercase) to be
+/// one of them.
 pub(crate) fn resolve_local_link(
     cwd: &Path,
     href: &str,
@@ -30,6 +34,9 @@ pub(crate) fn resolve_local_link(
         base_dir.join(href)
     };
     let path = canonical_existing_file(cwd, &candidate)?;
+    if allowed_extensions.is_empty() {
+        return Ok(path);
+    }
     let allowed = path
         .extension()
         .and_then(|extension| extension.to_str())

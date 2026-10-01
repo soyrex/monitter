@@ -105,6 +105,11 @@ export interface CommandArgs {
   href: string;
   basePath?: string | null;
   };
+  "open_task_file": {
+  taskId: string;
+  href: string;
+  basePath?: string | null;
+  };
   "get_lan_server_info": {  };
   "owner_relay_invoke": {
   command: string;
@@ -433,6 +438,7 @@ export interface CommandResults {
   "read_markdown_file": MarkdownDocument;
   "read_image_file": ImageDocument;
   "read_report_file": ReportDocument;
+  "open_task_file": void;
   "get_lan_server_info": LanServerInfo;
   "owner_relay_invoke": JsonValue;
   "resolve_approval": Snapshot;

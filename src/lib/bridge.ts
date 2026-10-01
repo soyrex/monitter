@@ -91,6 +91,7 @@ export interface MonitterBridge {
   readMarkdownFile(taskId: string, href: string, basePath?: string): Promise<MarkdownDocument>;
   readImageFile(taskId: string, href: string, basePath?: string): Promise<ImageDocument>;
   readReportFile(taskId: string, href: string, basePath?: string): Promise<ReportDocument>;
+  openTaskFile(taskId: string, href: string, basePath?: string): Promise<void>;
   getSubagentTranscript(taskId: string, subagentId: string): Promise<SubagentTranscriptEntry[]>;
   saveHost(host: Host): Promise<Snapshot>;
   deleteHost(id: string): Promise<Snapshot>;
@@ -443,6 +444,7 @@ const nativeBridge: MonitterBridge = {
   readMarkdownFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   readImageFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_image_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   readReportFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('read_report_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
+  openTaskFile: (taskId, href, basePath) => isLanBrowser() ? desktopOnly() : invoke('open_task_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }),
   getSubagentTranscript: (taskId, subagentId) => invoke('get_subagent_transcript', { taskId, subagentId }),
   saveHost: (host) => invoke("save_host", { host }),
   deleteHost: (id) => invoke("delete_host", { id }),
@@ -602,6 +604,7 @@ const previewBridge: MonitterBridge = {
   readMarkdownFile: () => desktopOnly(),
   readImageFile: () => desktopOnly(),
   readReportFile: () => desktopOnly(),
+  openTaskFile: () => desktopOnly(),
   getSubagentTranscript: () => desktopOnly(),
   saveHost: () => desktopOnly(),
   deleteHost: () => desktopOnly(),
@@ -734,6 +737,7 @@ export function getBridge(): MonitterBridge {
       readMarkdownFile: (taskId, href, basePath) => test.invoke('read_markdown_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<MarkdownDocument>,
       readImageFile: (taskId, href, basePath) => test.invoke('read_image_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<ImageDocument>,
       readReportFile: (taskId, href, basePath) => test.invoke('read_report_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<ReportDocument>,
+      openTaskFile: (taskId, href, basePath) => test.invoke('open_task_file', { taskId, href, ...(basePath === undefined ? {} : { basePath }) }) as Promise<void>,
       getSubagentTranscript: (taskId, subagentId) => test.invoke('get_subagent_transcript', { taskId, subagentId }) as Promise<SubagentTranscriptEntry[]>,
       saveHost: (host) =>
         test.invoke("save_host", { host }) as Promise<Snapshot>,

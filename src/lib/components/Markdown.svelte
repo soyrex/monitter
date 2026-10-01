@@ -9,13 +9,17 @@
   const openMarkdown = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-markdown');
   const openImageFile = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-image');
   const openReportFile = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-report');
+  const openFileExternally = getContext<((taskId: string, href: string, basePath?: string) => Promise<void>) | undefined>('monitter-open-file');
   let container = $state<HTMLDivElement>();
   let linkError = $state("");
   let lightbox = $state<{ src: string; alt: string; title?: string } | null>(null);
   let lightboxOpener = $state<HTMLElement | null>(null);
   // Preserve local Markdown file URLs for the scoped native reader. Other URI
   // schemes retain DOMPurify's normal allowlist; the click handler owns opening.
-  const allowedMarkdownUris = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|(?:file:\/\/\/|(?:tauri|asset):\/\/localhost\/)[^?#]*\.(?:md|markdown|png|jpe?g|gif|svg|webp|pdf|html?)(?:[?#]|$)|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+  // Any file type under a local-file scheme is allowed through sanitization:
+  // the click handler opens a known type internally and hands everything
+  // else to the OS, so there is no longer an extension to gate on here.
+  const allowedMarkdownUris = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|(?:file:\/\/\/|(?:tauri|asset):\/\/localhost\/)[^?#]+|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
   // Keep expensive parsing tied to the primitive content, not a replaced message object.
   const sourceText = $derived(text);
   const html = $derived(
@@ -76,6 +80,14 @@
       if (localPathLike && /\.(?:pdf|html?)$/i.test(bareHref)) {
         if (!openReportFile || !(taskId ?? contextTaskId)) { linkError = 'Reports can only be opened from a local task.'; return; }
         try { linkError = ''; await openReportFile(taskId ?? contextTaskId!, href, basePath); }
+        catch (reason) { linkError = reason instanceof Error ? reason.message : String(reason); }
+        return;
+      }
+      if (localPathLike) {
+        // No internal viewer for this file type: hand it to the OS default
+        // application, the same outcome as opening it from Finder.
+        if (!openFileExternally || !(taskId ?? contextTaskId)) { linkError = 'Files can only be opened from a local task.'; return; }
+        try { linkError = ''; await openFileExternally(taskId ?? contextTaskId!, href, basePath); }
         catch (reason) { linkError = reason instanceof Error ? reason.message : String(reason); }
         return;
       }
