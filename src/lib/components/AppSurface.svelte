@@ -7380,6 +7380,21 @@
   .sidebar-card-task .chat-actions { position:relative; z-index:2; }
   .task-row:focus-within .chat-actions { opacity:1; pointer-events:auto; }
   @media (hover:hover) and (pointer:fine) { .task-row:hover .chat-actions { opacity:1; pointer-events:auto; } }
+  @media (hover:hover) and (pointer:fine) {
+    .task-row > .chat-actions {
+      position:absolute;
+      z-index:4;
+      top:50%;
+      right:4px;
+      transform:translateY(-50%);
+      padding:2px;
+      border-radius:6px;
+      background:color-mix(in srgb,var(--sidebar) 90%,transparent);
+      box-shadow:0 1px 5px color-mix(in srgb,#000 18%,transparent);
+      backdrop-filter:blur(5px);
+    }
+    .task-row:has(> .sidebar-live-spinner) > .chat-actions { right:26px; }
+  }
   .chat-actions button { display:grid; place-items:center; width:20px; height:22px; padding:0; color:var(--muted); border-radius:4px; }
   .chat-actions button:hover { background:var(--soft); color:var(--ink); }
   .agent-chats { margin-top:24px; display:grid; gap:6px; }
