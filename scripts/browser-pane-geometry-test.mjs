@@ -19,10 +19,37 @@ try {
       const finalRect = () => page.evaluate(() => { const rect=document.querySelector('.browser-native-viewport').getBoundingClientRect(); return {x:Math.round(rect.x),y:Math.round(rect.y),width:Math.round(rect.width),height:Math.round(rect.height),visible:true}; });
       const matches=async()=>expect.poll(()=>page.evaluate(()=>window.paneQA.reports.at(-1))).toEqual(await finalRect());
       await matches();
+      const separator=page.getByRole('separator',{name:'Resize panes'});
+      const box=await separator.boundingBox();
+      await page.mouse.move(box.x+box.width/2,box.y+box.height/2);
+      await page.mouse.down();
+      await expect(page.getByLabel('Browser resize placeholder')).toBeVisible();
+      await expect(page.getByText('https://example.test — browser',{exact:true})).toBeVisible();
+      await expect.poll(()=>page.evaluate(()=>window.paneQA.reports.at(-1)?.visible)).toBe(false);
+      const hideIndex=await page.evaluate(()=>window.paneQA.reports.length-1);
+      await page.mouse.move(box.x-180,box.y+box.height/2,{steps:10});
+      await page.waitForTimeout(80);
+      expect(await page.evaluate(index=>window.paneQA.reports.slice(index).every(rect=>!rect.visible),hideIndex)).toBe(true);
+      await page.mouse.up();
+      await expect(page.getByLabel('Browser resize placeholder')).toHaveCount(0);
+      await matches();
+      // A sidebar drag also moves browser panes and must share the guard.
+      const sidebar=page.getByRole('separator',{name:'Resize fixture sidebar'});
+      await sidebar.dispatchEvent('pointerdown',{pointerId:31,button:0});
+      await expect(page.getByLabel('Browser resize placeholder')).toBeVisible();
+      await page.evaluate(()=>window.dispatchEvent(new PointerEvent('pointercancel',{pointerId:31})));
+      await expect(page.getByLabel('Browser resize placeholder')).toHaveCount(0);await matches();
+      // Blur and window-size bursts have a bounded final-frame reveal.
+      await sidebar.dispatchEvent('pointerdown',{pointerId:32,button:0});
+      await page.evaluate(()=>window.dispatchEvent(new Event('blur')));
+      await expect(page.getByLabel('Browser resize placeholder')).toHaveCount(0);await matches();
+      await page.evaluate(()=>window.dispatchEvent(new Event('resize')));
+      await expect(page.getByLabel('Browser resize placeholder')).toBeVisible();
+      await expect(page.getByLabel('Browser resize placeholder')).toHaveCount(0);await matches();
       await page.evaluate(()=>window.paneQA.resize(.65)); await page.waitForTimeout(300); await matches();
       await page.evaluate(()=>window.paneQA.move()); await page.waitForTimeout(300); await matches();
       await page.evaluate(()=>window.paneQA.closeOther()); await page.waitForTimeout(300); await matches();
-      await page.setViewportSize({width:1100,height:760}); await matches();
+      await page.setViewportSize({width:1100,height:760}); await page.evaluate(()=>window.dispatchEvent(new Event('resize'))); await expect(page.getByLabel('Browser resize placeholder')).toBeVisible(); await expect(page.getByLabel('Browser resize placeholder')).toHaveCount(0); await matches();
       const count=await page.evaluate(()=>window.paneQA.reports.length); await page.waitForTimeout(300); expect(await page.evaluate(()=>window.paneQA.reports.length)).toBe(count);
       expect(errors).toEqual([]); console.log(`${browserType.name()}: real PaneGrid neighbor resize, rearrange, close, window resize and idle measurement passed`);
     } finally {await browser.close();}

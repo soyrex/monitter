@@ -16,8 +16,7 @@ motion ends; unchanged idle bounds generate no further reports.
 Layout revisions update the observer rather than disposing it, avoiding a hide
 and re-show on every splitter update. The existing serialized layout queue keeps
 only the latest queued bounds per tab and now suppresses already-applied native
-rectangles. Window size is part of that cache key because native child views can
-resize proportionally before the renderer corrects their position. Failed writes
+rectangles. Window size is part of that cache key so even fixed DOM rectangles are revalidated after host-window changes. Failed writes
 remain retryable. Native position and size use one Tauri set_bounds dispatch.
 
 Native state reads share one pending request per tab, discard responses after
@@ -53,3 +52,32 @@ warnings); production Vite build; and 5 focused native-browser Rust tests. The
 native build used two jobs and a disposable APFS clone of the existing cache.
 The task's Rust target, web build and Svelte/Vite cache outputs were removed after
 validation. Main and the installed app were left unchanged.
+
+
+## Native resize placeholder
+
+The root surface captures pane and sidebar splitter pointer-downs before their
+resize handlers run. During the drag, all native browser pages are hidden and
+their shell viewports display the URL followed by “— browser”. Native bounds
+continue updating while hidden. After pointer-up, cancellation, lost capture or
+blur, settled animation frames precede the final bounds report and reveal.
+Keyboard splitter changes and window resize bursts use the same guard with a
+120 ms idle delay. Starting another resize cancels an outstanding reveal. Pane
+resize capture now also releases on Escape, blur and component disposal.
+
+`node scripts/browser-native-resize-smoke.mjs` builds a labelled local test page
+and standalone shell fixture, then prints a side-by-side debug bundle command.
+Keep the fixture server running while building and testing. Launch that bundle
+with `MONITTER_BROWSER_SMOKE_DISABLE_LAN=1` to avoid the installed desktop's LAN
+port. Its separate app identifier and browser profile do not replace the
+installed app or its task data. The “Hold resize placeholder”, “Resize hidden
+pane” and “Finish resize” controls expose each real WKWebView visibility phase
+for visual verification; ordinary divider dragging tests native hit-testing too.
+
+Follow-up validated in a separately identified macOS Tauri debug bundle at 125%
+interface zoom: native WKWebView disappearance, hidden pane-bound changes and
+reappearance were observed through accessibility and screenshots; an actual
+splitter drag changed the ratio from 40% to 64% and revealed the page aligned
+with the final pane. Chromium/WebKit regressions, Svelte check (0 errors, 25
+baseline warnings) and the production UI build also passed. This verifies the
+isolated fixture, not activation in the installed desktop.

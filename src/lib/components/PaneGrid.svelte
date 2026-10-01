@@ -13,6 +13,8 @@
   const showLeafBorder=$derived(showActivePaneBorder && 'axis' in layout);
   let over = $state<{id:string;edge:Edge}|null>(null);
   let pointerResizing = false;
+  let resizeCleanup = () => {};
+  onDestroy(() => resizeCleanup());
   let geometryReady = false;
   let gridRoot: HTMLElement;
   let geometryGeneration = 0;
@@ -237,13 +239,26 @@
     return ()=>{clear();window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',finish);window.removeEventListener('pointercancel',cancel);window.removeEventListener('blur',cancel);window.removeEventListener('keydown',key);};
   });
   function resize(event:PointerEvent,node:PaneSplit) {
+    if (event.button !== 0) return;
+    resizeCleanup();
+    cancelGeometryAnimations();
     const handle=event.currentTarget as HTMLElement, container=handle.parentElement!;
     const rect=container.getBoundingClientRect(), horizontal=node.axis==='horizontal';
     const size=horizontal?rect.width:rect.height, origin=horizontal?rect.left:rect.top;
-    pointerResizing=true;handle.setPointerCapture(event.pointerId);event.preventDefault();
-    const move=(next:PointerEvent)=>onresize(node.id,Math.max(.15,Math.min(.85,((horizontal?next.clientX:next.clientY)-origin)/size)));
-    const finish=()=>{pointerResizing=false;handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',finish);handle.removeEventListener('pointercancel',finish);handle.removeEventListener('lostpointercapture',finish);};
+    const pointerId = event.pointerId, initialRatio = node.ratio;
+    pointerResizing=true;handle.setPointerCapture(pointerId);event.preventDefault();
+    const move=(next:PointerEvent)=>{ if(next.pointerId===pointerId) onresize(node.id,Math.max(.15,Math.min(.85,((horizontal?next.clientX:next.clientY)-origin)/size))); };
+    const finish=()=>{
+      pointerResizing=false;
+      handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',finish);handle.removeEventListener('pointercancel',finish);handle.removeEventListener('lostpointercapture',finish);
+      window.removeEventListener('blur',finish);window.removeEventListener('keydown',cancel);
+      resizeCleanup=()=>{};
+      if(handle.hasPointerCapture(pointerId))handle.releasePointerCapture(pointerId);
+    };
+    const cancel=(next:KeyboardEvent)=>{if(next.key==='Escape'){next.preventDefault();onresize(node.id,initialRatio);finish();}};
+    resizeCleanup=finish;
     handle.addEventListener('pointermove',move);handle.addEventListener('pointerup',finish);handle.addEventListener('pointercancel',finish);handle.addEventListener('lostpointercapture',finish);
+    window.addEventListener('blur',finish);window.addEventListener('keydown',cancel);
   }
   function resizeKey(event:KeyboardEvent,node:PaneSplit) {
     const decrease=node.axis==='horizontal'?'ArrowLeft':'ArrowUp', increase=node.axis==='horizontal'?'ArrowRight':'ArrowDown';
