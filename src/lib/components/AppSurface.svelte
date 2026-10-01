@@ -5084,6 +5084,7 @@
 {#snippet sidebarChat(task: Task, detail = false, recent = false)}
   {@const sortGroup=sidebarView==='activity'?'':sidebarView==='projects'?`project-chats:${task.projectId??'unassigned'}`:`agent-chats:${task.agentId}`}
   {@const agent = visibleAgents.find(item=>item.id===task.agentId)}
+  {@const project = snapshot?.projects.find(item=>item.id===task.projectId)}
   {@const activityStyle = detail && sidebarView === 'activity'}
   {@const groupedStyle = !sidebarCompressed && sidebarView !== 'activity'}
   {@const cardStyle = activityStyle || groupedStyle}
@@ -5101,11 +5102,12 @@
         <span class="activity-task-copy">
           <span class="activity-task-title">{task.title}</span>
           <span class="chat-meta activity-task-meta">
-            {#if activityStyle || sidebarView === 'projects'}<span class="activity-agent-name">{agent?.name ?? 'Agent'}</span>
-            {:else}<span class="activity-agent-name">{task.status === 'running' ? 'Running' : task.status === 'completed' ? 'Finished' : task.status === 'error' ? 'Needs attention' : task.status === 'interrupted' ? 'Stopped' : 'Waiting'}</span>{/if}
+            {#if activityStyle}<span class="activity-agent-name" title={project ? `${agent?.name ?? 'Agent'} · ${project.name}` : agent?.name ?? 'Agent'}>{agent?.name ?? 'Agent'}{#if project} · {project.name}{/if}</span>
+            {:else if sidebarView === 'projects'}<span class="activity-agent-name">{agent?.name ?? 'Agent'}</span>
+            {:else if project}<span class="activity-agent-name" title={project.name}>{project.name}</span>{/if}
             {#if activeChildren.length}<button class="activity-subagents" aria-label={`${collapsedTaskChildren[task.id] ? 'Expand' : 'Collapse'} ${activeChildren.length} active subagents for ${task.title}`} aria-expanded={!collapsedTaskChildren[task.id]} aria-controls={`sidebar-children-${task.id}`} onclick={() => collapsedTaskChildren[task.id] = !collapsedTaskChildren[task.id]}><span aria-hidden="true" class="activity-subagents-sparkle">✦</span>{activeChildren.length}</button>{/if}
             {#if activityHost?.kind === 'ssh'}<span class="activity-host">· {activityHost.name}</span>{/if}
-            <span class="activity-time">· {relative(task.updatedAt)}</span>
+            <span class="activity-time">{relative(task.updatedAt)}</span>
           </span>
         </span>
       </div>
@@ -7312,7 +7314,7 @@
   .activity-task.recent .activity-task-title { font-weight:200; }
   .activity-task .activity-task-meta { display:flex; align-items:center; gap:4px; min-width:0; overflow:hidden; font-size:calc(10px * var(--interface-font-ratio,1)); line-height:1.3; white-space:nowrap; }
   .activity-agent-name, .activity-host { min-width:0; overflow:hidden; text-overflow:ellipsis; }
-  .activity-time { flex:none; }
+  .activity-time { flex:none; margin-left:auto; text-align:right; }
   .activity-subagents { display:inline-flex; align-items:center; justify-content:center; gap:3px; flex:none; min-width:27px; height:19px; padding:0 6px; border:1px solid color-mix(in srgb,#48a4ff 45%,transparent); border-radius:999px; color:#0565b8; background:linear-gradient(135deg,color-mix(in srgb,#75b9ff 23%,transparent),color-mix(in srgb,#368fff 11%,transparent)); box-shadow:inset 0 1px 0 color-mix(in srgb,white 55%,transparent),0 0 8px color-mix(in srgb,#53a7ff 18%,transparent); font:700 calc(10px * var(--interface-font-ratio,1))/1 var(--mono); white-space:nowrap; cursor:pointer; pointer-events:auto; }
   .activity-subagents:hover { border-color:#5cb1ff; background:color-mix(in srgb,#75b9ff 29%,transparent); }
   .sidebar.sidebar-selected .activity-subagents:focus-visible { outline:2px solid #4c9feb; outline-offset:2px; }
