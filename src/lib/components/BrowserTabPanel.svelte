@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { observeBrowserViewport } from '$lib/browser-viewport';
   import ArrowRight from "@lucide/svelte/icons/arrow-right";
   import ChevronLeft from "@lucide/svelte/icons/chevron-left";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
@@ -15,10 +16,27 @@
   let { tab, active = false, available = true, layoutRevision = 0, canGoBack = null, canGoForward = null, onNavigate, onBack, onForward, onRefreshState, onReload, onUnload, onLoadExtension, onLayout, onClose }:
     { tab: BrowserTabMetadata; active?: boolean; available?: boolean; layoutRevision?: string | number; canGoBack?: boolean | null; canGoForward?: boolean | null; onNavigate?: (url: string) => void; onBack?: () => void; onForward?: () => void; onRefreshState?: () => void; onReload?: () => void; onUnload?: () => void; onLoadExtension?: (path: string) => Promise<BrowserExtensionLoadResult>; onLayout?: (viewport: BrowserViewport) => void; onClose?: () => void } = $props();
   let url = $state('');
+  let addressFocused = $state(false);
+  let addressDirty = $state(false);
+  let addressTabId = '';
   let viewport = $state<HTMLElement>();
   let extensionOpen = $state(false), extensionPath = $state(''), extensionLoading = $state(false), extensionMessage = $state(''), extensionError = $state('');
 
-  $effect(() => { url = tab.url; });
+  $effect(() => {
+    const currentTabId = tab.id;
+    const currentUrl = tab.url;
+    // Native state is polled while the toolbar remains mounted. Keep a user's
+    // draft stable during that polling, but always start a newly selected tab
+    // with its own current address.
+    if (addressTabId !== currentTabId) {
+      addressTabId = currentTabId;
+      addressFocused = false;
+      addressDirty = false;
+      url = currentUrl;
+    } else if (!addressFocused && !addressDirty) {
+      url = currentUrl;
+    }
+  });
   $effect(() => {
     // Native page-load callbacks do not fire for SPA pushState/replaceState.
     // Poll only the one active child; WebKit still owns the real history stack.
@@ -26,46 +44,34 @@
     const timer = window.setInterval(() => onRefreshState?.(), 1000);
     return () => window.clearInterval(timer);
   });
+  let geometryObserver = $state.raw<ReturnType<typeof observeBrowserViewport>>();
   $effect(() => {
-    // Native WebView zoom can change without a DOM resize; include the
-    // revision in the report key so the parent recomputes native bounds.
-    const revision = layoutRevision;
-    const unloaded = tab.unloaded;
     const node = viewport;
     if (!node) return;
-    let frame = 0, lastReport = '';
-    const report = (force = false) => {
-      const rect = node.getBoundingClientRect();
-      const next = { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height), visible: active && !unloaded && rect.width > 0 && rect.height > 0 };
-      const key = `${revision}:${unloaded}:${next.x}:${next.y}:${next.width}:${next.height}:${next.visible}`;
-      // The parent writes browserBounds while handling this report. Keep that
-      // parent state out of this effect's dependency graph; otherwise the
-      // initial synchronous report reruns the effect until Svelte aborts it.
-      if (force || key !== lastReport) { lastReport = key; untrack(() => onLayout?.(next)); }
-    };
-    const queueReport = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; report(); }); };
-    report(true);
-    // Split/pane DOM updates can settle one frame after the reactive change.
-    // Measure again after paint even if the viewport's dimensions stay equal.
-    queueReport();
-    const observer = new ResizeObserver(() => report());
-    observer.observe(node);
-    // Split/layout movement can change x/y without changing this viewport's
-    // dimensions. Frame-coalesce window movement signals to avoid storms.
-    window.addEventListener('resize', queueReport);
-    window.addEventListener('scroll', queueReport, true);
-    window.addEventListener('transitionend', queueReport, true);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', queueReport);
-      window.removeEventListener('scroll', queueReport, true);
-      window.removeEventListener('transitionend', queueReport, true);
-      if (frame) cancelAnimationFrame(frame);
-      const rect = node.getBoundingClientRect();
-      untrack(() => onLayout?.({ x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height), visible: false }));
-    };
+    const observer = observeBrowserViewport(node, next => untrack(() => onLayout?.(next)));
+    geometryObserver = observer;
+    return () => { observer.destroy(); geometryObserver = undefined; };
   });
-  function navigate() { const value = url.trim(); if (value) onNavigate?.(value); }
+  $effect(() => {
+    const visible = active, unloaded = tab.unloaded, revision = layoutRevision;
+    // Revisions invalidate measurement without tearing down the native view
+    // or emitting an intermediate hide on every splitter movement.
+    geometryObserver?.update(visible, unloaded, revision);
+  });
+  function navigate() {
+    const value = url.trim();
+    addressDirty = false;
+    if (value) onNavigate?.(value);
+  }
+  function cancelAddressEdit(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    url = tab.url;
+    addressDirty = false;
+    addressFocused = false;
+    (event.currentTarget as HTMLInputElement).blur();
+  }
   async function loadExtension() {
     const path = extensionPath.trim(); extensionMessage = ''; extensionError = '';
     if (!path.startsWith('/')) { extensionError = 'Enter an absolute extension folder path.'; return; }
@@ -82,7 +88,7 @@
     <Globe size={16} aria-hidden="true" />
     <button type="button" aria-label="Back" title="Back" disabled={!available || canGoBack !== true} onclick={() => onBack?.()}><ChevronLeft size={16}/></button>
     <button type="button" aria-label="Forward" title="Forward" disabled={!available || canGoForward !== true} onclick={() => onForward?.()}><ChevronRight size={16}/></button>
-    <input aria-label="Browser address" bind:value={url} autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://example.com" disabled={!available}/>
+    <input aria-label="Browser address" bind:value={url} onfocus={() => addressFocused = true} onblur={() => addressFocused = false} oninput={() => addressDirty = true} onkeydown={cancelAddressEdit} autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://example.com" disabled={!available}/>
     <button type="submit" aria-label="Navigate" title="Navigate" disabled={!available}><ArrowRight size={15}/></button>
     <button type="button" aria-label="Reload browser tab" title="Reload browser tab" disabled={!available || !tab.url} onclick={() => onReload?.()}><RefreshCw size={15}/></button>
     <button type="button" aria-label="Unload browser tab" title="Unload native browser view; keep this tab" disabled={!available || tab.unloaded} onclick={() => onUnload?.()}><Globe size={15}/></button>

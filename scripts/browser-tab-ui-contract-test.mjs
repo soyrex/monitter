@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const surface = await readFile(new URL('../src/lib/components/AppSurface.svelte', import.meta.url), 'utf8');
 const panel = await readFile(new URL('../src/lib/components/BrowserTabPanel.svelte', import.meta.url), 'utf8');
+const geometry = await readFile(new URL('../src/lib/browser-viewport.ts', import.meta.url), 'utf8');
 const native = await readFile(new URL('../src-tauri/src/native_browser.rs', import.meta.url), 'utf8');
 const nativeBounds = ({ x, y, width, height }, scale, inset = 0) => {
   const zoom = scale / 100;
@@ -10,7 +11,7 @@ const nativeBounds = ({ x, y, width, height }, scale, inset = 0) => {
   return { x: left, y: top, width: Math.round((x + width - inset) * zoom) - left, height: Math.round((y + height - inset) * zoom) - top };
 };
 
-assert.match(surface, /'terminal', 'browser', 'settings'/, 'restored pane allowlist retains browser tabs');
+assert.match(surface, /'terminal', 'browser', 'git', 'settings'/, 'restored pane allowlist retains browser tabs');
 assert.match(surface, /browserTabs\[id\] = \{ id, url: '', title: 'New browser tab', unloaded: true \}/, 'new browser tabs are inert');
 assert.match(surface, /candidate\.width > 0 && candidate\.height > 0/, 'only valid viewport geometry is cached');
 assert.match(surface, /const bounds = browserBounds\[id\];\n    if \(!bounds\) return;/, 'hidden teardown reuses prior valid bounds');
@@ -50,10 +51,12 @@ assert.match(panel, /aria-label="Forward"/, 'browser toolbar exposes native forw
 assert.match(panel, /aria-label="Load unpacked extension"/, 'browser toolbar exposes explicit unpacked extension action');
 assert.match(panel, /Extensions may read or change browser pages/, 'extension loader gives a permissions warning');
 assert.match(panel, /loaded by WebKit/, 'success copy does not claim extension functionality');
-assert.match(panel, /window\.addEventListener\('scroll', queueReport, true\)/, 'position-only shifts are reported');
+assert.match(geometry, /'scroll'/, 'position-only shifts are reported');
 assert.match(panel, /untrack\(\(\) => onLayout\?\.\(next\)\)/, 'layout callback does not feed parent state back into the panel effect');
-assert.match(panel, /const revision = layoutRevision/, 'zoom changes force a fresh layout report');
-assert.match(panel, /window\.addEventListener\('transitionend', queueReport, true\)/, 'position-only CSS transitions get a final native bounds check');
+assert.match(panel, /revision = layoutRevision/, 'zoom changes force a fresh layout report');
+assert.match(geometry, /'transitionend'/, 'position-only CSS transitions get a final native bounds check');
+assert.match(geometry, /getAnimations/, 'WAAPI pane motion is followed through its final frame');
+assert.match(native, /\.set_bounds\(tauri::Rect/, 'position and size are dispatched as one rectangle');
 assert.match(panel, /display:flex; flex-direction:column/, 'optional extension loader keeps the viewport in the flex fill area');
 assert.match(native, /let main = owner_webview\.window\(\);/, 'native child attaches to its invoking owner window');
 assert.doesNotMatch(surface, /https:\/\/www\.google\.com/, 'no implicit Google navigation');

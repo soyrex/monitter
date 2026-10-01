@@ -452,18 +452,14 @@ fn apply_layout(
             .map_err(|error| format!("Cannot update native browser tab visibility: {error}"));
     }
     validate_bounds(bounds)?;
+    // Position and size belong to one rectangle. Dispatch them together so
+    // a window resize cannot interleave with half of a pane geometry update.
     webview
-        .set_position(tauri::LogicalPosition::new(
-            bounds.x as f64,
-            bounds.y as f64,
-        ))
-        .map_err(|error| format!("Cannot position native browser tab: {error}"))?;
-    webview
-        .set_size(tauri::LogicalSize::new(
-            bounds.width as f64,
-            bounds.height as f64,
-        ))
-        .map_err(|error| format!("Cannot resize native browser tab: {error}"))?;
+        .set_bounds(tauri::Rect {
+            position: tauri::LogicalPosition::new(bounds.x as f64, bounds.y as f64).into(),
+            size: tauri::LogicalSize::new(bounds.width as f64, bounds.height as f64).into(),
+        })
+        .map_err(|error| format!("Cannot update native browser tab bounds: {error}"))?;
     if visible {
         webview.show()
     } else {

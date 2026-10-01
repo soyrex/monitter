@@ -26,6 +26,13 @@ No fake conversations, progress, token counts, host connections or model replies
   and WKWebView may reject an unhandled HTTP authentication challenge.
 - `browser_set_layout { tabId: string, bounds: { x, y, width, height }, visible: boolean }` ->
   `BrowserState`.
+  The renderer coalesces geometry measurements after layout, follows pane motion
+  through its final frame, and suppresses unchanged native layout writes. Position
+  and size are applied as one native rectangle. Layout revisions do not hide a
+  still-visible child; teardown and visibility changes explicitly hide it.
+  Address editing retains an unsubmitted draft across native state polling;
+  Enter submits it and Escape restores the current page address. Native state
+  refreshes are coalesced and discarded after tab retirement.
   Hiding a tab retains its live page; closing its view unloads it. Reopening an unloaded tab
   reloads its URL and may lose unsaved page state.
 - `browser_navigate { tabId: string, url: string }` -> `BrowserState`; `browser_back { tabId: string }` -> `BrowserState`;
