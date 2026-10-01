@@ -234,6 +234,11 @@ export interface CommandArgs {
   text: string;
   attachmentIds?: string[] | null;
   };
+  "refresh_mail_inbox": {
+  taskId: string;
+  accountId: string;
+  query: string;
+  };
   "request_mail_detail": {
   taskId: string;
   mailId: string;
@@ -475,6 +480,7 @@ export interface CommandResults {
   "clear_task_context": Snapshot;
   "send_message": Snapshot;
   "send_message_fast": SendAccepted;
+  "refresh_mail_inbox": JsonValue;
   "request_mail_detail": MailDetailRequestResult;
   "get_mail_detail": MailDetail | null;
   "resume_task": Snapshot;

@@ -26,6 +26,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
   import { chatDay } from '$lib/chat-dates';
+  import { isLanBrowser } from '$lib/lan';
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
@@ -42,7 +43,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import AttachmentList from '$lib/components/AttachmentList.svelte';
   import ExpandableUserRequest from '$lib/components/ExpandableUserRequest.svelte';
   import SparkleField from '$lib/components/SparkleField.svelte';
-  import MailTriageBatch from '$lib/components/MailTriageBatch.svelte';
+  import NativeMailInbox from '$lib/components/NativeMailInbox.svelte';
   import { createTranscriptBuffer } from '$lib/transcript-buffer.svelte';
   import { captureTranscriptAnchor, mergeOlderTranscriptMessages } from '$lib/ui-sync';
   import { perfMark, perfMeasure } from '$lib/perf-phases';
@@ -169,7 +170,10 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
 
   let taskMenuAnchor = $state<HTMLButtonElement>();
   let conversationRoot = $state<HTMLElement>();
-  let inboxView = $state(true);
+  const nativeDesktopInbox = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__) && !isLanBrowser();
+  let inboxView = $state(false);
+  let inboxTouched = false;
+  let inboxTaskId = '';
   type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; steeringMessages: QueuedMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
   const taskMailBatches = $derived((snapshot.mailBatches ?? []).filter(batch => batch.taskId === task.id));
   const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, mailBatches: taskMailBatches, optimisticMessages, steeringMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
@@ -225,13 +229,22 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   const liveMailInboxes = $derived.by(() => {
     const latest = new Map<string, MailBatch>();
     for (const batch of taskMailBatches) {
-      const key = `${batch.source}\u0000${batch.accountLabel}`;
+      const key = `${batch.source}\u0000${batch.nativeAccountId ?? batch.accountLabel}`;
       const current = latest.get(key);
       if (!current || (batch.updatedAt || batch.createdAt) > (current.updatedAt || current.createdAt)) latest.set(key, batch);
     }
     return [...latest.values()].sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
   });
-  const displayMailInboxes = liveMailInboxes;
+  const displayMailInboxes = $derived(liveMailInboxes);
+  $effect(() => {
+    const currentTaskId = task.id;
+    const hasNativeInbox = taskMailBatches.some(batch => !!batch.nativeAccountId);
+    if (currentTaskId !== inboxTaskId) {
+      inboxTaskId = currentTaskId;
+      inboxTouched = false;
+    }
+    if (!inboxTouched) inboxView = nativeDesktopInbox && hasNativeInbox;
+  });
   const displayLatestUserRequest = $derived(displayItems.flatMap(item => item.type === 'message' && item.value.role === 'user' ? [item.value] : []).at(-1));
   const displayThinking = $derived.by(() => {
     if (displayTask.status !== 'running' || display.hasPendingApprovals) return false;
@@ -297,7 +310,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
       <h1 class="task-title"><AnimatedTitle text={task.title} active={$autonaming[`task:${task.id}`]}/><button class="icon task-title-edit" aria-label="Task settings" title="Edit task" onclick={onEditTask}><Pencil size={14}/></button></h1>
     </div>
     <div class="task-actions">
-      {#if displayMailInboxes.length}<button class="mail-view-toggle" type="button" aria-label={inboxView ? 'Show chat' : 'Show inbox'} title={inboxView ? 'Show chat' : 'Show inbox'} onclick={() => { inboxView = !inboxView; if (inboxView) transcriptBuffer.setFollowing(true); }}>{#if inboxView}<MessageSquare size={14}/>Chat{:else}<Inbox size={14}/>Inbox{/if}</button>{/if}
+      {#if nativeDesktopInbox}<button class="mail-view-toggle" type="button" aria-label={inboxView ? 'Show chat' : 'Show inbox'} title={inboxView ? 'Show chat' : 'Show inbox'} onclick={() => { inboxTouched = true; inboxView = !inboxView; if (inboxView) transcriptBuffer.setFollowing(true); }}>{#if inboxView}<MessageSquare size={14}/>Chat{:else}<Inbox size={14}/>Inbox{/if}</button>{/if}
       <ObserverIndicator names={observers}/>
       {@render rightSidebar()}
       <div class="task-overflow">
@@ -314,9 +327,9 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
 <section class="conversation" bind:this={conversationRoot}>
     <SparkleField active={task.status === 'running'} animation={snapshot.settings.activityAnimation ?? 'sparkles'} pane />
     <TaskActivity goal={null} onclear={onClearGoal} tools={computerTools} onstop={onStop} disabled={busy} />
-    {#if inboxView && displayMailInboxes.length}
+    {#if inboxView && nativeDesktopInbox}
       <div class="mail-inbox-surface" aria-label="Mail inbox">
-        {#each displayMailInboxes as inbox (inbox.id)}<MailTriageBatch batch={inbox} taskId={displayTask.id} fullHeight={displayMailInboxes.length === 1}/>{/each}
+        {#key displayTask.id}<NativeMailInbox taskId={displayTask.id} agentId={displayTask.agentId} inboxes={displayMailInboxes}/>{/key}
       </div>
     {:else}
       <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
@@ -414,7 +427,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
       </button>
     {/if}
   <div class="composer-area" class:git-docked={gitStatus?.repository === true}>
-    {#if !inboxView || !displayMailInboxes.length}
+    {#if !inboxView || !nativeDesktopInbox}
       {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
       {@render composer()}
     {/if}

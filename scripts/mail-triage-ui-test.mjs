@@ -13,8 +13,8 @@ writeFileSync(join(harness, 'index.html'), '<div id="app"></div><script type="mo
 writeFileSync(join(harness, 'bridge.js'), `
 let reads=0, requests=0;
 export function getBridge(){return{
-  async getMailDetail(){reads+=1;return requests && reads >= 3 ? {mailId:'mail-high',source:'gmail',accountLabel:'Work Gmail',from:'Pat <pat@example.com>',to:['Alex <alex@example.com>'],cc:[],subject:'Decision needed by Friday',receivedAt:1700000000000,bodyText:'Hello Alex,\\n\\nPlease approve the attached proposal by Friday.\\n\\nPat'} : null},
-  async requestMailDetail(){requests+=1;return{status:'pending'}}
+  async getMailDetail(){reads+=1;return requests ? {mailId:'mail-high',source:'gmail',accountLabel:'Work Gmail',from:'Pat <pat@example.com>',to:['Alex <alex@example.com>'],cc:[],subject:'Decision needed by Friday',receivedAt:1700000000000,bodyText:'Hello Alex,\\n\\nPlease approve the attached proposal by Friday.\\n\\nPat'} : null},
+  async requestMailDetail(){requests+=1;return{status:'ready'}}
 }}
 window.__mailTest={get reads(){return reads},get requests(){return requests}};
 `);
@@ -86,8 +86,8 @@ try {
   const detail = page.getByRole('region', { name: 'Email: Actionable message 1' });
   await expect(detail).toBeVisible();
   await expect(page.locator('.mail-overlay')).toHaveCount(0);
-  await expect(detail).toContainText('Asking this Codex agent');
   await expect(detail.locator('pre')).toContainText('Please approve the attached proposal by Friday.');
+  await detail.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
   const inboxBox = await fullInbox.boundingBox();
   const detailBox = await detail.boundingBox();
   const contentBox = await fullInbox.locator('.mail-content').boundingBox();
@@ -101,14 +101,14 @@ try {
   await expect(fullInbox.locator('.mail-scroll')).toHaveCount(0);
   await expect(detail.locator('.expanded-row')).toContainText('Actionable message 1');
   expect(await page.evaluate(() => window.__mailTest.requests)).toBe(1);
-  expect(await page.evaluate(() => window.__mailTest.reads)).toBeGreaterThanOrEqual(2);
+  expect(await page.evaluate(() => window.__mailTest.reads)).toBe(2);
   await expect(detail).toContainText('untrusted plain text');
   await page.screenshot({ path: join(root, 'verification', 'mail-triage-ui.png') });
   await detail.getByRole('button', { name: 'Back to inbox' }).click();
   await expect(detail).toHaveCount(0);
   await expect(fullInbox.locator('.mail-scroll')).toBeVisible();
   expect(errors).toEqual([]);
-  console.log('Persistent mail inbox passed grouping, new/history state, sync receipt, pending/Jev attribution, expanding row detail, click request, plain-text detail, and back checks.');
+  console.log('Mail inbox passed grouping, new/history state, Jev attribution, synchronous native detail read, plain-text detail, and back checks.');
 } finally {
   await browser?.close(); child.kill('SIGTERM');
   rmSync(harness, { recursive: true, force: true });

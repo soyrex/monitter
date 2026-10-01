@@ -178,7 +178,7 @@ export interface MailCard {
   isNew: boolean;
 }
 export interface MailBatch {
-  id: string; messageId: string; taskId: string; source: 'gmail'; accountLabel: string;
+  id: string; messageId: string; taskId: string; source: 'gmail'; accountLabel: string; nativeAccountId?: string | null;
   queryLabel: string; createdAt: number; updatedAt: number; syncCount: number; lastAdded: number;
   lastUpdated: number; lastMovedToHistory: number; classifier: MailClassifierTrace; items: MailCard[];
 }
@@ -194,7 +194,7 @@ export interface MailDetail {
   mailId: string; source: 'gmail'; accountLabel: string; from: string; to: string[]; cc: string[];
   subject: string; receivedAt: number; bodyText: string;
 }
-export interface MailDetailRequestResult { status: 'ready' | 'pending'; }
+export interface MailDetailRequestResult { status: 'ready'; }
 /** Private desktop Mail MCP configuration. Tokens and client secrets are never returned. */
 export interface MailConfig {
   revision: string;

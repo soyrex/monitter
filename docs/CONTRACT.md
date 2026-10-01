@@ -279,15 +279,24 @@ No fake conversations, progress, token counts, host connections or model replies
   it returns typed probability or score data. Each call is advisory and the agent must recheck current evidence
   before using a result. Invalid or failed model answers never become tool authority. Best-effort local receipts
   record task ID, tool, outcome, model, latency, and token counts without state, question or candidate text.
-- `request_mail_detail { taskId: string, mailId: string }` -> `{ status: "ready" | "pending" }`.
-  Native-owner only and deliberately absent from LAN/controller/visitor dispatch. The card must be a
-  durable Gmail card in that exact task. A cache miss creates a five-minute, one-card grant and sends
-  a visible, read-only follow-up to the same harness asking its Gmail connector to read that exact
-  provider message and return plain text through `present_mail_detail`. This never grants send,
-  reply, archive, label, delete, credential, or permission authority.
+- `refresh_mail_inbox { taskId: string, accountId: string, query: string }` -> JSON receipt.
+  Native-owner only, absent from LAN/controller/visitor dispatch. Uses only Monitter's native
+  Gmail connection assigned to the task's agent. Searches at most 20 envelopes with native Gmail
+  operators and updates that task/account inbox in place; absent messages move into local history.
+  The durable batch records `nativeAccountId` and the verified account email. A missing connection,
+  revoked assignment or provider error fails visibly. No harness turn or agent MCP is used.
+  Existing Jev enrichment receives only bounded envelopes and remains advisory. Legacy agent-fed
+  inboxes are hidden until replaced by a native refresh. Collaboration MCP no longer exposes
+  `mail_triage_help`, `present_mail_batch` or `present_mail_detail`.
+- `request_mail_detail { taskId: string, mailId: string }` -> `{ status: "ready" }`.
+  Native-owner only. The durable card must belong to the exact task. Monitter reads only that
+  provider message through the recorded native account and checks assignment before/after retrieval.
+  Legacy agent-fed cards require a native refresh before they can be opened. There is no agent
+  fallback. Incomplete content is marked explicitly.
 - `get_mail_detail { taskId: string, mailId: string }` -> `MailDetail | null`. Native-owner only.
-  Returns a matching full message from the bounded 30-minute process-local cache. Full bodies are
-  never persisted in `Snapshot`, SQLite, compact UI projections, visitor sharing, or RunEvent detail.
+  Returns a matching message from the bounded 30-minute process-local cache after checking native
+  account access. Full bodies are never persisted in Snapshot, SQLite, compact UI projections,
+  visitor sharing, or RunEvent detail. Gmail reads neither mark messages read nor load remote images.
 - `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null, codexHome?: string | null, refresh?: boolean } }` -> ModelCatalog.
   Agent targets work before the first turn. ACP catalogs are obtained from the saved launcher by
   initializing an isolated ACP connection and creating a model-free session; no user prompt or
@@ -1315,27 +1324,13 @@ The same Rust catalogue supplies the native harness tool allowlists:
   cancellation, turn replacement, or capability revocation. Ownership and turn identity are
   rechecked before execution. The shell stays interactive after the approved command finishes.
   The result includes `approvalRequestId` to correlate its native approval receipt.
-- `mail_triage_help`: return the read-only Gmail workflow and its untrusted-content rules.
-- `present_mail_batch`: accept 0–20 normalized Gmail envelopes with bounded headers and snippets,
-  never bodies. `sync_mode: snapshot` (the default) declares a complete current bounded result;
-  Monitter upserts one task/account inbox by provider message ID and moves absent cards into local
-  history. `incremental` only adds or refreshes and never infers removal. The normalized aggregate
-  state is capped at 64 KiB so every non-empty accepted batch remains one Jev HTTP request. The
-  authenticated MCP grant supplies the task identity, and this first milestone accepts Codex callers
-  only. Monitter creates one body-free card module and updates it in place on later calls,
-  then sends all envelopes to one background Jev System One request containing five typed Choice
-  questions per message (importance, intent, reply requirement, suggested owner, and suggested
-  action). Each answer's 0–100 confidence is retained; the visible overall confidence is the
-  minimum of those five values. Older persisted cards without the per-dimension evidence expose
-  zeroes rather than inventing historical metrics. The same cards are atomically enriched with provider/model/latency/token/cost evidence
-  when supplied; a stale response from an older sync is discarded. Empty snapshots do not call Jev.
-  `MONITTER_MAIL_TRIAGE_CLASSIFIER=mock` selects the deterministic local fixture;
-  missing or invalid live Jev results retain a visible 45% confidence fallback rather than
-  fabricating a live label.
-- `present_mail_detail`: accept at most 256 KiB of normalized plain text for one card only while its
-  fresh user-click grant exists and the provider message ID matches. The body is process-local,
-  expires after 30 minutes, is capped with the other cached details, and is redacted from normalized
-  provider tool events before Monitter persists them.
+
+The collaboration MCP cannot populate or deliver inbox content. The native inbox commands above
+own Gmail search and detail retrieval. Native envelope batches retain the existing background Jev
+workflow: one request with five typed Choice questions per message for importance, intent, reply,
+owner and suggested action. Per-dimension confidence and provider/latency/usage evidence remain
+visible. Empty results skip Jev, stale enrichment is discarded, and unavailable classification
+retains an explicit low-confidence local fallback. Email and model output remain untrusted data.
 
 Repeated writes with the same caller task and request ID return the same delivery; changing its
 recipient or message is rejected. A sender cannot address arbitrary existing chats or cancel another

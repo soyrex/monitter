@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import Info from "@lucide/svelte/icons/info";
@@ -31,7 +30,6 @@
   let error = $state('');
   let metricsCard = $state<MailCard | null>(null);
   let metricsAnchor = $state<HTMLElement | null>(null);
-  let poll: ReturnType<typeof setTimeout> | null = null;
   let generation = 0;
 
   const label = (value: string) => value.replaceAll('_', ' ');
@@ -54,41 +52,24 @@
   }
   function closeMetrics() { metricsCard = null; metricsAnchor = null; }
 
-  function stopPoll() { if (poll) clearTimeout(poll); poll = null; }
-  function close() { generation += 1; stopPoll(); closeMetrics(); selected = null; detail = null; loading = false; error = ''; }
-
-  async function waitForDetail(mailId: string, current: number, attempts = 0): Promise<void> {
-    if (current !== generation || !selected) return;
-    try {
-      const found = await bridge.getMailDetail(taskId, mailId);
-      if (current !== generation) return;
-      if (found) { detail = found; loading = false; return; }
-    } catch (reason) {
-      if (current !== generation) return;
-      error = String(reason);
-      loading = false;
-      return;
-    }
-    if (attempts >= 180) {
-      error = 'The Gmail reader did not return this message within three minutes. Close this view and try again.';
-      loading = false;
-      return;
-    }
-    poll = setTimeout(() => { void waitForDetail(mailId, current, attempts + 1); }, 1000);
-  }
+  function close() { generation += 1; closeMetrics(); selected = null; detail = null; loading = false; error = ''; }
 
   async function open(card: MailCard) {
     generation += 1;
     const current = generation;
-    stopPoll();
     selected = card; detail = null; error = ''; loading = true;
     try {
       const cached = await bridge.getMailDetail(taskId, card.id);
       if (current !== generation) return;
       if (cached) { detail = cached; loading = false; return; }
-      await bridge.requestMailDetail(taskId, card.id);
+      const requested = await bridge.requestMailDetail(taskId, card.id);
       if (current !== generation) return;
-      await waitForDetail(card.id, current);
+      if (requested.status !== 'ready') throw new Error('Native Gmail retrieval did not complete. Try opening this message again.');
+      const found = await bridge.getMailDetail(taskId, card.id);
+      if (current !== generation) return;
+      if (!found) throw new Error('Gmail returned no message content. Try opening this message again.');
+      detail = found;
+      loading = false;
     } catch (reason) {
       if (current !== generation) return;
       error = String(reason);
@@ -96,7 +77,6 @@
     }
   }
 
-  onDestroy(stopPoll);
 </script>
 
 <section class="mail-batch" class:full-height={fullHeight} aria-label={`Actionable inbox from ${batch.accountLabel}`}>
@@ -131,7 +111,7 @@
           {#if selected.cc.length}<div><dt>Cc</dt><dd>{selected.cc.join(', ')}</dd></div>{/if}
           <div><dt>Received</dt><dd>{received(selected.receivedAt)}</dd></div>
         </dl>
-        {#if loading}<div class="detail-state" role="status"><LoaderCircle class="spin" size={18}/><span>Asking this Codex agent to read the full message through its Gmail connector…</span></div>
+        {#if loading}<div class="detail-state" role="status"><LoaderCircle class="spin" size={18}/><span>Reading this message from the selected connected Gmail account…</span></div>
         {:else if error}<div class="detail-state error" role="alert">{error}</div>
         {:else if detail}<pre>{detail.bodyText}</pre>{/if}
         <footer><ShieldCheck size={13}/><span>Email content is displayed as untrusted plain text. No mailbox action is available here.</span></footer>

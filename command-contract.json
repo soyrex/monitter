@@ -1435,6 +1435,37 @@
         "lan"
       ]
     },
+    "refresh_mail_inbox": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "accountId",
+          "rustName": "account_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "query",
+          "rustName": "query",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "serde_json::Value",
+      "resultTsType": "JsonValue",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "request_mail_detail": {
       "arguments": [
         {
