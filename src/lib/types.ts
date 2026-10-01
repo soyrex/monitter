@@ -168,12 +168,17 @@ export interface MailClassificationMetrics {
   importanceConfidence: number; intentConfidence: number; replyConfidence: number;
   ownerConfidence: number; actionConfidence: number;
 }
+/** Jev Noul yes-probabilities (0–100), distinct from Choice confidence. */
+export interface MailInboxFit {
+  workRelated: number; requiresMyAction: number; excludedBulkOrAutomated: number;
+}
 export interface MailCard {
   id: string; providerMessageId: string; providerThreadId: string | null;
   from: string; to: string[]; cc: string[]; subject: string; receivedAt: number; snippet: string;
   importance: MailImportance; importanceScore: number; intent: MailIntent;
   replyRequired: MailReplyState; suggestedOwner: MailOwner; suggestedAction: MailSuggestedAction;
   confidence: number; classificationMetrics?: MailClassificationMetrics; rationale: string;
+  inboxFit?: MailInboxFit | null;
   state: MailCardState; firstSeenAt: number; lastSeenAt: number;
   isNew: boolean;
 }

@@ -290,7 +290,10 @@ No fake conversations, progress, token counts, host connections or model replies
   operators and updates that task/account inbox in place; absent messages move into local history.
   The durable batch records `nativeAccountId` and the verified account email. A missing connection,
   revoked assignment or provider error fails visibly. No harness turn or agent MCP is used.
-  Existing Jev enrichment receives only bounded envelopes and remains advisory. Legacy agent-fed
+  Jev receives only bounded envelopes. Each card has five advisory Choice classifications plus
+  `inboxFit { workRelated, requiresMyAction, excludedBulkOrAutomated }` Noul yes-probabilities
+  (integer 0–100). The native inbox shows only Jev-classified active cards that pass the
+  work/action/exclusion gate; provisional, fallback and older cards cannot pass it. Legacy agent-fed
   inboxes are hidden until replaced by a native refresh. Collaboration MCP no longer exposes
   `mail_triage_help`, `present_mail_batch` or `present_mail_detail`.
 - `request_mail_detail { taskId: string, mailId: string }` -> `{ status: "ready" }`.
@@ -1373,13 +1376,12 @@ session pipe and must advertise `agentCapabilities.mcpCapabilities.http`; otherw
 visibly before a prompt is sent. Other Python-based adapters and SSH supervisors are unaffected.
 The broker rejects non-loopback browser origins, invalid/revoked grants, oversized input and unknown tools.
 
-Mail access itself is not part of the broker. The harness retains its own Gmail plugin authentication;
-Monitter receives normalized data only when the agent calls the fixed presentation tools. Email text
-is always data rather than instruction. Jev is advisory classification only and cannot widen mailbox,
-harness, filesystem, or approval authority. The first version exposes no compose/send/reply/forward,
-archive, label, delete, attachment download, OAuth, or background mailbox polling action. `MailBatch`
-is included in owner desktop/LAN snapshots so cards follow the transcript, but the explicit shared-
-visitor projection omits it; full message viewing remains native-owner only.
+The inbox uses Monitter's assigned native Gmail connector directly; it does not call a harness Gmail
+plugin or the collaboration presentation tools. Email text is always data rather than instruction.
+Jev classification cannot widen mailbox, harness, filesystem, or approval authority. The inbox
+exposes no compose/send/reply/forward, archive, label, delete, attachment download, or background
+mailbox polling action. `MailBatch` is included in owner desktop/LAN snapshots, but the explicit
+shared-visitor projection omits it; full message viewing remains native-owner only.
 
 ## Task Git viewer
 

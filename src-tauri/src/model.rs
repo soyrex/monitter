@@ -407,6 +407,16 @@ pub struct MailClassificationMetrics {
     pub action_confidence: u8,
 }
 
+/// Noul yes-probabilities used only for the native inbox display gate.
+/// These are probabilities, not Choice confidence values.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MailInboxFit {
+    pub work_related: u8,
+    pub requires_my_action: u8,
+    pub excluded_bulk_or_automated: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MailCard {
@@ -430,6 +440,9 @@ pub struct MailCard {
     /// Individual Jev confidences. Older persisted cards deserialize as zeroes.
     #[serde(default)]
     pub classification_metrics: MailClassificationMetrics,
+    /// Absent on provisional, fallback, and older cards; none may pass the display gate.
+    #[serde(default)]
+    pub inbox_fit: Option<MailInboxFit>,
     pub rationale: String,
     /// Local inbox lifecycle only; this never changes Gmail state.
     #[serde(default)]

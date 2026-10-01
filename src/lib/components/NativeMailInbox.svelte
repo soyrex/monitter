@@ -66,7 +66,7 @@
       <label class="mail-query">Search
         <input bind:value={query} aria-label="Gmail search query" placeholder="in:inbox" />
       </label>
-      <small class="native-mail-limit">Shows up to 20 matching messages.</small>
+      <small class="native-mail-limit">Checks up to 20 Gmail messages; shows only those Jev marks as work requiring your action.</small>
       <button type="button" class="mail-refresh" onclick={() => void refresh()} disabled={refreshing || loading || !selectedAccount}>
         <span class="refresh-icon" class:spin={refreshing}><RefreshCw size={14}/></span>{refreshing ? 'Refreshing…' : 'Refresh'}
       </button>
