@@ -13,8 +13,8 @@
   export type BrowserTabMetadata = { id: string; url: string; title: string; unloaded: boolean };
   export type BrowserViewport = { x: number; y: number; width: number; height: number; visible: boolean };
 
-  let { tab, active = false, available = true, layoutRevision = 0, canGoBack = null, canGoForward = null, onNavigate, onBack, onForward, onRefreshState, onReload, onUnload, onLoadExtension, onLayout, onClose }:
-    { tab: BrowserTabMetadata; active?: boolean; available?: boolean; layoutRevision?: string | number; canGoBack?: boolean | null; canGoForward?: boolean | null; onNavigate?: (url: string) => void; onBack?: () => void; onForward?: () => void; onRefreshState?: () => void; onReload?: () => void; onUnload?: () => void; onLoadExtension?: (path: string) => Promise<BrowserExtensionLoadResult>; onLayout?: (viewport: BrowserViewport) => void; onClose?: () => void } = $props();
+  let { tab, active = false, resizing = false, available = true, layoutRevision = 0, canGoBack = null, canGoForward = null, onNavigate, onBack, onForward, onRefreshState, onReload, onUnload, onLoadExtension, onLayout, onClose }:
+    { tab: BrowserTabMetadata; active?: boolean; resizing?: boolean; available?: boolean; layoutRevision?: string | number; canGoBack?: boolean | null; canGoForward?: boolean | null; onNavigate?: (url: string) => void; onBack?: () => void; onForward?: () => void; onRefreshState?: () => void; onReload?: () => void; onUnload?: () => void; onLoadExtension?: (path: string) => Promise<BrowserExtensionLoadResult>; onLayout?: (viewport: BrowserViewport) => void; onClose?: () => void } = $props();
   let url = $state('');
   let addressFocused = $state(false);
   let addressDirty = $state(false);
@@ -96,8 +96,8 @@
     <button type="button" aria-label="Close browser tab" title="Close browser tab" onclick={() => onClose?.()}><X size={16}/></button>
   </form>
   {#if extensionOpen}<form class="extension-loader" onsubmit={event => { event.preventDefault(); void loadExtension(); }}><label>Unpacked extension folder <input aria-label="Unpacked extension folder" bind:value={extensionPath} placeholder="/absolute/path/to/extension" autocomplete="off" spellcheck="false" disabled={extensionLoading}/></label><button type="submit" disabled={extensionLoading}>{extensionLoading ? 'Loading…' : 'Load'}</button><p class="extension-warning">Extensions may read or change browser pages. Load only folders you trust; website permissions are not granted automatically.</p>{#if extensionMessage}<p class="extension-success" role="status">{extensionMessage}</p>{/if}{#if extensionError}<p class="extension-error" role="alert">{extensionError}</p>{/if}</form>{/if}
-  <div class="browser-native-viewport" bind:this={viewport} data-browser-tab-id={tab.id} data-browser-unloaded={tab.unloaded} aria-label={tab.unloaded ? 'Native browser view waiting to load' : 'Native browser view'}>
-    <div><Globe size={24}/><strong>{tab.title || 'Browser'}</strong><p>{!available ? 'Browser tabs require the native desktop app.' : tab.unloaded ? 'Enter or reload an address to attach the native browser view.' : 'Native browser view is attached by the desktop runtime.'}</p></div>
+  <div class="browser-native-viewport" bind:this={viewport} data-browser-tab-id={tab.id} data-browser-unloaded={tab.unloaded} aria-label={resizing ? 'Browser resize placeholder' : tab.unloaded ? 'Native browser view waiting to load' : 'Native browser view'}>
+    <div><Globe size={24}/><strong>{resizing ? `${tab.url || 'New tab'} — browser` : tab.title || 'Browser'}</strong><p>{resizing ? 'Resizing browser…' : !available ? 'Browser tabs require the native desktop app.' : tab.unloaded ? 'Enter or reload an address to attach the native browser view.' : 'Native browser view is attached by the desktop runtime.'}</p></div>
   </div>
 </section>
 
@@ -112,6 +112,6 @@
   .extension-loader label { display:grid; flex:1 1 260px; gap:3px; color:var(--muted); } .extension-loader input { width:100%; box-sizing:border-box; }
   .extension-loader button { width:auto; padding:0 10px; border:1px solid var(--line); color:var(--ink); }
   .extension-loader p { flex-basis:100%; margin:0; } .extension-warning { color:var(--muted); } .extension-success { color:var(--accent-ink); } .extension-error { color:#d95b5b; }
-  .browser-native-viewport > div { position:absolute; inset:0; display:grid; place-content:center; justify-items:center; gap:8px; color:var(--muted); text-align:center; }
-  strong { color:var(--ink); } p { max-width:300px; margin:0; font-size:12px; }
+  .browser-native-viewport > div { position:absolute; inset:0; display:grid; grid-template-columns:minmax(0,1fr); padding:16px; box-sizing:border-box; place-content:center; justify-items:center; gap:8px; color:var(--muted); text-align:center; }
+  strong { color:var(--ink); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } p { max-width:300px; margin:0; font-size:12px; }
 </style>

@@ -206,6 +206,7 @@
   import AccessPicker from '$lib/components/AccessPicker.svelte';
   import DraftPicker from '$lib/components/DraftPicker.svelte';
   import TerminalPane from '$lib/components/TerminalPane.svelte';
+  import { guardBrowserResize } from '$lib/browser-resize';
   import BrowserTabPanel, { type BrowserTabMetadata, type BrowserViewport } from '$lib/components/BrowserTabPanel.svelte';
   import { terminalSessions, registerTerminal, closeTerminalSession, recentTerminalOutput } from '$lib/terminal-runtime';
   import AttachmentList from '$lib/components/AttachmentList.svelte';
@@ -224,10 +225,10 @@
   // renderer as bundled content when choosing native-only APIs.
   const nativeRuntime = !isLanBrowser() && isTauri();
 
-  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, parentMobileSidebar = false, workspaceKey = 'all', parentGeometryRevision = '', parentBrowserVisible = true, onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
+  let { embedded = false, paneId = 'main', active = true, parentSnapshot = null, snapshotIndexes = null, parentMobileSidebar = false, workspaceKey = 'all', parentGeometryRevision = '', parentBrowserVisible = true, parentBrowserResizing = false, onSnapshot, onTabDrop, onLayout, onSelection, onTerminalSelect, onWorkspaceChange, onSettingsSelect, onTabPointerStart, onClosePane, onAgentSettingsSelect, onExpandPane, onVimSplit, onVimWorkspace, onExistingChat, parentExpandedPaneId=null }:
     { embedded?: boolean; paneId?: string; active?: boolean; parentSnapshot?: Snapshot | null; snapshotIndexes?: SnapshotIndexes | null; parentMobileSidebar?: boolean; workspaceKey?: WorkspaceKey;
       onSnapshot?: (value: Snapshot) => void; onTabDrop?: (id: string, edge: DropEdge, data: PaneTabTransfer, before?: TabKey) => void | Promise<void>;
-      parentExpandedPaneId?:string|null; parentGeometryRevision?:string; parentBrowserVisible?:boolean; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: PaneLayoutPreset) => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
+      parentExpandedPaneId?:string|null; parentGeometryRevision?:string; parentBrowserVisible?:boolean; parentBrowserResizing?:boolean; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: PaneLayoutPreset) => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
   type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; browser?: BrowserTabMetadata; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
@@ -258,6 +259,11 @@
 
   let pointerTabDrag = $state<{tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null>(null);
   let browserDragActive = $state(false);
+  let browserResizeActive = $state(false);
+  onMount(() => {
+    if (embedded) return;
+    return guardBrowserResize(suspended => { browserResizeActive = suspended; });
+  });
   let paneRefs = $state<Record<string, PaneSurfaceHandle<PaneState, TabPayload>>>({});
   let paneSelections = $state<Record<string,string|null>>({});
   let workspaceReady = $state(false);
@@ -827,7 +833,7 @@
   const browserGeometryRevision = $derived(`${parentGeometryRevision}:${activeInterfaceScale}:${JSON.stringify(layout)}:${activePaneId}:${sidebarSelected ? 1 : 0}:${expandedPaneId ?? ''}:${activeWorkspaceKey}:${autoHiddenTabsRevealed ? 1 : 0}:${snapshot?.settings.showActivePaneBorder === false ? 0 : 1}`);
   // A browser page stays visible in its split even when another pane has
   // keyboard focus. Focus and on-screen visibility are different states.
-  const browserGlobalVisible = $derived(!browserDragActive && !modal && !palette && (!mobileSidebar || mobileMain));
+  const browserGlobalVisible = $derived(!browserDragActive && !browserResizeActive && !modal && !palette && (!mobileSidebar || mobileMain));
   const browserPaneVisible = $derived((embedded ? parentBrowserVisible : browserGlobalVisible) && !modal && !palette && (!workspaceExpansion || workspaceExpansion === paneId) && (!mobileSidebar || mobileMain));
   let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
   let vimCommandInput = $state<HTMLInputElement>();
@@ -5334,7 +5340,7 @@
     {:else if pane === 'browser' && selectedBrowser}
       {#key selectedBrowser.id}
         {@const browserId = selectedBrowser.id}
-        <BrowserTabPanel tab={selectedBrowser} active={browserPaneVisible} available={nativeRuntime && bridge.available} layoutRevision={browserGeometryRevision} canGoBack={selectedBrowserHistory.canGoBack} canGoForward={selectedBrowserHistory.canGoForward} onLayout={viewport=>void layoutBrowser(browserId,viewport)} onNavigate={url=>void navigateBrowser(browserId,url)} onBack={()=>void browserBack(browserId)} onForward={()=>void browserForward(browserId)} onRefreshState={()=>void refreshBrowserState(browserId)} onReload={()=>void reloadBrowser(browserId)} onUnload={()=>void unloadBrowser(browserId)} onLoadExtension={path=>bridge.browserLoadUnpackedExtension(path)} onClose={()=>void closeBrowserTab(browserId)}/>
+        <BrowserTabPanel tab={selectedBrowser} active={browserPaneVisible} resizing={embedded ? parentBrowserResizing : browserResizeActive} available={nativeRuntime && bridge.available} layoutRevision={browserGeometryRevision} canGoBack={selectedBrowserHistory.canGoBack} canGoForward={selectedBrowserHistory.canGoForward} onLayout={viewport=>void layoutBrowser(browserId,viewport)} onNavigate={url=>void navigateBrowser(browserId,url)} onBack={()=>void browserBack(browserId)} onForward={()=>void browserForward(browserId)} onRefreshState={()=>void refreshBrowserState(browserId)} onReload={()=>void reloadBrowser(browserId)} onUnload={()=>void unloadBrowser(browserId)} onLoadExtension={path=>bridge.browserLoadUnpackedExtension(path)} onClose={()=>void closeBrowserTab(browserId)}/>
       {/key}
     {:else if pane === 'git' && selectedGitTask}
       <section class="git-review-workspace" aria-label={`Git review for ${selectedGitTask.title}`}>
@@ -5924,7 +5930,7 @@
   {#if embedded}{@render workspaceView()}{:else}<div class="pane-grid" inert={mobileSidebar && !mobileMain}>
     <PaneGrid {layout} activePaneId={sidebarSelected?'sidebar':activePaneId} {expandedPaneId} pointerDrag={pointerTabDrag} onPointerDragStart={()=>browserDragActive=true} onPointerDragEnd={()=>{browserDragActive=false;pointerTabDrag=null}} focusFollowsMouse={snapshot?.settings.focusFollowsMouse ?? false} showActivePaneBorder={snapshot?.settings.showActivePaneBorder ?? true} dimInactivePanes={snapshot?.settings.dimInactivePanes ?? true} inactivePaneOpacity={snapshot?.settings.inactivePaneOpacity ?? .6} onactivate={id=>{activePaneId=id;sidebarSelected=false}} onresize={resizeSplit} ondropTab={dropTab}>
       {#snippet children(id)}{#if id==='main'}{@render workspaceView()}{:else}
-        <AppSurface embedded={true} paneId={id} active={!sidebarSelected && activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey} parentGeometryRevision={browserGeometryRevision} parentBrowserVisible={browserGlobalVisible && (!expandedPaneId || expandedPaneId === id)}
+        <AppSurface embedded={true} paneId={id} active={!sidebarSelected && activePaneId===id && !modal && !palette} parentSnapshot={snapshot} snapshotIndexes={indexes} parentMobileSidebar={mobileSidebar} workspaceKey={activeWorkspaceKey} parentGeometryRevision={browserGeometryRevision} parentBrowserResizing={browserResizeActive} parentBrowserVisible={browserGlobalVisible && (!expandedPaneId || expandedPaneId === id)}
           onSnapshot={value=>applySnapshot(value,++snapshotIssued)} onTabDrop={dropTab} onLayout={setLayout} onVimSplit={splitPaneForVim} onVimWorkspace={(source,command)=>{activePaneId=source;return executeWorkspaceVim(command)}}
           onExistingChat={focusExistingChat} parentExpandedPaneId={expandedPaneId} onExpandPane={setPaneExpansion} onAgentSettingsSelect={routeAgentSettings} onClosePane={removeEmptyPane} onSettingsSelect={routeSettings} onTerminalSelect={routeTerminal} onSelection={taskId=>paneSelections[id]=taskId} onWorkspaceChange={handleChildWorkspaceChange} onTabPointerStart={(event,tab)=>pointerTabDrag={tab,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY}} bind:this={paneRefs[id]}/>
       {/if}{/snippet}

@@ -30,6 +30,11 @@ No fake conversations, progress, token counts, host connections or model replies
   through its final frame, and suppresses unchanged native layout writes. Position
   and size are applied as one native rectangle. Layout revisions do not hide a
   still-visible child; teardown and visibility changes explicitly hide it.
+  Pane/sidebar resize starts hide every native browser child before drag layout
+  updates. A shell-rendered URL/browser placeholder fills its viewport while
+  bounds continue updating invisibly. Pointer completion/cancellation restores
+  visibility after settled frames; window-resize bursts use a short idle delay.
+  No reload, navigation or native browser recreation is required.
   Address editing retains an unsubmitted draft across native state polling;
   Enter submits it and Escape restores the current page address. Native state
   refreshes are coalesced and discarded after tab retirement.
