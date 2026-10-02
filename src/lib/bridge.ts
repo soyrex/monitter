@@ -61,6 +61,7 @@ import type {
   JevCommandPlan,
   MailDetail,
   MailDetailRequestResult,
+  MailThreadSummary,
   MailConfig,
   MailConnectStart,
   MailConnectStatus,
@@ -116,6 +117,7 @@ export interface MonitterBridge {
   refreshMailInbox(taskId: string, accountId: string, query: string): Promise<unknown>;
   requestMailDetail(taskId: string, mailId: string): Promise<MailDetailRequestResult>;
   getMailDetail(taskId: string, mailId: string): Promise<MailDetail | null>;
+  summarizeMailThread(taskId: string, mailId: string): Promise<MailThreadSummary>;
   getMailConfig(): Promise<MailConfig>;
   configureGmail(revision: string, clientId: string, clientSecret?: string): Promise<MailConfig>;
   startMailConnect(): Promise<MailConnectStart>;
@@ -471,6 +473,7 @@ const nativeBridge: MonitterBridge = {
   refreshMailInbox: (taskId, accountId, query) => isLanBrowser() ? desktopOnly() : invoke('refresh_mail_inbox', { taskId, accountId, query }),
   requestMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('request_mail_detail', { taskId, mailId }),
   getMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('get_mail_detail', { taskId, mailId }),
+  summarizeMailThread: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('summarize_mail_thread', { taskId, mailId }),
   getMailConfig: () => isLanBrowser() ? desktopOnly() : invoke('mail_get_config'),
   configureGmail: (revision, clientId, clientSecret) => isLanBrowser() ? desktopOnly() : invoke('mail_configure_gmail', { revision, clientId, ...(clientSecret ? { clientSecret } : {}) }),
   startMailConnect: () => isLanBrowser() ? desktopOnly() : invoke('mail_start_connect'),
@@ -630,6 +633,7 @@ const previewBridge: MonitterBridge = {
   sendMessage: () => desktopOnly(),
   requestMailDetail: () => desktopOnly(),
   getMailDetail: () => desktopOnly(),
+  summarizeMailThread: () => desktopOnly(),
   refreshMailInbox: () => desktopOnly(),
   getMailConfig: () => desktopOnly(),
   configureGmail: () => desktopOnly(),
@@ -774,6 +778,7 @@ export function getBridge(): MonitterBridge {
       refreshMailInbox: (taskId, accountId, query) => test.invoke('refresh_mail_inbox', { taskId, accountId, query }),
       requestMailDetail: (taskId, mailId) => test.invoke('request_mail_detail', { taskId, mailId }) as Promise<MailDetailRequestResult>,
       getMailDetail: (taskId, mailId) => test.invoke('get_mail_detail', { taskId, mailId }) as Promise<MailDetail | null>,
+      summarizeMailThread: (taskId, mailId) => test.invoke('summarize_mail_thread', { taskId, mailId }) as Promise<MailThreadSummary>,
       getMailConfig: () => test.invoke('mail_get_config') as Promise<MailConfig>,
       configureGmail: (revision, clientId, clientSecret) => test.invoke('mail_configure_gmail', { revision, clientId, ...(clientSecret ? { clientSecret } : {}) }) as Promise<MailConfig>,
       startMailConnect: () => test.invoke('mail_start_connect') as Promise<MailConnectStart>,

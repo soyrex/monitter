@@ -89,6 +89,8 @@ struct VaultAccount {
     #[serde(flatten)]
     public: MailAccount,
     refresh_token: String,
+    #[serde(default)]
+    modify_scope: bool,
 }
 
 #[derive(Clone)]
@@ -234,6 +236,7 @@ impl MailService {
         vault.accounts.push(VaultAccount {
             public: account,
             refresh_token,
+            modify_scope: false,
         });
         normalize_vault(&mut vault)?;
         self.refresh_granted_agents(&vault)?;
@@ -324,7 +327,7 @@ impl MailService {
         let expires_at = now + OAUTH_TIMEOUT.as_millis() as i64;
         let authorization_url = format!(
             "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&code_challenge={}&code_challenge_method=S256&state={}",
-            url_encode(&vault.gmail_client_id), url_encode(&redirect_uri), url_encode("https://www.googleapis.com/auth/gmail.readonly"), challenge, state
+            url_encode(&vault.gmail_client_id), url_encode(&redirect_uri), url_encode("https://www.googleapis.com/auth/gmail.modify"), challenge, state
         );
         let attempt = Arc::new(ConnectAttempt {
             cancel: std::sync::atomic::AtomicBool::new(false),
@@ -501,10 +504,88 @@ impl MailService {
                 )
             }
             "mail_search" => self.mail_search(agent_id, args),
-            "mail_read" => self.mail_read(agent_id, args),
-            "mail_thread" => self.mail_thread(agent_id, args),
+            "mail_read" => {
+                let mut result = self.mail_read(agent_id, args)?;
+                strip_html_bodies(&mut result);
+                Ok(result)
+            }
+            "mail_thread" => {
+                let mut result = self.mail_thread(agent_id, args)?;
+                strip_html_bodies(&mut result);
+                Ok(result)
+            }
             _ => Err("Unknown mail tool.".into()),
         }
+    }
+
+    /// Native inbox operation; never exposed through the agent tool dispatcher.
+    pub(crate) fn native_search_unread(
+        &self,
+        agent_id: &str,
+        account_id: &str,
+    ) -> Result<Value, String> {
+        validate_agent_id(agent_id)?;
+        let account = self.authorized_account(agent_id, account_id)?;
+        let token = self.access_token(&account)?;
+        self.recheck_grant(agent_id, account_id)?;
+        let mut result = provider_for(&account)?.search(
+            &token,
+            SearchRequest {
+                query: Some("is:unread in:inbox".into()),
+                limit: 100,
+                page_token: None,
+                label_ids: Vec::new(),
+                include_spam_trash: false,
+            },
+        )?;
+        self.recheck_grant(agent_id, account_id)?;
+        result["accountId"] = json!(account_id);
+        Ok(result)
+    }
+
+    pub(crate) fn native_thread(
+        &self,
+        agent_id: &str,
+        account_id: &str,
+        thread_id: &str,
+    ) -> Result<Value, String> {
+        validate_agent_id(agent_id)?;
+        self.mail_thread(agent_id, json!({"account_id":account_id, "thread_id":thread_id, "max_messages":50, "max_body_chars":50_000}))
+    }
+
+    pub(crate) fn native_read(
+        &self,
+        agent_id: &str,
+        account_id: &str,
+        message_id: &str,
+    ) -> Result<Value, String> {
+        self.mail_read(agent_id, json!({"account_id":account_id, "message_ids":[message_id], "max_body_chars":50_000}))
+    }
+
+    pub(crate) fn native_mark_read(
+        &self,
+        agent_id: &str,
+        account_id: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        validate_agent_id(agent_id)?;
+        validate_provider_id(message_id)?;
+        let account = self.authorized_account(agent_id, account_id)?;
+        if !account.modify_scope {
+            return Err("Reconnect this Gmail account to authorize marking messages read.".into());
+        }
+        let token = self.access_token(&account)?;
+        self.recheck_grant(agent_id, account_id)?;
+        curl_request_with_headers(
+            "POST",
+            &format!(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}/modify",
+                url_encode(message_id)
+            ),
+            &[&format!("Authorization: Bearer {token}"), "Content-Type: application/json"],
+            Some(br#"{"removeLabelIds":["UNREAD"]}"#),
+        )?;
+        self.recheck_grant(agent_id, account_id)
     }
 
     fn accounts_for(&self, agent_id: &str) -> Result<Vec<MailAccount>, String> {
@@ -751,30 +832,42 @@ impl MailService {
             expires_at: now() + token.expires_in.max(60) * 1000,
         };
         let email = gmail_email(&access.value)?;
-        if vault
-            .accounts
-            .iter()
-            .any(|a| a.public.provider == "gmail" && a.public.email.eq_ignore_ascii_case(&email))
-        {
-            return Err("That Gmail account is already connected.".into());
-        }
-        if vault.accounts.len() >= MAX_ACCOUNTS {
-            return Err("Mail has reached its account limit.".into());
-        }
-        let account = MailAccount {
-            id: Uuid::new_v4().to_string(),
-            provider: "gmail".into(),
-            email: email.clone(),
-            label: email,
-            agent_ids: Vec::new(),
-            connected_at: now(),
-        };
-        vault.accounts.push(VaultAccount {
-            public: account.clone(),
-            refresh_token: token.refresh_token.ok_or(
-                "Gmail did not return a refresh token. Start again and grant offline access.",
-            )?,
+        let modify_scope = token.scope.as_deref().map(|scope| {
+            scope
+                .split_whitespace()
+                .any(|value| value == "https://www.googleapis.com/auth/gmail.modify")
+        }).unwrap_or(true);
+        let existing = vault.accounts.iter().position(|a| {
+            a.public.provider == "gmail" && a.public.email.eq_ignore_ascii_case(&email)
         });
+        let account = if let Some(index) = existing {
+            let existing = &mut vault.accounts[index];
+            existing.refresh_token = token
+                .refresh_token
+                .unwrap_or_else(|| existing.refresh_token.clone());
+            existing.modify_scope = modify_scope;
+            existing.public.clone()
+        } else {
+            if vault.accounts.len() >= MAX_ACCOUNTS {
+                return Err("Mail has reached its account limit.".into());
+            }
+            let account = MailAccount {
+                id: Uuid::new_v4().to_string(),
+                provider: "gmail".into(),
+                email: email.clone(),
+                label: email,
+                agent_ids: Vec::new(),
+                connected_at: now(),
+            };
+            vault.accounts.push(VaultAccount {
+                public: account.clone(),
+                refresh_token: token.refresh_token.ok_or(
+                    "Gmail did not return a refresh token. Start again and grant offline access.",
+                )?,
+                modify_scope,
+            });
+            account
+        };
         normalize_vault(&mut vault)?;
         let mut attempt_state = attempt.state.lock().map_err(|_| unavailable())?;
         if attempt.cancel.load(std::sync::atomic::Ordering::Acquire)
@@ -823,9 +916,19 @@ impl MailService {
     }
 }
 
+fn strip_html_bodies(result: &mut Value) {
+    if let Some(messages) = result.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(object) = message.as_object_mut() { object.remove("bodyHtml"); }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct GmailToken {
     access_token: String,
+    #[serde(default)]
+    scope: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
@@ -1052,6 +1155,9 @@ fn normalize_message(message: GmailMessage, max_body: usize) -> Value {
         );
     }
     let body_unavailable = max_body == 0 || message.payload.as_ref().is_some_and(has_external_body);
+    // Raw HTML is untrusted and must be rendered only in an isolated sandbox.
+    let body_html =
+        (max_body > 0 && !html.is_empty()).then(|| truncate_chars(html.join("\n"), max_body));
     let (body, body_truncated) = if max_body == 0 {
         (None, false)
     } else {
@@ -1066,7 +1172,7 @@ fn normalize_message(message: GmailMessage, max_body: usize) -> Value {
         let truncated = text.chars().count() > max_body;
         (Some(truncate_chars(text, max_body)), truncated)
     };
-    json!({"id": message.id, "threadId": message.thread_id, "from": headers.remove("from"), "to": headers.remove("to"), "cc": headers.remove("cc"), "subject": headers.remove("subject"), "date": headers.remove("date"), "receivedAt": message.internal_date.parse::<i64>().ok(), "snippet": truncate_chars(message.snippet, 1024), "labelIds": message.label_ids, "isRead": !message.label_ids.iter().any(|x| x == "UNREAD"), "body": body, "bodyTruncated": body_truncated, "bodyUnavailable": body_unavailable, "attachments": attachments})
+    json!({"id": message.id, "threadId": message.thread_id, "from": headers.remove("from"), "to": headers.remove("to"), "cc": headers.remove("cc"), "subject": headers.remove("subject"), "date": headers.remove("date"), "receivedAt": message.internal_date.parse::<i64>().ok(), "snippet": truncate_chars(message.snippet, 1024), "labelIds": message.label_ids, "isRead": !message.label_ids.iter().any(|x| x == "UNREAD"), "body": body, "bodyHtml": body_html, "bodyTruncated": body_truncated, "bodyUnavailable": body_unavailable, "attachments": attachments})
 }
 fn has_external_body(part: &GmailPart) -> bool {
     let is_body = part.filename.as_deref().unwrap_or("").is_empty()
@@ -1141,6 +1247,14 @@ fn curl_request(
     header: Option<&str>,
     body: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    curl_request_with_headers(method, url, &header.into_iter().collect::<Vec<_>>(), body)
+}
+fn curl_request_with_headers(
+    method: &str,
+    url: &str,
+    headers: &[&str],
+    body: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     // Secrets only travel through curl's stdin config. Do not put OAuth forms,
     // bearer tokens, or provider responses in argv, environment, or temp files.
     let result = (|| {
@@ -1154,11 +1268,14 @@ fn curl_request(
                 .map_err(|_| "Could not start Gmail HTTPS client.".to_string())?,
         );
         let mut config = format!("url = {}\nrequest = {}\nsilent\nshow-error\nproto = \"=https\"\nconnect-timeout = 5\nmax-time = 20\nmax-redirs = 0\nmax-filesize = {}\nwrite-out = \"\\n%{{http_code}}\"\n", curl_value(url), curl_value(method), HTTP_MAX_BYTES);
-        if let Some(header) = header {
+        for header in headers {
             config.push_str(&format!("header = {}\n", curl_value(header)));
         }
         if let Some(body) = body {
             let body = std::str::from_utf8(body).map_err(|_| "Could not prepare Gmail request.")?;
+            if body.starts_with('{') {
+                config.push_str("header = \"Content-Type: application/json\"\n");
+            }
             config.push_str(&format!("data = {}\n", curl_value(body)));
         }
         child
@@ -1735,6 +1852,7 @@ mod tests {
                     connected_at: 1,
                 },
                 refresh_token: "refresh".into(),
+                modify_scope: false,
             }],
         };
         let restored: MailVault =
@@ -1835,7 +1953,7 @@ mod tests {
         let params = parse_query(connect.authorization_url.split_once('?').unwrap().1).unwrap();
         assert_eq!(
             params["scope"],
-            "https://www.googleapis.com/auth/gmail.readonly"
+            "https://www.googleapis.com/auth/gmail.modify"
         );
         assert_eq!(params["code_challenge_method"], "S256");
         let address = params["redirect_uri"].trim_start_matches("http://");

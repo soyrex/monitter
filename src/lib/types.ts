@@ -197,9 +197,10 @@ export interface WorkPlan {
 }
 export interface MailDetail {
   mailId: string; source: 'gmail'; accountLabel: string; from: string; to: string[]; cc: string[];
-  subject: string; receivedAt: number; bodyText: string;
+  subject: string; receivedAt: number; bodyText: string; bodyHtml?: string | null;
 }
 export interface MailDetailRequestResult { status: 'ready'; }
+export interface MailThreadSummary { summary: string; messageCount: number; generatedAt: number; }
 /** Private desktop Mail MCP configuration. Tokens and client secrets are never returned. */
 export interface MailConfig {
   revision: string;

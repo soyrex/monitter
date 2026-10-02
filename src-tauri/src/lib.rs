@@ -8304,6 +8304,15 @@ async fn get_mail_detail(
 }
 
 #[tauri::command]
+async fn summarize_mail_thread(
+    state: State<'_, AppState>, task_id: String, mail_id: String,
+) -> Result<mail_triage::MailThreadSummary, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.summarize_mail_thread(&task_id, &mail_id))
+        .await.map_err(|error| format!("Mail thread summary worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn resume_task(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || service.resume(task_id))
@@ -9772,6 +9781,7 @@ pub fn run() {
             refresh_mail_inbox,
             request_mail_detail,
             get_mail_detail,
+            summarize_mail_thread,
             resume_task,
             cancel_task,
             cancel_queued_message,

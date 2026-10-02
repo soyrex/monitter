@@ -171,7 +171,7 @@
 
 <section class="mail-card" aria-labelledby="mail-heading" aria-busy={loading || saving || starting}>
   <div class="card-heading">
-    <div><h3 id="mail-heading">Mail</h3><p>Connect Gmail for read-only search and message access through an agent’s MCP tools.</p></div>
+    <div><h3 id="mail-heading">Mail</h3><p>Connect Gmail for agent search and reading, and native inbox read status.</p></div>
     {#if config?.accounts.length}<span class="connected-count">{config.accounts.length} connected</span>{/if}
   </div>
 
@@ -204,7 +204,7 @@
     {#if attempt}
       <div class="pending" role="status"><span>Waiting for Google sign-in to finish…</span><button type="button" disabled={saving} onclick={() => void cancelConnect()}>Cancel</button></div>
     {:else}
-      <button class="primary" type="button" disabled={saving || starting || !config.clientId} onclick={() => void connect()}>{starting ? 'Opening Google sign-in…' : config.accounts.length ? 'Connect another Gmail account' : 'Connect Gmail'}</button>
+      <button class="primary" type="button" disabled={saving || starting || !config.clientId} onclick={() => void connect()}>{starting ? 'Opening Google sign-in…' : config.accounts.length ? 'Connect or reauthorize Gmail' : 'Connect Gmail'}</button>
     {/if}
 
     <details class="setup" open={showSetup} ontoggle={(event) => showSetup = event.currentTarget.open}>
@@ -214,7 +214,7 @@
       <label>OAuth client secret <small>{config.clientSecretConfigured ? 'Saved; leave blank to keep the current secret.' : 'Stored securely and never shown again.'}</small><input type="password" bind:value={clientSecret} autocomplete="new-password" /></label>
       <div class="actions"><button type="button" disabled={saving} onclick={() => { clientId = config?.clientId ?? ''; clientSecret = ''; showSetup = false; }}>Cancel</button><button type="button" class="primary" disabled={saving || !clientId.trim()} onclick={() => void saveClient()}>{saving ? 'Saving…' : 'Save app settings'}</button></div>
     </details>
-    <p class="footnote">Read-only access. Agents can search Gmail and read messages; they cannot send, delete, or change mail. Fetched messages become part of the selected agent's context.</p>
+    <p class="footnote">Agent MCP access stays read-only. The native inbox can mark messages read after you open them or Jev confidently identifies low-value bulk mail. Reauthorize existing accounts here to grant that access. Fetched messages become part of the selected agent's context.</p>
   {/if}
 </section>
 

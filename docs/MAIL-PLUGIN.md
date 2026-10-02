@@ -24,7 +24,7 @@ For initial Google setup:
 1. Enable the Gmail API in the Google Cloud project that owns the OAuth client.
 2. Configure the OAuth consent screen. In testing mode, add the Gmail account as a test user.
 3. Create an OAuth client of type **Desktop app**, then enter its client ID and optional client secret here.
-4. Select **Connect Gmail**, approve read-only mail access in the system browser, then select the agents allowed to use that account.
+4. Select **Connect Gmail**, approve Gmail modify access in the system browser, then select the agents allowed to use that account. The agent MCP remains read-only; the native inbox uses modify access only to mark messages read.
 
 See [Google's installed-app OAuth guide](https://developers.google.com/identity/protocols/oauth2/native-app)
 and [Gmail authorization scopes](https://developers.google.com/workspace/gmail/api/auth/scopes).

@@ -286,25 +286,34 @@ No fake conversations, progress, token counts, host connections or model replies
   record task ID, tool, outcome, model, latency, and token counts without state, question or candidate text.
 - `refresh_mail_inbox { taskId: string, accountId: string, query: string }` -> JSON receipt.
   Native-owner only, absent from LAN/controller/visitor dispatch. Uses only Monitter's native
-  Gmail connection assigned to the task's agent. Searches at most 20 envelopes with native Gmail
-  operators and updates that task/account inbox in place; absent messages move into local history.
+  Gmail connection assigned to the task's agent. The query argument is ignored; the native inbox
+  searches the latest 100 unread inbox envelopes and updates that task/account inbox in place;
+  absent messages move into local history.
   The durable batch records `nativeAccountId` and the verified account email. A missing connection,
   revoked assignment or provider error fails visibly. No harness turn or agent MCP is used.
-  Jev receives only bounded envelopes. Each card has five advisory Choice classifications plus
+  Jev receives only bounded envelopes in chunks of 10. Each card has five advisory Choice classifications plus
   `inboxFit { workRelated, requiresMyAction, excludedBulkOrAutomated }` Noul yes-probabilities
   (integer 0–100). The native inbox shows only Jev-classified active cards that pass the
   work/action/exclusion gate; provisional, fallback and older cards cannot pass it. Legacy agent-fed
   inboxes are hidden until replaced by a native refresh. Collaboration MCP no longer exposes
   `mail_triage_help`, `present_mail_batch` or `present_mail_detail`.
+  A successful Jev result marks a low-importance message read only when action probability is at
+  most 10%, bulk/automation probability is at least 95%, and the suggested action is archive/none.
+  Failed or uncertain classifications never change Gmail.
 - `request_mail_detail { taskId: string, mailId: string }` -> `{ status: "ready" }`.
   Native-owner only. The durable card must belong to the exact task. Monitter reads only that
   provider message through the recorded native account and checks assignment before/after retrieval.
   Legacy agent-fed cards require a native refresh before they can be opened. There is no agent
-  fallback. Incomplete content is marked explicitly.
+  fallback. Incomplete content is marked explicitly. Opening marks that Gmail message read via
+  the native connector; existing read-only OAuth grants require reconnection for modify scope.
 - `get_mail_detail { taskId: string, mailId: string }` -> `MailDetail | null`. Native-owner only.
   Returns a matching message from the bounded 30-minute process-local cache after checking native
   account access. Full bodies are never persisted in Snapshot, SQLite, compact UI projections,
-  visitor sharing, or RunEvent detail. Gmail reads neither mark messages read nor load remote images.
+  visitor sharing, or RunEvent detail. Optional HTML is rendered in an isolated reader without
+  remote images or active content.
+- `summarize_mail_thread { taskId: string, mailId: string }` -> `MailThreadSummary`.
+  Native-owner only. Reads up to 50 messages in the selected Gmail thread, then returns a bounded
+  source-excerpt digest from the latest eight; it does not persist full bodies.
 - `get_model_catalog { target: { taskId?: string, agentId?: string, projectId?: string | null, codexHome?: string | null, refresh?: boolean } }` -> ModelCatalog.
   Agent targets work before the first turn. ACP catalogs are obtained from the saved launcher by
   initializing an isolated ACP connection and creating a model-free session; no user prompt or

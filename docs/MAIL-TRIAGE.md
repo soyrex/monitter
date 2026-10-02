@@ -1,19 +1,18 @@
 # Native Gmail inbox triage
 
 Monitter's inbox reads an assigned native Gmail connection directly. It does
-not ask an agent to search or read mail. The connector is read-only; opening a
-message does not mark it read or mutate Gmail.
+not ask an agent to search or read mail. Opening a message marks it read in Gmail.
+The agent-facing Mail MCP remains read-only.
 
 ## Use
 
 1. Connect Gmail in **Settings** and assign that account to the agent that owns
    the inbox chat. Configure `TYPESAFE_API_KEY` in **Settings → Environment &
    Secrets** for Jev classification (`JEV_API_KEY` remains a legacy alias).
-2. Open the chat's Gmail inbox, choose the assigned account, optionally enter
-   Gmail search operators, and select **Refresh**. Monitter searches up to 20
-   message envelopes directly through its native connector.
+2. Open the chat's Gmail inbox and select **Refresh**. Monitter searches the latest
+   100 unread inbox messages for each assigned Gmail account.
 3. Jev classifies the bounded sender, recipients, subject, timestamp, and
-   snippet in one background System One request. Full bodies and Gmail message
+   snippet in background System One batches of 10. Full bodies and Gmail message
    IDs are omitted from Jev state. The UI waits for the result before showing
    any card.
 4. Only messages Jev judges work-related and requiring a concrete action from
@@ -22,8 +21,16 @@ message does not mark it read or mutate Gmail.
    `me`, a concrete suggested action, and a non-newsletter, non-transactional,
    non-personal intent. Importance or urgency alone never admits a message.
 5. Click a visible card to read that exact message through the same native
-   Gmail account. The plain-text body stays in a bounded process-local cache
-   for up to 30 minutes and is never persisted in Snapshot or SQLite.
+   Gmail account and mark it read. The plain-text and optional HTML body stay in a bounded process-local cache
+   for up to 30 minutes and are never persisted in Snapshot or SQLite. The rich
+   reader isolates email HTML; a thread digest uses source excerpts on demand.
+
+The inbox also marks a message read automatically after a successful Jev batch
+only when Jev rates its importance low, rates owner action at most 10%, rates
+bulk/automation at least 95%, and suggests archive or no action. Failed or
+uncertain batches leave Gmail unchanged. Existing Gmail connections need a new
+Google consent through **Connect Gmail** for the `gmail.modify` scope; reconnecting
+the same account keeps its Monitter assignments.
 
 The three display judgments are Noul yes-probabilities, retained as 0–100
 values in `inboxFit`: `workRelated`, `requiresMyAction`, and

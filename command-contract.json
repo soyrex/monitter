@@ -1514,6 +1514,30 @@
         "native"
       ]
     },
+    "summarize_mail_thread": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "mailId",
+          "rustName": "mail_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "mail_triage::MailThreadSummary",
+      "resultTsType": "MailThreadSummary",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "resume_task": {
       "arguments": [
         {
@@ -2671,6 +2695,7 @@
       "MailConnectStatus",
       "MailDetail",
       "MailDetailRequestResult",
+      "MailThreadSummary",
       "MarkdownDocument",
       "ModelCatalog",
       "ModelSettings",

@@ -1,4 +1,4 @@
-//! Read-only native Gmail inbox triage.
+//! Native Gmail inbox triage.
 //!
 //! Monitter reads assigned native Gmail connections directly, classifies bounded
 //! message summaries with Jev, and persists body-free cards. Full message bodies
@@ -18,7 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) const MAX_MAIL_ITEMS: usize = 20;
+pub(crate) const MAX_MAIL_ITEMS: usize = 100;
+const JEV_CHUNK_SIZE: usize = 10;
 const MAX_ACCOUNT_BYTES: usize = 160;
 const MAX_QUERY_BYTES: usize = 240;
 const MAX_PROVIDER_ID_BYTES: usize = 512;
@@ -98,6 +99,15 @@ pub(crate) struct MailDetail {
     pub subject: String,
     pub received_at: i64,
     pub body_text: String,
+    pub body_html: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MailThreadSummary {
+    pub summary: String,
+    pub message_count: usize,
+    pub generated_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -119,11 +129,8 @@ impl crate::Service {
         account_id: String,
         query: String,
     ) -> Result<Value, String> {
-        let query = if query.trim().is_empty() {
-            "in:inbox".to_owned()
-        } else {
-            query
-        };
+        let _ = query;
+        let query = "in:inbox is:unread".to_owned();
         let (task, _) = self.task_and_host(&task_id)?;
         let accounts = self
             .mail
@@ -141,13 +148,7 @@ impl crate::Service {
             .as_str()
             .ok_or("Native Gmail account has no email.")?
             .to_owned();
-        let response = self.mail.call_for_agent(
-            &task.agent_id,
-            "mail_search",
-            json!({
-                "account_id":account_id, "query":query, "limit":20
-            }),
-        )?;
+        let response = self.mail.native_search_unread(&task.agent_id, &account_id)?;
         let input = native_batch_input(&response, email, query)?;
         let (current_task, _) = self.task_and_host(&task_id)?;
         if current_task.agent_id != task.agent_id {
@@ -341,7 +342,7 @@ impl crate::Service {
         result: Result<(Vec<MailClassification>, ClassifierEvidence), String>,
     ) -> Result<(), String> {
         let created_at = crate::model::now();
-        self.mutate(Some(task_id.into()), |snapshot| {
+        let mark_read = self.mutate(Some(task_id.into()), |snapshot| {
             let batch = snapshot
                 .mail_batches
                 .iter_mut()
@@ -350,7 +351,7 @@ impl crate::Service {
             // A later scheduled run already owns the visible inbox. Discard
             // this stale network result rather than relabelling newer mail.
             if batch.sync_count != revision {
-                return Ok(());
+                return Ok(Vec::new());
             }
             let (title, fallback) = match result {
                 Ok((classifications, evidence)) => {
@@ -377,8 +378,40 @@ impl crate::Service {
                 detail: trace.to_string().into(),
                 created_at,
             }));
-            Ok(())
-        })
+            let unimportant = if fallback { Vec::new() } else {
+                batch.items.iter().filter(|item| {
+                    input.messages.iter().any(|message| message.provider_message_id == item.provider_message_id)
+                        && item.importance == MailImportance::Low
+                        && item.inbox_fit.as_ref().is_some_and(|fit| fit.requires_my_action <= 10 && fit.excluded_bulk_or_automated >= 95)
+                        && matches!(item.suggested_action, MailSuggestedAction::Archive | MailSuggestedAction::None)
+                }).map(|item| item.provider_message_id.clone()).collect()
+            };
+            Ok(unimportant)
+        })?;
+        // A failed or uncertain Jev run never changes Gmail. A per-message provider
+        // failure is kept visible in the event stream; subsequent refreshes retry.
+        if !mark_read.is_empty() {
+            let (task, _) = self.task_and_host(task_id)?;
+            let batch = self.committed_data()?.snapshot.mail_batches.iter()
+                .find(|batch| batch.id == batch_id && batch.task_id == task_id)
+                .cloned().ok_or("Mail batch no longer exists.")?;
+            let account_id = self.native_mail_account_id(task_id, &batch)?;
+            for message_id in mark_read {
+                let latest = self.committed_data()?.snapshot.mail_batches.iter()
+                    .find(|current| current.id == batch_id && current.task_id == task_id)
+                    .map(|current| current.sync_count == revision && current.native_account_id.as_deref() == Some(account_id.as_str()))
+                    .unwrap_or(false);
+                if !latest { break; }
+                if let Err(error) = self.mail.native_mark_read(&task.agent_id, &account_id, &message_id) {
+                    let safe = safe_jev_error(&error);
+                    let _ = self.mutate(Some(task_id.into()), |snapshot| {
+                        snapshot.events.push(Arc::new(crate::model::RunEvent { id: id(), task_id: task_id.into(), kind: "mail".into(), title: "Gmail mark-read failed".into(), detail: safe.clone().into(), created_at: crate::model::now() }));
+                        Ok(())
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn cache_mail_detail(
@@ -387,6 +420,7 @@ impl crate::Service {
         batch: MailBatch,
         card: MailCard,
         body_text: String,
+        body_html: Option<String>,
     ) -> Result<(), String> {
         let detail = MailDetail {
             mail_id: card.id,
@@ -398,6 +432,7 @@ impl crate::Service {
             subject: card.subject,
             received_at: card.received_at,
             body_text,
+            body_html,
         };
         let mut details = self
             .mail_details
@@ -430,11 +465,6 @@ impl crate::Service {
         task_id: String,
         mail_id: String,
     ) -> Result<MailDetailRequestResult, String> {
-        if self.get_mail_detail(&task_id, &mail_id)?.is_some() {
-            return Ok(MailDetailRequestResult {
-                status: "ready".into(),
-            });
-        }
         let (batch, card) = self.mail_card(&task_id, &mail_id)?;
         if batch.source != "gmail" {
             return Err("This MVP can fetch detail only from Gmail cards.".into());
@@ -451,17 +481,14 @@ impl crate::Service {
             .agent_id
             .clone();
         let account_id = self.native_mail_account_id(&task_id, &batch)?;
+        if self.get_mail_detail(&task_id, &mail_id)?.is_some() {
+            self.mail.native_mark_read(&agent_id, &account_id, &card.provider_message_id)?;
+            return Ok(MailDetailRequestResult { status: "ready".into() });
+        }
         {
-            let response = self.mail.call_for_agent(
-                &agent_id,
-                "mail_read",
-                json!({
-                    "account_id": account_id,
-                    "message_ids": [card.provider_message_id],
-                    "max_body_chars": 50_000,
-                }),
-            )?;
+            let response = self.mail.native_read(&agent_id, &account_id, &card.provider_message_id)?;
             let body = native_detail_body(&response, &card.provider_message_id)?;
+            let html = native_detail_html(&response, &card.provider_message_id);
             // Recheck durable ownership after the network read, before publishing the body.
             let (current_batch, current_card) = self.mail_card(&task_id, &mail_id)?;
             let current_agent = self
@@ -480,7 +507,8 @@ impl crate::Service {
             {
                 return Err("Mail card changed while this message was being read.".into());
             }
-            self.cache_mail_detail(&task_id, current_batch, current_card, body)?;
+            self.cache_mail_detail(&task_id, current_batch, current_card, body, html)?;
+            self.mail.native_mark_read(&agent_id, &account_id, &card.provider_message_id)?;
             return Ok(MailDetailRequestResult {
                 status: "ready".into(),
             });
@@ -502,6 +530,53 @@ impl crate::Service {
         Ok(details
             .get(&(task_id.into(), mail_id.into()))
             .map(|entry| entry.detail.clone()))
+    }
+
+    pub(crate) fn summarize_mail_thread(
+        &self,
+        task_id: &str,
+        mail_id: &str,
+    ) -> Result<MailThreadSummary, String> {
+        let (batch, card) = self.mail_card(task_id, mail_id)?;
+        let account_id = self.native_mail_account_id(task_id, &batch)?;
+        let thread_id = card.provider_thread_id.as_deref()
+            .ok_or("Gmail did not provide a thread for this message.")?;
+        let (task, _) = self.task_and_host(task_id)?;
+        let response = self.mail.native_thread(&task.agent_id, &account_id, thread_id)?;
+        // Recheck the card and account grant after network retrieval.
+        let (current_batch, current_card) = self.mail_card(task_id, mail_id)?;
+        if current_batch.native_account_id != batch.native_account_id
+            || current_card.provider_thread_id != card.provider_thread_id {
+            return Err("Mail thread changed while it was being read.".into());
+        }
+        self.native_mail_account_id(task_id, &current_batch)?;
+        let messages = response.get("messages").and_then(Value::as_array)
+            .ok_or("Gmail returned an invalid thread.")?;
+        let mut lines = Vec::new();
+        for message in messages.iter().rev().take(8).rev() {
+            let from = message.get("from").and_then(Value::as_str).unwrap_or("Unknown sender");
+            let body = message.get("body").and_then(Value::as_str).unwrap_or("");
+            let excerpt = body.lines().map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('>')
+                    && !line.starts_with("On ") && !line.starts_with("From:")
+                    && !line.starts_with("Sent:") && !line.starts_with("Subject:")
+                    && !matches!(line.to_ascii_lowercase().as_str(), "hi" | "hello" | "thanks" | "thank you" | "dear alex"))
+                .max_by_key(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    let action = ["please", "need", "confirm", "approve", "decide", "deadline", "will ", "can you", "could you"]
+                        .iter().any(|word| lower.contains(word));
+                    (action as u8, line.contains('?') as u8, line.len().min(220))
+                })
+                .unwrap_or_else(|| message.get("snippet").and_then(Value::as_str).unwrap_or("No readable text."));
+            lines.push(format!("• {}: {}", truncate(from, 80), truncate(excerpt, 220)));
+        }
+        Ok(MailThreadSummary {
+            summary: format!("{} messages in this thread. Recent messages:\n{}{}",
+                messages.len(), lines.join("\n"),
+                if response.get("threadTruncated").and_then(Value::as_bool) == Some(true) { "\nEarlier messages omitted." } else { "" }),
+            message_count: messages.len(),
+            generated_at: crate::model::now(),
+        })
     }
 
     fn native_mail_account_id(&self, task_id: &str, batch: &MailBatch) -> Result<String, String> {
@@ -670,6 +745,12 @@ fn native_detail_body(response: &Value, provider_message_id: &str) -> Result<Str
     Ok(body)
 }
 
+fn native_detail_html(response: &Value, provider_message_id: &str) -> Option<String> {
+    response.get("messages")?.as_array()?.iter()
+        .find(|message| message.get("id").and_then(Value::as_str) == Some(provider_message_id))?
+        .get("bodyHtml")?.as_str().map(|html| truncate(html, 100_000))
+}
+
 fn validate_batch(input: &MailBatchInput) -> Result<(), String> {
     if input.source != "gmail" {
         return Err("source must be gmail for this MVP.".into());
@@ -703,12 +784,12 @@ fn validate_batch(input: &MailBatchInput) -> Result<(), String> {
             return Err("received_at must be a Unix millisecond timestamp.".into());
         }
     }
-    let state = jev_state(input)?;
-    if state.len() > model_router::MAX_JEV_PROMPT_BYTES {
-        return Err(format!(
-            "The normalized mail batch exceeds Jev's {} KiB state limit; reduce the result set or header lengths.",
-            model_router::MAX_JEV_PROMPT_BYTES / 1024
-        ));
+    for messages in input.messages.chunks(JEV_CHUNK_SIZE) {
+        let mut chunk = input.clone();
+        chunk.messages = messages.to_vec();
+        if jev_state(&chunk)?.len() > model_router::MAX_JEV_PROMPT_BYTES {
+            return Err("A normalized mail classification chunk exceeds Jev's state limit.".into());
+        }
     }
     Ok(())
 }
@@ -741,12 +822,24 @@ fn bounded_list(values: &[String], count: usize, bytes: usize, name: &str) -> Re
 fn classify_live(
     input: &MailBatchInput,
 ) -> Result<(Vec<MailClassification>, ClassifierEvidence), String> {
-    let (state, questions) = jev_payload(input)?;
-    let result = model_router::live_jev_system_one(&state, questions)?;
-    Ok((
-        classifications_from_jev(&result.body, input.messages.len())?,
-        result.evidence,
-    ))
+    let mut classifications = Vec::with_capacity(input.messages.len());
+    let mut total: Option<ClassifierEvidence> = None;
+    for messages in input.messages.chunks(JEV_CHUNK_SIZE) {
+        let mut chunk = input.clone();
+        chunk.messages = messages.to_vec();
+        let (state, questions) = jev_payload(&chunk)?;
+        let result = model_router::live_jev_system_one(&state, questions)?;
+        classifications.extend(classifications_from_jev(&result.body, messages.len())?);
+        if let Some(evidence) = &mut total {
+            evidence.latency_ms = evidence.latency_ms.saturating_add(result.evidence.latency_ms);
+            evidence.input_tokens = evidence.input_tokens.zip(result.evidence.input_tokens).map(|(a,b)| a.saturating_add(b));
+            evidence.output_tokens = evidence.output_tokens.zip(result.evidence.output_tokens).map(|(a,b)| a.saturating_add(b));
+            evidence.cost_usd = evidence.cost_usd.zip(result.evidence.cost_usd).map(|(a,b)| a + b);
+        } else {
+            total = Some(result.evidence);
+        }
+    }
+    Ok((classifications, total.ok_or("No messages were sent to Jev.")?))
 }
 
 #[cfg(test)]
