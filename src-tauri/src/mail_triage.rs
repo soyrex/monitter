@@ -2216,7 +2216,7 @@ mod tests {
             .is_err());
         assert_eq!(service.snapshot().unwrap().messages.len(), before);
         service
-            .cache_mail_detail(&task.id, batch, card, secret_body.into())
+            .cache_mail_detail(&task.id, batch, card, secret_body.into(), None)
             .unwrap();
         assert_eq!(
             service

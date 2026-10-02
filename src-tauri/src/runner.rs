@@ -1745,6 +1745,8 @@ pub struct RunControl {
     // notifications cannot mutate a later task turn.
     app_server_thread: Mutex<Option<String>>,
     app_server_turn: Mutex<Option<String>>,
+    // Never evict closed IDs: delayed native starts must not resurrect them.
+    app_server_closed_turns: Mutex<HashSet<String>>,
     // SSH bootstrap expands remote `~/` without ever consulting local HOME.
     // It is transport-only state and is not persisted into Task snapshots.
     app_server_cwd: Mutex<Option<String>>,
@@ -1899,6 +1901,7 @@ impl RunControl {
             control_stdin: Mutex::new(None),
             app_server_thread: Mutex::new(None),
             app_server_turn: Mutex::new(None),
+            app_server_closed_turns: Mutex::new(HashSet::new()),
             app_server_cwd: Mutex::new(None),
             app_server_next_request: Mutex::new(10),
             app_server_turn_requests: Mutex::new(HashSet::new()),
@@ -3041,14 +3044,63 @@ impl RunControl {
 
     pub(crate) fn set_app_server_turn(&self, turn_id: String) {
         if let Ok(mut turn) = self.app_server_turn.lock() {
-            *turn = Some(turn_id);
+            if let Some(previous) = turn.replace(turn_id.clone()) {
+                if previous != turn_id {
+                    if let Ok(mut closed) = self.app_server_closed_turns.lock() {
+                        if closed.len() < 8192 { closed.insert(previous); }
+                    }
+                }
+            }
         }
     }
 
     pub(crate) fn clear_app_server_turn(&self) {
         if let Ok(mut turn) = self.app_server_turn.lock() {
-            *turn = None;
+            if let Some(id) = turn.take() {
+                // Poisoning fails future continuation adoption closed.
+                if let Ok(mut closed) = self.app_server_closed_turns.lock() {
+                    if closed.len() < 8192 { closed.insert(id); }
+                }
+            }
         }
+    }
+
+    /// Called under the service's data -> registry fence after normal completion.
+    /// A provider-reported fresh start is authoritative; no prompt is invented.
+    pub(crate) fn adopt_native_continuation(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), String> {
+        if thread_id.is_empty()
+            || turn_id.is_empty()
+            || !self.matches_app_server_thread(thread_id)
+            || self.is_cancelled()
+            || self.is_planned_retirement()
+            || self.has_app_server_turn_request()
+            || self.has_pending_native_turn()
+        {
+            return Err("Native continuation does not own this idle thread.".into());
+        }
+        let mut current = self
+            .app_server_turn
+            .lock()
+            .map_err(|_| "Turn ownership unavailable")?;
+        let closed = self
+            .app_server_closed_turns
+            .lock()
+            .map_err(|_| "Closed turn ownership unavailable")?;
+        // Bound retained identities by refusing adoption, never by forgetting an old ID.
+        if current.is_some()
+            || closed.is_empty()
+            || closed.contains(turn_id)
+            || closed.len() >= 8192
+        {
+            return Err("Native continuation is stale or another turn owns this thread.".into());
+        }
+        self.begin_run()?;
+        *current = Some(turn_id.to_owned());
+        Ok(())
     }
 
     pub(crate) fn app_server_turn_is_current(&self, thread_id: &str, turn_id: &str) -> bool {

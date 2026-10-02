@@ -53,11 +53,46 @@ impl Fixture {
             .insert(task_id.into(), control.clone());
         control
     }
+
+    fn owned_idle_runtime(&self, task_id: &str) -> Arc<RunControl> {
+        let owner = self.idle_owner(task_id, true);
+        let mut command = std::process::Command::new("/bin/cat");
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::runner::isolate_child(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        owner.install(child, stdin).unwrap();
+        owner.capture_runtime_process_baseline().unwrap();
+        owner
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.service.cleanup();
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn native_subagent(parent_task_id: &str, source: &str, status: &str) -> crate::model::SubagentSession {
+    crate::model::SubagentSession {
+        id: format!("{source}-child-{parent_task_id}"),
+        source: source.into(),
+        parent_task_id: parent_task_id.into(),
+        parent_thread_id: None,
+        collaboration_id: None,
+        agent_path: None,
+        agent_thread_id: Some("child-thread".into()),
+        prompt: None,
+        model: None,
+        reasoning_effort: None,
+        status: status.into(),
+        result: None,
+        error: None,
+        created_at: 0,
+        updated_at: 0,
     }
 }
 
@@ -84,6 +119,81 @@ fn eligible_idle_runtime_is_retired_after_timeout() {
     assert_eq!(retired, 1);
     assert!(!owner.is_retiring());
     assert!(!f.service.has_resident_run(&task.id));
+}
+
+#[test]
+fn nonterminal_native_codex_subagents_pin_idle_runtime() {
+    for (index, status) in ["queued", "running", "future-status"].into_iter().enumerate() {
+        let f = Fixture::new(&format!("codex-child-live-{index}"));
+        let task = f.task("Parent with native child", Some("native-child-live"));
+        let owner = f.owned_idle_runtime(&task.id);
+        f.service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .subagent_sessions
+                    .push(native_subagent(&task.id, "codex", status));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            f.service
+                .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            0,
+            "Codex child status {status:?} must conservatively pin the parent runtime"
+        );
+        assert!(!owner.is_retiring());
+    }
+}
+
+#[test]
+fn terminal_native_codex_subagents_allow_idle_runtime_retirement() {
+    for (index, status) in ["completed", "error", "interrupted"].into_iter().enumerate() {
+        let f = Fixture::new(&format!("codex-child-terminal-{index}"));
+        let task = f.task("Parent with finished native child", Some("native-child-terminal"));
+        f.owned_idle_runtime(&task.id);
+        f.service
+            .mutate(None, |snapshot| {
+                snapshot
+                    .subagent_sessions
+                    .push(native_subagent(&task.id, "codex", status));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            f.service
+                .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            1,
+            "terminal Codex child status {status:?} must not pin the parent runtime"
+        );
+    }
+}
+
+#[test]
+fn other_tasks_and_subagent_sources_do_not_pin_idle_runtime() {
+    let f = Fixture::new("codex-child-unrelated");
+    let task = f.task("Unrelated native children", Some("native-child-unrelated"));
+    f.owned_idle_runtime(&task.id);
+    f.service
+        .mutate(None, |snapshot| {
+            snapshot.subagent_sessions.push(native_subagent(
+                "different-parent",
+                "codex",
+                "running",
+            ));
+            snapshot
+                .subagent_sessions
+                .push(native_subagent(&task.id, "acp", "running"));
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        f.service
+            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+        1
+    );
 }
 
 #[test]

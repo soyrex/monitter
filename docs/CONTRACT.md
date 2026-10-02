@@ -333,6 +333,14 @@ No fake conversations, progress, token counts, host connections or model replies
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot (routed through the resident Monitter Admin turn; see Internal agent)
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
+  A completed Codex turn is not proof that its persisted goal or native children
+  have finished. The resident transport may report a fresh `turn/started` after
+  normal completion without a new user message. Monitter adopts that turn only
+  for the current resident owner and explicit matching thread, with no competing
+  request, cancellation, or retirement; previously closed turn IDs remain rejected.
+  Native child status comes from child observations on normal parent completion,
+  and nonterminal Codex children prevent idle-runtime retirement. Monitter does
+  not invent a continuation prompt or change goal state in response to completion.
 - `get_task_slash_commands { taskId: string }` -> `SlashCommand[]`. Owner desktop/LAN only.
   Native Codex tasks expose Monitter's protocol-backed Codex catalog once a native thread exists;
   resident ACP tasks expose the latest replacement snapshot advertised through ACP

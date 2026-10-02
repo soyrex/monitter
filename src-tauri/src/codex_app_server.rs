@@ -1425,7 +1425,11 @@ fn handle_notification(
     if method == "turn/started" && !thread_id.is_empty() && !turn_id.is_empty() {
         // turn/start's correlated response installs the exact IDs first.
         // A delayed notification from an older turn must never replace them.
-        if control.app_server_turn_is_current(thread_id, turn_id) {
+        if control.app_server_turn_is_current(thread_id, turn_id)
+            || service
+                .adopt_app_server_continuation(task_id, control, thread_id, turn_id)
+                .is_ok()
+        {
             *started = true;
         } else {
             service.record(
@@ -2079,6 +2083,167 @@ mod tests {
         control.set_app_server_thread("thread-terminal".into());
         control.set_app_server_turn("turn-terminal".into());
         (service, task.id, control, directory)
+    }
+
+    #[test]
+    fn native_continuation_delivers_output_without_another_user_message() {
+        let (service, task_id, control, directory) = current_turn_service("native-continuation");
+        service
+            .mutate_data(None, |data| {
+                data.snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == task_id)
+                    .unwrap()
+                    .native_session_id = Some("thread-terminal".into());
+                Ok(())
+            })
+            .unwrap();
+        assert!(service.complete_app_server_turn(
+            &task_id,
+            &control,
+            Some("turn-terminal"),
+            "completed",
+            None
+        ));
+        let mut started = false;
+        let mut terminal = false;
+        let mut messages = HashMap::new();
+        let items = Arc::new(Mutex::new(HashMap::new()));
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let lifecycle = Arc::new(Mutex::new(RequestLifecycle::default()));
+        // Unsolicited starts require the schema-mandated thread identity.
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({"method":"turn/started","params":{"turn":{"id":"automatic-missing-thread"}}}),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        assert!(!started);
+        assert!(!control.matches_app_server_turn("automatic-missing-thread"));
+        handle_notification(&service, &task_id, &control,
+            &json!({"method":"turn/started","params":{"threadId":"thread-terminal","turn":{"id":"automatic-1"}}}),
+            &mut started, &mut terminal, &mut messages, &items, &seen, &lifecycle);
+        assert!(started);
+        assert!(control.app_server_turn_is_current("thread-terminal", "automatic-1"));
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({"method":"item/completed","params":{"threadId":"thread-terminal","turnId":"automatic-1","item":{"type":"agentMessage","id":"automatic-output","text":"continued work"}}}),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == "running"));
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|message| message.task_id == task_id
+                && message.role == "assistant"
+                && message.text == "continued work"));
+        assert!(!snapshot
+            .messages
+            .iter()
+            .any(|message| message.task_id == task_id && message.role == "user"));
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn native_continuation_rejects_stale_wrong_thread_cancelled_and_retiring_owners() {
+        for fence in [
+            "stale",
+            "wrong-thread",
+            "active",
+            "cancelled",
+            "retiring",
+            "error",
+            "archived",
+        ] {
+            let (service, task_id, control, directory) =
+                current_turn_service(&format!("continuation-{fence}"));
+            service
+                .mutate_data(None, |data| {
+                    data.snapshot
+                        .tasks
+                        .iter_mut()
+                        .find(|task| task.id == task_id)
+                        .unwrap()
+                        .native_session_id = Some("thread-terminal".into());
+                    Ok(())
+                })
+                .unwrap();
+            if fence != "active" {
+                assert!(service.complete_app_server_turn(
+                    &task_id,
+                    &control,
+                    Some("turn-terminal"),
+                    if fence == "error" {
+                        "error"
+                    } else {
+                        "completed"
+                    },
+                    None
+                ));
+            }
+            if fence == "cancelled" {
+                control.reserve_cancellation();
+            }
+            if fence == "retiring" {
+                control.set_resume_supported(true);
+                assert!(control
+                    .try_retire_idle(Instant::now() + Duration::from_secs(1), Duration::ZERO));
+            }
+            if fence == "archived" {
+                service
+                    .mutate_data(None, |data| {
+                        data.snapshot
+                            .tasks
+                            .iter_mut()
+                            .find(|task| task.id == task_id)
+                            .unwrap()
+                            .archived = true;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert!(
+                service
+                    .adopt_app_server_continuation(
+                        &task_id,
+                        &control,
+                        if fence == "wrong-thread" {
+                            "wrong-thread"
+                        } else {
+                            "thread-terminal"
+                        },
+                        if fence == "stale" {
+                            "turn-terminal"
+                        } else {
+                            "automatic-rejected"
+                        }
+                    )
+                    .is_err(),
+                "{fence}"
+            );
+            assert!(!control.matches_app_server_turn("automatic-rejected"));
+            drop(service);
+            let _ = std::fs::remove_dir_all(directory);
+        }
     }
 
     #[test]

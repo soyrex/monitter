@@ -41,6 +41,14 @@ fn task_allows_retirement(data: &ServiceData, task_id: &str) -> bool {
             .approval_requests
             .iter()
             .any(|request| request.task_id == task_id && request.status == "pending")
+        // Native Codex children live inside the resident Codex app-server and
+        // may not appear as separate OS descendants. Keep their owner alive
+        // until the authoritative child-thread status becomes terminal.
+        && !data.snapshot.subagent_sessions.iter().any(|session| {
+            session.source == "codex"
+                && session.parent_task_id == task_id
+                && !matches!(session.status.as_str(), "completed" | "error" | "interrupted")
+        })
 }
 
 impl Service {
