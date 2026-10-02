@@ -2220,3 +2220,10 @@ One-time replies include `matchedCount`, `archivedCount`, `skippedProtectedCount
 a longer result. The count covers the entire operation, not just the returned summaries. A preview
 is advisory; applying rechecks current activity under the state writer lock. Successful archives
 write a status event per chat. Native scheduler failures appear in the desktop diagnostic log.
+
+Workspace switching hides native browser children without closing or navigating them.
+Process-local tab ownership survives pane remounts, retaining forms, scroll, history
+and JavaScript state. Only explicit close/unload destroys the page; app restarts
+restore metadata as unloaded because in-memory page state cannot survive exit.
+Mounted dialogs (including Usage and Process metrics) suspend native browser
+overlays through their exit animation, then reveal the same live pages.

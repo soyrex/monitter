@@ -1,8 +1,14 @@
+import { writable } from 'svelte/store';
+
+/** Mounted dialogs, including their exit animation, suspend native overlays. */
+export const activeModalCount = writable(0);
+
 /** Keep the active-surface indicator on the foremost mounted modal, including
  * its exit animation. Registration avoids observing busy transcript DOM trees. */
 const modals: { node: HTMLElement; topLayer: boolean }[] = [];
 
 function updateActiveModal() {
+  activeModalCount.set(modals.length);
   let active: HTMLElement | undefined;
   let highestLayer = -Infinity;
   for (const { node: modal, topLayer } of modals) {

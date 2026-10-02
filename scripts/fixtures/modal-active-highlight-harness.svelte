@@ -1,4 +1,5 @@
 <script>
+  import { activeModalCount } from '../../src/lib/active-modal';
   import '../../src/app.css';
   import PaneGrid from '../../src/lib/components/PaneGrid.svelte';
   import Modal from '../../src/lib/components/Modal.svelte';
@@ -19,7 +20,7 @@
   };
 </script>
 
-<main class="fixture-shell">
+<main class="fixture-shell" data-modal-count={$activeModalCount}>
   <div class="fixture-controls">
     <label><input type="checkbox" bind:checked={showActivePaneBorder} /> Show active pane border</label>
     <button type="button" onclick={() => (modalOpen = true)}>Open fixture modal</button>

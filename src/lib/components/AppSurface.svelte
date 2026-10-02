@@ -159,7 +159,7 @@
     type ProviderKey,
   } from '$lib/agent-permissions';
   import Modal from "$lib/components/Modal.svelte";
-  import { activeModal } from "$lib/active-modal";
+  import { activeModal, activeModalCount } from "$lib/active-modal";
   import Markdown from "$lib/components/Markdown.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
   import { activeComputerTools } from "$lib/activity";
@@ -206,6 +206,7 @@
   import AccessPicker from '$lib/components/AccessPicker.svelte';
   import DraftPicker from '$lib/components/DraftPicker.svelte';
   import TerminalPane from '$lib/components/TerminalPane.svelte';
+  import { liveBrowserTabs, browserLayoutRuntime } from '$lib/browser-runtime';
   import { guardBrowserResize } from '$lib/browser-resize';
   import BrowserTabPanel, { type BrowserTabMetadata, type BrowserViewport } from '$lib/components/BrowserTabPanel.svelte';
   import { terminalSessions, registerTerminal, closeTerminalSession, recentTerminalOutput } from '$lib/terminal-runtime';
@@ -260,6 +261,7 @@
   let pointerTabDrag = $state<{tab:PaneTabTransfer;pointerId:number;startX:number;startY:number}|null>(null);
   let browserDragActive = $state(false);
   let browserResizeActive = $state(false);
+  let workspaceTransition = $state(false);
   onMount(() => {
     if (embedded) return;
     return guardBrowserResize(suspended => { browserResizeActive = suspended; });
@@ -560,12 +562,11 @@
   let openGitTaskIds=$state<string[]>([]), selectedGitTaskId=$state<string|null>(null);
   let browserTabs=$state<Record<string,BrowserTabMetadata>>({});
   let browserHistory=$state<Record<string, { canGoBack: boolean | null; canGoForward: boolean | null }>>({});
-  let browserBounds=$state<Record<string, BrowserBounds>>({});
+  const browserBounds = browserLayoutRuntime.bounds;
   // Tauri invokes may finish out of order. Serialize native layout writes
   // across tabs so a late hide cannot cover a newly selected browser view.
-  let browserLayoutTail: Promise<void> = Promise.resolve();
-  const browserLayoutRevision = new Map<string, number>();
-  const browserAppliedLayouts = new Map<string, string>();
+  const browserLayoutRevision = browserLayoutRuntime.revisions;
+  const browserAppliedLayouts = browserLayoutRuntime.applied;
   const browserRefreshes = new Map<string, Promise<void>>();
   const browserOpenings = new Map<string, Promise<boolean>>();
   const browserClosings = new Set<string>();
@@ -833,7 +834,7 @@
   const browserGeometryRevision = $derived(`${parentGeometryRevision}:${activeInterfaceScale}:${JSON.stringify(layout)}:${activePaneId}:${sidebarSelected ? 1 : 0}:${expandedPaneId ?? ''}:${activeWorkspaceKey}:${autoHiddenTabsRevealed ? 1 : 0}:${snapshot?.settings.showActivePaneBorder === false ? 0 : 1}`);
   // A browser page stays visible in its split even when another pane has
   // keyboard focus. Focus and on-screen visibility are different states.
-  const browserGlobalVisible = $derived(!browserDragActive && !browserResizeActive && !modal && !palette && (!mobileSidebar || mobileMain));
+  const browserGlobalVisible = $derived(!browserDragActive && !browserResizeActive && !workspaceTransition && $activeModalCount === 0 && !modal && !palette && (!mobileSidebar || mobileMain));
   const browserPaneVisible = $derived((embedded ? parentBrowserVisible : browserGlobalVisible) && !modal && !palette && (!workspaceExpansion || workspaceExpansion === paneId) && (!mobileSidebar || mobileMain));
   let vimCommandOpen = $state(false), vimCommandText = $state(''), vimCommandError = $state(''), vimHelpOpen = $state(false);
   let vimCommandInput = $state<HTMLInputElement>();
@@ -1510,6 +1511,7 @@
     return captured;
   }
   export function restoreState(value:PaneState) {
+    browserAppliedLayouts.clear(); // A restored pane must reveal its hidden native children.
     value = applySharedComposers(value as unknown as Record<string, unknown>) as unknown as PaneState;
     agentDraft=value.settingsEditor?.draft??null;agentEdits=value.settingsEditor?.edits??{};
     ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openGitTaskIds,selectedGitTaskId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
@@ -1538,7 +1540,6 @@
     }
     return { version: 1, layout, activePaneId, main, panes, sidebarCollapsed, collapsedAgents, collapsedProjects, terminals };
   }
-  let workspaceTransition = $state(false);
   function syncSharedTaskDrafts(source: PersistedWorkspace) {
     if (!workspaceSet) return;
     // Each chat has one owning pane in the current layout. Only that pane's
@@ -1628,9 +1629,8 @@
       browserTabs: saved.browserTabs && typeof saved.browserTabs === 'object' && !Array.isArray(saved.browserTabs)
         ? Object.fromEntries(Object.entries(saved.browserTabs).flatMap(([id, value]) => {
             const tab = value as BrowserTabMetadata;
-            // Native child webviews are process-local. A restored workspace retains
-            // only this metadata, so its first visible layout must create a child.
-            return typeof tab?.url === 'string' && typeof tab?.title === 'string' && typeof tab?.unloaded === 'boolean' ? [[id, { id, url: tab.url, title: tab.title, unloaded: true }]] : [];
+            // Runtime ownership survives workspace/pane remounts, but never an app restart.
+            return typeof tab?.url === 'string' && typeof tab?.title === 'string' && typeof tab?.unloaded === 'boolean' ? [[id, { id, url: tab.url, title: tab.title, unloaded: !liveBrowserTabs.has(id) }]] : [];
           })) : {},
       openEmptyIds: Array.isArray(saved.openEmptyIds) ? saved.openEmptyIds : fallback.openEmptyIds,
       documents: saved.documents && typeof saved.documents === 'object' && !Array.isArray(saved.documents)
@@ -1737,19 +1737,30 @@
     const state = captureState();
     return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openBrowserIds: [], selectedBrowserId: null, browserTabs: {}, openGitTaskIds: [], selectedGitTaskId: null, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
   }
-  export async function retireBrowserTabs() {
+  export async function suspendBrowserTabs() {
     if (!nativeRuntime || !bridge.available) return;
-    const tabs = Object.values(browserTabs);
-    const results = await Promise.allSettled(tabs.map(tab => retireNativeBrowser(tab.id)));
-    const failed = results.find(result => result.status === 'rejected');
-    if (failed?.status === 'rejected') throw new Error(`Could not retire browser tab: ${text(failed.reason)}`);
+    // Drain pending navigation/layout before parking the live pages. Hidden
+    // children remain alive, preserving DOM, forms, scroll and JS state.
+    await Promise.allSettled([...browserOpenings.values()]);
+    await browserLayoutRuntime.tail.catch(() => {});
+    for (const tab of Object.values(browserTabs)) {
+      const bounds = browserBounds[tab.id];
+      if (tab.unloaded || !bounds) continue;
+      browserLayoutRevision.set(tab.id, (browserLayoutRevision.get(tab.id) ?? 0) + 1);
+      const park = browserLayoutRuntime.tail.catch(() => {}).then(async () => {
+        await bridge.browserSetLayout(tab.id, bounds, false);
+        browserAppliedLayouts.delete(tab.id);
+      });
+      browserLayoutRuntime.tail = park;
+      await park;
+    }
   }
-  async function retireCurrentWorkspaceBrowsers() {
+  async function suspendCurrentWorkspaceBrowsers() {
     const children = paneIds(layout).filter(id => id !== 'main').flatMap(id => {
-      const pane = paneRefs[id] as unknown as { retireBrowserTabs?: () => Promise<void> } | undefined;
-      return pane?.retireBrowserTabs ? [pane.retireBrowserTabs()] : [];
+      const pane = paneRefs[id] as unknown as { suspendBrowserTabs?: () => Promise<void> } | undefined;
+      return pane?.suspendBrowserTabs ? [pane.suspendBrowserTabs()] : [];
     });
-    const results = await Promise.allSettled([retireBrowserTabs(), ...children]);
+    const results = await Promise.allSettled([suspendBrowserTabs(), ...children]);
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
   }
@@ -1759,7 +1770,7 @@
     if (!persistWorkspace()) return false;
     workspaceTransition = true;
     try {
-      try { await retireCurrentWorkspaceBrowsers(); }
+      try { await suspendCurrentWorkspaceBrowsers(); }
       catch (reason) {
         error = `Could not switch workspace: ${text(reason)}. Browser tabs remain available to retry.`;
         return false;
@@ -1882,8 +1893,9 @@
       return {tab};
     }
     if(tab.kind==='browser') {
+      if (browserOpenings.has(tab.id) || browserRequestedUrls.has(tab.id) || browserClosings.has(tab.id)) { notice = 'Wait for the browser navigation before moving this tab.'; return null; }
       const browser = browserTabs[tab.id]; if (!browser) return null;
-      delete browserTabs[tab.id]; delete browserBounds[tab.id]; openBrowserIds = openBrowserIds.filter(id => id !== tab.id);
+      delete browserTabs[tab.id]; openBrowserIds = openBrowserIds.filter(id => id !== tab.id);
       if (pane === 'browser' && selectedBrowserId === tab.id) { selectedBrowserId = null; openOverview(); }
       forgetTab(tab); return { tab, browser: { ...browser } };
     }
@@ -1918,6 +1930,7 @@
     if(tab.kind==='settings') {agentDraft=payload.settingsEditor?.draft??null;agentEdits=payload.settingsEditor?.edits??{};settingsCategory=payload.settingsCategory??'appearance';openSettings();rememberTab(tab,before);return;}
     if(tab.kind==='terminal') {openTerminalTab(tab.id);rememberTab(tab,before);return;}
     if(tab.kind==='browser') {
+      if (browserOpenings.has(tab.id) || browserRequestedUrls.has(tab.id) || browserClosings.has(tab.id)) { notice = 'Wait for the browser navigation before moving this tab.'; return null; }
       const browser = payload.browser;
       if (!browser || browser.id !== tab.id || typeof browser.url !== 'string' || typeof browser.title !== 'string' || typeof browser.unloaded !== 'boolean') return;
       browserTabs[tab.id] = { ...browser }; openBrowser(tab.id); rememberTab(tab,before); return;
@@ -2741,14 +2754,20 @@
     return {};
   }
   export async function newTerminal() {
-    await runTerminalCommand('');
+    const emptyId = pane === 'empty' && selectedEmptyId && !documents[selectedEmptyId] ? selectedEmptyId : null;
+    await runTerminalCommand('', emptyId);
   }
-  async function runTerminalCommand(command: string) {
+  async function runTerminalCommand(command: string, replaceEmptyId: string | null = null) {
     if(terminalBusy)return;
+    const workspaceKey = activeWorkspaceKey;
     const target=terminalTarget();
     if(command) target.command=command;
     terminalBusy=true;error='';
-    try {const session=await bridge.openTerminal(target,80,24);registerTerminal(session);openTerminalTab(session.id);}
+    try {
+      const session=await bridge.openTerminal(target,80,24);
+      registerTerminal(session);openTerminalTab(session.id);
+      if (replaceEmptyId && workspaceKey === activeWorkspaceKey) replaceEmptyTab(replaceEmptyId, { kind: 'terminal', id: session.id });
+    }
     catch(reason){error=`Could not open terminal: ${text(reason)}`;}
     finally{terminalBusy=false;}
   }
@@ -2983,9 +3002,17 @@
     rememberTab({ kind: 'empty', id });
     focusSelectedTabInput();
   }
+  function replaceEmptyTab(emptyId: string, replacement: TabKey) {
+    if (!openEmptyIds.includes(emptyId) || documents[emptyId]) return;
+    rememberTab(replacement, { kind: 'empty', id: emptyId });
+    openEmptyIds = openEmptyIds.filter(id => id !== emptyId);
+    if (selectedEmptyId === emptyId) selectedEmptyId = null;
+    forgetTab({ kind: 'empty', id: emptyId });
+  }
   export function openBrowserTab() {
     if (!nativeRuntime || !bridge.available) { notice = 'Browser tabs require the native desktop app.'; return; }
     saveCurrentDraft();
+    const emptyId = pane === 'empty' && selectedEmptyId && !documents[selectedEmptyId] ? selectedEmptyId : null;
     const id = localUuid();
     // A tab is inert until the user enters an address. Never create a network
     // request merely because a workspace or a tab strip was restored.
@@ -2994,6 +3021,7 @@
     selectedBrowserId = id; selectedTaskId = null; selectedChannelId = null; selectedTerminalId = null; selectedEmptyId = null; currentDraftId = null;
     focusedAgentId = null; focusedProjectId = null; composer = ''; pane = 'browser';
     rememberTab({ kind: 'browser', id });
+    if (emptyId) replaceEmptyTab(emptyId, { kind: 'browser', id });
   }
   function openBrowser(id: string) {
     const tab = browserTabs[id]; if (!tab) return;
@@ -3039,6 +3067,7 @@
         const state = await bridge.browserOpen(id, 'about:blank', bounds);
         const current = browserTabs[id];
         if ((browserEpoch.get(id) ?? 0) !== epoch || !current) { try { await bridge.browserClose(id); } catch { /* Closing an already-removed child is harmless. */ } return false; }
+        liveBrowserTabs.add(id);
         browserAppliedLayouts.delete(id);
         applyBrowserState(state, true);
         return true;
@@ -3050,7 +3079,7 @@
   }
   async function layoutBrowser(id: string, viewport: BrowserViewport) {
     const tab = browserTabs[id];
-    if (!tab || browserClosings.has(id) || !nativeRuntime || !bridge.available) return;
+    if ((!tab && viewport.visible) || browserClosings.has(id) || !nativeRuntime || !bridge.available) return;
     // DOM rects are CSS coordinates after the renderer WebView zoom. Tauri
     // child-webview bounds are window logical coordinates before that zoom.
     // At the default 125% UI scale this multiplies the CSS rect by 1.25,
@@ -3076,14 +3105,14 @@
     if (!bounds) return;
     // An unloaded tab has no child to hide or resize. It remains inert until
     // address submission creates its blank native child.
-    if (tab.unloaded) return;
+    if (tab?.unloaded || !liveBrowserTabs.has(id)) return;
     const revision = (browserLayoutRevision.get(id) ?? 0) + 1;
     browserLayoutRevision.set(id, revision);
     const visible = viewport.visible;
-    const write = browserLayoutTail.catch(() => {}).then(async () => {
+    const write = browserLayoutRuntime.tail.catch(() => {}).then(async () => {
       // Collapse bursts of resize/movement reports to the newest bounds for
       // this tab, and never resurrect a child after unload or close.
-      if (browserLayoutRevision.get(id) !== revision || browserClosings.has(id) || !browserTabs[id] || browserTabs[id].unloaded) return;
+      if (browserLayoutRevision.get(id) !== revision || browserClosings.has(id) || !liveBrowserTabs.has(id) || (visible && (!browserTabs[id] || browserTabs[id].unloaded))) return;
       const key = `${window.innerWidth}:${window.innerHeight}:${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}:${visible}`;
       if (browserAppliedLayouts.get(id) === key) return;
       try {
@@ -3095,7 +3124,7 @@
           error = `Could not position browser tab: ${text(reason)}`;
       }
     });
-    browserLayoutTail = write;
+    browserLayoutRuntime.tail = write;
     await write;
   }
   function browserAddress(raw: string): string | null {
@@ -3144,7 +3173,7 @@
     const tab = browserTabs[id]; if (!tab || tab.unloaded || !nativeRuntime || !bridge.available) return;
     browserEpoch.set(id, (browserEpoch.get(id) ?? 0) + 1);
     browserLayoutRevision.set(id, (browserLayoutRevision.get(id) ?? 0) + 1);
-    try { await browserLayoutTail; await bridge.browserClose(id); if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true }; delete browserBounds[id]; delete browserHistory[id]; browserLayoutRevision.delete(id); browserAppliedLayouts.delete(id); browserRequestedUrls.delete(id); }
+    try { await browserLayoutRuntime.tail.catch(() => {}); await bridge.browserClose(id); liveBrowserTabs.delete(id); if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true }; delete browserBounds[id]; delete browserHistory[id]; browserLayoutRevision.delete(id); browserAppliedLayouts.delete(id); browserRequestedUrls.delete(id); }
     catch (reason) { error = `Could not unload browser tab: ${text(reason)}`; }
   }
   function retireNativeBrowser(id: string): Promise<void> {
@@ -3157,6 +3186,7 @@
       // idempotent final close catches any child that survived that path.
       await browserOpenings.get(id);
       if (nativeRuntime && bridge.available) await bridge.browserClose(id);
+      liveBrowserTabs.delete(id);
       if (browserTabs[id]) browserTabs[id] = { ...browserTabs[id], unloaded: true };
       delete browserBounds[id]; delete browserHistory[id]; browserRequestedUrls.delete(id);
       browserLayoutRevision.delete(id); browserAppliedLayouts.delete(id); browserEpoch.delete(id);

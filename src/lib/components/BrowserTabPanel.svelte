@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { claimBrowserViewport } from '$lib/browser-runtime';
   import { untrack } from 'svelte';
   import { observeBrowserViewport } from '$lib/browser-viewport';
   import ArrowRight from "@lucide/svelte/icons/arrow-right";
@@ -48,9 +49,10 @@
   $effect(() => {
     const node = viewport;
     if (!node) return;
-    const observer = observeBrowserViewport(node, next => untrack(() => onLayout?.(next)));
+    const owner = claimBrowserViewport(untrack(() => tab.id));
+    const observer = observeBrowserViewport(node, next => untrack(() => { if (owner.owns()) onLayout?.(next); }));
     geometryObserver = observer;
-    return () => { observer.destroy(); geometryObserver = undefined; };
+    return () => { observer.destroy(); owner.release(); geometryObserver = undefined; };
   });
   $effect(() => {
     const visible = active, unloaded = tab.unloaded, revision = layoutRevision;

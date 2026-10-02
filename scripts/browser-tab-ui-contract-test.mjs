@@ -16,9 +16,9 @@ assert.match(surface, /browserTabs\[id\] = \{ id, url: '', title: 'New browser t
 assert.match(surface, /candidate\.width > 0 && candidate\.height > 0/, 'only valid viewport geometry is cached');
 assert.match(surface, /const bounds = browserBounds\[id\];\n    if \(!bounds\) return;/, 'hidden teardown reuses prior valid bounds');
 assert.match(surface, /async function unloadBrowser/, 'unload retains tab metadata separately from close');
-assert.match(surface, /export async function retireBrowserTabs/, 'each pane retires its own native browser children');
-assert.match(surface, /pane\.retireBrowserTabs/, 'workspace switches call embedded-pane retirement');
-assert.match(surface, /if \(failed\?\.status === 'rejected'\) throw new Error\(`Could not retire browser tab:/, 'retirement failure stops workspace replacement');
+assert.match(surface, /export async function suspendBrowserTabs/, 'each pane hides its own live native browser children');
+assert.match(surface, /pane\.suspendBrowserTabs/, 'workspace switches call embedded-pane suspension');
+assert.match(surface, /if \(failed\?\.status === 'rejected'\) throw failed.reason/, 'suspension failure stops workspace replacement');
 assert.match(surface, /browserEpoch\.set/, 'in-flight browser creation is invalidated during retirement');
 assert.match(surface, /const nativeZoom = nativeRuntime \? activeInterfaceScale \/ 100 : 1/, 'DOM coordinates are converted through the native WebView zoom');
 assert.match(surface, /const borderInset = focusedPane && snapshot\?\.settings\.showActivePaneBorder !== false \? 2 : 0/, 'active pane outline is exposed around the native child');
@@ -30,12 +30,12 @@ assert.match(surface, /parentBrowserVisible=\{browserGlobalVisible && \(!expande
 assert.match(surface, /browserGlobalVisible = \$derived\(!browserDragActive/, 'native browser children hide during an active tab drag');
 assert.match(surface, /onPointerDragStart=\{\(\)=>browserDragActive=true\}/, 'drag threshold hides browser children before drop targeting');
 assert.match(surface, /'monitter:browser-focus'/, 'native browser clicks activate their owning pane');
-assert.match(surface, /browserLayoutTail\.catch\(\(\) => \{\}\)\.then/, 'native layout writes are serialized');
+assert.match(surface, /browserLayoutRuntime\.tail\.catch\(\(\) => \{\}\)\.then/, 'native layout writes are serialized');
 assert.match(surface, /function retireNativeBrowser\(id: string\)[\s\S]*?await bridge\.browserClose\(id\)/, 'native cleanup owns the close attempt');
 assert.match(surface, /async function closeBrowserTab\(id: string, collapse = true\)[\s\S]*?await retireNativeBrowser\(id\);[\s\S]*?delete browserTabs\[id\]/, 'close keeps tab controls until native cleanup succeeds');
 assert.match(surface, /const existing = browserCloseTasks\.get\(id\); if \(existing\) return existing;/, 'workspace retirement awaits an already-running tab close');
 assert.match(surface, /browserEpoch\.set\(id, \(browserEpoch\.get\(id\) \?\? 0\) \+ 1\)/, 'close invalidates an in-flight native open');
-assert.match(surface, /browserClosings\.has\(id\) \|\| !browserTabs\[id\]/, 'queued layout cannot re-show a closing child');
+assert.match(surface, /browserClosings\.has\(id\) \|\| !liveBrowserTabs\.has\(id\)/, 'queued layout cannot re-show a closing child');
 assert.match(native, /let close_result = close_after_detach\(detach_result/, 'native close proceeds even if authentication detach fails');
 assert.match(native, /tab\.closing = true/, 'native close rejects late layout writes');
 assert.deepEqual(nativeBounds({ x: 10, y: 20, width: 500, height: 300 }, 80), { x: 8, y: 16, width: 400, height: 240 });
@@ -52,7 +52,7 @@ assert.match(panel, /aria-label="Load unpacked extension"/, 'browser toolbar exp
 assert.match(panel, /Extensions may read or change browser pages/, 'extension loader gives a permissions warning');
 assert.match(panel, /loaded by WebKit/, 'success copy does not claim extension functionality');
 assert.match(geometry, /'scroll'/, 'position-only shifts are reported');
-assert.match(panel, /untrack\(\(\) => onLayout\?\.\(next\)\)/, 'layout callback does not feed parent state back into the panel effect');
+assert.match(panel, /untrack\(\(\) => \{ if \(owner\.owns\(\)\) onLayout\?\.\(next\); \}\)/, 'layout callback does not feed parent state back into the panel effect');
 assert.match(panel, /revision = layoutRevision/, 'zoom changes force a fresh layout report');
 assert.match(geometry, /'transitionend'/, 'position-only CSS transitions get a final native bounds check');
 assert.match(geometry, /getAnimations/, 'WAAPI pane motion is followed through its final frame');
