@@ -166,6 +166,7 @@ export interface MonitterBridge {
   browserGetState(tabId: string): Promise<BrowserState>;
   onBrowserState(handler: (state: BrowserState) => void): Promise<UnlistenFn>;
   getModelCatalog(target: ModelTarget): Promise<ModelCatalog>;
+  clearModelCatalog(): Promise<void>;
   setTaskModelSettings(taskId: string, settings: ModelSettings): Promise<Snapshot>;
   setTaskSandbox(taskId: string, sandbox: Sandbox): Promise<Snapshot>;
   getTaskGoal(taskId: string): Promise<Goal | null>;
@@ -518,6 +519,7 @@ const nativeBridge: MonitterBridge = {
   browserGetState: tabId => isLanBrowser() ? desktopOnly() : invoke('browser_get_state', {tabId}),
   onBrowserState: handler => isLanBrowser() ? desktopOnly() : listen<BrowserState>('monitter:browser-state', event => handler(event.payload)),
   getModelCatalog: target => invoke("get_model_catalog", {target}),
+  clearModelCatalog: () => invoke("clear_model_catalog_cache"),
   setTaskModelSettings: (taskId, settings) => invoke("set_task_model_settings", {taskId,settings}),
   setTaskSandbox: (taskId, sandbox) => invoke('set_task_sandbox', {taskId,sandbox}),
   getTaskGoal: async taskId => goalFromJson(await invoke("get_task_goal", { taskId })),
@@ -678,6 +680,7 @@ const previewBridge: MonitterBridge = {
   browserGetState: () => desktopOnly(),
   onBrowserState: () => desktopOnly(),
   getModelCatalog: () => desktopOnly(),
+  clearModelCatalog: () => desktopOnly(),
   setTaskModelSettings: () => desktopOnly(),
   setTaskSandbox: () => desktopOnly(),
   getTaskGoal: async () => null,
@@ -833,6 +836,7 @@ export function getBridge(): MonitterBridge {
       browserGetState: tabId => test.invoke('browser_get_state', {tabId}) as Promise<BrowserState>,
       onBrowserState: async () => () => {},
       getModelCatalog: target => test.invoke("get_model_catalog", {target}) as Promise<ModelCatalog>,
+      clearModelCatalog: () => test.invoke("clear_model_catalog_cache") as Promise<void>,
       setTaskModelSettings: (taskId, settings) => test.invoke("set_task_model_settings", {taskId,settings}) as Promise<Snapshot>,
       setTaskSandbox: (taskId, sandbox) => test.invoke('set_task_sandbox', {taskId,sandbox}) as Promise<Snapshot>,
       getTaskGoal: taskId => test.invoke("get_task_goal", {taskId}) as Promise<Goal | null>,

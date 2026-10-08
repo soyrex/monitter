@@ -971,4 +971,52 @@ mod tests {
         control.terminate_owned();
         let _ = std::fs::remove_dir_all(service.runtime_dir.clone());
     }
+
+    #[test]
+    fn model_catalog_cache_drops_entries_on_clear() {
+        let service = Service::open(None, dir("clear-catalog")).unwrap();
+        let host = service.snapshot().unwrap().hosts[0].clone();
+        let key_a = crate::model_catalog_key(
+            &host, "codex", "/tmp", Some("/tmp"), None,
+        );
+        let key_b = crate::model_catalog_key(
+            &host, "opencode", "/tmp", None, None,
+        );
+        service
+            .model_catalogs
+            .lock()
+            .unwrap()
+            .insert(key_a, (Instant::now(), ModelCatalog {
+                models: vec![],
+                current: ModelCatalogCurrent { model: String::new(), reasoning_effort: None, fast_mode: None },
+                source: "fixture".into(),
+                warning: None,
+            }));
+        service
+            .model_catalogs
+            .lock()
+            .unwrap()
+            .insert(key_b, (Instant::now(), ModelCatalog {
+                models: vec![],
+                current: ModelCatalogCurrent { model: String::new(), reasoning_effort: None, fast_mode: None },
+                source: "fixture".into(),
+                warning: None,
+            }));
+        assert_eq!(service.model_catalogs.lock().unwrap().len(), 2);
+        service.clear_model_catalog_cache().unwrap();
+        assert!(
+            service.model_catalogs.lock().unwrap().is_empty(),
+            "clear_model_catalog_cache should drop every entry"
+        );
+    }
+
+    #[test]
+    fn codex_cli_version_probe_never_panics() {
+        // The version probe is the cache-key suffix; it must be deterministic
+        // for the same binary and the same default PATH lookup. An empty
+        // return is acceptable when codex is not on PATH. We just assert
+        // the function returns a String and does not panic.
+        let version = crate::codex_cli_version("");
+        let _ = version;
+    }
 }

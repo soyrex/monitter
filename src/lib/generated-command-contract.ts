@@ -306,6 +306,7 @@ export interface CommandArgs {
   "get_model_catalog": {
   target: ModelTarget;
   };
+  "clear_model_catalog_cache": {  };
   "set_task_model_settings": {
   taskId: string;
   settings: ModelSettings;
@@ -504,6 +505,7 @@ export interface CommandResults {
   "send_channel_message_fast": SendAccepted;
   "get_resume_command": string;
   "get_model_catalog": ModelCatalog;
+  "clear_model_catalog_cache": void;
   "set_task_model_settings": Snapshot;
   "set_task_sandbox": Snapshot;
   "get_task_goal": JsonValue | null;

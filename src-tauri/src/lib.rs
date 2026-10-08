@@ -474,12 +474,57 @@ enum InternalAdminState {
     Multiple,
 }
 
-const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
+const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Codex CLI cache-key suffix. We probe the installed binary's `--version`
+/// output and append it to the catalog cache key so a CLI upgrade
+/// invalidates the cache without waiting for the TTL. An empty string is a
+/// stable "version unknown" suffix; the picker keeps working, it just relies
+/// on the TTL for refresh.
 
 /// Maximum wall-clock duration for a single Monitter Admin mini-LLM turn.
 /// Matches the user-facing 45-second interface deadline; the broker watchdog
 /// terminates the resident transport on expiry.
 const ADMIN_TURN_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn codex_cli_version(codex_path: &str) -> String {
+    let bin = if codex_path.trim().is_empty() {
+        "codex"
+    } else {
+        codex_path.trim()
+    };
+    std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if v.is_empty() { None } else { Some(v) }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Build the cache key for a (host, provider, cwd, codex_home, acp) tuple.
+/// Codex catalogs also append the installed CLI version so a `codex`
+/// upgrade invalidates the cache without waiting for the TTL. Test
+/// seeders must go through this same helper so write and read keys match.
+fn model_cache_key(
+    host: &Host,
+    provider: &str,
+    cwd: &str,
+    codex_home: Option<&str>,
+    acp_launch: Option<&AcpLaunch>,
+) -> String {
+    let mut key = model_catalog_key(host, provider, cwd, codex_home, acp_launch);
+    if provider == "codex" {
+        key.push('\u{1f}');
+        key.push_str(&codex_cli_version(&host.codex_path));
+    }
+    key
+}
 
 fn model_catalog_key(
     host: &Host,
@@ -2721,7 +2766,7 @@ impl Service {
         codex_home: Option<&str>,
         refresh: bool,
     ) -> Result<ModelCatalog, String> {
-        let key = model_catalog_key(host, provider, cwd, codex_home, None);
+        let key = model_cache_key(host, provider, cwd, codex_home, None);
         if !refresh {
             if let Ok(cache) = self.model_catalogs.lock() {
                 if let Some((when, catalog)) = cache.get(&key) {
@@ -2791,6 +2836,38 @@ impl Service {
             .map_err(|_| "Monitter model catalog lock failed.".to_string())?
             .insert(key, (Instant::now(), catalog.clone()));
         Ok(catalog)
+    }
+
+    /// Insert a pre-built model catalog into the cache. Tests use this to
+    /// seed a deterministic catalog without spawning a real Codex CLI; the
+    /// production read path also goes through `model_cache_key` so the keys
+    /// line up.
+    #[cfg(test)]
+    pub(crate) fn seed_model_catalog(
+        &self,
+        host: &Host,
+        provider: &str,
+        cwd: &str,
+        codex_home: Option<&str>,
+        acp_launch: Option<&AcpLaunch>,
+        catalog: ModelCatalog,
+    ) {
+        let key = model_cache_key(host, provider, cwd, codex_home, acp_launch);
+        self.model_catalogs
+            .lock()
+            .expect("model_catalogs lock")
+            .insert(key, (Instant::now(), catalog));
+    }
+
+    /// Drop every cached model catalog. The next picker open will refetch
+    /// from each harness. Used as an explicit escape hatch when the picker
+    /// appears stale; the picker also exposes a refresh button.
+    pub(crate) fn clear_model_catalog_cache(&self) -> Result<(), String> {
+        self.model_catalogs
+            .lock()
+            .map_err(|_| "Monitter model catalog lock failed.".to_string())?
+            .clear();
+        Ok(())
     }
 
     fn set_task_model_settings(
@@ -9415,6 +9492,14 @@ async fn get_model_catalog(
 }
 
 #[tauri::command]
+async fn clear_model_catalog_cache(state: State<'_, AppState>) -> Result<(), String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.clear_model_catalog_cache())
+        .await
+        .map_err(|error| format!("Model catalog clear worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn set_task_model_settings(
     state: State<'_, AppState>,
     task_id: String,
@@ -9798,6 +9883,7 @@ pub fn run() {
             send_channel_message_fast,
             get_resume_command,
             get_model_catalog,
+            clear_model_catalog_cache,
             set_task_model_settings,
             set_task_sandbox,
             get_task_goal,
@@ -10938,39 +11024,33 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             .unwrap();
         // Prime the catalog cache so the live change can validate the chosen model.
         let (task_snapshot, host) = service.task_and_host(&task.id).unwrap();
-        let key = model_catalog_key(
+        service.seed_model_catalog(
             &host,
             &task_snapshot.provider,
             &task_snapshot.cwd,
             task_snapshot.codex_home.as_deref(),
             None,
-        );
-        service.model_catalogs.lock().unwrap().insert(
-            key,
-            (
-                Instant::now(),
-                ModelCatalog {
-                    models: vec![CatalogModel {
-                        id: "gpt-test".into(),
-                        name: "Test".into(),
-                        description: String::new(),
-                        reasoning_efforts: vec![
-                            ReasoningEffortOption { id: "high".into(), description: String::new() },
-                            ReasoningEffortOption { id: "low".into(), description: String::new() },
-                        ],
-                        default_effort: Some("high".into()),
-                        supports_fast: false,
-                        fast_description: None,
-                    }],
-                    current: ModelCatalogCurrent {
-                        model: "gpt-test".into(),
-                        reasoning_effort: Some("high".into()),
-                        fast_mode: None,
-                    },
-                    source: "fixture".into(),
-                    warning: None,
+            ModelCatalog {
+                models: vec![CatalogModel {
+                    id: "gpt-test".into(),
+                    name: "Test".into(),
+                    description: String::new(),
+                    reasoning_efforts: vec![
+                        ReasoningEffortOption { id: "high".into(), description: String::new() },
+                        ReasoningEffortOption { id: "low".into(), description: String::new() },
+                    ],
+                    default_effort: Some("high".into()),
+                    supports_fast: false,
+                    fast_description: None,
+                }],
+                current: ModelCatalogCurrent {
+                    model: "gpt-test".into(),
+                    reasoning_effort: Some("high".into()),
+                    fast_mode: None,
                 },
-            ),
+                source: "fixture".into(),
+                warning: None,
+            },
         );
         service
             .set_task_model_settings(
@@ -11138,13 +11218,6 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             })
             .unwrap();
         let (task_snapshot, host) = service.task_and_host(&task.id).unwrap();
-        let key = model_catalog_key(
-            &host,
-            &task_snapshot.provider,
-            &task_snapshot.cwd,
-            task_snapshot.codex_home.as_deref(),
-            None,
-        );
         let catalog = ModelCatalog {
             models: vec![CatalogModel {
                 id: "older".into(),
@@ -11163,11 +11236,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             source: "fixture".into(),
             warning: None,
         };
-        service
-            .model_catalogs
-            .lock()
-            .unwrap()
-            .insert(key, (Instant::now(), catalog));
+        service.seed_model_catalog(
+            &host,
+            &task_snapshot.provider,
+            &task_snapshot.cwd,
+            task_snapshot.codex_home.as_deref(),
+            None,
+            catalog,
+        );
         for fast_mode in [Some(true), Some(false)] {
             assert_eq!(
                 service.set_task_model_settings(

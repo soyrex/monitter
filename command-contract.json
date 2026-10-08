@@ -1883,6 +1883,15 @@
         "lan"
       ]
     },
+    "clear_model_catalog_cache": {
+      "arguments": [],
+      "resultRustType": "()",
+      "resultTsType": "void",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "set_task_model_settings": {
       "arguments": [
         {

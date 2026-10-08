@@ -1554,8 +1554,7 @@ mod tests {
 
     fn seed_delegation_catalog(service: &Service, caller: &str, agent: &Agent) {
         let target = service.delegation_target(caller, &agent.id).unwrap();
-        let key = crate::model_catalog_key(&target.host, &agent.provider, &target.cwd, agent.codex_home.as_deref(), agent.acp.as_ref());
-        service.model_catalogs.lock().unwrap().insert(key, (Instant::now(), crate::model::ModelCatalog {
+        let catalog = crate::model::ModelCatalog {
             models: vec![crate::model::CatalogModel {
                 id:"fixture-model".into(), name:"Fixture".into(), description:"Focused checks".into(),
                 reasoning_efforts:vec![crate::model::ReasoningEffortOption {id:"low".into(),description:"Low".into()}],
@@ -1563,7 +1562,15 @@ mod tests {
             }],
             current:crate::model::ModelCatalogCurrent {model:agent.model.clone(),reasoning_effort:None,fast_mode:None},
             source:"fixture".into(),warning:None,
-        }));
+        };
+        service.seed_model_catalog(
+            &target.host,
+            &agent.provider,
+            &target.cwd,
+            agent.codex_home.as_deref(),
+            agent.acp.as_ref(),
+            catalog,
+        );
     }
 
     #[test]
