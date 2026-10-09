@@ -5,6 +5,109 @@ Canonical TS data shapes: `src/lib/types.ts`. Rust serde fields use camelCase.
 All timestamps are Unix milliseconds. IDs are UUID strings. Optional task links use null.
 No fake conversations, progress, token counts, host connections or model replies in the shipped app.
 
+### Experimental GPUI desktop adapter
+
+The read-only private method `read_idle_runtime_status` returns `idleTimeoutMs`
+and a `runtimes` array keyed by `taskId`/`rootPid`. Each sample reports `state`
+(`dormant|active|idle|retiring|unavailable`), nullable `idleForMs`, `resumeSupported`,
+`eventCount`, `pendingApproval`, `pendingRequest`, `cancelled`,
+`toolWorkObserved`, `processTreeVerified`, `unknownProcessCount`, `pinReasons`,
+`backgroundToolProcesses`,
+and `taskEligible`. This owner-local
+diagnostic contains no prompts, native thread IDs, command arguments or secrets;
+it is not exposed through LAN/mobile/shared command dispatch. It is a sample,
+not permission to stop a process. The collector independently
+rechecks work, ownership and send/retire fences before releasing an idle runtime.
+Darwin-confirmed exited/zombie descendants do not pin retirement; live unknown
+children and uninspectable/root identities still do. Chat history and saved
+provider session IDs remain durable, and the next normal send resumes that ID.
+Late replacement helpers may be adopted only when their exact executable,
+arguments and complete ancestry match infrastructure captured before tool work.
+Matching a helper does not authorize its unfamiliar descendants. Launch details
+stay private to ownership checks and are never included in idle diagnostics.
+Before the first Codex prompt, a background worker checks every page of the
+thread's MCP inventory for completed startup. The stdout reader keeps servicing
+responses. If startup readiness cannot be verified within 30 seconds, the
+original prompt still starts. Retirement stays blocked unless a later effective
+configuration read and exact ownership checks prove the complete live tree.
+
+
+In the `experiment/gpui-desktop` fork, `desktop-gpui/` calls the feature-gated
+`monitter_lib::experimental_desktop::DesktopService` on background workers through
+private, same-user Unix-socket IPC to the separate `Monitter GPUI Server.app`.
+The private GUI client quietly retries transient transport failures twice, with
+150 ms and 450 ms backoff, before returning an error. A failed connection or
+handshake can retry any command because its request has not been sent. After
+request delivery begins, only explicitly allowlisted read operations can retry;
+uncertain sends, terminal input, and other mutations are never automatically
+replayed. Authentication, backend identity, malformed protocol responses, and
+backend validation errors bypass retry. All attempts run on existing background
+workers and keep the same authenticated backend instance.
+Transient change-feed drops silently reopen the read-only subscription and its
+initial wake refreshes committed state. Longer outages use a sleeping backoff on
+the existing feed worker. Chat command replies lost in transit trigger bounded
+authority reads only after failure; a unique matching acknowledgement completes
+silently. Unconfirmed outcomes preserve local drafts and attachments and show
+concise guidance instead of transport internals. Normal commands add no extra
+authority reads, and recovery never resends an uncertain mutation.
+The menu-bar server alone owns one Service and the isolated experimental profile;
+the GUI owns presentation and retained native views. It does not create a Tauri
+window or automatically start the LAN listener. Existing
+mobile/shared clients and their wire contracts are unchanged and still connect
+to the original desktop. The adapter reports its implemented command subset via
+`get_command_capabilities`; unported native browser commands are not advertised.
+The compatibility command path reuses existing JSON argument/result shapes and
+the revisioned compact `get_ui_snapshot` response. Native callers can instead use
+`read_ui_changes`, `read_task_messages`, and `read_channel_messages` to receive the
+existing typed Rust journal/page responses over the private IPC transport. Delta
+consumers must match `fromRevision` exactly, use a full snapshot after
+a journal gap, and honor explicit removals/channel resets. Compact history is not
+a complete transcript export. The native shell now owns this typed cache and
+accepts task/channel history pages only against its current revision; existing
+native views receive a shared compatibility projection after accepted changes.
+Native views subscribe to a bounded, coalescing change feed, fetching
+revisioned state only on a wake or explicit refresh. The native terminal uses
+`write_terminal_input(id, &[u8])` for binary PTY input with the existing session
+lookup, size and lifecycle checks; Tauri/LAN string-input commands stay unchanged.
+Native picker attachments use owner-only typed `read_attachment_file` and
+`store_selected_attachment` methods. Reads reuse the existing regular-file and
+20 MiB limits. Storage checks the picker-captured task host/workspace under the
+same state lock that resolves the transfer destination, so a task move during
+file reading cannot redirect that transfer. These methods add no LAN commands;
+the existing attachment IDs and `send_message` wire shapes remain unchanged.
+Owner-only typed methods also reuse existing scheduler validation and expose redacted
+agent extension assignments with revision guards. The native preference store is
+separate from domain snapshots: fixed isolated-profile `native-ui.json`, bounded
+layout/appearance/explicit composer drafts, atomic private writes and revision
+conflict rejection. No preference method is added to LAN or mobile dispatch;
+the native shell restores supported retained panes and debounces revision-guarded layout saves. The optional `chatPanes` map retains explicit secondary-sidebar visibility, selected lowercase `details|timeline|approvals|subagents` tab, and width in design pixels per task UUID. It admits at most 512 entries and finite widths 260–1600; the whole store remains bounded to 512 KiB. Empty maps are omitted for legacy readers; saving a nonempty map requires the updated experimental backend. Pane deletion removes its state, and preference reload merges pending local changes before restoring retained entities. Automatic compact-mode hiding and width constraints do not overwrite explicit saved visibility or width. These are native presentation preferences only. Normal window close waits for pending saves before pane cleanup; forced/platform quit during an in-flight save remains unverified.
+The optional `attachmentDrafts` map stores task-keyed unsent registered attachment IDs, display metadata and captured host/workspace, never file bytes, previews or paths. Restoration requires the same task and exact destination, and cannot replace a locally edited draft. Send acknowledgement removes only sent references; failed sends retain them. Backend registry checks still govern whether an attachment can be sent.
+
+The optional owner-only `browserMetadata` stores at most 64 tabs, each with a nonzero local numeric `id`, accepted `requestedUrl`, optional `actualUrl`, and bounded `title`, plus `selectedId`. HTTP(S) URLs must have a host and no embedded credentials; `about:blank` is the only other accepted URL. URLs are limited to 8192 bytes, titles to 512 bytes, and aggregate metadata to 256 KiB within the existing 512 KiB preference limit. No body, cookies, page history, credentials or agent browser-control authority is included. URLs may themselves contain private data, so this remains private workspace metadata. GUI restoration creates unloaded tabs; only explicit navigation loads a saved page. User edits during asynchronous preference loading block late browser restoration. Local metadata changes survive a conflicting preference reload and are acknowledged only against the saved projection. These private DTOs add no mobile/LAN command and do not change the existing Tauri browser command contract.
+
+Native GPUI appearance preferences are private to the isolated profile and saved
+through the same revisioned `native-ui.json` store. Light and dark palette IDs,
+optional `#RRGGBB` accent, contrast (0–100), and surface tint (0–50; half
+intensity in light mode) affect native palette colors. Missing fields use the
+Monitter/Monitter pair, no custom accent, contrast 0, and tint 5. The legacy
+`warmPaper` choice remains readable. Border opacity (0–100, default 100) and
+interface scale (80–200 in steps of 5, default 125) are retained as typed
+preferences but have no native visual effect until the corresponding rendering
+support is available. These fields are private presentation state; no LAN or
+mobile command is added.
+See `desktop-gpui/parity.json` for unfinished native UI and integration work.
+
+The private transport uses bounded length-prefixed JSON frames, request IDs,
+protocol/profile/server-instance validation, private socket permissions, and
+same-user peer checks. It does not expose an additional TCP listener. GUI close,
+disconnect, or process termination cannot shut down the backend or cancel runs.
+The menu-bar server's explicit Quit action stops its owned services and runs.
+GUI rebuilds may reconnect to a compatible running server; backend changes require
+an explicit server restart. Mutations are never automatically replayed after a
+lost response. The GUI must refresh committed state before deciding whether to
+retry an operation with an ambiguous result. A server-instance change requires
+reconnection and a new authoritative snapshot.
+
 ## Commands (Tauri invoke names and JSON argument keys)
 
 - Native browser commands are owner-desktop-only; they are absent from LAN, mobile, and shared
@@ -146,8 +249,13 @@ No fake conversations, progress, token counts, host connections or model replies
   and resident memory for breakdown views. An owned CLI/ACP harness root also includes the
   optional `chatTitle` of its running task; processes without a known task owner omit that field.
   Unsupported platforms fail visibly instead of returning
-  fabricated values. In the resource modal, a collapsed process group shows the sum of its own and
-  all live descendant CPU/RAM usage; an expanded group shows its own usage beside the child rows.
+  fabricated values. Exited, unreaped processes can expose stale native resident counters;
+  those records are excluded from live-process rows and RAM totals. In the GPUI resource modal,
+  process groups retain aggregate CPU/RAM values when expanded, and child rows show the breakdown.
+  The backend group includes every retained backend record even if a parent exited during sampling.
+  GPUI adds its independent GUI process locally to sidebar/modal totals and displays a separate
+  GUI row; it normalizes exited records from older running backends on the metrics worker thread.
+  The shared command response remains a backend-tree sample.
   RAM value text is orange above 250 MiB and red above 500 MiB; row backgrounds are unchanged.
 - `list_system_fonts {}` -> `{ family: string, monospace: boolean }[]`.
   Native desktop only. It returns local OS font family names for Typography suggestions, without
@@ -333,6 +441,14 @@ No fake conversations, progress, token counts, host connections or model replies
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot (routed through the resident Monitter Admin turn; see Internal agent)
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
+  A completed Codex turn is not proof that its persisted goal or native children
+  have finished. The resident transport may report a fresh `turn/started` after
+  normal completion without a new user message. Monitter adopts that turn only
+  for the current resident owner and explicit matching thread, with no competing
+  request, cancellation, or retirement; previously closed turn IDs remain rejected.
+  Native child status comes from child observations on normal parent completion,
+  and nonterminal Codex children prevent idle-runtime retirement. Monitter does
+  not invent a continuation prompt or change goal state in response to completion.
 - `get_task_slash_commands { taskId: string }` -> `SlashCommand[]`. Owner desktop/LAN only.
   Native Codex tasks expose Monitter's protocol-backed Codex catalog once a native thread exists;
   resident ACP tasks expose the latest replacement snapshot advertised through ACP
@@ -929,9 +1045,9 @@ Provider stderr is diagnostic-only: routine trace, debug, info and warning outpu
 At most one concise actionable provider error may appear in a chat's activity, while process/event
 failures remain visible through their normal task status.
 
-A service-owned collector checks resident runtimes every 60 seconds, filtering by idle age before inspecting processes. Eligible local macOS
-Codex app-server, Claude stream-json and resumable ACP processes retire after more than five
-minutes continuously idle following a durably completed turn. Task history, settings and native
+A service-owned collector checks resident runtimes every 10 seconds, filtering by idle age before inspecting processes. Eligible local macOS
+Codex app-server, Claude stream-json and resumable ACP processes retire after more than 45
+seconds continuously idle following a durably completed turn. Task history, settings and native
 session IDs stay saved. The next accepted message silently starts the same native session and
 submits that message once; it may take longer because the process must start again. Retirement
 never submits a continuation prompt and never replays a failed turn. One-shot providers already
@@ -940,10 +1056,13 @@ that remote background work has ended.
 
 Active turns, pending approvals/input, queued messages, protocol requests, and unidentified live
 descendants prevent collection. A saved session and negotiated cold-resume support are required.
-The collector verifies process identities against the infrastructure process tree captured before
-the first prompt and refreshed only after tool-free completion, until any tool work is observed. It closes owned pipes,
-and uses bounded termination of the owned process group and verified captured helpers, including
-helpers that detach or reparent. PID and start time are checked before signalling those helpers.
+The collector verifies PID/start-time identities against captured infrastructure and exact
+configured stdio launches. It may adopt late MCP helpers after tool use only with verified
+parent lineage and launch arguments; npm wrappers additionally require the configured installed
+package entrypoint as a direct child. Unsupported wrappers and unknown jobs remain pinned.
+Usage views and other observational queries never reset idleness or pin protocol work.
+Retirement closes owned pipes and uses bounded termination of exact captured identities,
+including helpers that detach or reparent. Idle retirement does not signal a whole process group.
 The old native-session writer remains
 reserved until teardown completes. Accepted sends wait for that reservation; cancellation
 invalidates their dispatch receipt. Successful retirement adds no visible chat status or messages;
@@ -1497,6 +1616,8 @@ persisted All workspace and opens its whole-app overview without altering agent/
 That overview occupies the workspace without a desktop tab bar or duplicate terminal shortcut; mobile
 retains only its Back to chats navigation. Agent/project sidebar
 metadata shows a compact local-disk or remote-cloud host indicator beside the harness/model line.
+The experimental GPUI sidebar also keeps pending tool approvals in a dedicated top block. Review opens the owning chat and a pane-local modal with the canonical approval decisions. Backdrop, Escape and Review later dismiss the presentation without resolving the request; backend rejection remains visible inside the popup. New pending requests reopen the popup, while a dismissed request stays available from the sidebar.
+
 Badges and the global approval entry surface pending approvals even in hidden workspaces. Opening an
 approval navigates to the shared owning chat. The left sidebar is always global: its Agents,
 Projects, Activity and collapsed-rail chat lists show chats from every workspace. Selecting one routes
@@ -1765,7 +1886,10 @@ directory changes and session ID do not survive a quit.
 IPC: `open_terminal {target,cols,rows}`, `list_terminals {}`, `write_terminal {id,data}`, `resize_terminal {id,cols,rows}`,
 `read_terminal {id,afterSeq}`, `close_terminal {id}`. Target resolves saved task, agent/project, host,
 or an explicit validated `cwd` on its host
-configuration; returned TerminalSession contains id/title/hostId/cwd/status/exitCode. Reads contain
+configuration. The existing target's optional `command` delivers that exact text to the
+new shell followed by a newline; it is bounded to 4096 bytes, rejects NUL and empty
+commands, and uses the resolved target host/cwd. Omit `command` for an ordinary
+terminal. Returned TerminalSession contains id/title/hostId/cwd/status/exitCode. Reads contain
 sequenced byte chunks, `nextSeq` (last delivered sequence), status/exitCode and a truncation flag for
 actual ring loss. Native buffers retain at most 1 MiB; each read is at most 256 KiB. Terminal input is
 bounded to 64 KiB per write, sizes to 10–500 columns and 4–300 rows. xterm retains 10,000 scrollback
@@ -1955,7 +2079,12 @@ implementation remain available to re-enable later; this is intentionally not In
 
 Browser API calls use `POST /api/invoke {command, args}` with a Bearer access code;
 responses are `{ok: true, result}` or `{ok: false, error}`. The browser sign-in gate
-stores the code in sessionStorage. Access links place the code in a fragment, which is
+keeps pending input in sessionStorage and remembers the reusable bearer in origin-scoped
+localStorage only after a successful authenticated snapshot. New tabs and browser reopening
+reconnect automatically to the same origin. A 401 clears the remembered credential; transient
+network failures retain it. Blocked browser storage falls back to the current page only.
+This is the existing per-process reusable code, not a one-time code or a new session token.
+Access links place the code in a fragment, which is
 removed after loading. Static assets are public; workspace data and commands require
 authentication and same-origin requests. The code grants owner-level workspace control,
 including terminals; this is distinct from limited visitor sharing. The legacy HTTP
@@ -2236,3 +2365,62 @@ and JavaScript state. Only explicit close/unload destroys the page; app restarts
 restore metadata as unloaded because in-memory page state cannot survive exit.
 Mounted dialogs (including Usage and Process metrics) suspend native browser
 overlays through their exit animation, then reveal the same live pages.
+
+
+### Experimental GPUI owner LAN controls
+
+The isolated GPUI host exposes typed private-IPC `DesktopService::read_lan_status`,
+`start_lan`, and `stop_lan` methods only to its native owner UI. They are not JSON
+commands and add no mobile, LAN, or relay authority. The backend starts the browser
+listener automatically on all IPv4 interfaces, including LAN and Tailscale, using
+ports 19436/19437. The host/peer and local certificate checks accept Tailscale
+IPv4 addresses in 100.64.0.0/10 alongside private LAN and loopback addresses.
+A startup failure is retained in LAN status and does not prevent
+local desktop startup. The owner can stop it until the next backend launch.
+Automatic and explicit starts always require the
+existing access code, origin/host validation and authentication rate limiting;
+the ordinary desktop server's authentication default remains unchanged. Status
+includes the installation-local URLs, owner-only access code, CA fingerprint and
+errors. Access codes are not copied into Snapshot, preferences or logs. Stopping
+releases the listener through its existing lifecycle; explicit backend-server
+shutdown also stops it. Closing the GUI leaves the listener running.
+
+Startup requires a real `index.html` in the isolated profile's `lan-web` directory
+or the current app bundle's `Contents/Resources/lan-web`, in that order. It refuses
+linked roots/entry pages and provides no production-profile or source-build fallback.
+Missing assets and listener failures are visible and do not imply readiness.
+The unchanged iOS native LAN address validator requires port 18436, so it rejects
+these experimental ports. Browser LAN access is distinct from encrypted phone
+pairing and visitor/operator chat sharing: those relay hosts are separate pending
+native functionality, and starting LAN does not activate or claim them.
+
+### Experimental GPUI owner settings
+
+The isolated native GUI advertises `get_extension_config`, `save_extension_config`, `list_environment_secrets`, `set_environment_secret` and `delete_environment_secret` only through authenticated private desktop IPC. They reuse the existing service authority and camelCase payloads. They are not added to LAN, mobile or shared-client command allowlists. Extension writes preserve revision checks; secret listings expose metadata only, never values. An older persistent server that does not advertise these commands must be displayed as unavailable rather than silently routed to another surface. GUI updates do not restart that server.
+
+### Experimental GPUI history copies
+
+Authenticated owner-local private IPC offers `validate_project_history { input }` and
+`import_project_history { input }`. These methods accept already-mapped camelCase
+record bundles, never source database paths. They are not exposed through Tauri,
+LAN, mobile, sharing, or agent command allowlists. Each bundle is bounded to 24 MiB;
+imports validate every reference and collision before a single authority transaction.
+Identical records are idempotent, while conflicting destination records are rejected.
+
+The bundle contains only host/agent/project definitions, dormant tasks, messages,
+events, saved task host snapshots, and scoped attachment registry metadata. Credentials,
+settings, approval rules, grants, scheduled work, queues, and resident Admin records
+are not imported. History copies retain native session references but do not launch
+or resume a provider. Attachment previews are bounded; registered workspace assets
+remain links governed by the existing attachment path and host checks. Copies must
+not be resumed concurrently in the source and destination desktop.
+
+### Resident history and lazy retrieval
+
+SQLite retains complete message, channel-message and event records. The resident service
+keeps identities, ordering and metadata, plus the latest 64 message bodies and 128 event
+bodies per task (64 per channel). System boundaries and streaming messages stay readable.
+Older event summaries used by the live UI are bounded. Paging, event-detail expansion,
+forking and import collision checks retrieve durable bodies on demand. Cache eviction
+never becomes a durable edit; metadata updates, deletion and reordering preserve stored
+bodies. Usage rendering remains observational and does not extend runtime lifetime.

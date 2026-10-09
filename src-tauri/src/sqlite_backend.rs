@@ -197,8 +197,19 @@ impl Database {
         private_sidecars(&self.path)
     }
 
-    pub(crate) fn read_snapshot(
+    pub(crate) fn read_resident_snapshot(&self) -> Result<(Snapshot, HashMap<String, Host>, HashMap<String, StoredAttachment>, Vec<RunUsageSample>, Option<i64>), String> {
+        let mut state = self.read_snapshot_inner(true)?;
+        crate::resident_history::evict(&mut state.0);
+        Ok(state)
+    }
+
+    pub(crate) fn read_snapshot(&self) -> Result<(Snapshot, HashMap<String, Host>, HashMap<String, StoredAttachment>, Vec<RunUsageSample>, Option<i64>), String> {
+        self.read_snapshot_inner(false)
+    }
+
+    fn read_snapshot_inner(
         &self,
+        resident: bool,
     ) -> Result<
         (
             Snapshot,
@@ -216,14 +227,11 @@ impl Database {
             hosts: read_vec(&connection, "hosts")?,
             agents: read_vec(&connection, "agents")?,
             tasks: read_vec(&connection, "tasks")?,
-            messages: read_vec(&connection, "messages")?.into(),
+            messages: read_history(&connection, "messages", resident)?,
             mail_batches: read_vec(&connection, "mail_batches")?,
             work_plans: read_vec(&connection, "work_plans")?,
-            events: read_vec::<RunEvent>(&connection, "events")?
-                .into_iter()
-                .map(Arc::new)
-                .collect(),
-            channels: read_channels(&connection)?,
+            events: read_history(&connection, "events", resident)?,
+            channels: read_channels(&connection,resident)?,
             project_board_messages: read_vec(&connection, "project_board_messages")?,
             projects: read_vec(&connection, "projects")?,
             settings,
@@ -249,6 +257,93 @@ impl Database {
         ))
     }
 
+
+    pub(crate) fn message_page(&self, task_id:&str, before_id:Option<&str>, limit:Option<u32>, revision:String) -> Result<crate::ui_sync::TaskMessagesPage,String> {
+        let connection=self.lock()?;
+        let before=match before_id {
+            Some(id)=>{
+                let (scope,position):(String,i64)=connection.query_row("SELECT task_id,position FROM entities WHERE collection='messages' AND id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or("This transcript cursor is no longer available. Refresh the conversation.")?;
+                if scope!=task_id { return Err("Transcript cursor belongs to another task.".into()); }
+                position
+            },None=>i64::MAX,
+        };
+        let limit=limit.unwrap_or(64).clamp(1,crate::ui_sync::MAX_MESSAGE_PAGE as u32) as usize;
+        let mut statement=connection.prepare("SELECT payload FROM entities WHERE collection='messages' AND task_id=?1 AND position<?2 ORDER BY position DESC LIMIT ?3").map_err(|e|e.to_string())?;
+        let mut messages=statement.query_map(params![task_id,before,(limit+1) as i64],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?.map(|row|row.map_err(|e|e.to_string()).and_then(|text|serde_json::from_str::<Message>(&text).map_err(|e|e.to_string()))).collect::<Result<Vec<_>,_>>()?;
+        let more=messages.len()>limit; messages.truncate(limit); messages.reverse();
+        let next_before_id=if more { messages.first().map(|row|row.id.clone()) } else { None };
+        Ok(crate::ui_sync::TaskMessagesPage{messages,next_before_id,revision})
+    }
+
+    pub(crate) fn channel_page(&self,channel_id:&str,before_id:Option<&str>,limit:Option<u32>,revision:String)->Result<crate::ui_sync::ChannelMessagesPage,String>{
+        let connection=self.lock()?; let collection=channel_message_collection(channel_id);
+        let before=match before_id {
+            Some(id)=>connection.query_row("SELECT position FROM entities WHERE collection=?1 AND id=?2",params![collection,id],|row|row.get::<_,i64>(0)).optional().map_err(|e|e.to_string())?.ok_or("This channel cursor is no longer available. Refresh the channel.")?,
+            None=>i64::MAX,
+        };
+        let limit=limit.unwrap_or(64).clamp(1,crate::ui_sync::MAX_MESSAGE_PAGE as u32) as usize;
+        let mut statement=connection.prepare("SELECT payload FROM entities WHERE collection=?1 AND position<?2 ORDER BY position DESC LIMIT ?3").map_err(|e|e.to_string())?;
+        let mut messages=statement.query_map(params![collection,before,(limit+1) as i64],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?.map(|row|row.map_err(|e|e.to_string()).and_then(|text|serde_json::from_str::<ChannelMessage>(&text).map_err(|e|e.to_string()))).collect::<Result<Vec<_>,_>>()?;
+        let more=messages.len()>limit; messages.truncate(limit);messages.reverse();
+        let next_before_id=if more {messages.first().map(|row|row.id.clone())}else{None};
+        Ok(crate::ui_sync::ChannelMessagesPage{channel_id:channel_id.into(),messages,next_before_id,revision})
+    }
+    pub(crate) fn messages_through(&self, task_id:&str, through_id:&str) -> Result<Vec<Message>,String> {
+        let connection=self.lock()?;
+        let (scope,position):(String,i64)=connection.query_row("SELECT task_id,position FROM entities WHERE collection='messages' AND id=?1",[through_id],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or("Selected message was not found in this chat.")?;
+        if scope!=task_id { return Err("Selected message belongs to another chat.".into()); }
+        let mut statement=connection.prepare("SELECT payload FROM entities WHERE collection='messages' AND task_id=?1 AND position<=?2 AND json_extract(payload,'$.role') IN ('user','assistant') ORDER BY position LIMIT 2001").map_err(|e|e.to_string())?;
+        let mut messages=Vec::new(); let mut bytes=0;
+        for row in statement.query_map(params![task_id,position],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())? {
+            let message:Message=serde_json::from_str(&row.map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+            bytes+=message.text.len(); messages.push(message);
+            if messages.len()>2000 || bytes>8*1024*1024 { return Err("This fork exceeds the 2,000-message or 8 MiB safety limit. Choose an earlier message.".into()); }
+        }
+        Ok(messages)
+    }
+    pub(crate) fn task_message(&self, task_id: &str, message_id: &str) -> Result<Message, String> {
+        let connection = self.lock()?;
+        let payload: String = connection.query_row(
+            "SELECT payload FROM entities WHERE collection='messages' AND task_id=?1 AND id=?2",
+            params![task_id, message_id], |row| row.get(0),
+        ).map_err(|_| "Message was not found in this task.".to_string())?;
+        serde_json::from_str(&payload).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn task_event(&self,task_id:&str,event_id:&str)->Result<RunEvent,String> {
+        let connection=self.lock()?;
+        let payload:String=connection.query_row("SELECT payload FROM entities WHERE collection='events' AND task_id=?1 AND id=?2",params![task_id,event_id],|row|row.get(0)).optional().map_err(|e|e.to_string())?.ok_or("Task event was not found.")?;
+        serde_json::from_str(&payload).map_err(|e|e.to_string())
+    }
+    pub(crate) fn event_page(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String> {
+        let connection=self.lock()?;
+        let count:i64=connection.query_row("SELECT count(*) FROM entities WHERE collection='events' AND task_id=?1",[task_id],|row|row.get(0)).map_err(|e|e.to_string())?;
+        let before=before.unwrap_or(count).clamp(0,count);
+        let limit=limit.unwrap_or(60).clamp(1,crate::lan_sync::MAX_EVENT_PAGE as u32);
+        let mut statement = connection.prepare(
+            "SELECT payload FROM entities WHERE collection='events' AND task_id=?1 ORDER BY position DESC LIMIT ?2 OFFSET ?3",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement.query_map(params![task_id, i64::from(limit), count-before], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut events = Vec::new();
+        let mut used = 0;
+        // Decode one durable body at a time; a page never retains all of its
+        // potentially large source payloads before applying the byte budget.
+        for row in rows.take(before as usize) {
+            if used >= crate::lan_sync::MAX_EVENT_PAGE_DETAIL_BYTES { break; }
+            let mut event: RunEvent = serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            let available = crate::lan_sync::MAX_EVENT_PAGE_DETAIL_BYTES - used;
+            if event.detail.len() > available {
+                let mut end = available;
+                while !event.detail.is_char_boundary(end) { end -= 1; }
+                event.detail = Arc::from(&event.detail[..end]);
+            }
+            used += event.detail.len();
+            events.push(event);
+        }
+        let next = before - events.len() as i64;
+        Ok(crate::lan_sync::TaskEventsPage { events, next_before: (next > 0).then_some(next) })
+    }
     pub(crate) fn integrity_check(&self) -> Result<(), String> {
         let connection = self.lock()?;
         let result: String = connection
@@ -731,6 +826,8 @@ where
 trait HasId {
     fn id(&self) -> &str;
 }
+impl<T: HasId> HasId for Arc<T> { fn id(&self)->&str { (**self).id() } }
+
 
 macro_rules! has_id {
     ($($type:ty),+ $(,)?) => {
@@ -913,6 +1010,9 @@ fn write_history<T: HistoryRecord + Clone + Serialize>(
     values: &History<T>,
     key: impl Fn(&T) -> (&str, Option<&str>, Option<i64>),
 ) -> Result<(), String> {
+    if values.has_cold_payloads() {
+        return Err("Cannot replace durable history with a resident cache.".into());
+    }
     let rows = values.iter().collect::<Vec<_>>();
     write_vec(transaction, collection, &rows, |value| key(*value))
 }
@@ -977,7 +1077,7 @@ fn diff_history<T: HistoryRecord + Clone + Serialize + PartialEq>(
                         value,
                     )?;
                 } else if before.get(index) != Some(value) {
-                    put(
+                    put_history(
                         transaction,
                         collection,
                         id,
@@ -985,11 +1085,15 @@ fn diff_history<T: HistoryRecord + Clone + Serialize + PartialEq>(
                         task_id,
                         created_at,
                         value,
+                        after.payload_is_cold(id),
                     )?;
                 }
             }
             return Ok(());
         }
+    }
+    if after.has_cold_payloads() {
+        return diff_cold_history(transaction, collection, before, after, key);
     }
     let old = before.iter().collect::<Vec<_>>();
     let new = after.iter().collect::<Vec<_>>();
@@ -1165,6 +1269,60 @@ fn diff_map<T: Serialize + PartialEq>(
     Ok(())
 }
 
+/// Shell payloads must never erase durable bodies, even on reorder/delete fallback.
+fn put_history<T: Serialize>(transaction: &Transaction<'_>, collection: &str, id: &str,
+    position: usize, task_id: Option<&str>, created_at: Option<i64>, value: &T, cold: bool) -> Result<(), String> {
+    if !cold { return put(transaction, collection, id, position, task_id, created_at, value); }
+    let original: String = transaction.query_row("SELECT payload FROM entities WHERE collection=?1 AND id=?2", params![collection,id], |row|row.get(0)).map_err(|e|format!("Cold history is missing its durable body: {e}"))?;
+    let original: serde_json::Value = serde_json::from_str(&original).map_err(|e|e.to_string())?;
+    let mut payload = serde_json::to_value(value).map_err(|e|e.to_string())?;
+    let field = if collection == "events" { "detail" } else { "text" };
+    payload[field] = original[field].clone();
+    put(transaction, collection, id, position, task_id, created_at, &payload)
+}
+fn diff_cold_history<T: HistoryRecord + Clone + Serialize + PartialEq>(transaction: &Transaction<'_>, collection: &str,
+    before: &History<T>, after: &History<T>, key: impl Fn(&T)->(&str,Option<&str>,Option<i64>)) -> Result<(),String> {
+    let old: HashMap<_,_> = before.iter().enumerate().map(|(index,row)|(row.id(),(index,row))).collect();
+    let mut seen = HashSet::new();
+    for (position,value) in after.iter().enumerate() {
+        let (id,task_id,created_at)=key(value);
+        if !seen.insert(id) { return Err(format!("Duplicate {collection} id {id}")); }
+        match old.get(id) {
+            Some((old_position,old_value)) if *old_value == value => {
+                if *old_position != position { update_position(transaction,collection,id,position)?; }
+            }
+            _ => put_history(transaction,collection,id,position,task_id,created_at,value,after.payload_is_cold(id))?,
+        }
+    }
+    for id in old.keys() { if !seen.contains(*id) { delete_entity(transaction,collection,id)?; } }
+    Ok(())
+}
+fn read_history<T: DeserializeOwned + HistoryRecord + HasId>(connection: &Connection, collection: &str, resident: bool) -> Result<History<T>,String> {
+    if !resident { return Ok(read_vec(connection,collection)?.into_iter().collect()); }
+    let (limit,field,protected) = if collection == "events" {
+        (crate::resident_history::HOT_EVENTS,"detail","json_extract(payload,'$.kind')='jevDecision' OR (rank<=512 AND json_extract(payload,'$.kind') NOT IN ('log','output'))")
+    } else {
+        (crate::resident_history::HOT_MESSAGES,"text",if collection=="messages" { "json_extract(payload,'$.role') NOT IN ('user','assistant') OR json_extract(payload,'$.streamStatus')='streaming'" } else { "0" })
+    };
+    // SQLite strips cold payload strings before crossing into Rust; startup
+    // never materializes historical bodies just to discard them again.
+    let sql=format!("WITH ranked AS (SELECT id,position,ROW_NUMBER() OVER(PARTITION BY task_id ORDER BY position DESC) rank FROM entities WHERE collection=?1) SELECT ranked.id,ranked.position,CASE WHEN rank<=?2 OR ({protected}) THEN payload ELSE json_set(payload,'$.{field}','') END,NOT (rank<=?2 OR COALESCE(({protected}),0)) FROM ranked JOIN entities ON entities.collection=?1 AND entities.id=ranked.id ORDER BY ranked.position");
+    let mut statement=connection.prepare(&sql).map_err(|e|e.to_string())?;
+    let rows=statement.query_map(params![collection,limit as i64],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,row.get::<_,bool>(3)?))).map_err(|e|e.to_string())?;
+    let mut values=Vec::new(); let mut cold=Vec::new();
+    for row in rows {
+        let (id,position,payload,is_cold)=row.map_err(|e|e.to_string())?;
+        if position!=values.len() as i64 { return Err(format!("SQLite {collection} positions are malformed.")); }
+        let value:T=serde_json::from_str(&payload).map_err(|e|e.to_string())?;
+        if HistoryRecord::id(&value)!=id { return Err(format!("SQLite {collection} payload identity mismatch.")); }
+        if is_cold { cold.push(values.len()); }
+        values.push(value);
+    }
+    let mut history:History<T>=values.into_iter().collect();
+    for index in cold { history.evict_payload(index,history[index].clone()); }
+    Ok(history)
+}
+
 fn read_vec<T: DeserializeOwned + HasId>(
     connection: &Connection,
     collection: &str,
@@ -1198,14 +1356,7 @@ fn read_vec<T: DeserializeOwned + HasId>(
     Ok(values)
 }
 
-fn read_history<T: DeserializeOwned + HasId + HistoryRecord>(
-    connection: &Connection,
-    collection: &str,
-) -> Result<History<T>, String> {
-    Ok(read_vec(connection, collection)?.into())
-}
-
-fn read_channels(connection: &Connection) -> Result<Vec<Channel>, String> {
+fn read_channels(connection: &Connection, resident: bool) -> Result<Vec<Channel>, String> {
     let mut channels = read_vec::<Channel>(connection, "channels")?;
     let known_collections = channels
         .iter()
@@ -1234,7 +1385,7 @@ fn read_channels(connection: &Connection) -> Result<Vec<Channel>, String> {
                 channel.id
             ));
         }
-        channel.messages = read_history(connection, &channel_message_collection(&channel.id))?;
+        channel.messages = read_history(connection, &channel_message_collection(&channel.id),resident)?;
     }
     Ok(channels)
 }
@@ -1559,6 +1710,33 @@ mod tests {
         })
     }
 
+    fn history_message(id: &str, task_id: &str, text: &str) -> Message {
+        Message {
+            id: id.into(),
+            task_id: task_id.into(),
+            role: "user".into(),
+            text: text.into(),
+            created_at: 1,
+            sender_agent_id: None,
+            collaboration_id: None,
+            stream_status: None,
+            phase: None,
+            response_metadata: None,
+            attachments: vec![],
+        }
+    }
+
+    fn history_event(id: &str, task_id: &str, detail: &str) -> Arc<RunEvent> {
+        Arc::new(RunEvent {
+            id: id.into(),
+            task_id: task_id.into(),
+            kind: "tool".into(),
+            title: id.into(),
+            detail: Arc::from(detail),
+            created_at: 1,
+        })
+    }
+
     fn channel_message(id: &str, text: &str, created_at: i64) -> ChannelMessage {
         ChannelMessage {
             id: id.into(),
@@ -1614,6 +1792,317 @@ mod tests {
             EMPTY_HOSTS.get_or_init(HashMap::new),
             EMPTY_ATTACHMENTS.get_or_init(HashMap::new),
         )
+    }
+
+    #[test]
+    fn resident_history_keeps_cold_bodies_in_sqlite_and_pages_them_on_demand() {
+        let (directory, path) = temp_path("resident-history-pages");
+        let database = Database::create(&path).unwrap();
+        let mut snapshot = default_snapshot();
+        snapshot.messages = (0..70)
+            .map(|index| {
+                history_message(
+                    &format!("message-{index:03}"),
+                    "task-a",
+                    &format!("full message body {index}"),
+                )
+            })
+            .collect();
+        snapshot.events = (0..140)
+            .map(|index| {
+                history_event(
+                    &format!("event-{index:03}"),
+                    "task-a",
+                    &format!("full event detail {index} {}", "x".repeat(3_000)),
+                )
+            })
+            .collect();
+        snapshot.channels = vec![channel(
+            "channel-a",
+            (0..70)
+                .map(|index| {
+                    channel_message(
+                        &format!("channel-message-{index:03}"),
+                        &format!("full channel body {index}"),
+                        index,
+                    )
+                })
+                .collect(),
+        )]
+        .into();
+        database.replace_all(state(&snapshot), &[], None).unwrap();
+
+        let (resident, ..) = database.read_resident_snapshot().unwrap();
+        assert_eq!(resident.messages.len(), 70);
+        assert!(resident.messages.payload_is_cold("message-000"));
+        assert!(resident.messages[0].text.is_empty());
+        assert_eq!(resident.messages[69].text, "full message body 69");
+        assert_eq!(resident.events.len(), 140);
+        assert!(resident.events.payload_is_cold("event-000"));
+        assert!(resident.events[0].detail.len() < snapshot.events[0].detail.len());
+        assert!(!resident.events.payload_is_cold("event-139"));
+        assert_eq!(resident.channels[0].messages.len(), 70);
+        assert!(resident.channels[0]
+            .messages
+            .payload_is_cold("channel-message-000"));
+        assert!(resident.channels[0].messages[0].text.is_empty());
+        assert_eq!(resident.channels[0].messages[69].text, "full channel body 69");
+
+        let latest = database
+            .message_page("task-a", None, Some(64), "r1".into())
+            .unwrap();
+        assert_eq!(latest.messages.first().unwrap().id, "message-006");
+        assert_eq!(latest.messages.first().unwrap().text, "full message body 6");
+        assert_eq!(latest.messages.last().unwrap().id, "message-069");
+        assert_eq!(latest.next_before_id.as_deref(), Some("message-006"));
+        let older = database
+            .message_page("task-a", Some("message-006"), Some(64), "r1".into())
+            .unwrap();
+        assert_eq!(older.messages.len(), 6);
+        assert_eq!(older.messages[0].id, "message-000");
+        assert_eq!(older.messages[0].text, "full message body 0");
+        assert!(database
+            .message_page("task-b", Some("message-006"), Some(10), "r1".into())
+            .is_err());
+
+        let latest_channel = database
+            .channel_page("channel-a", None, Some(64), "r1".into())
+            .unwrap();
+        assert_eq!(latest_channel.messages.first().unwrap().id, "channel-message-006");
+        assert_eq!(latest_channel.messages.first().unwrap().text, "full channel body 6");
+        let older_channel = database
+            .channel_page("channel-a", Some("channel-message-006"), Some(64), "r1".into())
+            .unwrap();
+        assert_eq!(older_channel.messages.len(), 6);
+        assert_eq!(older_channel.messages[0].text, "full channel body 0");
+
+        let detail = database.task_event("task-a", "event-000").unwrap();
+        assert!(detail.detail.starts_with("full event detail 0"));
+        let first_chunk = crate::lan_sync::event_detail_chunk(
+            &{
+                let mut only_event = default_snapshot();
+                only_event.events.push(Arc::new(detail.clone()));
+                only_event
+            },
+            "task-a",
+            "event-000",
+            None,
+            Some(1_024),
+        )
+        .unwrap();
+        assert_eq!(first_chunk.chunk, detail.detail[..1_024]);
+        assert!(first_chunk.next_offset.is_some());
+
+        let mut cursor = None;
+        let mut paged_ids = Vec::new();
+        let mut first_page_ids = Vec::new();
+        loop {
+            let page = database.event_page("task-a", cursor, Some(100)).unwrap();
+            let detail_bytes: usize = page.events.iter().map(|event| event.detail.len()).sum();
+            assert!(detail_bytes <= crate::lan_sync::MAX_EVENT_PAGE_DETAIL_BYTES);
+            if first_page_ids.is_empty() {
+                assert_eq!(page.events.first().unwrap().id, "event-139");
+                assert!(page.events.first().unwrap().detail.starts_with("full event detail 139"));
+                first_page_ids.extend(page.events.iter().map(|event| event.id.clone()));
+            }
+            paged_ids.extend(page.events.into_iter().map(|event| event.id));
+            let Some(next) = page.next_before else { break };
+            assert!(cursor.map_or(true, |previous| next < previous));
+            cursor = Some(next);
+        }
+        assert_eq!(paged_ids.len(), 140);
+        assert_eq!(paged_ids.first().unwrap(), "event-139");
+        assert_eq!(paged_ids.last().unwrap(), "event-000");
+        for (ordinal, id) in paged_ids.iter().enumerate() {
+            assert_eq!(id, &format!("event-{:03}", 139 - ordinal));
+        }
+        assert!(first_page_ids.len() < 100, "payload budget should split a page");
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cold_history_reorder_metadata_edits_and_removals_preserve_durable_bodies() {
+        let (directory, path) = temp_path("cold-history-diff");
+        let database = Database::create(&path).unwrap();
+        let mut before = default_snapshot();
+        before.messages = (0..70)
+            .map(|index| {
+                history_message(
+                    &format!("message-{index:03}"),
+                    "task-a",
+                    &format!("durable message {index}"),
+                )
+            })
+            .collect();
+        before.events = (0..140)
+            .map(|index| {
+                history_event(
+                    &format!("event-{index:03}"),
+                    "task-a",
+                    &format!("durable event {index}"),
+                )
+            })
+            .collect();
+        before.channels = vec![channel(
+            "channel-a",
+            (0..70)
+                .map(|index| {
+                    channel_message(
+                        &format!("channel-message-{index:03}"),
+                        &format!("durable channel body {index}"),
+                        index,
+                    )
+                })
+                .collect(),
+        )]
+        .into();
+        database.replace_all(state(&before), &[], None).unwrap();
+        let (mut after, ..) = database.read_resident_snapshot().unwrap();
+
+        // Force the cold-history fallback and exercise all three collections.
+        after.messages.get_mut_tracked(0).unwrap().role = "system".into();
+        let moved_message = after.messages.remove(1);
+        after.messages.insert(8, moved_message);
+        after.messages.remove(10);
+
+        let mut changed_event = after.events.get_mut_tracked(0).unwrap();
+        Arc::make_mut(&mut changed_event).title = "metadata edit survives".into();
+        drop(changed_event);
+        let moved_event = after.events.remove(1);
+        after.events.insert(8, moved_event);
+        after.events.remove(10);
+
+        after.channels[0].messages.get_mut_tracked(0).unwrap().role = "system".into();
+        let moved_channel_message = after.channels[0].messages.remove(1);
+        after.channels[0].messages.insert(8, moved_channel_message);
+        after.channels[0].messages.remove(10);
+
+        database.apply_update(state(&before), state(&after), &[], &[], None).unwrap();
+        let (loaded, ..) = database.read_snapshot().unwrap();
+        assert_eq!(loaded.messages.len(), 69);
+        assert_eq!(loaded.messages[0].role, "system");
+        assert_eq!(loaded.messages[0].text, "durable message 0");
+        assert_eq!(loaded.messages[8].id, "message-001");
+        assert_eq!(loaded.messages[8].text, "durable message 1");
+        assert!(!loaded.messages.iter().any(|message| message.id == "message-010"));
+
+        assert_eq!(loaded.events.len(), 139);
+        assert_eq!(loaded.events[0].title, "metadata edit survives");
+        assert_eq!(loaded.events[0].detail.as_ref(), "durable event 0");
+        assert_eq!(loaded.events[8].id, "event-001");
+        assert_eq!(loaded.events[8].detail.as_ref(), "durable event 1");
+        assert!(!loaded.events.iter().any(|event| event.id == "event-010"));
+
+        assert_eq!(loaded.channels[0].messages.len(), 69);
+        assert_eq!(loaded.channels[0].messages[0].role, "system");
+        assert_eq!(loaded.channels[0].messages[0].text, "durable channel body 0");
+        assert_eq!(loaded.channels[0].messages[8].id, "channel-message-001");
+        assert_eq!(loaded.channels[0].messages[8].text, "durable channel body 1");
+        assert!(!loaded.channels[0]
+            .messages
+            .iter()
+            .any(|message| message.id == "channel-message-010"));
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn replacing_database_with_cold_resident_history_rolls_back() {
+        let (directory, path) = temp_path("cold-history-replace");
+        let database = Database::create(&path).unwrap();
+        let mut original = default_snapshot();
+        original.messages = (0..70)
+            .map(|index| {
+                history_message(
+                    &format!("message-{index:03}"),
+                    "task-a",
+                    &format!("durable message {index}"),
+                )
+            })
+            .collect();
+        original.events = (0..140)
+            .map(|index| {
+                history_event(
+                    &format!("event-{index:03}"),
+                    "task-a",
+                    &format!("durable event {index}"),
+                )
+            })
+            .collect();
+        original.channels = vec![channel(
+            "channel-a",
+            (0..70)
+                .map(|index| {
+                    channel_message(
+                        &format!("channel-message-{index:03}"),
+                        &format!("durable channel body {index}"),
+                        index,
+                    )
+                })
+                .collect(),
+        )]
+        .into();
+        database.replace_all(state(&original), &[], None).unwrap();
+        let (resident, ..) = database.read_resident_snapshot().unwrap();
+        assert!(database.replace_all(state(&resident), &[], None).is_err());
+        let (after_rejection, ..) = database.read_snapshot().unwrap();
+        assert_eq!(after_rejection, original);
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn peak_rss_bytes() -> u64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(result, 0, "getrusage failed");
+        let usage = unsafe { usage.assume_init() };
+        #[cfg(target_os = "macos")]
+        let bytes = usage.ru_maxrss as u64;
+        #[cfg(not(target_os = "macos"))]
+        let bytes = (usage.ru_maxrss as u64).saturating_mul(1_024);
+        bytes
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "opt-in benchmark; MONITTER_HISTORY_BENCHMARK_DB must point to a copied fixture database"]
+    fn benchmark_history_loading_from_copied_fixture() {
+        let path = env::var_os("MONITTER_HISTORY_BENCHMARK_DB")
+            .expect("set MONITTER_HISTORY_BENCHMARK_DB to a copied fixture database");
+        let mode = env::var("MODE").expect("set MODE=full or MODE=resident");
+        assert!(matches!(mode.as_str(), "full" | "resident"), "MODE must be full or resident");
+        let started = std::time::Instant::now();
+        let database = Database::open(Path::new(&path)).unwrap();
+        let (snapshot, ..) = match mode.as_str() {
+            "full" => database.read_snapshot().unwrap(),
+            "resident" => database.read_resident_snapshot().unwrap(),
+            _ => unreachable!(),
+        };
+        let elapsed_ms = started.elapsed().as_millis();
+        let message_count = snapshot.messages.len();
+        let event_count = snapshot.events.len();
+        let channel_message_count: usize = snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.messages.len())
+            .sum();
+        let body_bytes: usize = snapshot.messages.iter().map(|message| message.text.len()).sum::<usize>()
+            + snapshot.events.iter().map(|event| event.detail.len()).sum::<usize>()
+            + snapshot.channels.iter().flat_map(|channel| channel.messages.iter()).map(|message| message.text.len()).sum::<usize>();
+        eprintln!(
+            "history benchmark mode={mode} messages={message_count} events={event_count} channel_messages={channel_message_count} body_bytes={body_bytes} elapsed_ms={elapsed_ms} peak_rss_bytes={}",
+            peak_rss_bytes(),
+        );
+        if let Some(hold_ms) = env::var_os("HOLD_MS") {
+            let hold_ms: u64 = hold_ms.to_string_lossy().parse().expect("HOLD_MS must be an integer");
+            assert!(hold_ms <= 60_000, "HOLD_MS must not exceed 60000");
+            println!("history benchmark holding mode={mode} pid={} hold_ms={hold_ms}", std::process::id());
+            use std::io::Write as _;
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+        }
     }
 
     #[test]

@@ -3,9 +3,11 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkS
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertExperimentalConfig, assertExperimentalBundle, EXPERIMENTAL_ID } from './experimental-identity.mjs';
 
 if (process.platform !== 'darwin') throw new Error('This packaging script is for macOS.');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+assertExperimentalConfig(root);
 const profile = process.argv.includes('--debug') ? 'debug' : 'release';
 const buildArgs = ['run', 'tauri', '--', 'build', '--bundles', 'app', '--no-sign'];
 if (profile === 'debug') buildArgs.push('--debug');
@@ -14,12 +16,13 @@ if (!process.argv.includes('--package-only')) execFileSync('npm', buildArgs, { c
 
 // Documents may be managed by File Provider, which adds FinderInfo to .app bundles.
 // Sign our compiled application outside that directory, preserving security attributes.
-const cache = join(homedir(), 'Library/Caches/Monitter/builds');
+const cache = join(homedir(), 'Library/Caches/Monitter-GPUI/builds');
 mkdirSync(cache, { recursive: true });
 const staging = mkdtempSync(join(cache, `${profile}-`));
-const app = join(staging, 'Monitter.app');
-const compiled = join(root, `src-tauri/target/${profile}/bundle/macos/Monitter.app`);
+const app = join(staging, 'Monitter GPUI.app');
+const compiled = join(root, `src-tauri/target/${profile}/bundle/macos/Monitter GPUI.app`);
 if (!existsSync(compiled)) throw new Error(`Tauri did not produce ${compiled}`);
+assertExperimentalBundle(compiled);
 execFileSync('/usr/bin/ditto', [compiled, app], { stdio: 'inherit' });
 
 function removeSigningMetadata(path) {
@@ -60,14 +63,14 @@ symlinkSync('/Applications', join(staging, 'Applications'));
 const artifacts = join(root, 'artifacts');
 mkdirSync(artifacts, { recursive: true });
 // Never overwrite a previous disk image: Finder or File Provider may still hold it open.
-const filename = `Monitter-${process.arch}-${profile}-${Date.now()}.dmg`;
+const filename = `Monitter-GPUI-${process.arch}-${profile}-${Date.now()}.dmg`;
 const packages = join(cache, 'packages');
 mkdirSync(packages, { recursive: true });
 const cachedDmg = join(packages, filename);
-execFileSync('/usr/bin/hdiutil', ['create', '-volname', 'Monitter', '-srcfolder', staging, '-format', 'UDZO', cachedDmg], { stdio: 'inherit' });
+execFileSync('/usr/bin/hdiutil', ['create', '-volname', 'Monitter GPUI', '-srcfolder', staging, '-format', 'UDZO', cachedDmg], { stdio: 'inherit' });
 execFileSync('/usr/bin/hdiutil', ['verify', cachedDmg], { stdio: 'inherit' });
 const dmg = join(artifacts, filename);
 copyFileSync(cachedDmg, dmg);
-const manifest = { profile, app, dmg, builtAt: new Date().toISOString() };
+const manifest = { identifier: EXPERIMENTAL_ID, profile, app, dmg, builtAt: new Date().toISOString() };
 writeFileSync(join(artifacts, `macos-${profile}.json`), `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(JSON.stringify(manifest, null, 2));

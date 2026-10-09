@@ -179,6 +179,11 @@ impl RuntimeExtensions {
         Some(format!("{:x}", Sha256::digest(encoded)))
     }
 
+    pub(crate) fn stdio_launches(&self) -> Vec<(String, Vec<String>)> {
+        self.all_servers().filter(|server| server.transport == McpTransport::Stdio)
+            .map(|server| (server.command.clone(), server.args.clone())).collect()
+    }
+
     /// Codex app-server's `config` object is sent over its owned stdin pipe.
     pub(crate) fn codex_config(&self) -> Map<String, Value> {
         let mut config = Map::new();

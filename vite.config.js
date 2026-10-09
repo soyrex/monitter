@@ -33,7 +33,7 @@ export default defineConfig(({ command, mode }) => {
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: appUi ? 18420 : webDev ? 18450 : 18420,
+    port: appUi ? 19420 : webDev ? 19450 : 19420,
     strictPort: true,
     host: appUi ? '127.0.0.1' : webDev ? '0.0.0.0' : host || "127.0.0.1",
     ...(webDev ? { allowedHosts: ['.ts.net'], cors: false, proxy: webDevProxy() } : {}),
@@ -41,7 +41,7 @@ export default defineConfig(({ command, mode }) => {
       ? {
           protocol: "ws",
           host,
-          port: 18421,
+          port: 19421,
         }
       : undefined,
     watch: {

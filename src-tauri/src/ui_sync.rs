@@ -3,7 +3,7 @@
 
 use crate::history::{History, HistoryRecord};
 use crate::model::{ChannelMessage, Message, Snapshot};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const LIVE_MESSAGES_PER_TASK: usize = 64;
@@ -11,7 +11,7 @@ pub const MAX_MESSAGE_PAGE: usize = 100;
 const MAX_JOURNAL_REVISIONS: usize = 128;
 const MAX_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiDeltaResponse {
     pub revision: String,
@@ -19,7 +19,7 @@ pub struct UiDeltaResponse {
     pub delta: Option<UiDelta>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiDelta {
     pub from_revision: String,
@@ -33,7 +33,7 @@ pub struct UiDelta {
     pub retained_subagent_transcript_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskMessagesPage {
     /// Chronological within this page.
@@ -42,7 +42,7 @@ pub struct TaskMessagesPage {
     pub revision: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMessageChange {
     pub channel_id: String,
@@ -51,7 +51,7 @@ pub struct ChannelMessageChange {
     pub reset: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelMessagesPage {
     pub channel_id: String,
@@ -527,14 +527,10 @@ impl crate::Service {
         before_id: Option<&str>,
         limit: Option<u32>,
     ) -> Result<ChannelMessagesPage, String> {
-        let data = self.committed_data()?;
-        channel_message_page(
-            &data.snapshot,
-            channel_id,
-            before_id,
-            limit,
-            format!("{}:{}", self.revision_epoch, data.revision),
-        )
+        let _writer=self.state_writes.lock().map_err(|_| "Monitter state writer lock failed.")?;
+        let data=self.committed_data()?;
+        if !data.snapshot.channels.iter().any(|channel|channel.id==channel_id) {return Err("Channel was not found.".into());}
+        self.store.channel_messages(channel_id,before_id,limit,format!("{}:{}",self.revision_epoch,data.revision))
     }
 
     pub(crate) fn ui_delta(&self, revision: Option<&str>) -> Result<UiDeltaResponse, String> {
@@ -597,14 +593,10 @@ impl crate::Service {
         before_id: Option<&str>,
         limit: Option<u32>,
     ) -> Result<TaskMessagesPage, String> {
+        let _writer = self.state_writes.lock().map_err(|_| "Monitter state writer lock failed.")?;
         let data = self.committed_data()?;
-        message_page(
-            &data.snapshot,
-            task_id,
-            before_id,
-            limit,
-            format!("{}:{}", self.revision_epoch, data.revision),
-        )
+        if !data.snapshot.tasks.iter().any(|task|task.id==task_id) { return Err("Task was not found.".into()); }
+        self.store.task_messages(task_id,before_id,limit,format!("{}:{}", self.revision_epoch,data.revision))
     }
 }
 

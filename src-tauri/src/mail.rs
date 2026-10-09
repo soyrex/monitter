@@ -22,7 +22,7 @@ use std::{
 use uuid::Uuid;
 
 #[cfg(all(target_os = "macos", not(test)))]
-const KEYCHAIN_SERVICE: &str = "com.monitter.desktop.mail";
+const KEYCHAIN_SERVICE: &str = "com.monitter.gpui.experimental.mail";
 #[cfg(all(target_os = "macos", not(test)))]
 const KEYCHAIN_ACCOUNT: &str = "default";
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;

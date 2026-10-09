@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
-const backend = 'http://127.0.0.1:18436';
+const backend = 'http://127.0.0.1:19436';
 const apiRoute = /^\/api\/(?:access|invoke)(?:\?|$)/;
 
 export function trustedDevAddress(address = '') {

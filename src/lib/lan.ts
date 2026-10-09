@@ -1,3 +1,4 @@
+import { createLanAccessStore } from './lan-access-storage';
 import { invokeCommand } from './command-invoke';
 import { createCommandGuard } from './command-protocol';
 import { OwnerRelayDisconnectedError } from './owner-relay-error.js';
@@ -43,9 +44,10 @@ export function noteOwnerRelayReconnectOutcome(connected: boolean): void {
   ownerRelayReconnectFailures = connected ? 0 : ownerRelayReconnectFailures + 1;
 }
 export const isOwnerRelayReconnectPersistent = () => ownerRelayReconnectFailures >= OWNER_RELAY_RECONNECT_ALERT_THRESHOLD;
-const storageKey = 'monitter.lan.access';
-export function accessKey(): string { return sessionStorage.getItem(storageKey) ?? ''; }
-export function setAccessKey(key: string) { sessionStorage.setItem(storageKey, key.trim()); }
+const accessStore = createLanAccessStore(() => sessionStorage, () => localStorage);
+export const accessKey = accessStore.accessKey;
+export const setAccessKey = accessStore.setAccessKey;
+export const rememberAccessKey = accessStore.rememberAccessKey;
 const requireCompatibleCommand = createCommandGuard(() => lanRequest('get_command_capabilities', {}));
 export async function lanInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   await requireCompatibleCommand(command);
@@ -63,12 +65,13 @@ async function lanRequest<T>(command: string, args: Record<string, unknown>): Pr
       throw reason;
     }
   }
+  const requestKey = accessKey();
   const response = await fetch('/api/invoke', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessKey()}` },
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestKey}` },
     body: JSON.stringify({ command, args }),
   });
   if (response.status === 401) {
-    window.dispatchEvent(new Event('monitter-lan-unauthorized'));
+    if (accessStore.clearAccessKey(requestKey)) window.dispatchEvent(new Event('monitter-lan-unauthorized'));
     throw new Error('Incorrect or expired access code. Check Monitter Settings → LAN access.');
   }
   const data = await response.json();

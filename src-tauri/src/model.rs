@@ -626,10 +626,9 @@ pub fn upsert_subagent_session(
     });
 }
 
-/// Close any child projections that never emitted their own terminal event
-/// before the owning task ended. Native Codex children can be interrupted
-/// without a final `subAgentActivity` notification; leaving those entries
-/// active would keep an empty visor dock mounted forever.
+/// Finalize children when the owning execution is interrupted or fails.
+/// A completed Codex parent turn can still have independently running children;
+/// their own native terminal observations remain authoritative on success.
 pub fn finalize_subagent_sessions(
     sessions: &mut [SubagentSession],
     parent_task_id: &str,
@@ -644,6 +643,7 @@ pub fn finalize_subagent_sessions(
     let mut finalized = 0;
     for session in sessions.iter_mut().filter(|session| {
         session.source != "collaboration"
+            && !(parent_status == "completed" && session.source == "codex")
             && session.parent_task_id == parent_task_id
             && !terminal_subagent_status(&session.status)
     }) {
@@ -2013,7 +2013,7 @@ mod task_migration_tests {
     }
 
     #[test]
-    fn unfinished_subagents_follow_the_parent_to_a_terminal_state() {
+    fn native_children_survive_parent_completion_but_follow_interruption() {
         let mut sessions = vec![
             SubagentSession {
                 id: "codex:running".into(),
@@ -2050,6 +2050,15 @@ mod task_migration_tests {
                 updated_at: 2,
             },
         ];
+
+        assert_eq!(
+            finalize_subagent_sessions(&mut sessions, "parent", "completed", 9),
+            0
+        );
+        assert_eq!(sessions[0].status, "running");
+        assert_eq!(sessions[0].updated_at, 1);
+        assert_eq!(sessions[1].status, "completed");
+        assert_eq!(sessions[1].result.as_deref(), Some("kept"));
 
         assert_eq!(
             finalize_subagent_sessions(&mut sessions, "parent", "interrupted", 10),

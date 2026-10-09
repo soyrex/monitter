@@ -587,7 +587,7 @@ pub async fn browser_open(
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
     #[cfg(target_os = "macos")]
     {
-        builder = builder.data_store_identifier(*b"monitter-browser");
+        builder = builder.data_store_identifier(*b"monitter-gpui-v1");
     }
     #[cfg(target_os = "macos")]
     let webview = if macos_extensions_supported() {

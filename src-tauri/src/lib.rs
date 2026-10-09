@@ -56,6 +56,10 @@ mod dev_ui;
 mod environment_secrets;
 mod extensions;
 mod extensions_runtime;
+#[cfg(feature = "experimental-gpui")]
+pub mod experimental_desktop;
+#[cfg(feature = "experimental-gpui")]
+mod gpui_history_import;
 mod git;
 mod goals;
 #[cfg(test)]
@@ -66,6 +70,7 @@ mod lan;
 mod lan_sync;
 mod ui_sync;
 mod history;
+mod resident_history;
 mod image_file;
 mod local_file_link;
 mod markdown;
@@ -99,6 +104,8 @@ pub(crate) mod scheduler_impl;
 mod scheduler_tests;
 #[cfg(test)]
 mod runtime_gc_tests;
+#[cfg(test)]
+mod runtime_process_tests;
 #[cfg(test)]
 mod responsiveness_tests;
 #[cfg(test)]
@@ -367,6 +374,8 @@ fn approval_session_scope(input: &CreateApprovalRequest) -> Option<String> {
 }
 
 pub(crate) struct Service {
+    #[cfg(feature = "experimental-gpui")]
+    native_subscribers: Mutex<Vec<async_channel::Sender<()>>>,
     app: Option<AppHandle>,
     store: store::Store,
     extensions: extensions::ExtensionStore,
@@ -807,6 +816,8 @@ impl Service {
             idle_retirement_failures: Mutex::new(HashSet::new()),
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
             native_shortcut_mode: std::sync::atomic::AtomicU8::new(shortcut_mode),
+            #[cfg(feature = "experimental-gpui")]
+            native_subscribers: Mutex::new(Vec::new()),
             #[cfg(test)]
             runtime_dir: dir.join("runtime"),
             model_catalogs: Mutex::new(HashMap::new()),
@@ -1590,16 +1601,12 @@ impl Service {
         before: Option<i64>,
         limit: Option<u32>,
     ) -> Result<lan_sync::TaskEventsPage, String> {
+        let _writer = self.state_writes.lock().map_err(|_| "State writer lock failed.".to_string())?;
         let data = self.committed_data()?;
         if !data.snapshot.tasks.iter().any(|task| task.id == task_id) {
             return Err("Task was not found.".into());
         }
-        Ok(lan_sync::task_events(
-            &data.snapshot,
-            task_id,
-            before,
-            limit,
-        ))
+        self.store.task_events(task_id,before,limit)
     }
 
     fn task_event_detail(
@@ -1609,8 +1616,12 @@ impl Service {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> Result<lan_sync::EventDetailChunk, String> {
+        let _writer = self.state_writes.lock().map_err(|_| "State writer lock failed.".to_string())?;
         let data = self.committed_data()?;
-        lan_sync::event_detail_chunk(&data.snapshot, task_id, event_id, offset, limit)
+        if !data.snapshot.tasks.iter().any(|task|task.id==task_id) { return Err("Task was not found.".into()); }
+        let mut detail_snapshot = default_snapshot();
+        detail_snapshot.events.push(Arc::new(self.store.task_event(task_id,event_id)?));
+        lan_sync::event_detail_chunk(&detail_snapshot, task_id, event_id, offset, limit)
     }
 
     fn start_lan(
@@ -1833,16 +1844,14 @@ impl Service {
             }
             "delete_task" => {
                 let id: String = arg(&args, "id")?;
-                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(tauri::async_runtime::block_on(delete_task(app.state(), id))?)
+                snapshot_value(delete_task_blocking(self, id)?)
             }
             "delete_archived_task" => {
-                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(tauri::async_runtime::block_on(delete_archived_task(
-                    app.state(),
+                snapshot_value(delete_archived_task_blocking(
+                    self,
                     arg(&args, "taskId")?,
                     arg(&args, "removeNativeFiles")?,
-                ))?)
+                )?)
             }
             "set_task_archived" => snapshot_value(
                 self.set_task_archived(&arg::<String>(&args, "taskId")?, arg(&args, "archived")?)?,
@@ -1904,8 +1913,7 @@ impl Service {
             )?),
             "save_settings" => {
                 let settings: Settings = arg(&args, "settings")?;
-                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(tauri::async_runtime::block_on(save_settings(app.state(), settings))?)
+                snapshot_value(save_settings_blocking(self, settings)?)
             }
             "save_channel" => snapshot_value(self.save_channel(arg(&args, "channel")?)?),
             "set_channel_membership" => snapshot_value(self.set_channel_membership(
@@ -1924,9 +1932,8 @@ impl Service {
                 self.stop_channel_agent_conversation(&arg::<String>(&args, "channelId")?)?,
             ),
             "send_channel_message" => {
-                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                snapshot_value(tauri::async_runtime::block_on(send_channel_message(
-                    app.state(),
+                snapshot_value(send_channel_message_blocking(
+                    self.clone(),
                     arg(&args, "channelId")?,
                     arg(&args, "text")?,
                     arg(&args, "agentIds")?,
@@ -1935,12 +1942,11 @@ impl Service {
                         .map(serde_json::from_value)
                         .transpose()
                         .map_err(|_| "Invalid attachmentIds.")?,
-                ))?)
+                )?)
             }
             "send_channel_message_fast" => {
-                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
                 send_channel_message_accepted(
-                    app.state::<AppState>().0.clone(),
+                    self.clone(),
                     arg(&args, "channelId")?,
                     arg(&args, "text")?,
                     arg(&args, "agentIds")?,
@@ -1977,11 +1983,7 @@ impl Service {
                 value(acp_probe::verify(&host, &launch)?)
             }
             "get_model_catalog" => {
-                let app = self.app.as_ref().ok_or("LAN bridge needs an app handle.")?;
-                value(tauri::async_runtime::block_on(get_model_catalog(
-                    app.state(),
-                    arg(&args, "target")?,
-                ))?)
+                value(get_model_catalog_blocking(self, arg(&args, "target")?)?)
             }
             "set_task_model_settings" => snapshot_value(self.set_task_model_settings(
                 &arg::<String>(&args, "taskId")?,
@@ -2932,6 +2934,13 @@ impl Service {
     }
 
     fn changed(&self, task_id: Option<String>) {
+        #[cfg(feature = "experimental-gpui")]
+        if let Ok(mut subscribers) = self.native_subscribers.lock() {
+            subscribers.retain(|sender| match sender.try_send(()) {
+                Ok(()) | Err(async_channel::TrySendError::Full(_)) => true,
+                Err(async_channel::TrySendError::Closed(_)) => false,
+            });
+        }
         if let Some(app) = &self.app {
             let _ = app.emit("monitter:changed", serde_json::json!({ "taskId": task_id }));
         }
@@ -2972,6 +2981,7 @@ impl Service {
                 (&previous.snapshot, &previous.task_hosts, &previous.attachments),
                 (&candidate.snapshot, &candidate.task_hosts, &candidate.attachments),
             )?;
+            resident_history::evict(&mut candidate.snapshot);
             candidate.revision = previous.revision.saturating_add(1);
             // Record only durable changes. A poisoned projection cache is not
             // permission to reject an already-committed mutation; readers can
@@ -3095,12 +3105,39 @@ impl Service {
         preview_data_url: Option<String>,
         source_id: Option<String>,
     ) -> Result<attachments::Attachment, String> {
+        self.store_attachment_checked(
+            target,
+            filename,
+            mime_type,
+            data_base64,
+            preview_data_url,
+            source_id,
+            None,
+        )
+    }
+
+    fn store_attachment_checked(
+        &self,
+        target: attachments::AttachmentTarget,
+        filename: String,
+        mime_type: String,
+        data_base64: String,
+        preview_data_url: Option<String>,
+        source_id: Option<String>,
+        expected_scope: Option<(&str, &str)>,
+    ) -> Result<attachments::Attachment, String> {
         let (host, cwd) = {
             let data = self
                 .data
                 .lock()
                 .map_err(|_| "Monitter state lock failed.")?;
-            resolve_attachment_target(&data, &target)?
+            let resolved = resolve_attachment_target(&data, &target)?;
+            if expected_scope
+                .is_some_and(|(host_id, cwd)| resolved.0.id != host_id || resolved.1 != cwd)
+            {
+                return Err("The attachment destination changed. Select the file again for the current workspace.".into());
+            }
+            resolved
         };
         let attachment = attachments::store(
             &host,
@@ -3547,6 +3584,7 @@ impl Service {
                 (&data.snapshot, &data.task_hosts, &data.attachments),
                 (&candidate.snapshot, &candidate.task_hosts, &candidate.attachments),
             )?;
+            resident_history::evict(&mut candidate.snapshot);
             candidate.revision = data.revision.saturating_add(1);
             runs.tasks.remove(task_id);
             runs.native_sessions.retain(|_, owner| owner != task_id);
@@ -4999,9 +5037,7 @@ impl Service {
             if state.messages[cutoff].stream_status.as_deref() == Some("streaming") {
                 return Err("Wait for this message to finish before forking it.".into());
             }
-            let copied = state.messages.iter().take(cutoff + 1)
-                .filter(|message| message.task_id == source.id && matches!(message.role.as_str(), "user" | "assistant"))
-                .cloned().collect::<Vec<_>>();
+            let copied = self.store.messages_through(&source.id,&input.through_message_id)?;
             if copied.len() > 2_000 || copied.iter().map(|message| message.text.len()).sum::<usize>() > 8 * 1024 * 1024 {
                 return Err("This fork exceeds the 2,000-message or 8 MiB safety limit. Choose an earlier message.".into());
             }
@@ -8191,6 +8227,25 @@ async fn preview_task_deletion(
     .map_err(|error| format!("Task deletion preview worker failed: {error}"))?
 }
 
+fn delete_archived_task_blocking(
+    service: &Service,
+    task_id: String,
+    remove_native_files: bool,
+) -> Result<Snapshot, String> {
+    let (task, host) = service.task_and_host(&task_id)?;
+    let snapshot = service.snapshot()?;
+    if !task.archived {
+        return Err("Archive this chat before permanently deleting it.".into());
+    }
+    if task.status == "running" {
+        return Err("Cancel this running chat before permanently deleting it.".into());
+    }
+    if remove_native_files {
+        deletion::remove_verified(&snapshot, &task, &host)?;
+    }
+    delete_task_blocking(service, task_id)
+}
+
 #[tauri::command]
 async fn delete_archived_task(
     state: State<'_, AppState>,
@@ -8199,18 +8254,7 @@ async fn delete_archived_task(
 ) -> Result<Snapshot, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (task, host) = service.task_and_host(&task_id)?;
-        let snapshot = service.snapshot()?;
-        if !task.archived {
-            return Err("Archive this chat before permanently deleting it.".into());
-        }
-        if task.status == "running" {
-            return Err("Cancel this running chat before permanently deleting it.".into());
-        }
-        if remove_native_files {
-            deletion::remove_verified(&snapshot, &task, &host)?;
-        }
-        delete_task_blocking(&service, task_id)
+        delete_archived_task_blocking(&service, task_id, remove_native_files)
     })
     .await
     .map_err(|error| format!("Archived task deletion worker failed: {error}"))?
@@ -8562,25 +8606,27 @@ async fn resume_schedule(
         .map_err(|error| format!("Schedule resume worker failed: {error}"))?
 }
 
-#[tauri::command]
-async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Snapshot, String> {
+fn save_settings_blocking(service: &Service, settings: Settings) -> Result<Snapshot, String> {
     validate_settings(&settings)?;
-    let service = state.0.clone();
-    let snapshot = tauri::async_runtime::spawn_blocking(move || service.mutate(None, |snapshot| {
+    let snapshot = service.mutate(None, |snapshot| {
         snapshot.settings = settings;
         Ok(snapshot.clone())
-    }))
-    .await
-    .map_err(|error| format!("Settings save worker failed: {error}"))??;
+    })?;
     if snapshot.settings.shortcut_mode != menu::VIM_SHORTCUT_MODE {
         // Clear before replacing the native menu so an in-flight renderer
         // focus update cannot leave Escape consumed in standard mode.
-        state.0.set_native_escape_shield(false);
+        service.set_native_escape_shield(false);
     }
-    state
-        .0
-        .apply_shortcut_mode(&snapshot.settings.shortcut_mode)?;
+    service.apply_shortcut_mode(&snapshot.settings.shortcut_mode)?;
     Ok(snapshot)
+}
+
+#[tauri::command]
+async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || save_settings_blocking(&service, settings))
+        .await
+        .map_err(|error| format!("Settings save worker failed: {error}"))?
 }
 
 /// The renderer enables this only for Vim command handling outside a terminal.
@@ -8634,17 +8680,21 @@ async fn send_channel_message(
 ) -> Result<Snapshot, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        send_channel_message_accepted(
-            service.clone(),
-            channel_id,
-            text,
-            agent_ids,
-            attachment_ids,
-        )?;
-        service.snapshot()
+        send_channel_message_blocking(service, channel_id, text, agent_ids, attachment_ids)
     })
     .await
     .map_err(|error| format!("Channel send worker failed: {error}"))?
+}
+
+fn send_channel_message_blocking(
+    service: Arc<Service>,
+    channel_id: String,
+    text: String,
+    agent_ids: Vec<String>,
+    attachment_ids: Option<Vec<String>>,
+) -> Result<Snapshot, String> {
+    send_channel_message_accepted(service.clone(), channel_id, text, agent_ids, attachment_ids)?;
+    service.snapshot()
 }
 
 fn send_channel_message_accepted(
@@ -9285,131 +9335,136 @@ async fn clear_task_goal(state: State<'_, AppState>, task_id: String) -> Result<
         .map_err(|error| format!("Goal clear worker failed: {error}"))?
 }
 
+fn get_model_catalog_blocking(
+    service: &Service,
+    target: ModelCatalogTarget,
+) -> Result<ModelCatalog, String> {
+    let data = service
+        .data
+        .lock()
+        .map_err(|_| "Monitter state lock failed.".to_string())?;
+    let (host, provider, cwd, selected, codex_home, acp_launch) = if let Some(task_id) = target.task_id.as_deref() {
+        let task = data
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .ok_or("Task was not found.")?;
+        (
+            data.task_hosts
+                .get(task_id)
+                .cloned()
+                .ok_or("Task's saved host settings were not found.")?,
+            task.provider.clone(),
+            task.cwd.clone(),
+            task.model_settings.clone().unwrap_or(ModelSettings {
+                model: task.model.clone(),
+                reasoning_effort: None,
+                fast_mode: None,
+            }),
+            task.codex_home.clone(),
+            task.acp.clone(),
+        )
+    } else if let Some(agent_id) = target.agent_id.as_deref() {
+        let agent = data
+            .snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .ok_or("Agent was not found.")?;
+        let host = data
+            .snapshot
+            .hosts
+            .iter()
+            .find(|host| host.id == agent.host_id)
+            .cloned()
+            .ok_or("Agent host was not found.")?;
+        let cwd = if let Some(project_id) = target.project_id.as_deref() {
+            let project = data
+                .snapshot
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .ok_or("Project was not found.")?;
+            project
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.host_id == agent.host_id)
+                .map(|workspace| workspace.cwd.clone())
+                .unwrap_or_else(|| agent.cwd.clone())
+        } else {
+            agent.cwd.clone()
+        };
+        let cwd = if cwd.trim().is_empty() {
+            host.default_cwd.clone()
+        } else {
+            cwd
+        };
+        if cwd.trim().is_empty() {
+            return Err("Agent or host must specify a task folder.".into());
+        }
+        (
+            host,
+            agent.provider.clone(),
+            cwd,
+            ModelSettings {
+                model: agent.model.clone(),
+                reasoning_effort: None,
+                fast_mode: None,
+            },
+            target.codex_home.clone().or_else(|| agent.codex_home.clone()),
+            agent.acp.clone(),
+        )
+    } else {
+        return Err("Model catalog needs a task or agent target.".into());
+    };
+    drop(data);
+    let mut catalog = if provider == "acp" {
+        if let Some(task_id) = target.task_id.as_deref() {
+            if let Some(catalog) = service.acp_task_model_catalog(task_id)? {
+                catalog
+            } else {
+                let launch = acp_launch
+                    .as_ref()
+                    .filter(|launch| model::valid_acp_launch(launch))
+                    .ok_or("ACP task has no valid saved launch configuration.")?;
+                service.acp_agent_model_catalog(&host, launch, &cwd, target.refresh)?
+            }
+        } else {
+            let launch = acp_launch
+                .as_ref()
+                .filter(|launch| model::valid_acp_launch(launch))
+                .ok_or("ACP agent has no valid saved launch configuration.")?;
+            service.acp_agent_model_catalog(&host, launch, &cwd, target.refresh)?
+        }
+    } else {
+        service.model_catalog(
+            &host,
+            &provider,
+            &cwd,
+            codex_home.as_deref(),
+            target.refresh,
+        )?
+    };
+    if !selected.model.trim().is_empty() {
+        catalog.current.model = selected.model;
+        if selected.reasoning_effort.is_some() {
+            catalog.current.reasoning_effort = selected.reasoning_effort;
+        }
+        if selected.fast_mode.is_some() {
+            catalog.current.fast_mode = selected.fast_mode;
+        }
+    }
+    Ok(catalog)
+}
+
 #[tauri::command]
 async fn get_model_catalog(
     state: State<'_, AppState>,
     target: ModelCatalogTarget,
 ) -> Result<ModelCatalog, String> {
     let service = state.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let data = service
-            .data
-            .lock()
-            .map_err(|_| "Monitter state lock failed.".to_string())?;
-        let (host, provider, cwd, selected, codex_home, acp_launch) = if let Some(task_id) = target.task_id.as_deref() {
-            let task = data
-                .snapshot
-                .tasks
-                .iter()
-                .find(|task| task.id == task_id)
-                .ok_or("Task was not found.")?;
-            (
-                data.task_hosts
-                    .get(task_id)
-                    .cloned()
-                    .ok_or("Task's saved host settings were not found.")?,
-                task.provider.clone(),
-                task.cwd.clone(),
-                task.model_settings.clone().unwrap_or(ModelSettings {
-                    model: task.model.clone(),
-                    reasoning_effort: None,
-                    fast_mode: None,
-                }),
-                task.codex_home.clone(),
-                task.acp.clone(),
-            )
-        } else if let Some(agent_id) = target.agent_id.as_deref() {
-            let agent = data
-                .snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.id == agent_id)
-                .ok_or("Agent was not found.")?;
-            let host = data
-                .snapshot
-                .hosts
-                .iter()
-                .find(|host| host.id == agent.host_id)
-                .cloned()
-                .ok_or("Agent host was not found.")?;
-            let cwd = if let Some(project_id) = target.project_id.as_deref() {
-                let project = data
-                    .snapshot
-                    .projects
-                    .iter()
-                    .find(|project| project.id == project_id)
-                    .ok_or("Project was not found.")?;
-                project
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.host_id == agent.host_id)
-                    .map(|workspace| workspace.cwd.clone())
-                    .unwrap_or_else(|| agent.cwd.clone())
-            } else {
-                agent.cwd.clone()
-            };
-            let cwd = if cwd.trim().is_empty() {
-                host.default_cwd.clone()
-            } else {
-                cwd
-            };
-            if cwd.trim().is_empty() {
-                return Err("Agent or host must specify a task folder.".into());
-            }
-            (
-                host,
-                agent.provider.clone(),
-                cwd,
-                ModelSettings {
-                    model: agent.model.clone(),
-                    reasoning_effort: None,
-                    fast_mode: None,
-                },
-                target.codex_home.clone().or_else(|| agent.codex_home.clone()),
-                agent.acp.clone(),
-            )
-        } else {
-            return Err("Model catalog needs a task or agent target.".into());
-        };
-        drop(data);
-        let mut catalog = if provider == "acp" {
-            if let Some(task_id) = target.task_id.as_deref() {
-                if let Some(catalog) = service.acp_task_model_catalog(task_id)? {
-                    catalog
-                } else {
-                    let launch = acp_launch
-                        .as_ref()
-                        .filter(|launch| model::valid_acp_launch(launch))
-                        .ok_or("ACP task has no valid saved launch configuration.")?;
-                    service.acp_agent_model_catalog(&host, launch, &cwd, target.refresh)?
-                }
-            } else {
-                let launch = acp_launch
-                    .as_ref()
-                    .filter(|launch| model::valid_acp_launch(launch))
-                    .ok_or("ACP agent has no valid saved launch configuration.")?;
-                service.acp_agent_model_catalog(&host, launch, &cwd, target.refresh)?
-            }
-        } else {
-            service.model_catalog(
-                &host,
-                &provider,
-                &cwd,
-                codex_home.as_deref(),
-                target.refresh,
-            )?
-        };
-        if !selected.model.trim().is_empty() {
-            catalog.current.model = selected.model;
-            if selected.reasoning_effort.is_some() {
-                catalog.current.reasoning_effort = selected.reasoning_effort;
-            }
-            if selected.fast_mode.is_some() {
-                catalog.current.fast_mode = selected.fast_mode;
-            }
-        }
-        Ok(catalog)
-    })
+    tauri::async_runtime::spawn_blocking(move || get_model_catalog_blocking(&service, target))
     .await
     .map_err(|error| format!("Model catalog worker failed: {error}"))?
 }
@@ -9923,6 +9978,34 @@ mod tests {
         }).unwrap();
         assert!(service.fork_task(ForkTaskInput { source_task_id: source.id, through_message_id: "first-agent".into(), agent_id: agent.id, model_settings: None }).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fork_task_reads_evicted_text_from_sqlite() {
+        let dir = temp_dir("cold-message-fork");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let source = service.create_task(task_input(agent.id.clone(), "Source", None)).unwrap();
+        service.mutate(None, |snapshot| {
+            for index in 0..70 {
+                snapshot.messages.push(Message {
+                    id: format!("cold-fork-{index}"), task_id: source.id.clone(),
+                    role: "user".into(), text: format!("Original request {index}"), created_at: index,
+                    sender_agent_id: None, collaboration_id: None, stream_status: None,
+                    phase: None, response_metadata: None, attachments: vec![],
+                });
+            }
+            Ok(())
+        }).unwrap();
+        assert!(service.snapshot().unwrap().messages.payload_is_cold("cold-fork-0"));
+        let fork = service.fork_task(ForkTaskInput {
+            source_task_id: source.id, through_message_id: "cold-fork-1".into(),
+            agent_id: agent.id, model_settings: None,
+        }).unwrap();
+        let page = service.task_messages(&fork.id, None, Some(64)).unwrap();
+        let text = page.messages.iter().filter(|row| row.role == "user").map(|row| row.text.as_str()).collect::<Vec<_>>();
+        assert_eq!(text, vec!["Original request 0", "Original request 1"]);
+        drop(service); let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -10755,6 +10838,82 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             control.terminate_owned();
             service.release_app_server_run(&task.id, &control);
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resident_codex_permission_changes_reach_each_next_turn_without_restarting() {
+        let dir = temp_dir("resident-permission-wire");
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("fake-codex");
+        let wire = dir.join("wire.jsonl");
+        std::fs::write(&executable, r##"#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline');
+const wire = path.join(path.dirname(process.argv[1]), 'wire.jsonl');
+const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+let turn = 0;
+readline.createInterface({input: process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  fs.appendFileSync(wire, JSON.stringify({pid:process.pid,...request}) + '\n');
+  if (request.method === 'initialize') send({id:request.id,result:{}});
+  if (request.method === 'thread/resume') send({id:request.id,result:{thread:{id:'permission-session'}}});
+  if (request.method === 'turn/start') {
+    const id = `permission-turn-${++turn}`;
+    send({id:request.id,result:{turn:{id}}});
+    send({method:'item/completed',params:{threadId:'permission-session',turnId:id,item:{id:`reply-${turn}`,type:'agentMessage',text:'fixture complete'}}});
+    send({method:'turn/completed',params:{threadId:'permission-session',turn:{id,status:'completed'}}});
+  }
+});
+"##).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let service = Service::open(None, dir.clone()).unwrap();
+        let task = service.create_task(CreateTaskInput {
+            agent_id: service.snapshot().unwrap().agents[0].id.clone(),
+            title: "permission wire".into(), native_session_id: Some("permission-session".into()),
+            parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+            model_settings: None, sandbox: Some("read-only".into()),
+        }).unwrap();
+        service.mutate_data(None, |data| {
+            data.task_hosts.get_mut(&task.id).unwrap().codex_path = executable.display().to_string();
+            Ok(())
+        }).unwrap();
+        service.resume(task.id.clone()).unwrap();
+        wait_idle(&service, &task.id, 5).unwrap();
+        let resident = service.resident_control(&task.id).unwrap().unwrap();
+        // Broaden, bypass, then tighten. A stale thread default would leave the
+        // final read-only turn with the earlier bypass policy.
+        for sandbox in ["workspace-write", "yolo", "read-only"] {
+            service.set_task_sandbox(&task.id, sandbox.into()).unwrap();
+            service.send(task.id.clone(), format!("next {sandbox}"), vec![]).unwrap();
+            wait_idle(&service, &task.id, 5).unwrap();
+            assert!(Arc::ptr_eq(&resident, &service.resident_control(&task.id).unwrap().unwrap()));
+        }
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&wire).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let turns: Vec<_> = requests.iter().filter(|request| request["method"] == "turn/start").collect();
+        resident.terminate_owned();
+        service.release_app_server_run(&task.id, &resident);
+        assert_eq!(turns.len(), 4);
+        assert_eq!(requests.iter().filter(|request| request["method"] == "thread/resume").count(), 1);
+        for (index, (policy, approval)) in [
+            ("readOnly", "on-request"), ("workspaceWrite", "on-request"),
+            ("dangerFullAccess", "never"), ("readOnly", "on-request"),
+        ].into_iter().enumerate() {
+            assert_eq!(turns[index]["pid"], turns[0]["pid"]);
+            assert_eq!(turns[index]["params"]["threadId"], "permission-session");
+            assert_eq!(turns[index]["params"]["sandboxPolicy"]["type"], policy);
+            assert_eq!(turns[index]["params"]["approvalPolicy"], approval);
+            if policy != "dangerFullAccess" {
+                assert_eq!(turns[index]["params"]["sandboxPolicy"]["networkAccess"], false);
+            }
+        }
+        assert_eq!(turns[1]["params"]["sandboxPolicy"]["writableRoots"], serde_json::json!([turns[1]["params"]["cwd"]]));
         let _ = std::fs::remove_dir_all(dir);
     }
 

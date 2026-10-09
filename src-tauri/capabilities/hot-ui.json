@@ -4,7 +4,7 @@
   "description": "The developer UI may only return the main window to packaged assets.",
   "local": false,
   "remote": {
-    "urls": ["http://127.0.0.1:18420/monitter-app-ui/*"]
+    "urls": ["http://127.0.0.1:19420/monitter-app-ui/*"]
   },
   "webviews": ["main"],
   "permissions": ["allow-use-packaged-ui"]

@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Monitter",
+  "productName": "Monitter GPUI",
   "version": "0.1.0",
-  "identifier": "com.monitter.desktop",
+  "identifier": "com.monitter.gpui.experimental",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:18420",
+    "devUrl": "http://localhost:19420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../build"
   },
@@ -13,7 +13,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "Monitter",
+        "title": "Monitter GPUI",
         "titleBarStyle": "Overlay",
         "transparent": true,
         "hiddenTitle": true,

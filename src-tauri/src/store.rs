@@ -55,7 +55,7 @@ impl Store {
         let lease = migration::Lease::acquire(&dir)?;
         let database = migration::open_database(&dir)?;
         let (mut snapshot, mut hosts, attachments, samples, captured_since) =
-            database.read_snapshot()?;
+            database.read_resident_snapshot()?;
         let previous = snapshot.clone();
         let previous_hosts = hosts.clone();
         // Preserve immutable task host snapshots when importing older state.
@@ -90,6 +90,15 @@ impl Store {
         Ok((store, snapshot, hosts, attachments))
     }
 
+
+    pub(crate) fn channel_messages(&self,channel_id:&str,before_id:Option<&str>,limit:Option<u32>,revision:String)->Result<crate::ui_sync::ChannelMessagesPage,String>{self.database.channel_page(channel_id,before_id,limit,revision)}
+    pub(crate) fn task_messages(&self, task_id:&str, before_id:Option<&str>,limit:Option<u32>,revision:String)->Result<crate::ui_sync::TaskMessagesPage,String> { self.database.message_page(task_id,before_id,limit,revision) }
+    pub(crate) fn messages_through(&self, task_id:&str, through_id:&str)->Result<Vec<crate::model::Message>,String> { self.database.messages_through(task_id,through_id) }
+    pub(crate) fn task_message(&self, task_id: &str, message_id: &str) -> Result<crate::model::Message, String> {
+        self.database.task_message(task_id, message_id)
+    }
+    pub(crate) fn task_events(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String>{self.database.event_page(task_id,before,limit)}
+    pub(crate) fn task_event(&self,task_id:&str,event_id:&str)->Result<crate::model::RunEvent,String>{self.database.task_event(task_id,event_id)}
     fn require_writable(&self) -> Result<(), String> {
         if self.poisoned.load(Ordering::Acquire) {
             Err("Monitter persistence failed; reopen the app to reconcile durable state before making further changes.".into())
@@ -107,7 +116,7 @@ impl Store {
         attachments: &HashMap<String, StoredAttachment>,
     ) -> Result<(), String> {
         self.require_writable()?;
-        let previous = self.database.read_snapshot()?;
+        let previous = self.database.read_resident_snapshot()?;
         self.save_update(
             (&previous.0, &previous.1, &previous.2),
             (snapshot, hosts, attachments),

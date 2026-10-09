@@ -1,5 +1,36 @@
 # Monitter agent guide
 
+## Experimental GPUI fork
+
+This checkout is the `experiment/gpui-desktop` fork from `557bb5e`. Alex has
+authorized migrating the full desktop UI to GPUI while leaving mobile and shared
+web clients unchanged. For this fork, `desktop-gpui/` uses Rust and pinned GPUI
+Kit; this explicitly supersedes the Svelte desktop stack requirement below.
+Retain the Rust authority and the existing mobile protocol. Track incomplete
+features in `desktop-gpui/parity.json`; a working chat shell is not full parity.
+
+Match outcomes and visual design, not the Tauri/Svelte implementation path.
+Prefer GPUI retained entities, native focus/actions/input, virtualized lists,
+typed Rust state, and existing GPUI docking/resizing primitives where they fit.
+Keep backend security/execution authoritative. The JSON command adapter is an
+incremental migration seam, not a mandate to preserve renderer IPC or polling.
+Evaluate native alternatives before porting DOM/workaround behavior literally.
+
+Use `npm run check:gpui`, `npm run build:gpui`, and `npm run dev:gpui` for the
+native GPUI executable. `build:mac` remains the legacy Tauri baseline, even though
+its packaging identity is isolated. Never call it proof of a GPUI build.
+The experimental profile is `com.monitter.gpui.experimental`. Do not copy or open
+the production profile, overwrite `/Applications/Monitter.app`, restart production,
+or deploy the unchanged production relay infrastructure. Legacy smoke scripts
+must be audited for production paths/ports before running them.
+
+Track cache growth with `node scripts/gpui-disk.mjs`. Native commands share
+`.cargo-target/gpui`; packaging records before/after usage under ignored
+`artifacts/gpui/disk-usage.jsonl` and stops below 6 GiB free for warm debug
+rebuilds, or 10 GiB for cold/release builds. Reclaim only idle,
+regenerable fork-owned caches after checking active compiler processes. Preserve
+production/shared caches, running app bundles, profiles, credentials and backups.
+
 Monitter is a Tauri desktop workspace for real CLI and ACP agents. The desktop runs the agents locally or over SSH; mobile and shared browser clients connect to that desktop. macOS is the primary tested desktop platform. Do not edit the unrelated CME checkout.
 
 ## Project map
@@ -32,3 +63,7 @@ Monitter is a Tauri desktop workspace for real CLI and ACP agents. The desktop r
 - Use `npm ci` for a clean dependency install. `npm run check` checks Svelte/TypeScript; `npm run build` builds the web assets; `cargo test --manifest-path src-tauri/Cargo.toml` runs Rust tests. Choose focused tests from `scripts/` for the changed behavior, then broaden only for a concrete remaining risk.
 - `npm run tauri dev` runs the desktop app. `npm run dev` is a browser design preview and does not run native agents. For the installed macOS app, `npm run dev:app-ui` serves the hot UI on the dedicated bridge port; backend edits require a native rebuild.
 - Do not purchase or provision paid services. A specific transaction requires Alex's explicit approval of vendor/account, total price and currency, term, and recurring charges before any charge or commitment; research or setup approval is not purchase approval.
+
+## Experimental preview lifecycle authorization
+
+Alex has authorized this agent to own experimental preview launches and restarts for development and verification. This supersedes the earlier requirement to ask before restarting the preview. Verify the exact experimental executable before stopping it. Production Monitter, mobile/shared clients, profiles, and unrelated processes remain protected.

@@ -74,6 +74,9 @@ pub enum HistoryDelta {
 /// A persistent, ordered collection with identity and scope indexes.
 pub struct History<T: HistoryRecord> {
     rows: Vector<T>,
+    /// Bodies evicted from the resident view remain authoritative in SQLite.
+    /// This is private cache state, never serialized as durable history.
+    cold_payload_ids: PersistentHashMap<String, ()>,
     ids: Mutex<PersistentHashMap<String, Vector<usize>>>,
     scopes: Mutex<PersistentHashMap<String, Vector<usize>>>,
     indexes_dirty: AtomicBool,
@@ -93,6 +96,7 @@ impl<T: HistoryRecord + Clone> Clone for History<T> {
         // A new clone token intentionally starts a fresh delta log.
         Self {
             rows: self.rows.clone(),
+            cold_payload_ids: self.cold_payload_ids.clone(),
             ids: Mutex::new(self.ids.lock().expect("history id index poisoned").clone()),
             scopes: Mutex::new(
                 self.scopes
@@ -121,6 +125,7 @@ impl<T: HistoryRecord> History<T> {
         let version = next_version();
         Self {
             rows,
+            cold_payload_ids: PersistentHashMap::new(),
             ids: Mutex::new(ids),
             scopes: Mutex::new(scopes),
             indexes_dirty: AtomicBool::new(false),
@@ -134,6 +139,21 @@ impl<T: HistoryRecord> History<T> {
 
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    pub(crate) fn payload_is_cold(&self, id: &str) -> bool {
+        self.cold_payload_ids.contains_key(id)
+    }
+
+    pub(crate) fn has_cold_payloads(&self) -> bool {
+        !self.cold_payload_ids.is_empty()
+    }
+
+    /// Eviction changes neither durable identity nor the mutation journal.
+    pub(crate) fn evict_payload(&mut self, index: usize, value: T) {
+        assert_eq!(self.rows[index].id(), value.id());
+        self.cold_payload_ids.insert(value.id().to_owned(), ());
+        self.rows[index] = value;
     }
 
     pub fn is_empty(&self) -> bool {

@@ -107,6 +107,49 @@ impl Service {
         })
     }
 
+    /// Adopt a fresh provider-driven continuation on this resident writer only.
+    /// This does not enqueue/send a user message or change native goal state.
+    pub(crate) fn adopt_app_server_continuation(
+        &self,
+        task_id: &str,
+        control: &Arc<RunControl>,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), String> {
+        self.mutate_data(Some(task_id.into()), |data| {
+            let runs = self.runs.lock().map_err(|_| "Run registry unavailable")?;
+            let task = data
+                .snapshot
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .ok_or("Task not found")?;
+            if task.provider != "codex"
+                || task.archived
+                || task.status != "completed"
+                || task.native_session_id.as_deref() != Some(thread_id)
+                || !runs
+                    .tasks
+                    .get(task_id)
+                    .is_some_and(|owner| Arc::ptr_eq(owner, control))
+            {
+                return Err("Native continuation no longer owns this chat.".into());
+            }
+            control.adopt_native_continuation(thread_id, turn_id)?;
+            task.status = "running".into();
+            task.updated_at = now();
+            data.snapshot.events.push(Arc::new(RunEvent {
+                id: id(),
+                task_id: task_id.into(),
+                kind: "status".into(),
+                title: "turn.started".into(),
+                detail: "Native provider continuation".into(),
+                created_at: now(),
+            }));
+            Ok(())
+        })
+    }
+
     pub(crate) fn app_server_message(
         &self,
         task_id: &str,
@@ -376,16 +419,41 @@ impl Service {
             }
             if let Some((kind, title, detail)) = parsed.event {
                 if kind == "computer_image" {
-                    let image = attachments::generated_image(&detail)?;
-                    let mut pending = self
-                        .pending_codex_images
-                        .lock()
-                        .map_err(|_| "Image state unavailable")?;
-                    let images = pending.entry(task_id.into()).or_default();
-                    if images.len() >= 4 {
-                        return Err("Too many pending Codex images.".into());
+                    match attachments::generated_image(&detail) {
+                        Ok(image) => {
+                            let mut pending = self
+                                .pending_codex_images
+                                .lock()
+                                .map_err(|_| "Image state unavailable")?;
+                            let images = pending.entry(task_id.into()).or_default();
+                            if images.len() >= 4 {
+                                data.snapshot.events.push(Arc::new(RunEvent {
+                                    id: id(),
+                                    task_id: task_id.into(),
+                                    kind: "warning".into(),
+                                    title: "Codex image preview omitted".into(),
+                                    detail: "Four image previews are already pending. The provider turn continues.".into(),
+                                    created_at: now(),
+                                }));
+                            } else {
+                                images.push(image);
+                            }
+                        }
+                        Err(_) => {
+                            // Keep the rejected image bytes out of durable
+                            // events. Rendering limits and malformed previews
+                            // are visible warnings; authority and write errors
+                            // from this fenced mutation still propagate.
+                            data.snapshot.events.push(Arc::new(RunEvent {
+                                id: id(),
+                                task_id: task_id.into(),
+                                kind: "warning".into(),
+                                title: "Codex image preview omitted".into(),
+                                detail: "An image preview exceeded the inline limits or could not be decoded. The provider turn continues.".into(),
+                                created_at: now(),
+                            }));
+                        }
                     }
-                    images.push(image);
                 } else {
                     data.snapshot.events.push(Arc::new(RunEvent {
                         id: id(),

@@ -32,7 +32,213 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(20);
 // Keep this bounded, but accommodate the documented 120-second MCP timeout.
 const THREAD_TIMEOUT: Duration = Duration::from_secs(150);
 const TURN_START_TIMEOUT: Duration = Duration::from_secs(20);
+const MCP_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
+
+// Enumerate the actual thread inventory, including home/plugin MCP servers.
+// Querying happens on a worker; the sole stdout reader must stay responsive.
+fn mcp_inventory_ready(
+    mut query: impl FnMut(Value) -> Result<Value, String>,
+    thread_id: &str,
+    updates: &HashMap<String, String>,
+) -> Result<bool, String> {
+    let mut cursor: Option<String> = None;
+    let mut cursors = HashSet::new();
+    let mut ready = true;
+    for _ in 0..64 {
+        let page =
+            query(json!({"threadId":thread_id,"detail":"full","limit":100,"cursor":cursor}))?;
+        let rows = page
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or("MCP startup inventory unavailable")?;
+        for row in rows {
+            let name = row
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("MCP inventory omitted a server name")?;
+            let status = row
+                .get("runtimeStatus")
+                .and_then(Value::as_str)
+                .or_else(|| updates.get(name).map(String::as_str));
+            match status {
+                Some(
+                    "ready"
+                    | "connected"
+                    | "failed"
+                    | "cancelled"
+                    | "disabled"
+                    | "authenticationRequired",
+                ) => {}
+                Some("starting" | "notStarted") => ready = false,
+                _ => return Err("MCP startup readiness is not supported by this provider".into()),
+            }
+        }
+        match page
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            Some(next) if cursors.insert(next.to_owned()) => cursor = Some(next.to_owned()),
+            Some(_) => return Err("MCP startup inventory repeated its cursor".into()),
+            None => return Ok(ready),
+        }
+    }
+    Err("MCP startup inventory exceeded the bounded page limit".into())
+}
+
+fn record_mcp_startup_update(
+    value: &Value,
+    thread_id: Option<&str>,
+    updates: &mut HashMap<String, String>,
+) {
+    let Some(thread_id) = thread_id else {
+        return;
+    };
+    let params = &value["params"];
+    if params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != thread_id)
+    {
+        return;
+    }
+    let (Some(name), Some(status)) = (params["name"].as_str(), params["status"].as_str()) else {
+        return;
+    };
+    if matches!(status, "starting" | "ready" | "failed" | "cancelled")
+        && (updates.len() < 4096 || updates.contains_key(name))
+    {
+        updates.insert(name.into(), status.into());
+    }
+}
+
+fn wait_for_mcp_startup(
+    control: &RunControl,
+    thread_id: &str,
+    updates: &Mutex<HashMap<String, String>>,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !control.is_cancelled() && !control.is_planned_retirement() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let snapshot = match updates.lock() {
+            Ok(value) => value.clone(),
+            Err(_) => return false,
+        };
+        let result = mcp_inventory_ready(
+            |params| {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err("MCP startup timed out".into());
+                }
+                control.query_app_server(
+                    "mcpServerStatus/list",
+                    params,
+                    remaining.min(Duration::from_secs(2)),
+                )
+            },
+            thread_id,
+            &snapshot,
+        );
+        match result {
+            Ok(true) => return Instant::now() < deadline,
+            Err(_) => return false,
+            Ok(false) => {}
+        }
+        thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100)),
+        );
+    }
+    false
+}
+
+fn take_mcp_startup_result(pending: &mut Option<mpsc::Receiver<bool>>) -> Option<bool> {
+    match pending.as_ref()?.try_recv() {
+        Ok(ready) => {
+            pending.take();
+            Some(ready)
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            pending.take();
+            Some(false)
+        }
+        Err(mpsc::TryRecvError::Empty) => None,
+    }
+}
+
+// This trace is deliberately separate from provider stderr diagnostics and
+// transcript events. It contains only fixed protocol labels and booleans.
+#[cfg(feature = "experimental-gpui")]
+type ProtocolTraceState = Option<ProtocolTrace>;
+#[cfg(not(feature = "experimental-gpui"))]
+type ProtocolTraceState = ();
+
+#[cfg(feature = "experimental-gpui")]
+struct ProtocolTrace {
+    started_at: Instant,
+}
+
+#[cfg(feature = "experimental-gpui")]
+fn protocol_trace_state() -> ProtocolTraceState {
+    (std::env::var_os("MONITTER_EXPERIMENTAL_APP_SERVER_TRACE").as_deref()
+        == Some(std::ffi::OsStr::new("1")))
+    .then(|| ProtocolTrace {
+        started_at: Instant::now(),
+    })
+}
+
+#[cfg(not(feature = "experimental-gpui"))]
+fn protocol_trace_state() -> ProtocolTraceState {}
+
+fn protocol_trace(
+    trace: &ProtocolTraceState,
+    method: &'static str,
+    stage: &'static str,
+    milestone: &'static str,
+    request_correlated: Option<bool>,
+    scope_matched: Option<bool>,
+) {
+    #[cfg(feature = "experimental-gpui")]
+    if let Some(trace) = trace {
+        let yes_no = |value| match value {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "n/a",
+        };
+        eprintln!(
+            "[gpui-app-server-trace] method={method} stage={stage} milestone={milestone} elapsed_ms={} request_correlated={} scope_matched={}",
+            trace.started_at.elapsed().as_millis(),
+            yes_no(request_correlated),
+            yes_no(scope_matched),
+        );
+    }
+    #[cfg(not(feature = "experimental-gpui"))]
+    let _ = (
+        trace,
+        method,
+        stage,
+        milestone,
+        request_correlated,
+        scope_matched,
+    );
+}
+
+fn traceable_notification_method(method: &str) -> Option<&'static str> {
+    match method {
+        "turn/started" => Some("turn/started"),
+        "turn/completed" => Some("turn/completed"),
+        "item/started" => Some("item/started"),
+        "item/completed" => Some("item/completed"),
+        "item/agentMessage/delta" => Some("item/agentMessage/delta"),
+        "thread/tokenUsage/updated" => Some("thread/tokenUsage/updated"),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestStage {
@@ -88,13 +294,24 @@ fn observe_subsequent_turn_clock(
     started: bool,
     control: &RunControl,
     stage_clock: &mut Option<StageClock>,
+    trace: &ProtocolTraceState,
 ) {
-    if started
-        && stage_clock.is_none()
-        && (control.has_app_server_turn_request()
-            || control.has_app_server_native_turn_request())
-    {
+    if started && stage_clock.is_none() {
+        let ordinary_turn_pending = control.has_app_server_turn_request();
+        if !ordinary_turn_pending && !control.has_app_server_native_turn_request() {
+            return;
+        }
         *stage_clock = Some(StageClock::start(RequestStage::SubsequentTurn));
+        if ordinary_turn_pending {
+            protocol_trace(
+                trace,
+                "turn/start",
+                "subsequent_turn",
+                "request_observed",
+                None,
+                None,
+            );
+        }
     }
 }
 
@@ -176,6 +393,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
 }
 
 fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunControl>) {
+    let trace = protocol_trace_state();
+    protocol_trace(&trace, "transport", "run", "started", None, None);
     let _owned = OwnedRun {
         service: service.clone(),
         task_id: task_id.clone(),
@@ -184,6 +403,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     let (mut task, host) = match service.task_and_host(&task_id) {
         Ok(value) => value,
         Err(error) => {
+            protocol_trace(&trace, "transport", "prepare", "failure", None, None);
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
@@ -191,18 +411,22 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     let mut extensions = match service.runtime_extensions_for_task(&task_id) {
         Ok(extensions) => extensions,
         Err(error) => {
+            protocol_trace(&trace, "transport", "prepare", "failure", None, None);
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
     };
     if let Err(error) = extensions.validate_for("codex", &host.kind) {
+        protocol_trace(&trace, "transport", "prepare", "failure", None, None);
         service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
         return;
     }
     control.set_mcp_fingerprint(extensions.mcp_fingerprint());
+    control.set_runtime_infrastructure_launches(extensions.stdio_launches());
     let grant = match service.collaboration_grant(&task_id) {
         Ok(value) => value,
         Err(error) => {
+            protocol_trace(&trace, "transport", "prepare", "failure", None, None);
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
@@ -210,11 +434,13 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     let jev_decisions_grant = match service.jev_decisions_grant(&task_id) {
         Ok(value) => value,
         Err(error) => {
+            protocol_trace(&trace, "transport", "prepare", "failure", None, None);
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
     };
     if host.kind == "ssh" && jev_decisions_grant.is_some() {
+        protocol_trace(&trace, "transport", "prepare", "unsupported", None, None);
         service.complete_app_server_turn(
             &task_id,
             &control,
@@ -251,6 +477,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     ) {
         Ok(transport) => transport,
         Err(error) => {
+            protocol_trace(&trace, "transport", "launch", "failure", None, None);
             service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
             return;
         }
@@ -259,6 +486,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     // Attachment ownership and the saved task snapshot keep their original cwd.
     task.cwd = cwd;
     let Some(stdin) = child.stdin.take() else {
+        protocol_trace(&trace, "transport", "stdin", "failure", None, None);
         crate::runner::terminate_bounded(&mut child);
         service.complete_app_server_turn(
             &task_id,
@@ -270,6 +498,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         return;
     };
     let Some(stdout) = child.stdout.take() else {
+        protocol_trace(&trace, "transport", "stdout", "failure", None, None);
         crate::runner::terminate_bounded(&mut child);
         service.complete_app_server_turn(
             &task_id,
@@ -281,6 +510,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         return;
     };
     if let Err(error) = control.install(child, Some(stdin)) {
+        protocol_trace(&trace, "transport", "install", "failure", None, None);
         service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
         return;
     }
@@ -298,7 +528,10 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                         let line = token
                             .as_deref()
                             .filter(|token| !token.is_empty())
-                            .map_or_else(|| line.clone(), |token| line.replace(token, "[redacted]"));
+                            .map_or_else(
+                                || line.clone(),
+                                |token| line.replace(token, "[redacted]"),
+                            );
                         // The internal admin has no durable transcript or
                         // activity surface. Keep provider diagnostics inside
                         // its process-local caller path rather than leaking
@@ -318,8 +551,13 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             }
         });
     }
+    let mut startup_pending: Option<mpsc::Receiver<bool>> = None;
+    let mut startup_thread_id: Option<String> = None;
+    let startup_updates = Arc::new(Mutex::new(HashMap::<String, String>::new()));
     let mut stage_clock = Some(StageClock::start(RequestStage::Initialize));
+    protocol_trace(&trace, "initialize", "initialize", "request", None, None);
     if let Err(error) = send(&control, initialize()) {
+        protocol_trace(&trace, "initialize", "initialize", "failure", None, None);
         service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
         return;
     }
@@ -350,17 +588,64 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
     });
     loop {
         if control.is_planned_retirement() {
+            protocol_trace(&trace, "transport", "run", "retired", None, None);
             terminal = true;
             break;
         }
         if control.is_cancelled() {
+            protocol_trace(&trace, "transport", "run", "cancelled", None, None);
             terminal = true;
             break;
+        }
+        if let Some(ready) = take_mcp_startup_result(&mut startup_pending) {
+            let Some(thread_id) = startup_thread_id.take() else {
+                break;
+            };
+            let owner_current = service
+                .runs
+                .lock()
+                .map(|runs| {
+                    runs.tasks
+                        .get(&task_id)
+                        .is_some_and(|owner| Arc::ptr_eq(owner, &control))
+                })
+                .unwrap_or(false);
+            if !owner_current
+                || control.is_cancelled()
+                || control.is_planned_retirement()
+                || control.current_app_server_thread().as_deref() != Some(thread_id.as_str())
+            {
+                control.disable_runtime_process_baseline();
+                terminal = true;
+                break;
+            }
+            if !ready || control.capture_runtime_process_baseline().is_err() {
+                control.disable_runtime_process_baseline();
+            }
+            protocol_trace(&trace, "turn/start", "initial_turn", "request", None, None);
+            if let Err(error) = control
+                .mark_app_server_turn_request(FIRST_TURN_ID)
+                .and_then(|_| send(&control, turn_request(&thread_id, &prompt, &task)))
+            {
+                service.complete_app_server_turn(&task_id, &control, None, "error", Some(error));
+                terminal = true;
+                break;
+            }
+            stage_clock = Some(StageClock::start(RequestStage::InitialTurn));
         }
         // `recv_timeout` returns immediately while the pipe has queued
         // notifications. Check absolute expiry before accepting another frame
         // so notification noise cannot starve a request-stage timeout.
         if stage_clock.is_some_and(|clock| clock.expired_at(Instant::now())) {
+            let stage = stage_clock
+                .map(|clock| match clock.stage {
+                    RequestStage::Initialize => "initialize",
+                    RequestStage::Thread => "thread",
+                    RequestStage::InitialTurn => "initial_turn",
+                    RequestStage::SubsequentTurn => "subsequent_turn",
+                })
+                .unwrap_or("request");
+            protocol_trace(&trace, "request", stage, "timeout", None, None);
             service.complete_app_server_turn(
                 &task_id,
                 &control,
@@ -379,7 +664,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         // A resident connection starts later turns outside this reader.  Begin
         // their own clock when the outstanding request is observed; only its
         // matching response clears it. Notifications never extend a clock.
-        observe_subsequent_turn_clock(started, &control, &mut stage_clock);
+        observe_subsequent_turn_clock(started, &control, &mut stage_clock, &trace);
         let deadline = stage_clock.map(StageClock::deadline);
         let poll = deadline
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
@@ -388,10 +673,12 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         let received = match output_rx.recv_timeout(poll) {
             Ok(value) => Ok(value),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                protocol_trace(&trace, "transport", "stdout", "eof", None, None);
                 Err("Codex app-server output closed.".into())
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if stage_clock.is_some_and(|clock| clock.expired_at(Instant::now())) {
+                    protocol_trace(&trace, "request", "active", "timeout", None, None);
                     Err(stage_clock
                         .map(|clock| clock.stage.timeout_error())
                         .unwrap_or("Codex app-server request timed out.")
@@ -402,12 +689,14 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
             }
         };
         let Some(_event) = control.begin_event_processing() else {
+            protocol_trace(&trace, "transport", "run", "cancelled", None, None);
             terminal = true;
             break;
         };
         let line = match received {
             Ok(Ok(line)) => line,
             Ok(Err(error)) | Err(error) => {
+                protocol_trace(&trace, "transport", "stdout", "read_failure", None, None);
                 service.complete_app_server_turn(
                     &task_id,
                     &control,
@@ -422,6 +711,7 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         let value: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(error) => {
+                protocol_trace(&trace, "transport", "stdout", "invalid_json", None, None);
                 service.complete_app_server_turn(
                     &task_id,
                     &control,
@@ -436,7 +726,17 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
         // A later turn can be marked and responded to while this reader is in
         // recv_timeout. Observe again after waking, before correlating the
         // frame, so an immediate valid response cannot look out of order.
-        observe_subsequent_turn_clock(started, &control, &mut stage_clock);
+        observe_subsequent_turn_clock(started, &control, &mut stage_clock, &trace);
+        if value.get("method").and_then(Value::as_str) == Some("mcpServer/startupStatus/updated") {
+            if let Ok(mut updates) = startup_updates.lock() {
+                record_mcp_startup_update(
+                    &value,
+                    control.current_app_server_thread().as_deref(),
+                    &mut updates,
+                );
+            }
+            continue;
+        }
         // Server-to-client requests also have JSON-RPC ids.  Dispatch them
         // before considering client response correlation; never mistake one
         // for a late turn/start acknowledgement.
@@ -499,6 +799,14 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 || native_turn_request.is_some()
                 || steer_request.is_some();
             if !known_request {
+                protocol_trace(
+                    &trace,
+                    "rpc/response",
+                    "response",
+                    "uncorrelated",
+                    Some(false),
+                    None,
+                );
                 service.complete_app_server_turn(
                     &task_id,
                     &control,
@@ -510,6 +818,50 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 );
                 terminal = true;
                 break;
+            }
+            let response_method = if id == INITIALIZE_ID {
+                Some("initialize")
+            } else if id == THREAD_ID {
+                Some(
+                    if task
+                        .native_session_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        "thread/resume"
+                    } else {
+                        "thread/start"
+                    },
+                )
+            } else if is_turn_request {
+                Some("turn/start")
+            } else {
+                None
+            };
+            if let Some(method) = response_method {
+                let stage = if is_turn_request {
+                    if started {
+                        "subsequent_turn"
+                    } else {
+                        "initial_turn"
+                    }
+                } else if id == THREAD_ID {
+                    "thread"
+                } else {
+                    "initialize"
+                };
+                protocol_trace(
+                    &trace,
+                    method,
+                    stage,
+                    if value.get("error").is_some() {
+                        "failure_response"
+                    } else {
+                        "ack"
+                    },
+                    Some(true),
+                    None,
+                );
             }
             if let Some(steer) = steer_request {
                 if let Some(error) = value.pointer("/error/message").and_then(Value::as_str) {
@@ -615,15 +967,31 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     terminal = true;
                     break;
                 }
-                if send(&control, json!({"method":"initialized"}))
-                    .and_then(|_| {
-                        send(
-                            &control,
-                            thread_request(&task, collaboration_endpoint.as_deref(), jev_decisions_endpoint.as_deref(), &extensions),
-                        )
-                    })
-                    .is_err()
-                {
+                if send(&control, json!({"method":"initialized"})).is_err() {
+                    service.complete_app_server_turn(
+                        &task_id,
+                        &control,
+                        None,
+                        "error",
+                        Some("Could not initialize Codex app-server thread.".into()),
+                    );
+                    terminal = true;
+                    break;
+                }
+                let request = thread_request(
+                    &task,
+                    collaboration_endpoint.as_deref(),
+                    jev_decisions_endpoint.as_deref(),
+                    &extensions,
+                );
+                let method = if request["method"] == "thread/resume" {
+                    "thread/resume"
+                } else {
+                    "thread/start"
+                };
+                protocol_trace(&trace, method, "thread", "request", None, None);
+                if send(&control, request).is_err() {
+                    protocol_trace(&trace, method, "thread", "failure", None, None);
                     service.complete_app_server_turn(
                         &task_id,
                         &control,
@@ -661,9 +1029,6 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 };
                 control.set_app_server_thread(thread_id.into());
                 control.set_resume_supported(true);
-                // The initialized process tree contains provider/MCP helpers;
-                // later children may be live user background jobs and pin GC.
-                let _ = control.capture_runtime_process_baseline();
                 if let Err(error) = service.app_server_event(
                     &task_id,
                     &control,
@@ -685,21 +1050,32 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                     terminal = true;
                     break;
                 }
-                if let Err(error) = control
-                    .mark_app_server_turn_request(FIRST_TURN_ID)
-                    .and_then(|_| send(&control, turn_request(thread_id, &prompt, &task)))
+                let (startup_tx, startup_rx) = mpsc::channel();
+                startup_pending = Some(startup_rx);
+                startup_thread_id = Some(thread_id.to_owned());
+                stage_clock = None;
+                let startup_control = control.clone();
+                let startup_thread = thread_id.to_owned();
+                let updates = startup_updates.clone();
+                // No user prompt is sent until this worker finishes or its
+                // bounded readiness fallback fires. The reader keeps pumping
+                // list responses and per-server startup notifications.
+                if thread::Builder::new()
+                    .name("monitter-codex-mcp-ready".into())
+                    .spawn(move || {
+                        let _ = startup_tx.send(wait_for_mcp_startup(
+                            &startup_control,
+                            &startup_thread,
+                            &updates,
+                            MCP_STARTUP_TIMEOUT,
+                        ));
+                    })
+                    .is_err()
                 {
-                    service.complete_app_server_turn(
-                        &task_id,
-                        &control,
-                        None,
-                        "error",
-                        Some(error),
-                    );
-                    terminal = true;
-                    break;
+                    // Dropped sender resolves once, disables GC, and still
+                    // starts the original prompt on the reader's next loop.
+                    control.disable_runtime_process_baseline();
                 }
-                stage_clock = Some(StageClock::start(RequestStage::InitialTurn));
             } else if is_turn_request {
                 let expected = if started {
                     RequestStage::SubsequentTurn
@@ -760,11 +1136,12 @@ fn run(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunC
                 }
             }
         }
-        handle_notification(
+        handle_notification_with_trace(
             &service,
             &task_id,
             &control,
             &value,
+            &trace,
             &mut started,
             &mut terminal,
             &mut message_text,
@@ -1394,6 +1771,43 @@ fn handle_notification(
     seen: &Arc<Mutex<HashSet<String>>>,
     lifecycle: &Arc<Mutex<RequestLifecycle>>,
 ) {
+    let trace = disabled_protocol_trace_state();
+    handle_notification_with_trace(
+        service,
+        task_id,
+        control,
+        value,
+        &trace,
+        started,
+        _terminal,
+        message_text,
+        turn_items,
+        seen,
+        lifecycle,
+    );
+}
+
+#[cfg(feature = "experimental-gpui")]
+fn disabled_protocol_trace_state() -> ProtocolTraceState {
+    None
+}
+
+#[cfg(not(feature = "experimental-gpui"))]
+fn disabled_protocol_trace_state() -> ProtocolTraceState {}
+
+fn handle_notification_with_trace(
+    service: &Arc<Service>,
+    task_id: &str,
+    control: &Arc<RunControl>,
+    value: &Value,
+    trace: &ProtocolTraceState,
+    started: &mut bool,
+    _terminal: &mut bool,
+    message_text: &mut HashMap<String, BufferedMessage>,
+    turn_items: &Arc<Mutex<HashMap<String, Value>>>,
+    seen: &Arc<Mutex<HashSet<String>>>,
+    lifecycle: &Arc<Mutex<RequestLifecycle>>,
+) {
     let method = value.get("method").and_then(Value::as_str).unwrap_or("");
     let params = value.get("params").unwrap_or(&Value::Null);
     let thread_id = params.get("threadId").and_then(Value::as_str).unwrap_or("");
@@ -1402,6 +1816,7 @@ fn handle_notification(
         .and_then(Value::as_str)
         .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))
         .unwrap_or("");
+    let trace_method = traceable_notification_method(method);
     if method == "serverRequest/resolved" {
         let Some(request_id) = params.get("requestId") else {
             return;
@@ -1425,7 +1840,25 @@ fn handle_notification(
     if method == "turn/started" && !thread_id.is_empty() && !turn_id.is_empty() {
         // turn/start's correlated response installs the exact IDs first.
         // A delayed notification from an older turn must never replace them.
-        if control.app_server_turn_is_current(thread_id, turn_id) {
+        let scope_matched = control.app_server_turn_is_current(thread_id, turn_id)
+            || service
+                .adopt_app_server_continuation(task_id, control, thread_id, turn_id)
+                .is_ok();
+        if let Some(method) = trace_method {
+            protocol_trace(
+                trace,
+                method,
+                "notification",
+                if scope_matched {
+                    "recognized"
+                } else {
+                    "ignored_scope"
+                },
+                None,
+                Some(scope_matched),
+            );
+        }
+        if scope_matched {
             *started = true;
         } else {
             service.record(
@@ -1436,6 +1869,23 @@ fn handle_notification(
             );
         }
         return;
+    }
+    let scope_matched = !thread_id.is_empty()
+        && !turn_id.is_empty()
+        && control.app_server_turn_is_current(thread_id, turn_id);
+    if let Some(method) = trace_method {
+        protocol_trace(
+            trace,
+            method,
+            "notification",
+            if scope_matched {
+                "recognized"
+            } else {
+                "ignored_scope"
+            },
+            None,
+            Some(scope_matched),
+        );
     }
     if matches!(
         method,
@@ -1453,6 +1903,10 @@ fn handle_notification(
         );
         return;
     }
+    // Late native PTY exits may clear an existing job without replaying a turn.
+    if method == "item/completed" && control.current_app_server_thread().as_deref() == Some(thread_id) {
+        if let Some(item) = params.get("item") { control.observe_runtime_command_exit(item); }
+    }
     if !thread_id.is_empty()
         && !turn_id.is_empty()
         && !control.app_server_turn_is_current(thread_id, turn_id)
@@ -1469,6 +1923,7 @@ fn handle_notification(
                         }
                     }
                 }
+                control.observe_runtime_command(item);
                 let parsed = parse_item(item, true);
                 if parsed
                     .event
@@ -1626,7 +2081,16 @@ fn handle_notification(
                             return;
                         }
                     }
-                    let parsed = parse_item(item, false);
+                    // Tool result payloads can contain the image's entire
+                    // base64 representation. Keep that data out of timeline
+                    // details even when preview validation rejects it.
+                    let safe_item = if mcp_image(item).is_some() {
+                        without_mcp_image_data(item)
+                    } else {
+                        item.clone()
+                    };
+                    control.observe_runtime_command(item);
+                    let parsed = parse_item(&safe_item, false);
                     if parsed
                         .event
                         .as_ref()
@@ -1915,6 +2379,24 @@ fn mcp_image(item: &Value) -> Option<&str> {
         })
 }
 
+fn without_mcp_image_data(item: &Value) -> Value {
+    let mut safe = item.clone();
+    if let Some(content) = safe
+        .pointer_mut("/result/content")
+        .and_then(Value::as_array_mut)
+    {
+        for entry in content {
+            if entry.get("type").and_then(Value::as_str) == Some("image") {
+                if let Some(object) = entry.as_object_mut() {
+                    object.remove("data");
+                    object.insert("imageOmitted".into(), Value::Bool(true));
+                }
+            }
+        }
+    }
+    safe
+}
+
 fn send(control: &RunControl, value: Value) -> Result<(), String> {
     control.send_control(&value.to_string())
 }
@@ -2000,13 +2482,18 @@ fn thread_request(
     }
     let mut config = extensions.codex_config();
     if let Some(endpoint) = collaboration_endpoint {
-        config.extend(json!({
-            "mcp_servers.monitter.url": endpoint,
-            "mcp_servers.monitter.bearer_token_env_var":"MONITTER_TOKEN",
-            "mcp_servers.monitter.required":true,
-            "mcp_servers.monitter.enabled_tools": crate::collaboration_mcp::tool_names(),
-            "mcp_servers.monitter.tools.install_shared_skill.approval_mode":"prompt"
-        }).as_object().cloned().unwrap_or_default());
+        config.extend(
+            json!({
+                "mcp_servers.monitter.url": endpoint,
+                "mcp_servers.monitter.bearer_token_env_var":"MONITTER_TOKEN",
+                "mcp_servers.monitter.required":true,
+                "mcp_servers.monitter.enabled_tools": crate::collaboration_mcp::tool_names(),
+                "mcp_servers.monitter.tools.install_shared_skill.approval_mode":"prompt"
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
     }
     if let Some(endpoint) = jev_decisions_endpoint {
         config.extend(
@@ -2046,6 +2533,125 @@ mod tests {
     use super::*;
     use std::{io::Cursor, path::PathBuf};
 
+    #[test]
+    fn mcp_readiness_paginates_and_waits_for_every_server() {
+        let pages = [
+            json!({"data":[{"name":"configured","runtimeStatus":"connected"}],"nextCursor":"page-two"}),
+            json!({"data":[{"name":"home-plugin","runtimeStatus":"starting"}],"nextCursor":null}),
+        ];
+        let mut index = 0;
+        let mut cursors = Vec::new();
+        assert!(!mcp_inventory_ready(
+            |params| {
+                cursors.push(params["cursor"].clone());
+                let page = pages[index].clone();
+                index += 1;
+                Ok(page)
+            },
+            "thread-a",
+            &HashMap::new()
+        )
+        .unwrap());
+        assert_eq!(cursors, vec![Value::Null, json!("page-two")]);
+        let ready = json!({"data":[{"name":"configured","runtimeStatus":"connected"},
+            {"name":"home-plugin","runtimeStatus":"connected"},{"name":"disabled","runtimeStatus":"disabled"}]});
+        assert!(mcp_inventory_ready(|_| Ok(ready.clone()), "thread-a", &HashMap::new()).unwrap());
+    }
+
+    #[test]
+    fn mcp_readiness_fresh_inventory_overrides_stale_notifications() {
+        let mut updates = HashMap::new();
+        record_mcp_startup_update(
+            &json!({"params":{"threadId":"other","name":"home","status":"ready"}}),
+            Some("thread-a"),
+            &mut updates,
+        );
+        assert!(updates.is_empty());
+        record_mcp_startup_update(
+            &json!({"params":{"threadId":"thread-a","name":"home","status":"ready"}}),
+            Some("thread-a"),
+            &mut updates,
+        );
+        record_mcp_startup_update(
+            &json!({"params":{"threadId":"thread-a","name":"unknown","status":"ready"}}),
+            Some("thread-a"),
+            &mut updates,
+        );
+        assert!(!mcp_inventory_ready(
+            |_| Ok(json!({"data":[{"name":"home","runtimeStatus":"starting"}]})),
+            "thread-a",
+            &updates
+        )
+        .unwrap());
+        assert!(mcp_inventory_ready(
+            |_| Ok(json!({"data":[{"name":"home"}]})),
+            "thread-a",
+            &updates
+        )
+        .unwrap());
+        assert!(mcp_inventory_ready(
+            |_| Ok(json!({"data":[{"name":"unseen"}]})),
+            "thread-a",
+            &updates
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_readiness_timeout_and_unsupported_fall_back_without_querying() {
+        let control = RunControl::new(false);
+        assert!(!wait_for_mcp_startup(
+            &control,
+            "thread-a",
+            &Mutex::new(HashMap::new()),
+            Duration::ZERO
+        ));
+        assert!(mcp_inventory_ready(
+            |_| Err("unsupported method".into()),
+            "thread-a",
+            &HashMap::new()
+        )
+        .is_err());
+        assert!(mcp_inventory_ready(
+            |_| Ok(json!({"data":[],"nextCursor":"repeat"})),
+            "thread-a",
+            &HashMap::new()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_readiness_completion_starts_original_prompt_once() {
+        let (tx, rx) = mpsc::channel();
+        let mut pending = Some(rx);
+        assert_eq!(take_mcp_startup_result(&mut pending), None);
+        tx.send(true).unwrap();
+        tx.send(false).unwrap();
+        assert_eq!(take_mcp_startup_result(&mut pending), Some(true));
+        assert_eq!(take_mcp_startup_result(&mut pending), None);
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let mut pending = Some(rx);
+        assert_eq!(take_mcp_startup_result(&mut pending), Some(false));
+        assert_eq!(take_mcp_startup_result(&mut pending), None);
+    }
+
+    #[test]
+    fn protocol_trace_notification_methods_are_allowlisted() {
+        assert_eq!(
+            traceable_notification_method("item/agentMessage/delta"),
+            Some("item/agentMessage/delta")
+        );
+        assert_eq!(
+            traceable_notification_method("turn/completed"),
+            Some("turn/completed")
+        );
+        assert_eq!(
+            traceable_notification_method("arbitrary/untrusted-method"),
+            None
+        );
+    }
+
     fn current_turn_service(name: &str) -> (Arc<Service>, String, Arc<RunControl>, PathBuf) {
         let directory =
             std::env::temp_dir().join(format!("monitter-codex-app-server-{name}-{}", crate::id()));
@@ -2079,6 +2685,318 @@ mod tests {
         control.set_app_server_thread("thread-terminal".into());
         control.set_app_server_turn("turn-terminal".into());
         (service, task.id, control, directory)
+    }
+
+    #[test]
+    fn native_continuation_delivers_output_without_another_user_message() {
+        let (service, task_id, control, directory) = current_turn_service("native-continuation");
+        service
+            .mutate_data(None, |data| {
+                data.snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == task_id)
+                    .unwrap()
+                    .native_session_id = Some("thread-terminal".into());
+                Ok(())
+            })
+            .unwrap();
+        assert!(service.complete_app_server_turn(
+            &task_id,
+            &control,
+            Some("turn-terminal"),
+            "completed",
+            None
+        ));
+        let mut started = false;
+        let mut terminal = false;
+        let mut messages = HashMap::new();
+        let items = Arc::new(Mutex::new(HashMap::new()));
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let lifecycle = Arc::new(Mutex::new(RequestLifecycle::default()));
+        // Unsolicited starts require the schema-mandated thread identity.
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({"method":"turn/started","params":{"turn":{"id":"automatic-missing-thread"}}}),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        assert!(!started);
+        assert!(!control.matches_app_server_turn("automatic-missing-thread"));
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({"method":"turn/started","params":{"threadId":"thread-terminal","turn":{"id":"automatic-1"}}}),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        assert!(started);
+        assert!(control.app_server_turn_is_current("thread-terminal", "automatic-1"));
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({"method":"item/completed","params":{"threadId":"thread-terminal","turnId":"automatic-1","item":{"type":"agentMessage","id":"automatic-output","text":"continued work"}}}),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == "running"));
+        assert!(snapshot
+            .messages
+            .iter()
+            .any(|message| message.task_id == task_id
+                && message.role == "assistant"
+                && message.text == "continued work"));
+        assert!(!snapshot
+            .messages
+            .iter()
+            .any(|message| message.task_id == task_id && message.role == "user"));
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn rejected_image_preview_warns_and_keeps_the_provider_turn_live() {
+        let (service, task_id, control, directory) = current_turn_service("image-preview-warning");
+        let mut started = true;
+        let mut terminal = false;
+        let mut messages = HashMap::new();
+        let items = Arc::new(Mutex::new(HashMap::new()));
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let lifecycle = Arc::new(Mutex::new(RequestLifecycle::default()));
+        let image_data = "A".repeat(crate::attachments::MAX_GENERATED_IMAGE_DATA_URL_BYTES);
+
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({
+                "method":"item/completed",
+                "params":{
+                    "threadId":"thread-terminal",
+                    "turnId":"turn-terminal",
+                    "item":{
+                        "type":"mcpToolCall",
+                        "id":"image-tool",
+                        "server":"image-tools",
+                        "tool":"render",
+                        "arguments":{},
+                        "result":{"content":[{"type":"image","mimeType":"image/png","data":image_data}]}
+                    }
+                }
+            }),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+
+        assert!(!terminal);
+        assert!(control.app_server_turn_is_current("thread-terminal", "turn-terminal"));
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == "running"));
+        let warning = snapshot
+            .events
+            .iter()
+            .find(|event| event.task_id == task_id && event.kind == "warning")
+            .expect("rejected preview should be visible as a warning");
+        assert_eq!(warning.title, "Codex image preview omitted");
+        assert!(warning.detail.contains("provider turn continues"));
+        assert!(warning.detail.len() < 256);
+        let tool_event = snapshot
+            .events
+            .iter()
+            .find(|event| event.task_id == task_id && event.kind == "tool")
+            .expect("tool activity should remain visible");
+        assert!(tool_event.detail.contains("imageOmitted"));
+        assert!(!tool_event.detail.contains(&image_data));
+        assert!(tool_event.detail.len() < 2_000);
+
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({
+                "method":"item/completed",
+                "params":{
+                    "threadId":"thread-terminal",
+                    "turnId":"turn-terminal",
+                    "item":{"type":"agentMessage","id":"after-image","text":"The turn continued."}
+                }
+            }),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+        let snapshot = service.snapshot().unwrap();
+        assert!(snapshot.messages.iter().any(|message| {
+            message.task_id == task_id && message.text == "The turn continued."
+        }));
+        assert!(!terminal);
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn image_preview_ownership_failure_still_terminates_the_turn() {
+        let (service, task_id, control, directory) =
+            current_turn_service("image-preview-state-error");
+        let mut started = true;
+        let mut terminal = false;
+        let mut messages = HashMap::new();
+        let items = Arc::new(Mutex::new(HashMap::new()));
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let lifecycle = Arc::new(Mutex::new(RequestLifecycle::default()));
+        service.release_app_server_run(&task_id, &control);
+        let replacement = service.reserve_run(&task_id).unwrap();
+        replacement.set_app_server_thread("thread-terminal".into());
+        replacement.set_app_server_turn("turn-terminal".into());
+
+        handle_notification(
+            &service,
+            &task_id,
+            &control,
+            &json!({
+                "method":"item/completed",
+                "params":{
+                    "threadId":"thread-terminal",
+                    "turnId":"turn-terminal",
+                    "item":{
+                        "type":"mcpToolCall",
+                        "id":"image-tool",
+                        "server":"image-tools",
+                        "tool":"render",
+                        "arguments":{},
+                        "result":{"content":[{"type":"image","mimeType":"image/jpeg","data":"/9j/2Q=="}]}
+                    }
+                }
+            }),
+            &mut started,
+            &mut terminal,
+            &mut messages,
+            &items,
+            &seen,
+            &lifecycle,
+        );
+
+        assert!(terminal);
+        let snapshot = service.snapshot().unwrap();
+        assert!(!snapshot
+            .events
+            .iter()
+            .any(|event| event.task_id == task_id && event.kind == "warning"));
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn native_continuation_rejects_stale_wrong_thread_cancelled_and_retiring_owners() {
+        for fence in [
+            "stale",
+            "wrong-thread",
+            "active",
+            "cancelled",
+            "retiring",
+            "error",
+            "archived",
+        ] {
+            let (service, task_id, control, directory) =
+                current_turn_service(&format!("continuation-{fence}"));
+            service
+                .mutate_data(None, |data| {
+                    data.snapshot
+                        .tasks
+                        .iter_mut()
+                        .find(|task| task.id == task_id)
+                        .unwrap()
+                        .native_session_id = Some("thread-terminal".into());
+                    Ok(())
+                })
+                .unwrap();
+            if fence != "active" {
+                assert!(service.complete_app_server_turn(
+                    &task_id,
+                    &control,
+                    Some("turn-terminal"),
+                    if fence == "error" {
+                        "error"
+                    } else {
+                        "completed"
+                    },
+                    None
+                ));
+            }
+            if fence == "cancelled" {
+                control.reserve_cancellation();
+            }
+            if fence == "retiring" {
+                control.set_resume_supported(true);
+                assert!(control
+                    .try_retire_idle(Instant::now() + Duration::from_secs(1), Duration::ZERO));
+            }
+            if fence == "archived" {
+                service
+                    .mutate_data(None, |data| {
+                        data.snapshot
+                            .tasks
+                            .iter_mut()
+                            .find(|task| task.id == task_id)
+                            .unwrap()
+                            .archived = true;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert!(
+                service
+                    .adopt_app_server_continuation(
+                        &task_id,
+                        &control,
+                        if fence == "wrong-thread" {
+                            "wrong-thread"
+                        } else {
+                            "thread-terminal"
+                        },
+                        if fence == "stale" {
+                            "turn-terminal"
+                        } else {
+                            "automatic-rejected"
+                        }
+                    )
+                    .is_err(),
+                "{fence}"
+            );
+            assert!(!control.matches_app_server_turn("automatic-rejected"));
+            drop(service);
+            let _ = std::fs::remove_dir_all(directory);
+        }
     }
 
     #[test]
@@ -2349,7 +3267,12 @@ mod tests {
         control.mark_app_server_turn_request(10).unwrap();
         // This models a response waking the reader before its next loop-top
         // observation of the just-sent resident turn.
-        observe_subsequent_turn_clock(true, &control, &mut stage_clock);
+        observe_subsequent_turn_clock(
+            true,
+            &control,
+            &mut stage_clock,
+            &disabled_protocol_trace_state(),
+        );
         assert_eq!(
             stage_clock.map(|clock| clock.stage),
             Some(RequestStage::SubsequentTurn)
@@ -2358,7 +3281,12 @@ mod tests {
         stage_clock = None;
 
         control.mark_app_server_turn_request(11).unwrap();
-        observe_subsequent_turn_clock(true, &control, &mut stage_clock);
+        observe_subsequent_turn_clock(
+            true,
+            &control,
+            &mut stage_clock,
+            &disabled_protocol_trace_state(),
+        );
         assert_eq!(
             stage_clock.map(|clock| clock.stage),
             Some(RequestStage::SubsequentTurn)

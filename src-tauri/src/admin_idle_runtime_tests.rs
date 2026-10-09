@@ -50,6 +50,13 @@ fn fixture() -> Fixture {
         "const uniqueIds = process.env.MONITTER_FIXTURE_UNIQUE_IDS === '1';",
         "const uniqueIds = true;",
     );
+    // This fixture has no configured MCP transports. Advertise the actual
+    // empty inventory/config so startup ownership can be verified, rather than
+    // exercising the unsupported-provider fail-closed fallback accidentally.
+    let source = source.replace(
+        "  if (request.method === 'initialized') return;",
+        "  if (request.method === 'initialized') return;\n  if (request.method === 'mcpServerStatus/list') return response(request.id, {data: [], nextCursor: null});\n  if (request.method === 'config/read') return response(request.id, {config: {mcp_servers: {}}, origins: {}, layers: null});",
+    );
     fs::write(&executable, source).unwrap();
     #[cfg(unix)]
     {
@@ -169,7 +176,7 @@ fn admin_reuses_then_cold_resumes_without_snapshot_leakage() {
         .unwrap();
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         1
     );
     assert!(f.service.runs.lock().unwrap().tasks.get(&task).is_none());

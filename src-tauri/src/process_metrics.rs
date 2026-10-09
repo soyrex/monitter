@@ -44,8 +44,16 @@ pub(crate) fn retirement_process_tree(
         if !visited.insert(pid) {
             continue;
         }
-        let (_, _, started_at) = process_identity(pid)
-            .ok_or_else(|| "Could not verify the idle runtime's process ownership.".to_string())?;
+        let Some(started_at) = retirement_live_identity(pid)? else {
+            // Darwin returns ESRCH for unreaped exited children as well as
+            // children which disappeared during the walk. Neither can run
+            // work. Keep a missing root conservative: its ownership cannot
+            // establish the descendant tree any longer.
+            if pid == root {
+                return Err("Could not verify the idle runtime's root process ownership.".into());
+            }
+            continue;
+        };
         identities.push((pid, started_at));
         pending.extend(child_pids(pid, capacity)?);
     }
@@ -60,16 +68,33 @@ pub(crate) fn retirement_process_identity_alive(
     pid: libc::pid_t,
     started_at: i64,
 ) -> Result<bool, String> {
-    if let Some((_, _, current_started_at)) = process_identity(pid) {
-        return Ok(current_started_at == started_at);
+    Ok(retirement_live_identity(pid)?.is_some_and(|current| current == started_at))
+}
+
+/// Strict BSD identity read for retirement. `kill(pid, 0)` also succeeds for
+/// zombies, so it cannot distinguish a vanished process from an unreaped exit.
+/// Only Darwin's explicit ESRCH/SZOMB result counts as gone; permission errors,
+/// short reads and all other failures continue to pin the runtime.
+#[cfg(target_os = "macos")]
+fn retirement_live_identity(pid: libc::pid_t) -> Result<Option<i64>, String> {
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .map_err(|_| "Process identity size is unavailable.")?;
+    let read = unsafe {
+        libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+    };
+    if read != size {
+        if read == 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return Ok(None);
+        }
+        return Err(format!("Could not verify idle runtime process identity {pid}."));
     }
-    let exists = unsafe { libc::kill(pid, 0) } == 0;
-    if !exists && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-        return Ok(false);
+    if info.pbi_status == libc::SZOMB {
+        return Ok(None);
     }
-    Err(format!(
-        "Could not verify whether idle runtime process identity {pid} is still alive."
-    ))
+    Ok(Some(info.pbi_start_tvsec.saturating_mul(1_000)
+        .saturating_add(info.pbi_start_tvusec / 1_000).min(i64::MAX as u64) as i64))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -157,7 +182,7 @@ fn process_identity(pid: libc::pid_t) -> Option<(libc::pid_t, String, i64)> {
             size,
         )
     };
-    if read != size {
+    if read != size || info.pbi_status == libc::SZOMB {
         return None;
     }
     let bytes = info
@@ -217,12 +242,16 @@ pub fn sample() -> Result<ProcessMetricsSample, String> {
         // vanished PID is safer than failing the whole widget.
         if let Some((own_cpu, tree_cpu, memory)) = process_usage(pid) {
             cpu_time_ns = cpu_time_ns.saturating_add(tree_cpu);
+            // Exited, unreaped processes can still return their last rusage
+            // resident size. Keep cumulative CPU for delta continuity, but
+            // count memory and live-process rows only after identity validation.
+            let Some((parent_pid, name, started_at)) = process_identity(pid) else {
+                if pid == root {
+                    return Err("Could not read Monitter process identity.".into());
+                }
+                continue;
+            };
             resident_memory_bytes = resident_memory_bytes.saturating_add(memory);
-            let (parent_pid, name, started_at) = process_identity(pid).unwrap_or((
-                0,
-                if pid == root { "Monitter" } else { "Process" }.into(),
-                0,
-            ));
             let command_line = process_command_line(pid).unwrap_or_else(|| name.clone());
             processes.push(ProcessMetricsProcess {
                 pid,
@@ -249,7 +278,7 @@ pub fn sample() -> Result<ProcessMetricsSample, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_command_line(pid: libc::pid_t) -> Option<String> {
+fn process_command_args(pid: libc::pid_t) -> Option<Vec<String>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let mut size = 0usize;
     let result = unsafe {
@@ -284,11 +313,93 @@ fn process_command_line(pid: libc::pid_t) -> Option<String> {
     for _ in 0..argc {
         if offset >= bytes.len() { break; }
         let end = bytes[offset..].iter().position(|byte| *byte == 0).map(|index| offset + index).unwrap_or(bytes.len());
-        let value = String::from_utf8_lossy(&bytes[offset..end]).trim().to_string();
-        if !value.is_empty() { args.push(value); }
+        // Preserve argument boundaries and whitespace for ownership matching.
+        // Lossy decoding could collapse two different launch specifications.
+        let value = std::str::from_utf8(&bytes[offset..end]).ok()?.to_owned();
+        args.push(value);
         offset = end.saturating_add(1);
     }
-    (!args.is_empty()).then(|| args.join(" "))
+    (!args.is_empty() && args.len() == argc).then_some(args)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn retirement_runtime_path(pid: libc::pid_t, started_at: i64) -> Option<Vec<String>> {
+    if retirement_live_identity(pid).ok().flatten()? != started_at { return None; }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = 0usize;
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size <= std::mem::size_of::<libc::c_int>() { return None; }
+    let mut bytes = vec![0u8; size];
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size <= std::mem::size_of::<libc::c_int>() { return None; }
+    bytes.truncate(size);
+    let argc = i32::from_ne_bytes(bytes[..4].try_into().ok()?).max(0) as usize;
+    let mut offset = 4;
+    while offset < bytes.len() && bytes[offset] != 0 { offset += 1; }
+    while offset < bytes.len() && bytes[offset] == 0 { offset += 1; }
+    for _ in 0..argc {
+        let end = bytes.get(offset..)?.iter().position(|byte| *byte == 0)?;
+        offset += end + 1;
+    }
+    let value = bytes.get(offset..)?.split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"PATH="))?;
+    let path = std::str::from_utf8(value).ok()?.split(':').filter(|part| part.starts_with('/')).map(str::to_owned).collect();
+    if retirement_live_identity(pid).ok().flatten()? != started_at { return None; }
+    Some(path)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn retirement_runtime_path(_pid: libc::pid_t, _started_at: i64) -> Option<Vec<String>> { None }
+
+#[cfg(target_os = "macos")]
+fn process_command_line(pid: libc::pid_t) -> Option<String> {
+    process_command_args(pid).map(|args| args.join(" "))
+}
+
+/// Private ownership evidence. Never serialize this: arguments can contain
+/// credentials. Recheck the process identity after inspecting its executable.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RetirementLaunch {
+    pub parent_pid: libc::pid_t,
+    pub executable: String,
+    pub arguments: Vec<String>,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn retirement_launch(pid: libc::pid_t, started_at: i64) -> Option<RetirementLaunch> {
+    let (parent_pid, _, current) = process_identity(pid)?;
+    if current != started_at { return None; }
+    let mut path = [0_u8; 4096];
+    let count = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    if count <= 0 { return None; }
+    let end = path.iter().position(|byte| *byte == 0)?;
+    let executable = std::str::from_utf8(&path[..end]).ok()?.to_owned();
+    let arguments = process_command_args(pid)?;
+    if retirement_live_identity(pid).ok().flatten()? != started_at { return None; }
+    Some(RetirementLaunch { parent_pid, executable, arguments })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn retirement_launch(_pid: libc::pid_t, _started_at: i64) -> Option<RetirementLaunch> {
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -305,6 +416,33 @@ mod tests {
         assert!(sample.sampled_at > 0);
         assert!(sample.resident_memory_bytes > 0);
         assert_eq!(sample.processes[0].pid, sample.root_pid);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn excludes_unreaped_exited_processes_from_memory() {
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .spawn().expect("spawn exited child fixture");
+        let pid = child.id() as libc::pid_t;
+        // Observe exit without wait()/try_wait(), which would reap the child.
+        let mut exited = false;
+        for _ in 0..100 {
+            let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+            let read = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+            if read != size || info.pbi_status == libc::SZOMB {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let sample = super::sample().expect("sample process tree");
+        let _ = child.wait();
+        assert!(exited, "child should have exited before sampling");
+        assert!(!sample.processes.iter().any(|process| process.pid == pid));
+        assert_eq!(sample.resident_memory_bytes,
+            sample.processes.iter().map(|process| process.resident_memory_bytes).sum::<u64>());
     }
 
     #[cfg(target_os = "macos")]

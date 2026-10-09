@@ -174,6 +174,11 @@ fn open_with_shell(
         .map_err(|e| format!("Could not open terminal PTY: {e}"))?;
     let mut command = build_command(host, &cwd, test_shell)?;
     command.env("TERM", "xterm-256color");
+    #[cfg(feature = "experimental-gpui")]
+    command.env(
+        "CLICOLOR",
+        std::env::var_os("CLICOLOR").unwrap_or_else(|| "1".into()),
+    );
     let reader = pty
         .master
         .try_clone_reader()
@@ -300,8 +305,13 @@ fn build_command(
         command.arg(expand_local_home(host.identity_file.trim()));
     }
     command.arg(ssh_target(host)?);
+    let colour_hint = if cfg!(feature = "experimental-gpui") {
+        " export CLICOLOR=\"${CLICOLOR:-1}\";"
+    } else {
+        ""
+    };
     command.arg(format!(
-        "cd {} || exit; export TERM=xterm-256color; exec \"${{SHELL:-/bin/sh}}\" -l",
+        "cd {} || exit; export TERM=xterm-256color;{colour_hint} exec \"${{SHELL:-/bin/sh}}\" -l",
         remote_path(cwd)
     ));
     Ok(command)
@@ -614,6 +624,18 @@ mod tests {
             .iter()
             .any(|arg| arg.contains("cd \"$HOME\"/'work/a b'")));
         assert!(args.iter().any(|arg| arg == "alex@mira"));
+        assert!(args.iter().any(|arg| arg.contains("export TERM=xterm-256color;")));
+        #[cfg(feature = "experimental-gpui")]
+        assert!(args.iter().any(|arg| arg.contains("export CLICOLOR=\"${CLICOLOR:-1}\";")));
+    }
+    #[test]
+    #[cfg(feature = "experimental-gpui")]
+    fn native_pty_advertises_256_colors_and_preserves_colour_preference() {
+        let session = open_test_shell();
+        session.write(b"printf '__TERM_%s__COLOUR_%s__\\n' \"$TERM\" \"$CLICOLOR\"\n").unwrap();
+        let colour = std::env::var("CLICOLOR").unwrap_or_else(|_| "1".into());
+        wait_for(&session, &format!("__TERM_xterm-256color__COLOUR_{colour}__"));
+        session.close().unwrap();
     }
     #[test]
     fn local_pty_rejects_missing_working_directory() {

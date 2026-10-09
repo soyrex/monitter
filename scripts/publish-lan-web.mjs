@@ -7,6 +7,11 @@ import { randomUUID } from 'node:crypto';
 // Publish assets first, then atomically switch the entry page. Keep previous
 // hashed chunks: an already-open browser may still request one lazily.
 export function publishLanWeb(source, destination) {
+  const liveProfile = join(homedir(), 'Library/Application Support/com.monitter.desktop');
+  const resolvedDestination = resolve(destination);
+  if (resolvedDestination === liveProfile || resolvedDestination.startsWith(`${liveProfile}/`)) {
+    throw new Error('Refusing to publish experimental assets into the live Monitter profile.');
+  }
   const entry = join(source, 'index.html');
   if (!existsSync(entry) || !statSync(entry).isFile()) throw new Error('Build has no index.html; live LAN assets unchanged.');
   function copyDirectory(from, to, root = false) {
@@ -31,7 +36,7 @@ export function publishLanWeb(source, destination) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.platform === 'darwin') {
     const source = resolve(dirname(fileURLToPath(import.meta.url)), '../build');
-    const destination = join(homedir(), 'Library/Application Support/com.monitter.desktop/lan-web');
+    const destination = join(homedir(), 'Library/Application Support/com.monitter.gpui.experimental/lan-web');
     publishLanWeb(source, destination);
     console.log(`Published live LAN web assets: ${destination}`);
   } else console.log('LAN web auto-publish is macOS-only; web build is available in build/.');

@@ -17,6 +17,8 @@ vite.config.ts.timestamp-*
 verification/
 artifacts/
 /.cargo-target/
+/.toolchain/
+/desktop-gpui/target/
 .DS_Store
 
 # BEGIN oh-my-opencode-slim worktrees

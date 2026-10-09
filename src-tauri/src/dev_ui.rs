@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, Url, WebviewWindow, Wry};
 pub const LOAD_MENU_ID: &str = "load-dev-ui";
 pub const PACKAGED_MENU_ID: &str = "use-packaged-ui";
 pub const ERROR_EVENT: &str = "monitter-dev-ui-error";
-pub const DEV_UI_ORIGIN: &str = "http://127.0.0.1:18420";
+pub const DEV_UI_ORIGIN: &str = "http://127.0.0.1:19420";
 const DEV_UI_PATH: &str = "/monitter-app-ui/";
 const DEV_UI_MARKER: &str = "/monitter-app-ui/__monitter_dev__";
 const PROBE_TIMEOUT: Duration = Duration::from_millis(700);
@@ -144,7 +144,7 @@ fn probe_at(address: SocketAddr) -> Result<(), String> {
     stream
         .write_all(
             format!(
-                "GET {DEV_UI_MARKER} HTTP/1.1\r\nHost: 127.0.0.1:18420\r\nConnection: close\r\n\r\n"
+                "GET {DEV_UI_MARKER} HTTP/1.1\r\nHost: 127.0.0.1:19420\r\nConnection: close\r\n\r\n"
             )
             .as_bytes(),
         )
@@ -157,7 +157,7 @@ fn probe_at(address: SocketAddr) -> Result<(), String> {
     if is_compatible_marker_response(&response) {
         Ok(())
     } else {
-        Err("Port 18420 is not serving a compatible Monitter hot-reload interface.".into())
+        Err("Port 19420 is not serving a compatible Monitter hot-reload interface.".into())
     }
 }
 
@@ -231,7 +231,7 @@ mod tests {
         assert!(probe_at(address).is_ok());
         let request = server.join().unwrap();
         assert!(request.starts_with(&format!("GET {DEV_UI_MARKER} HTTP/1.1\r\n")));
-        assert!(request.contains("\r\nHost: 127.0.0.1:18420\r\n"));
+        assert!(request.contains("\r\nHost: 127.0.0.1:19420\r\n"));
         assert!(request.ends_with("\r\nConnection: close\r\n\r\n"));
     }
 

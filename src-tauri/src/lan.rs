@@ -11,15 +11,15 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
 
-pub const PORT: u16 = 18_436;
-pub const TLS_PORT: u16 = 18_437;
+pub const PORT: u16 = 19_436;
+pub const TLS_PORT: u16 = 19_437;
 const MAX_HEADER: usize = 16 * 1024;
 /// Attachments are accepted by the ordinary bridge and can be up to 20 MiB;
 /// base64 plus JSON needs headroom while still imposing a hard request cap.
@@ -32,7 +32,7 @@ const AUTH_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 pub const REQUIRE_ACCESS_CODE: bool = false;
 const DEV_BRIDGE_HEADER: &str = "x-monitter-dev-bridge";
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Info {
     pub urls: Vec<String>,
@@ -53,6 +53,25 @@ impl Server {
         service: Arc<Service>,
         asset_roots: Vec<PathBuf>,
         tls_config_path: PathBuf,
+    ) -> Result<Self, String> {
+        Self::start_with_access_code(service, asset_roots, tls_config_path, REQUIRE_ACCESS_CODE)
+    }
+
+    /// Owner-native experimental host opts into authentication without changing
+    /// the ordinary desktop's trusted-LAN default or its remote command surface.
+    pub(crate) fn start_authenticated(
+        service: Arc<Service>,
+        asset_roots: Vec<PathBuf>,
+        tls_config_path: PathBuf,
+    ) -> Result<Self, String> {
+        Self::start_with_access_code(service, asset_roots, tls_config_path, true)
+    }
+
+    fn start_with_access_code(
+        service: Arc<Service>,
+        asset_roots: Vec<PathBuf>,
+        tls_config_path: PathBuf,
+        require_access_code: bool,
     ) -> Result<Self, String> {
         let addresses = lan_addresses();
         let custom_tls = TlsConfig::load(&tls_config_path)?;
@@ -89,7 +108,7 @@ impl Server {
         let info = Info {
             urls,
             token: token.clone(),
-            access_code_required: REQUIRE_ACCESS_CODE,
+            access_code_required: require_access_code,
             error: None,
             local_ca_pem: tls.local_ca_pem.clone(),
             local_ca_fingerprint: tls.local_ca_fingerprint.clone(),
@@ -148,7 +167,7 @@ impl Server {
                                                 &token,
                                                 &roots,
                                                 &auth_limiter,
-                                                REQUIRE_ACCESS_CODE,
+                                                require_access_code,
                                                 tls_hosts.as_deref(),
                                                 ca_pem.as_deref(),
                                             );
@@ -161,7 +180,7 @@ impl Server {
                                             &token,
                                             &roots,
                                             &auth_limiter,
-                                            REQUIRE_ACCESS_CODE,
+                                            require_access_code,
                                             None,
                                             ca_pem.as_deref(),
                                         );
@@ -831,7 +850,12 @@ fn valid_host(host: Option<&String>) -> bool {
 }
 fn local_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
+        // Tailscale uses the shared-address range 100.64.0.0/10, which
+        // Rust deliberately excludes from RFC1918 is_private().
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private() || ip.is_loopback() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
         IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
     }
 }
@@ -948,20 +972,32 @@ mod tests {
     use std::io::{Read, Write};
 
     #[test]
+    fn tailscale_addresses_are_allowed_without_allowing_public_neighbors() {
+        for address in ["100.64.0.0", "100.121.138.9", "100.127.255.255"] {
+            assert!(local_ip(address.parse().unwrap()));
+            assert!(valid_host(Some(&format!("{address}:{PORT}"))));
+        }
+        for address in ["100.63.255.255", "100.128.0.0", "8.8.8.8"] {
+            assert!(!local_ip(address.parse().unwrap()));
+            assert!(!valid_host(Some(&format!("{address}:{PORT}"))));
+        }
+    }
+
+    #[test]
     fn rejects_non_literal_host_and_escape() {
-        assert!(!valid_host(Some(&"evil.test:18436".into())));
-        assert!(valid_host(Some(&"192.168.1.9:18436".into())));
+        assert!(!valid_host(Some(&"evil.test:19436".into())));
+        assert!(valid_host(Some(&"192.168.1.9:19436".into())));
         assert!(asset_file(&[PathBuf::from("/tmp")], "../x").is_none());
     }
 
     #[test]
     fn https_host_and_origin_must_match_configured_authority_exactly() {
-        let host = "monitter.example.test:18437".to_string();
-        let origin = "https://monitter.example.test:18437".to_string();
+        let host = "monitter.example.test:19437".to_string();
+        let origin = "https://monitter.example.test:19437".to_string();
         assert!(valid_tls_request_host(Some(&host), "monitter.example.test"));
         assert!(same_tls_origin(Some(&origin), "monitter.example.test"));
         assert!(!valid_tls_request_host(
-            Some(&"192.168.1.9:18437".into()),
+            Some(&"192.168.1.9:19437".into()),
             "monitter.example.test"
         ));
         assert!(!valid_tls_request_host(
@@ -969,11 +1005,11 @@ mod tests {
             "monitter.example.test"
         ));
         assert!(!same_tls_origin(
-            Some(&"http://monitter.example.test:18437".into()),
+            Some(&"http://monitter.example.test:19437".into()),
             "monitter.example.test"
         ));
         assert!(!same_tls_origin(
-            Some(&"https://evil.example.test:18437".into()),
+            Some(&"https://evil.example.test:19437".into()),
             "monitter.example.test"
         ));
         assert!(!same_tls_origin(None, "monitter.example.test"));
@@ -1229,7 +1265,7 @@ mod tests {
         let limiter = Arc::new(Mutex::new(AuthRateLimiter::default()));
         let body = r#"{"command":"get_snapshot","args":{}}"#;
         let request = format!(
-            "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nAuthorization: Bearer wrong\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:19436\r\nAuthorization: Bearer wrong\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         let unrestricted = one_request_with_limiter(
@@ -1248,7 +1284,7 @@ mod tests {
             root.clone(),
             "owner-token",
             &format!(
-                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nOrigin: http://127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\nContent-Length: {}\r\n\r\n{body}",
+                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:19436\r\nOrigin: http://127.0.0.1:19436\r\nX-Monitter-Dev-Bridge: 1\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
             Arc::clone(&limiter),
@@ -1261,7 +1297,7 @@ mod tests {
             root.clone(),
             "owner-token",
             &format!(
-                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}",
+                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:19436\r\nX-Monitter-Dev-Bridge: 1\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
             Arc::clone(&limiter),
@@ -1273,7 +1309,7 @@ mod tests {
             Arc::clone(&service),
             root.clone(),
             "owner-token",
-            "GET /api/access HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\n\r\n",
+            "GET /api/access HTTP/1.1\r\nHost: 127.0.0.1:19436\r\nX-Monitter-Dev-Bridge: 1\r\n\r\n",
             Arc::clone(&limiter),
             false,
         );
@@ -1348,7 +1384,7 @@ mod tests {
         let run_id = control.current_run_id().unwrap();
         let body = r#"{"command":"get_ui_snapshot","args":{}}"#;
         let request = format!(
-            "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nOrigin: http://127.0.0.1:18436\r\nX-Monitter-Dev-Bridge: 1\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:19436\r\nOrigin: http://127.0.0.1:19436\r\nX-Monitter-Dev-Bridge: 1\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
 
@@ -1443,13 +1479,23 @@ mod tests {
         let service = Service::open(None, root.join("state")).unwrap();
         let body = r#"{"command":"get_snapshot","args":{}}"#;
         let unauthorized = one_request(
-            Arc::clone(&service), root.clone(), "owner-token",
-            &format!("POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nContent-Length: {}\r\n\r\n{body}", body.len()),
+            Arc::clone(&service),
+            root.clone(),
+            "owner-token",
+            &format!(
+                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:19436\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
         );
         assert!(unauthorized.starts_with("HTTP/1.1 401"));
         let authorized = one_request(
-            Arc::clone(&service), root.clone(), "owner-token",
-            &format!("POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:18436\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}", body.len()),
+            Arc::clone(&service),
+            root.clone(),
+            "owner-token",
+            &format!(
+                "POST /api/invoke HTTP/1.1\r\nHost: 127.0.0.1:19436\r\nAuthorization: Bearer owner-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
         );
         assert!(authorized.starts_with("HTTP/1.1 200"));
         assert!(authorized.contains("\"ok\":true"));
@@ -1457,7 +1503,7 @@ mod tests {
             Arc::clone(&service),
             root.clone(),
             "owner-token",
-            "GET / HTTP/1.1\r\nHost: 127.0.0.1:18436\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:19436\r\n\r\n",
         );
         assert!(asset.starts_with("HTTP/1.1 200"));
         assert!(asset.contains("data-monitter-lan=\"1\""));
@@ -1468,7 +1514,7 @@ mod tests {
             service,
             root.clone(),
             "owner-token",
-            "GET /large.txt HTTP/1.1\r\nHost: 127.0.0.1:18436\r\n\r\n",
+            "GET /large.txt HTTP/1.1\r\nHost: 127.0.0.1:19436\r\n\r\n",
         );
         let (headers, received) = large.split_once("\r\n\r\n").unwrap();
         assert!(headers.starts_with("HTTP/1.1 200"));
