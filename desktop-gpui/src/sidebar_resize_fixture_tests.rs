@@ -15,6 +15,7 @@ use std::{cell::Cell, rc::Rc};
 struct SidebarResizeHarness {
     state: Entity<ResizableState>,
     collapsed: Rc<Cell<bool>>,
+    persisted_mode: Rc<Cell<super::preferences_modal::SidebarMode>>,
     width_touched: Rc<Cell<bool>>,
     suppress_resize_event: Rc<Cell<bool>>,
     consume_sibling_mouse_moves: bool,
@@ -114,6 +115,8 @@ fn fixture(
     cx.update(|cx| gpui_kit::init(cx));
     let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
     let collapsed = Rc::new(Cell::new(false));
+    let persisted_mode = Rc::new(Cell::new(super::preferences_modal::SidebarMode::Full));
+    let mode_for_event = persisted_mode.clone();
     let width_touched = Rc::new(Cell::new(false));
     let suppress_resize_event = Rc::new(Cell::new(false));
     let collapsed_for_event = collapsed.clone();
@@ -140,6 +143,8 @@ fn fixture(
                 collapsed_for_event.get(),
                 scale,
             ));
+            // Mirror the production release write without touching a profile.
+            mode_for_event.set(if collapsed_for_event.get() { super::preferences_modal::SidebarMode::Icons } else { super::preferences_modal::SidebarMode::Full });
             // Desktop::queue_preferences_save also calls cx.notify(), making
             // the release-driven rail state visible immediately.
             cx.notify();
@@ -149,6 +154,7 @@ fn fixture(
         SidebarResizeHarness {
             state: state.clone(),
             collapsed: collapsed.clone(),
+            persisted_mode: persisted_mode.clone(),
             width_touched: width_touched.clone(),
             suppress_resize_event: suppress_resize_event.clone(),
             consume_sibling_mouse_moves,
@@ -437,5 +443,57 @@ fn saved_width_redraw_does_not_cancel_a_pointer_owned_resize(cx: &mut TestAppCon
             "release commits the user's new width"
         );
         assert!((harness.state.read(cx).sizes()[0].as_f32() - (seam + 60.)).abs() < 2.);
+    });
+}
+
+#[gpui_kit::test]
+fn sidebar_layout_ticks_are_silent_and_live_drag_wins(cx: &mut TestAppContext) {
+    let (harness, visual) = fixture(cx, false, 252., 100);
+    let events = Rc::new(Cell::new(0));
+    let capture = events.clone();
+    let state = harness.read_with(visual, |harness, _| harness.state.clone());
+    let _subscription = visual.update(|window, cx| window.subscribe(&state, cx, move |_, _, _, _| {
+        capture.set(capture.get() + 1);
+    }));
+    // The toggle owns its target, so saved-width hydration cannot undo it.
+    harness.update(visual, |harness, _| harness.width_touched.set(true));
+    visual.update(|window, cx| {
+        assert!(state.update(cx, |state, cx| state.resize_panel_for_layout(0, px(190.), window, cx)));
+        window.draw(cx).clear(cx);
+    });
+    assert_eq!(events.get(), 0, "a geometry tick must not emit a persistence event");
+    drag_sidebar_to(visual, 225.);
+    visual.update(|window, cx| {
+        let before = state.read(cx).sizes().clone();
+        assert!(state.read(cx).is_resizing());
+        assert!(!state.update(cx, |state, cx| state.resize_panel_for_layout(0, px(100.), window, cx)));
+        assert_eq!(state.read(cx).sizes(), &before);
+        assert!(state.read(cx).is_resizing(), "layout interpolation cannot end a live pointer gesture");
+    });
+    visual.simulate_mouse_up(point(px(225.), px(90.)), MouseButton::Left, Modifiers::default());
+}
+
+
+#[gpui_kit::test]
+fn hidden_transition_drag_release_persists_full_even_without_a_collapse_change(cx: &mut TestAppContext) {
+    let (harness, visual) = fixture(cx, false, 252., 100);
+    // Icons->Hidden saves Hidden immediately, then pointer takeover clears
+    // hidden and leaves collapsed=false. Releasing above the full threshold
+    // must persist Full even though collapsed remains false throughout.
+    harness.update(visual, |harness, _| {
+        harness.persisted_mode.set(super::preferences_modal::SidebarMode::Hidden);
+        harness.collapsed.set(false);
+        harness.width_touched.set(true);
+    });
+    drag_sidebar_to(visual, 220.);
+    harness.read_with(visual, |harness, _| {
+        assert!(!harness.collapsed.get());
+        assert_eq!(harness.persisted_mode.get(), super::preferences_modal::SidebarMode::Hidden);
+    });
+    visual.simulate_mouse_up(point(px(220.), px(90.)), MouseButton::Left, Modifiers::default());
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    harness.read_with(visual, |harness, _| {
+        assert!(!harness.collapsed.get());
+        assert_eq!(harness.persisted_mode.get(), super::preferences_modal::SidebarMode::Full);
     });
 }

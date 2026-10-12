@@ -71,8 +71,9 @@ def isolate_app(binary, output, fixture_env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
-    parser.add_argument("--scenario", choices=["idle", "static", "streaming-body", "pipeline-updates", "browser-adjacent"], default="static")
+    parser.add_argument("--scenario", choices=["idle", "static", "streaming-body", "pipeline-updates", "browser-adjacent", "motion"], default="static")
     parser.add_argument("--rows", type=int, default=10_000)
+    parser.add_argument("--motion-mode", choices=["system", "subtle", "on", "off"], default="on")
     parser.add_argument("--seconds", type=int, default=45)
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
@@ -99,6 +100,7 @@ def main():
     metrics = output / "metrics.json"
     fixture_env = {
         "MONITTER_GPUI_PERF_SCENARIO": args.scenario,
+        "MONITTER_GPUI_PERF_MOTION": args.motion_mode,
         "MONITTER_GPUI_PERF_HISTORY_ROWS": str(args.rows),
         "MONITTER_GPUI_PERF_SECONDS": str(args.seconds),
         "MONITTER_GPUI_PERF_WARMUP_SECONDS": str(args.warmup),
@@ -118,8 +120,9 @@ def main():
         "sourceBinary": str(binary),
         "sourceSha256": fingerprint,
         "scenario": args.scenario,
+        "motionMode": args.motion_mode,
         "historyRowsPerPane": args.rows,
-        "chatPanes": 4 if args.scenario == "pipeline-updates" else 1,
+        "chatPanes": 4 if args.scenario == "pipeline-updates" else (3 if args.scenario == "motion" else 1),
         "build": build,
         "startedAtUtc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "warmupSeconds": args.warmup,

@@ -210,7 +210,17 @@ pub fn rebase_history_once(
 pub struct PublicationIndex {
     metadata: Value,
     task_activity: HashMap<String, Value>,
+    task_statuses: Arc<HashMap<String, String>>,
     events: HashMap<String, Vec<Value>>,
+}
+impl PublicationIndex {
+    pub fn task_status(&self, id: &str) -> Option<&str> {
+        self.task_statuses.get(id).map(String::as_str)
+    }
+    /// Tiny worker-prepared projection; reuse identifies body-only publications.
+    pub fn task_statuses(&self) -> Arc<HashMap<String, String>> {
+        self.task_statuses.clone()
+    }
 }
 pub type PreparedChildTranscripts = Arc<HashMap<String, Arc<Vec<Value>>>>;
 pub struct PreparedPublication {
@@ -276,10 +286,14 @@ pub fn prepare(
     // affects the task's footer and its collaboration ancestors, but cannot
     // invalidate unrelated panes. Keep every other metadata field conservative.
     let mut task_activity = HashMap::new();
+    let mut task_statuses = HashMap::new();
     if let Some(tasks) = metadata["tasks"].as_array_mut() {
         for task in tasks {
             if let Some(task) = task.as_object_mut() {
                 if let Some(id) = task.get("id").and_then(Value::as_str).map(str::to_owned) {
+                    if let Some(status) = task.get("status").and_then(Value::as_str) {
+                        task_statuses.insert(id.clone(), status.to_owned());
+                    }
                     if let Some(updated_at) = task.remove("updatedAt") {
                         task_activity.insert(id, updated_at);
                     }
@@ -287,6 +301,8 @@ pub fn prepare(
             }
         }
     }
+    let task_statuses = previous.as_ref().filter(|index| index.task_statuses.as_ref() == &task_statuses)
+        .map(|index| index.task_statuses.clone()).unwrap_or_else(|| Arc::new(task_statuses));
     let dependencies: HashMap<String, HashSet<String>> = panes
         .iter()
         .map(|id| {
@@ -390,6 +406,7 @@ pub fn prepare(
         index: Arc::new(PublicationIndex {
             metadata,
             task_activity,
+            task_statuses,
             events,
         }),
         sync_tasks,
@@ -406,6 +423,29 @@ mod tests {
     use monitter_lib::model::{Message, default_snapshot};
     fn message(id: &str, task: &str) -> Message {
         serde_json::from_value(serde_json::json!({"id":id,"taskId":task,"role":"assistant","text":"body","createdAt":0})).unwrap()
+    }
+    #[test]
+    fn task_status_projection_reuses_body_only_index_and_tracks_success_and_removal() {
+        let mut snapshot = default_snapshot();
+        snapshot.tasks = vec![serde_json::from_value(serde_json::json!({
+            "id":"task","agentId":"a","title":"task","status":"running",
+            "createdAt":0,"updatedAt":0,"hostId":"h","cwd":"",
+            "provider":"codex","model":"default","sandbox":"read-only"
+        })).unwrap()];
+        let first = prepare(snapshot.clone(), HashSet::new(), &PublicationChanges::default(), None).unwrap();
+        assert_eq!(first.index.task_status("task"), Some("running"));
+        snapshot.tasks[0].updated_at = 100;
+        let streamed = prepare(snapshot.clone(), HashSet::new(), &PublicationChanges::default(), Some(first.index.clone())).unwrap();
+        assert!(Arc::ptr_eq(&first.index.task_statuses(), &streamed.index.task_statuses()));
+        let mut task = serde_json::to_value(&snapshot.tasks[0]).unwrap();
+        task["status"] = serde_json::json!("completed");
+        snapshot.tasks[0] = serde_json::from_value(task).unwrap();
+        let completed = prepare(snapshot.clone(), HashSet::new(), &PublicationChanges::default(), Some(streamed.index.clone())).unwrap();
+        assert_eq!(completed.index.task_status("task"), Some("completed"));
+        assert!(!Arc::ptr_eq(&streamed.index.task_statuses(), &completed.index.task_statuses()));
+        snapshot.tasks.clear();
+        let removed = prepare(snapshot, HashSet::new(), &PublicationChanges::default(), Some(completed.index)).unwrap();
+        assert_eq!(removed.index.task_status("task"), None);
     }
     #[test]
     fn newer_same_revision_history_invalidates_preparation_and_retains_reset() {

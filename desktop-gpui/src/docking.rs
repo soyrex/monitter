@@ -110,6 +110,7 @@ struct NativePanel {
     retaining_layout: Rc<Cell<bool>>,
     appearance: Rc<Cell<Option<crate::pane_appearance::PaneAppearance>>>,
     auto_hide_tabs: Rc<Cell<bool>>,
+    background: Option<Entity<crate::pane_appearance::PaneBackground>>,
 }
 impl EventEmitter<PanelEvent> for NativePanel {}
 impl Focusable for NativePanel {
@@ -130,6 +131,7 @@ impl BasePanel for NativePanel {
         }
     }
     fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(background) = &self.background { background.update(cx, |background, cx| background.set_visible(false, cx)); }
         if self.retaining_layout.get() {
             if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
                 chat.update(cx, |chat, cx| chat.set_dock_group(None, cx));
@@ -303,6 +305,24 @@ impl Render for NativePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = self.appearance.get();
         let active = pane_visual_active(&self.spec.focus, window, cx);
+        let background = self.background.get_or_insert_with(|| cx.new(|_| crate::pane_appearance::PaneBackground::new())).clone();
+        if let Some(appearance) = appearance {
+            let fill = if self.spec.id.starts_with("browser:") || self.spec.id == "browser" || self.spec.id == "route:browser" {
+                (*cx.theme().tokens.tab_active).into()
+            } else {
+                let tint = if self.spec.id == "terminal" || self.spec.id.starts_with("terminal:") || self.spec.id == "route:terminal" { 0.25 } else { 0.15 };
+                crate::surface_blend::tinted_pane_background(appearance.paper_color, appearance.dark, tint)
+            };
+            // A retained pane also supports plain GPUI windows without the
+            // component Root (e.g. native fixture and embedded pane hosts).
+            let has_dialog = window.root::<gpui_kit::base::Root>().flatten().is_some()
+                && window.has_active_dialog(cx);
+            background.update(cx, |background, cx| {
+                background.set_appearance(appearance, fill, active, cx);
+                background.set_visible(self.paint.borrow().shown && !has_dialog, cx);
+            });
+        }
+        let hover_background = background.clone();
         let focus = self.spec.focus.clone();
         let paint = self.paint.clone();
         let id = self.spec.id.clone();
@@ -331,14 +351,12 @@ impl Render for NativePanel {
         // Only paint proves effective visibility. Active slots can be hidden,
         // collapsed, displaced by zoom, or outside the host's current route.
         div()
+            .id(SharedString::from(format!("pane-emphasis-{}", self.spec.id)))
             .size_full()
             .relative()
             .track_focus(&self.spec.focus)
             .when_some(appearance, |this, appearance| {
-                this.when(!active && appearance.dim_inactive, |this| {
-                    this.opacity(appearance.inactive_opacity)
-                })
-                .when(appearance.focus_follows_mouse, |this| {
+                this.when(appearance.focus_follows_mouse, |this| {
                     this.on_mouse_move(move |event, window, cx| {
                         if event.pressed_button.is_none()
                             && !window.has_active_dialog(cx)
@@ -361,7 +379,11 @@ impl Render for NativePanel {
                 .absolute()
                 .size_full(),
             )
-            .child(
+            .on_hover(move |hovered, _, cx| hover_background.update(cx, |background, cx| background.set_hovered(*hovered, cx)))
+            .child(div().absolute().inset_0().child(background))
+            .child(div().size_full().relative()
+                .when_some(appearance, |this, appearance| this.when(!active && appearance.dim_inactive, |this| this.opacity(appearance.inactive_opacity)))
+                .child(
                 // Cached prepaint/paint now replay AccessKit nodes and actions.
                 // Keep the visibility canvas outside the cached content.
                 self.spec.content.clone()
@@ -369,7 +391,7 @@ impl Render for NativePanel {
                     .into_any_element()
             )
             .children(decorations)
-            .when_some(working_bubble, |this, bubble| this.child(bubble))
+            .when_some(working_bubble, |this, bubble| this.child(bubble)))
     }
 }
 #[derive(Clone)]
@@ -392,6 +414,8 @@ pub struct DockWorkspace {
     empty_panes: HashMap<String, Entity<EmptyPane>>,
     empty_subscriptions: HashMap<String, Subscription>,
     _subscriptions: Vec<Subscription>,
+    equalize_motion: Option<(std::time::Instant, Vec<DockSplitSnapshot>)>,
+    equalize_frame_pending: bool,
 }
 impl EventEmitter<WorkspaceEvent> for DockWorkspace {}
 impl DockWorkspace {
@@ -454,6 +478,8 @@ impl DockWorkspace {
             empty_panes: HashMap::new(),
             empty_subscriptions: HashMap::new(),
             _subscriptions: vec![changed, released],
+            equalize_motion: None,
+            equalize_frame_pending: false,
         }
     }
     pub fn area(&self) -> Entity<DockArea> {
@@ -564,6 +590,7 @@ impl DockWorkspace {
             retaining_layout: self.retaining_layout.clone(),
             appearance: self.appearance.clone(),
             auto_hide_tabs: self.auto_hide_tabs.clone(),
+            background: None,
         });
         self.panels.borrow_mut().insert(id, panel.clone());
         Ok(panel)
@@ -1279,39 +1306,45 @@ impl DockWorkspace {
         true
     }
 
-    /// Equalize split proportions while keeping panel entities and active tabs.
+    /// Equalize nested split shares in place, keeping all native entities,
+    /// active tabs, focus, terminals and composers throughout the transition.
     pub fn equalize_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let focused = self.focused_pane_id(window, cx);
-        let area_entity = self.area();
-        let layouts = {
-            let area = area_entity.read(cx);
-            [
-                DockPlacement::Center,
-                DockPlacement::Left,
-                DockPlacement::Right,
-                DockPlacement::Bottom,
-            ]
-            .into_iter()
-            .filter_map(|placement| {
-                let tree = area.layout(placement)?;
-                let layout = equalized_layout(tree.root(), &area, cx)?;
-                Some((placement, layout))
-            })
-            .collect::<Vec<_>>()
-        };
-        if layouts.is_empty() {
+        let snapshots = self.area.read(cx).split_geometry(cx);
+        if snapshots.is_empty() { self.equalize_motion = None; return false; }
+        if snapshots.iter().all(|split| split.shares.iter().zip(&split.target_shares).all(|(share, target)| (share - target).abs() < 0.0005)) {
+            if self.equalize_motion.take().is_some() {
+                return self.area.update(cx, |area, cx| area.equalize_split_geometry(&snapshots, 1., true, cx));
+            }
             return false;
         }
-        area_entity.update(cx, |area, cx| {
-            for (placement, layout) in layouts {
-                if placement == DockPlacement::Center {
-                    area.set_center(layout, window, cx);
+        if !crate::native_motion::motion_allowed() || !self.paint.borrow().shown || self.area.read(cx).is_zoomed() || !snapshots.iter().any(|split| split.animated) {
+            self.equalize_motion = None;
+            return self.area.update(cx, |area, cx| area.equalize_split_geometry(&snapshots, 1., true, cx));
+        }
+        // A repeated invocation samples the currently displayed shares.
+        self.equalize_motion = Some((std::time::Instant::now(), snapshots));
+        self.schedule_equalize_frame(window, cx);
+        true
+    }
+    fn schedule_equalize_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.equalize_frame_pending || self.equalize_motion.is_none() { return; }
+        self.equalize_frame_pending = true;
+        let weak = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = weak.update(cx, |workspace, cx| {
+                workspace.equalize_frame_pending = false;
+                let Some((started, snapshots)) = workspace.equalize_motion.as_ref() else { return; };
+                let progress = if !crate::native_motion::motion_allowed() || !workspace.paint.borrow().shown || crate::session_lock::locked(cx) || !workspace.area.read(cx).has_visible_split_geometry(snapshots, cx) {
+                    1.
                 } else {
-                    area.set_dock(placement, layout, window, cx);
-                }
-            }
+                    crate::layout_motion::layout_progress(started.elapsed())
+                };
+                let settled = progress >= 1.;
+                let applied = workspace.area.update(cx, |area, cx| area.equalize_split_geometry(snapshots, progress, settled, cx));
+                if !applied || settled { workspace.equalize_motion = None; }
+                else { workspace.schedule_equalize_frame(window, cx); }
+            });
         });
-        focused.is_some_and(|id| self.focus(&id, window, cx))
     }
     /// Add and focus a native empty tab. Its stable prefix lets restore rebuild
     /// the pane without creating or changing any task/session state.
@@ -1701,6 +1734,8 @@ impl DockWorkspace {
         for id in prior.symmetric_difference(&next) {
             let visible = next.contains(id);
             if let Some(panel) = self.panels.borrow().get(id) {
+                let background = panel.read(cx).background.clone();
+                if let Some(background) = background { background.update(cx, |background, cx| background.set_visible(visible, cx)); }
                 let hook = panel.read(cx).spec.lifecycle.clone();
                 if let Some(hook) = hook {
                     hook(PaneLifecycle::Visible(visible), window, cx);
@@ -2270,28 +2305,6 @@ fn directional_score(from: NavRect, to: NavRect, direction: &str) -> Option<f32>
     Some(primary + cross * 1.5)
 }
 
-fn equalized_layout(node: &PaneNode, area: &DockArea, cx: &App) -> Option<DockLayout> {
-    match node.kind() {
-        PaneRef::Tabs { panels, active_ix } => {
-            let mut layout = DockLayout::tabs();
-            for panel in panels {
-                layout = layout.panel_view(area.panel(*panel)?.clone(), cx);
-            }
-            Some(layout.active_index(active_ix))
-        }
-        PaneRef::Split { axis, children, .. } => {
-            let mut layout = if axis == Axis::Horizontal {
-                DockLayout::h_split()
-            } else {
-                DockLayout::v_split()
-            };
-            for child in children {
-                layout = layout.child(equalized_layout(child, area, cx)?, None);
-            }
-            Some(layout)
-        }
-    }
-}
 
 #[cfg(test)]
 mod keyboard_navigation_tests {

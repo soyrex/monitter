@@ -201,6 +201,8 @@ impl chat::ChatPane {
                     self.mcp_approval_supported,
                     decision,
                     toggle,
+                    window,
+                    cx,
                 ));
                 continue;
             }

@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::{rc::Rc, sync::Arc};
 
+#[path = "completion_feedback.rs"]
+pub(crate) mod completion_feedback;
+use completion_feedback::CompletionMarker;
+
 const TRANSCRIPT_WORKER_STACK: usize = 8 * 1024 * 1024;
 
 /// Plain selectable text for the child output log. This deliberately avoids
@@ -547,9 +551,40 @@ pub struct SubagentPane {
     visor_open: bool,
     compact_header: bool,
     composed_palette: Option<crate::design::Palette>,
+    completion_markers: HashMap<(String, bool), Entity<CompletionMarker>>,
+    sidebar_visible: bool,
+    visor_visible: bool,
+    suppress_completion: bool,
 }
 
 impl SubagentPane {
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.set_surface_visibility(visible, false, cx);
+    }
+    pub(crate) fn set_surface_visibility(&mut self, sidebar: bool, visor: bool, _cx: &mut Context<Self>) {
+        if (self.sidebar_visible, self.visor_visible) == (sidebar, visor) { return; }
+        self.sidebar_visible = sidebar;
+        self.visor_visible = visor;
+        for ((_, is_visor), marker) in &self.completion_markers {
+            marker.update(_cx, |marker, cx| marker.set_visible(if *is_visor { visor } else { sidebar }, cx));
+        }
+    }
+    /// Full snapshots and reconnects seed final status rather than replaying events.
+    pub(crate) fn suppress_completion_motion(&mut self, cx: &mut Context<Self>) {
+        self.suppress_completion = true;
+        for marker in self.completion_markers.values() { marker.update(cx, |marker, cx| marker.suppress(cx)); }
+    }
+    fn marker(&mut self, id: &str, status: &str, visor: bool, palette: crate::design::Palette, size: f32, cx: &mut Context<Self>) -> Entity<CompletionMarker> {
+        let visible = if visor { self.visor_visible } else { self.sidebar_visible };
+        let marker = self.completion_markers.entry((id.to_owned(), visor))
+            .or_insert_with(|| cx.new(|_| CompletionMarker::new(id, status)));
+        let (icon, color) = status_marker(status, palette);
+        marker.update(cx, |marker, cx| {
+            marker.set_visible(visible, cx);
+            marker.set_appearance(icon, color, size, cx);
+        });
+        marker.clone()
+    }
     /// Count only authoritative records for this pane's current parent task.
     /// The badge performs no transcript read or backend request.
     pub fn record_count(&self) -> usize {
@@ -584,6 +619,10 @@ impl SubagentPane {
             visor_open: false,
             compact_header: false,
             composed_palette: None,
+            completion_markers: HashMap::new(),
+            sidebar_visible: false,
+            visor_visible: false,
+            suppress_completion: true,
         }
     }
 
@@ -642,6 +681,15 @@ impl SubagentPane {
         let changed = self.parent_task.as_deref() != Some(task_id);
         self.snapshot = snapshot;
         self.parent_task = Some(task_id.to_owned());
+        if changed { self.completion_markers.clear(); }
+        let live = !changed && !self.suppress_completion;
+        self.completion_markers.retain(|(id, _), _| items.iter().any(|item| field(item, "id") == *id));
+        for ((id, visor), marker) in &self.completion_markers {
+            let Some(item) = items.iter().find(|item| field(item, "id") == *id) else { continue; };
+            let visible = if *visor { self.visor_visible } else { self.sidebar_visible };
+            marker.update(cx, |marker, cx| marker.set_status(id, &field(item, "status"), live && visible, cx));
+        }
+        self.suppress_completion = false;
         self.items = items;
         self.prepared_transcripts = transcripts;
         if changed
@@ -851,7 +899,7 @@ impl SubagentPane {
             .px(px(10.))
             .py(px(5.))
             .bg(crate::surface_blend::background(crate::surface_blend::Area::Pane, palette.paper));
-        for (index, item) in self.items.iter().cloned().enumerate() {
+        for (index, item) in self.items.clone().iter().cloned().enumerate() {
             let id = field(&item, "id");
             let active_tab = selected.as_deref() == Some(id.as_str());
             let title = item["title"]
@@ -861,7 +909,8 @@ impl SubagentPane {
             let initials = item["agentInitials"].as_str().unwrap_or("S").to_owned();
             let selected_id = id.clone();
             let status = field(&item, "status");
-            let (status_icon, status_color) = status_marker(&status, palette);
+            let (_, status_color) = status_marker(&status, palette);
+            let status_marker = self.marker(&id, &status, true, palette, 9., cx);
             let mut tab = div()
                 .id(SharedString::from(format!(
                     "subagent-visor-tab-{task_id}-{index}"
@@ -908,7 +957,7 @@ impl SubagentPane {
                         .gap(px(4.))
                         .text_size(px(9.))
                         .text_color(rgb(status_color))
-                        .child(status_icon)
+                        .child(status_marker)
                         .child(status_label(&status)),
                 )
                 .on_click(cx.listener(move |pane, _, _, cx| pane.select(selected_id.clone(), cx)));
@@ -1331,6 +1380,7 @@ impl Render for SubagentPane {
                     let selected_id = id.clone();
                     let accessible_name = format!("{title}, {agent}, {label}");
                     let (status_icon, status_color) = status_marker(&status, palette);
+                    let completion_marker = self.marker(&id, &status, false, palette, 12., cx);
                     let hover_motion = gpui_kit::component::hover_motion::HoverMotion::new(
                         SharedString::from(format!("subagent-sidebar-hover-{id}")), !selected, window, cx,
                     );
@@ -1435,11 +1485,7 @@ impl Render for SubagentPane {
                         )
                         .when(!status_icon.is_empty(), |row| {
                             row.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(status_color))
-                                    .child(status_icon),
+                                completion_marker,
                             )
                         })
                         .on_click(

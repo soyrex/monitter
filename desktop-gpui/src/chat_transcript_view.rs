@@ -5,6 +5,31 @@
 //! message, disclosure, focus or viewport resize invalidates its descendants.
 use super::*;
 
+/// Paint/layout geometry is independent of committed transcript content.
+/// Visible virtual rows sample this retained scalar after each pane reflow.
+#[derive(Clone, Copy, Default)]
+pub(super) struct TranscriptGeometry {
+    width: f32,
+}
+impl TranscriptGeometry {
+    pub(super) fn from_viewport_width(width: f32) -> Self {
+        Self { width: width - space::SECTION * 2. }
+    }
+    pub(super) fn bubble_fraction(self) -> f32 {
+        if self.width <= 420. { 1. } else { 0.9 }
+    }
+    pub(super) fn attachment_width(self) -> f32 {
+        self.width.min(design::CHAT_MAX_WIDTH).max(120.) * self.bubble_fraction()
+    }
+    pub(super) fn attachment_layout(self, preferred: message_attachments::AttachmentLayout) -> message_attachments::AttachmentLayout {
+        use message_attachments::AttachmentLayout;
+        if self.attachment_width() < 320. && preferred == AttachmentLayout::PortraitLeft {
+            AttachmentLayout::LandscapeBottom
+        } else { preferred }
+    }
+}
+
+
 #[derive(Clone)]
 pub(super) struct TranscriptPreparationKey {
     snapshot: std::rc::Weak<Value>,
@@ -95,8 +120,7 @@ impl PartialEq for TranscriptPreparationKey {
             && self.appearance == other.appearance
             && self.typography == other.typography
             && self.scale == other.scale
-            && self.width == other.width
-            && self.companion_width == other.companion_width
+            // Scalar widths drive visible-row layout through TranscriptGeometry.
             && self.companion_visible == other.companion_visible
             && self.compact_detail == other.compact_detail
             && self.history_error == other.history_error
@@ -169,8 +193,9 @@ impl TranscriptPreparationKey {
             flags[7] = old.appearance != self.appearance;
             flags[8] = old.typography != self.typography;
             flags[9] = old.scale != self.scale;
-            flags[10] = old.width != self.width;
-            flags[11] = old.companion_width != self.companion_width;
+            // Width changes are observations, not preparation causes.
+            flags[10] = false;
+            flags[11] = false;
             flags[12] = old.companion_visible != self.companion_visible;
             flags[13] = old.compact_detail != self.compact_detail;
             flags[14] = old.history_error != self.history_error;
@@ -236,6 +261,7 @@ pub(super) struct TranscriptViewport {
     list: Option<Entity<StableTranscriptList>>,
     error: Option<String>,
     palette: design::Palette,
+    geometry: Rc<std::cell::Cell<TranscriptGeometry>>,
 }
 impl TranscriptViewport {
     pub(super) fn new(
@@ -244,6 +270,7 @@ impl TranscriptViewport {
         list: Option<Entity<StableTranscriptList>>,
         error: Option<String>,
         palette: design::Palette,
+        geometry: Rc<std::cell::Cell<TranscriptGeometry>>,
     ) -> Self {
         let retry_owner = owner.clone();
         let load_earlier = Rc::new(move |task_id: &str, cx: &mut App| {
@@ -281,6 +308,7 @@ impl TranscriptViewport {
             list,
             error,
             palette,
+            geometry,
             #[cfg(test)]
             render_count: 0,
         }
@@ -308,8 +336,15 @@ impl Render for TranscriptViewport {
         }
         let load_unmeasured_history = self.load_unmeasured_history.clone();
         let scroll_task_id = self.task_id.clone();
+        let geometry = self.geometry.clone();
         let mut transcript = div()
             .id("transcript")
+            .relative()
+            // Run before the cached list's prepaint, using this frame's allocation.
+            .child(canvas(move |bounds, _, _| {
+                let width_design = bounds.size.width / design::ui_scaled_px(1.);
+                geometry.set(TranscriptGeometry::from_viewport_width(width_design));
+            }, |_, _, _, _| ()).absolute().inset_0())
             // A cached view renders as a layout root. Explicitly fill its
             // assigned bounds; flex_1 alone has no parent flex layout here.
             .size_full()
@@ -358,6 +393,25 @@ impl Render for TranscriptViewport {
     }
 }
 
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn bubble_and_attachment_modes_track_live_width_thresholds() {
+        use message_attachments::AttachmentLayout;
+        let wide = TranscriptGeometry::from_viewport_width(461.);
+        let narrow = TranscriptGeometry::from_viewport_width(460.);
+        assert_eq!(wide.bubble_fraction(), 0.9);
+        assert_eq!(narrow.bubble_fraction(), 1.);
+        let portrait = TranscriptGeometry::from_viewport_width(360.);
+        let landscape = TranscriptGeometry::from_viewport_width(359.);
+        assert_eq!(portrait.attachment_layout(AttachmentLayout::PortraitLeft), AttachmentLayout::PortraitLeft);
+        assert_eq!(landscape.attachment_layout(AttachmentLayout::PortraitLeft), AttachmentLayout::LandscapeBottom);
+        assert_eq!(landscape.attachment_layout(AttachmentLayout::Cards), AttachmentLayout::Cards);
+        assert!(landscape.attachment_width() < portrait.attachment_width());
+        assert_eq!(TranscriptGeometry::from_viewport_width(1_000.).attachment_width(), design::CHAT_MAX_WIDTH * 0.9);
+    }
+}
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "chat_render_isolation_tests.rs"]
 mod tests;

@@ -151,6 +151,7 @@ fn mount(
             list: None,
             error: None,
             palette: design::palette(&Value::Null, WindowAppearance::Dark),
+            geometry: Rc::new(Cell::new(super::TranscriptGeometry::default())),
         });
         IsolationHarness {
             snapshot: Rc::new(json!({"tasks":[{"id":"task"}]})),
@@ -325,7 +326,11 @@ fn preparation_key_tracks_sources_and_semantic_context_without_deep_equality() {
     assert!(base != disclosure);
     let mut width = base.clone();
     width.width -= 20.;
-    assert!(base != width);
+    width.companion_width += 20.;
+    assert!(base == width, "scalar widths only reflow visible rows");
+    let mut compact = base.clone();
+    compact.compact_detail = !compact.compact_detail;
+    assert!(base != compact, "content mode remains a semantic change");
     let mut error = base.clone();
     error.history_error = Some("history unavailable".into());
     assert!(base != error);

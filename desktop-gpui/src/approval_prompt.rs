@@ -11,6 +11,50 @@ use gpui_kit::{
 };
 use serde_json::Value;
 use std::rc::Rc;
+use crate::chat::feedback::{self, Clock, FeedbackClock};
+
+struct TechnicalDetails {
+    lines: Vec<String>,
+    payload: SharedString,
+    muted: u32,
+    code: u32,
+    clock: Clock,
+}
+impl Render for TechnicalDetails {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = self.clock.borrow_mut().progress(cx.reduce_motion());
+        feedback::painted(
+            div().id("approval-expanded-details").flex().flex_col().gap_2()
+                .opacity(0.65 + progress * 0.35)
+                .children(self.lines.iter().map(|line| div().text_color(rgb(self.muted)).child(line.clone())))
+                .child(div().p_2().bg(design::modal_surface_color(self.code)).rounded_md()
+                    .font_family(design::FONT_MONO).child(self.payload.clone())),
+            self.clock.clone(),
+        )
+    }
+}
+
+fn technical_details(
+    id: SharedString, lines: Vec<String>, payload: SharedString, palette: Palette,
+    entering: bool, window: &mut Window, cx: &mut App,
+) -> Entity<TechnicalDetails> {
+    let holder = window.use_keyed_state(id, cx, |_, cx| cx.new(|_| {
+        let clock = FeedbackClock::new();
+        if entering { clock.borrow_mut().start(std::time::Duration::from_millis(120)); }
+        TechnicalDetails { lines: Vec::new(), payload: "".into(), muted: palette.muted, code: palette.code, clock }
+    }));
+    let details = holder.read(cx).clone();
+    details.update(cx, |view, cx| {
+        if view.lines != lines || view.payload != payload || view.muted != palette.muted || view.code != palette.code {
+            view.lines = lines;
+            view.payload = payload;
+            view.muted = palette.muted;
+            view.code = palette.code;
+            cx.notify();
+        }
+    });
+    details
+}
 
 pub type DecisionCallback = Rc<dyn Fn(&'static str, &mut Window, &mut App)>;
 pub type DisclosureCallback = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -149,7 +193,13 @@ pub fn render_approval_prompt(
     native_mcp_supported: bool,
     on_decision: DecisionCallback,
     on_toggle_details: DisclosureCallback,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
+    let (chevron, details_entering) = crate::chrome_motion::disclosure_chevron(
+        SharedString::from(format!("approval-details-motion-{}", text(request, "id"))),
+        expanded, window, cx,
+    );
     let summary = text(request, "summary");
     let tool = text(request, "tool");
     let risk_color = if text(request, "risk") == "high" {
@@ -264,10 +314,12 @@ pub fn render_approval_prompt(
                 } else {
                     "Technical request details"
                 })
+                .child(chevron)
                 .on_click(move |_, window, cx| on_toggle_details(window, cx)),
         );
     }
     if expanded {
+        let mut lines = Vec::new();
         for (label, value) in [
             (
                 "Host",
@@ -280,25 +332,17 @@ pub fn render_approval_prompt(
             ("Folder", text(task, "cwd")),
         ] {
             if !value.is_empty() {
-                body = body.child(
-                    div()
-                        .text_color(rgb(palette.muted))
-                        .child(format!("{label}: {}", bounded(&value, 400))),
-                );
+                lines.push(format!("{label}: {}", bounded(&value, 400)));
             }
         }
         let payload = parsed
             .as_ref()
             .and_then(|value| serde_json::to_string_pretty(value).ok())
             .unwrap_or(detail);
-        body = body.child(
-            div()
-                .p_2()
-                .bg(design::modal_surface_color(palette.code))
-                .rounded_md()
-                .font_family(design::FONT_MONO)
-                .child(bounded(&payload, 6000)),
-        );
+        body = body.child(technical_details(
+            SharedString::from(format!("approval-details-content-{}", text(request, "id"))),
+            lines, bounded(&payload, 6000).into(), palette, details_entering, window, cx,
+        ));
     }
     let mut actions = div()
         .id("approval-dock-actions")
@@ -485,7 +529,7 @@ mod layout_tests {
     use std::rc::Rc;
     struct Fixture;
     impl Render for Fixture {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let request = serde_json::json!({"status":"pending","summary":"Long tool explanation. ".repeat(1000), "provider":"codex","tool":"Command execution","risk":"unknown","rememberable":true});
             let palette = crate::design::palette(
                 &serde_json::json!({"theme":"dark"}),
@@ -507,6 +551,8 @@ mod layout_tests {
                     true,
                     Rc::new(|_, _, _| {}),
                     Rc::new(|_, _| {}),
+                    window,
+                    cx,
                 ))
         }
     }

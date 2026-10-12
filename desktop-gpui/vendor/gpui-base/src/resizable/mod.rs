@@ -95,6 +95,52 @@ impl ResizableState {
         self.done_resizing(cx);
     }
 
+    /// Change geometry without ending a gesture or reporting a user resize.
+    /// A live pointer always wins over layout animation. The layout owner may
+    /// collapse this slot below its previous minimum; its rendered size range
+    /// must agree with that target in the next layout (e.g. a hidden sidebar).
+    pub fn resize_panel_for_layout(&mut self, ix: usize, size: Pixels, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.is_resizing() || ix + 1 >= self.sizes.len() || !size.as_f32().is_finite() { return false; }
+        let minimum = self.panels[ix].size_range.start;
+        self.panels[ix].size_range.start = minimum.min(size.max(Pixels::ZERO));
+        self.resize_panel_at_handle(ix, size.max(Pixels::ZERO), window, cx);
+        self.panels[ix].size_range.start = minimum;
+        true
+    }
+
+    fn layout_size_ranges(&self) -> Vec<Range<Pixels>> {
+        self.panels.iter().map(|panel| {
+            // A cached split can precede its first prepaint; the default
+            // 0..0 range is unknown rather than an intentional zero-size pane.
+            if panel.size_range.end <= panel.size_range.start { PANEL_MIN_SIZE..Pixels::MAX }
+            else { panel.size_range.clone() }
+        }).collect()
+    }
+
+    pub(crate) fn equalized_layout_shares(&self) -> Vec<f32> {
+        if self.panels.is_empty() { return Vec::new(); }
+        let total = if self.container_size() > Pixels::ZERO { self.container_size() }
+            else { gpui::px(self.sizes.iter().map(|size| size.as_f32()).sum::<f32>()) };
+        let equal = vec![total / self.panels.len() as f32; self.panels.len()];
+        let ranges = self.layout_size_ranges();
+        let sizes = constrained_layout_sizes(&equal, &ranges, total);
+        let resolved = sizes.iter().map(|size| size.as_f32()).sum::<f32>();
+        sizes.iter().map(|size| size.as_f32() / resolved).collect()
+    }
+
+    /// Assign all split slots together, preserving each slot's minimum size.
+    /// No gesture, tree reconciliation or persistence event is synthesized.
+    pub(crate) fn apply_layout_sizes(&mut self, sizes: &[Pixels], cx: &mut Context<Self>) -> bool {
+        if self.is_resizing() || sizes.len() != self.panels.len()
+            || sizes.iter().any(|size| !size.as_f32().is_finite()) { return false; }
+        let ranges = self.layout_size_ranges();
+        let total = if self.container_size() > Pixels::ZERO { self.container_size() }
+            else { gpui::px(sizes.iter().map(|size| size.as_f32()).sum::<f32>()) };
+        let sizes = constrained_layout_sizes(sizes, &ranges, total);
+        self.adopt_sizes(&sizes.into_iter().map(Some).collect::<Vec<_>>(), cx);
+        true
+    }
+
     /// Insert a panel state at `ix`, or append it when no index is supplied.
     ///
     /// Existing panel sizes are redistributed so their total remains equal to
@@ -401,6 +447,24 @@ pub(crate) struct ResizablePanelState {
     bounds: Bounds<Pixels>,
 }
 
+/// Clamp and redistribute the remainder across unconstrained slots. With a
+/// viewport smaller than the sum of minima the existing minimum-size overflow
+/// semantics win, rather than shrinking terminals below their minimum.
+fn constrained_layout_sizes(sizes: &[Pixels], ranges: &[Range<Pixels>], total: Pixels) -> Vec<Pixels> {
+    let mut result: Vec<Pixels> = sizes.iter().zip(ranges).map(|(size, range)| (*size).clamp(range.start, range.end)).collect();
+    for _ in 0..=result.len() {
+        let remaining = total.as_f32() - result.iter().map(|size| size.as_f32()).sum::<f32>();
+        if remaining.abs() < 0.01 { break; }
+        let free: Vec<usize> = result.iter().zip(ranges).enumerate().filter_map(|(ix, (size, range))| {
+            ((remaining > 0. && *size < range.end) || (remaining < 0. && *size > range.start)).then_some(ix)
+        }).collect();
+        if free.is_empty() { break; }
+        let share = px(remaining / free.len() as f32);
+        for ix in free { result[ix] = (result[ix] + share).clamp(ranges[ix].start, ranges[ix].end); }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -417,6 +481,16 @@ mod tests {
     use super::{
         ResizableState, ResizeHandleContext, ResizeHandleState, h_resizable, resizable_panel,
     };
+
+    #[test]
+    fn coordinated_geometry_preserves_minima_and_total() {
+        let sizes = super::constrained_layout_sizes(
+            &[px(20.), px(480.)], &[px(100.)..px(1000.), px(100.)..px(1000.)], px(500.));
+        assert_eq!(sizes, vec![px(100.), px(400.)]);
+        let equal = super::constrained_layout_sizes(
+            &[px(250.), px(250.)], &[px(300.)..px(1000.), px(100.)..px(1000.)], px(500.));
+        assert_eq!(equal, vec![px(300.), px(200.)]);
+    }
 
     struct MixedSizingHarness {
         width: Pixels,

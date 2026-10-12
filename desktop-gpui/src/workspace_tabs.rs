@@ -333,6 +333,10 @@ impl Desktop {
                     .clone();
                 let click_focus = focus.clone();
                 let color = rgb(design::parse_color(&item.color, palette.accent));
+                let selection_chrome = crate::chrome_motion::selection_chrome(
+                    SharedString::from(format!("workspace-selection-motion-{id}")), active,
+                    color, px(if tern { 12. } else { 5. }), window, cx,
+                );
                 let drop_id = id.clone();
                 let drag = WorkspaceTabDrag {
                     id: id.clone(), name: item.name.clone(), icon: icon(&item.icon),
@@ -390,6 +394,7 @@ impl Desktop {
                 tabs = tabs.child(
                     div()
                         .id(SharedString::from(format!("workspace-pill-{id}")))
+                        .relative()
                         .flex_shrink_0()
                         .h(px(32.))
                         .max_w(px(300.))
@@ -399,16 +404,7 @@ impl Desktop {
                         .gap(px(8.))
                         .rounded(px(if tern { 12. } else { 5. }))
                         .border_1()
-                        .border_color(if active {
-                            color.opacity(0.65)
-                        } else {
-                            rgb(palette.line).opacity(0.)
-                        })
-                        .bg(if active {
-                            color.opacity(0.14)
-                        } else {
-                            color.opacity(0.)
-                        })
+                        .border_color(rgb(palette.line).opacity(0.))
                         .text_color(rgb(if active { palette.ink } else { palette.muted }))
                         .cursor_pointer()
                         .track_focus(&focus)
@@ -427,6 +423,7 @@ impl Desktop {
                             item.name,
                             if active { ", selected" } else { "" }
                         ))
+                        .child(div().absolute().inset_0().child(selection_chrome))
                         .child(menu)
                         .child(div().min_w_0().truncate()
                             .text_size((cx.theme().font_size - px(4.)).max(px(8.)))
@@ -510,6 +507,7 @@ impl Desktop {
                 };
                 bar.child(
                     Button::new("cycle-main-sidebar")
+                        .track_focus(&self.sidebar_toggle_focus)
                         .ghost()
                         .compact()
                         .flex_shrink_0()

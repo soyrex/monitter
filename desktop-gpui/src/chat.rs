@@ -7,6 +7,10 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, WindowExt as _};
 use std::{sync::Arc, time::Duration};
 #[path = "chat_attachments.rs"]
 mod attachments;
+#[path = "local_feedback.rs"]
+pub(crate) mod feedback;
+#[path = "chat_copy_feedback.rs"]
+mod copy_feedback;
 #[path = "message_attachments.rs"]
 mod message_attachments;
 #[path = "system_divider.rs"]
@@ -17,7 +21,7 @@ pub(crate) mod run_activity;
 use super::transcript::TimelineRow;
 #[path = "chat_transcript_view.rs"]
 mod transcript_view;
-use transcript_view::{TranscriptPreparationKey, TranscriptViewport};
+use transcript_view::{TranscriptGeometry, TranscriptPreparationKey, TranscriptViewport};
 #[path = "chat_slash.rs"]
 mod chat_slash;
 #[path = "composer_format.rs"]
@@ -30,6 +34,9 @@ pub(crate) mod connection_recovery;
 #[cfg(test)]
 #[path = "chat_column_fixture_tests.rs"]
 mod chat_column_fixture_tests;
+#[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
+#[path = "chat_width_reflow_tests.rs"]
+mod chat_width_reflow_tests;
 
 #[cfg(any(test, feature = "performance-profiling"))]
 static TRANSCRIPT_PREPARATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -621,9 +628,11 @@ pub struct ChatPane {
     grouped_rows: HashMap<String, Entity<run_activity::RunActivityRow>>,
     message_attachment_rows: HashMap<String, Entity<message_attachments::MessageAttachments>>,
     message_action_focus: HashMap<String, FocusHandle>,
+    copy_controls: HashMap<String, Entity<copy_feedback::CopyFeedback>>,
     streaming_bodies: HashMap<String, Entity<crate::streaming_message::StreamingMessage>>,
     streaming_bodies_initialized: bool,
     transcript_context_unchanged: bool,
+    transcript_geometry: Rc<std::cell::Cell<TranscriptGeometry>>,
     deferred_publication: Option<DeferredChatPublication>,
     activity_refresh_pending: bool,
     #[cfg(test)]
@@ -1048,9 +1057,11 @@ impl ChatPane {
             grouped_rows: HashMap::new(),
             message_attachment_rows: HashMap::new(),
             message_action_focus: HashMap::new(),
+            copy_controls: HashMap::new(),
             streaming_bodies: HashMap::new(),
             streaming_bodies_initialized: false,
             transcript_context_unchanged: false,
+            transcript_geometry: Rc::new(std::cell::Cell::new(TranscriptGeometry::default())),
             deferred_publication: None,
             activity_refresh_pending: false,
             #[cfg(test)]
@@ -1249,14 +1260,15 @@ impl ChatPane {
     }
     /// Resolve text at activation time: retained streaming row closures may
     /// have been prepared before the latest canonical body arrived.
-    fn copy_message_text(&self, task_id: &str, message_id: &str, cx: &mut App) {
-        if self.task_id() != task_id { return; }
+    fn copy_message_text(&self, task_id: &str, message_id: &str, cx: &mut App) -> bool {
+        if self.task_id() != task_id { return false; }
         let Some(message) = self.transcripts.get(task_id).and_then(|state| {
             state.messages.iter().find(|message| message["id"].as_str() == Some(message_id))
-        }) else { return; };
+        }) else { return false; };
         let text = field(message, "text");
         let text = if message["role"] == "user" { split_operator_message(&text).1 } else { text };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
     }
     pub fn task_id(&self) -> String {
         self.selected.clone().unwrap_or_default()
@@ -1279,6 +1291,12 @@ impl ChatPane {
             self.streaming_bodies_initialized = false;
         }
         self.dock_visible = visible;
+        self.attachments.update(cx, |view, cx| view.set_visible(visible, cx));
+        self.companion.update(cx, |pane, cx| pane.set_surface_visibility(
+            visible && self.companion_visible && !self.compact_detail && self.detail_tab == crate::companion_sidebar::DetailTab::Subagents, visible, cx));
+        for control in self.copy_controls.values() {
+            control.update(cx, |control, cx| control.set_visible(visible, cx));
+        }
         for body in self.streaming_bodies.values() {
             body.update(cx, |body, cx| body.set_visible(visible, cx));
         }
@@ -1376,6 +1394,7 @@ impl ChatPane {
                 row["id"].as_str() == Some(id) && row["taskId"].as_str() == Some(task_id.as_str())
             }))
         }));
+        if reset { self.companion.update(cx, |pane, cx| pane.suppress_completion_motion(cx)); }
         self.sync_prepared(snapshot, revision, records, child_transcripts, context_unchanged, cx);
         if let Some(history) = history { self.reconcile_history(history, reset, cx); }
         if let Some(boundary) = boundary { self.restore_history_boundary(boundary, cx); }
@@ -1396,6 +1415,7 @@ impl ChatPane {
     }
     pub fn sync(&mut self, snapshot: Rc<Value>, revision: Option<String>, cx: &mut Context<Self>) {
         self.transcript_context_unchanged = false;
+        self.companion.update(cx, |pane, cx| pane.suppress_completion_motion(cx));
         self.sync_with_companion(snapshot, revision, None, false, cx);
     }
     fn refresh_activity_context(&mut self, cx: &mut Context<Self>) {
@@ -1542,6 +1562,7 @@ impl ChatPane {
         self.grouped_rows.retain(|id, _| group_ids.contains(id));
         self.message_attachment_rows.retain(|id, _| message_ids.contains(id));
         self.message_action_focus.retain(|id, _| message_ids.contains(id));
+        self.copy_controls.retain(|id, _| message_ids.contains(id));
         self.streaming_bodies.retain(|id, _| message_ids.contains(id));
     }
     /// Authoritative cache integration: pass all known task messages, including
@@ -1560,6 +1581,9 @@ impl ChatPane {
                     key.advance_stream_rows(&previous_rows, &state.rows);
                 }
                 for message in changed {
+                    if let Some(control) = self.copy_controls.get(&field(&message, "id")) {
+                        control.update(cx, |control, cx| control.set_disabled(field(&message, "text").is_empty(), cx));
+                    }
                     self.streaming_bodies[&field(&message, "id")].update(cx, |body, cx| body.set_message(message, cx));
                 }
                 let remeasured = !indices.is_empty();
@@ -2605,6 +2629,25 @@ impl Render for ChatPane {
             self.response_details_expanded.retain(|id| message_ids.contains(id));
             self.message_action_focus
                 .retain(|id, _| message_ids.contains(id));
+            self.copy_controls.retain(|id, _| message_ids.contains(id));
+            let copy_owner = cx.weak_entity();
+            let copy_task = self.task_id();
+            for item in timeline_rows.iter() {
+                let transcript::ConversationItem::Message(message) = item else { continue; };
+                let id = field(message, "id");
+                let control = self.copy_controls.entry(id.clone()).or_insert_with(|| {
+                    let owner = copy_owner.clone();
+                    let task = copy_task.clone();
+                    let message_id = id.clone();
+                    cx.new(|_| copy_feedback::CopyFeedback::new(id, Rc::new(move |cx| {
+                        owner.update(cx, |pane, cx| pane.copy_message_text(&task, &message_id, cx)).unwrap_or(false)
+                    })))
+                });
+                control.update(cx, |control, cx| {
+                    control.set_disabled(field(message, "text").is_empty(), cx);
+                    control.set_visible(self.dock_visible, cx);
+                });
+            }
             for id in &message_ids {
                 self.message_action_focus
                     .entry(id.clone())
@@ -2652,20 +2695,14 @@ impl Render for ChatPane {
             self.streaming_bodies_initialized = true;
             let streaming_bodies = self.streaming_bodies.clone();
             let message_action_focus = self.message_action_focus.clone();
+            let copy_controls = self.copy_controls.clone();
             let response_details_expanded = self.response_details_expanded.clone();
             let activities = self.activity_rows.clone();
             let grouped = self.grouped_rows.clone();
             let pane = cx.entity().downgrade();
             let message_settings = self.snapshot["settings"].clone();
             let message_appearance = window.appearance();
-            let transcript_width = self.pane_width_design
-                - if self.companion_visible && !self.compact_detail {
-                    self.companion_width
-                } else {
-                    0.
-                }
-                - space::SECTION * 2.;
-            let bubble_width = if transcript_width <= 420. { 1. } else { 0.9 };
+            let transcript_geometry = self.transcript_geometry.clone();
             let interface_family = interface_family.clone();
             let row_renderer: StableRowRenderer = Rc::new(std::cell::RefCell::new(move |index: usize, _: &mut Window, cx: &mut App| {
                     let rendered = (|| {
@@ -2673,6 +2710,8 @@ impl Render for ChatPane {
                     let Some(timeline_row) = timeline_rows.get(index) else {
                         return div().into_any_element();
                     };
+                    let geometry = transcript_geometry.get();
+                    let bubble_width = geometry.bubble_fraction();
                     let date_break = date_breaks.get(&index).cloned();
                     let message = match timeline_row {
                         transcript::ConversationItem::Activity(event) => {
@@ -2901,9 +2940,6 @@ impl Render for ChatPane {
                     let message_id = field(message, "id");
                     let group: SharedString = format!("message-actions-{message_id}").into();
                     if message_action_focus.contains_key(&message_id) {
-                        let copy_message = message_id.clone();
-                        let copy_task = field(&task_snapshot, "id");
-                        let copy_pane = pane.clone();
                         let reply_message = message_id.clone();
                         let reply_author = label.clone();
                         let reply_task = field(&task_snapshot, "id");
@@ -2916,16 +2952,7 @@ impl Render for ChatPane {
                             .flex().flex_shrink_0().items_center().gap(px(2.))
                             .max_w(px(0.)).opacity(0.).overflow_hidden()
                             .group_hover(group.clone(), |style| style.max_w(px(76.)).opacity(1.))
-                            .child(Button::new(SharedString::from(format!("copy-message-{message_id}")))
-                                .ghost().compact().w(px(23.)).h(px(23.)).p_0()
-                                .icon(Icon::new(IconName::Copy).size(px(13.)))
-                                .disabled(visible_text.is_empty())
-                                .accessibility_label("Copy message text").tooltip("Copy message text")
-                                .on_click(move |_, _, cx| {
-                                    let _ = copy_pane.update(cx, |pane, cx| {
-                                        pane.copy_message_text(&copy_task, &copy_message, cx);
-                                    });
-                                }))
+                            .children(copy_controls.get(&message_id).cloned())
                             .child(Button::new(SharedString::from(format!("reply-message-{message_id}")))
                                 .ghost().compact().w(px(23.)).h(px(23.)).p_0()
                                 .icon(Icon::new(IconName::Reply).size(px(14.)))
@@ -2973,6 +3000,8 @@ impl Render for ChatPane {
                     };
                     let mut bubble = div().w(relative(bubble_width)).min_w_0().max_w_full()
                         .flex_shrink_1().flex().flex_col();
+                    #[cfg(test)]
+                    { let id = message_id.clone(); bubble = bubble.debug_selector(move || format!("message-bubble-{id}")); }
                     let mut body = div()
                         .id(SharedString::from(format!("message-body-{message_id}")))
                         .w_full()
@@ -3003,6 +3032,8 @@ impl Render for ChatPane {
                             .min_w_0()
                             .max_w_full().into_any_element()
                         });
+                    #[cfg(test)]
+                    { let id = message_id.clone(); body = body.debug_selector(move || format!("message-body-{id}")); }
                     if let Some(status_label) = stream_presentation.status_label.filter(|_| streaming_body.is_none()) {
                         body = body.child(
                             div()
@@ -3061,11 +3092,8 @@ impl Render for ChatPane {
                     }
                     if let Some(attachments) = message_attachment_rows.get(&message_id) {
                         use message_attachments::AttachmentLayout;
-                        let width = transcript_width.min(design::CHAT_MAX_WIDTH).max(120.) * bubble_width;
-                        let mut layout = attachments.read(cx).layout();
-                        if width < 320. && layout == AttachmentLayout::PortraitLeft {
-                            layout = AttachmentLayout::LandscapeBottom;
-                        }
+                        let width = geometry.attachment_width();
+                        let layout = geometry.attachment_layout(attachments.read(cx).layout());
                         attachments.update(cx, |attachments, cx| attachments.set_bubble_layout(width, layout, cx));
                         match layout {
                             AttachmentLayout::PortraitLeft => {
@@ -3157,7 +3185,7 @@ impl Render for ChatPane {
             } else {
                 let owner = cx.weak_entity();
                 self.transcript_viewport = Some(cx.new(|_| {
-                    TranscriptViewport::new(owner, self.task_id(), list, history_error, palette)
+                    TranscriptViewport::new(owner, self.task_id(), list, history_error, palette, self.transcript_geometry.clone())
                 }));
             }
             // Projection reconciliation can adjust the list boundary. Capture
@@ -3410,6 +3438,8 @@ impl Render for ChatPane {
         }
         let detail_mounted = self.pane_width_design > 0.0
             && (self.companion_visible || detail_progress > 0.0);
+        self.companion.update(cx, |pane, cx| pane.set_surface_visibility(
+            self.dock_visible && detail_mounted && self.detail_tab == crate::companion_sidebar::DetailTab::Subagents, self.dock_visible, cx));
         self.working_bubble.update(cx, |bubble, cx| {
             bubble.set_context(
                 (task_running || self.starting_turn) && !(self.compact_detail && detail_mounted),
@@ -3519,7 +3549,7 @@ impl Render for ChatPane {
                 let _ = owner.update(cx, |pane, cx| { pane.approval_details_expanded = !pane.approval_details_expanded; cx.notify(); });
             });
             let task = rows(&self.snapshot, "tasks").into_iter().find(|t| field(t,"id") == self.task_id()).unwrap_or(Value::Null);
-            let prompt = crate::approval_prompt::render_approval_prompt(&request, &task, &self.snapshot, palette, cx.theme().font_family.clone(), cx.theme().font_size, self.busy, self.approval_details_expanded, self.mcp_approval_supported, decision, toggle);
+            let prompt = crate::approval_prompt::render_approval_prompt(&request, &task, &self.snapshot, palette, cx.theme().font_family.clone(), cx.theme().font_size, self.busy, self.approval_details_expanded, self.mcp_approval_supported, decision, toggle, window, cx);
             content = content.child(div().absolute().inset_0().occlude().flex().items_center().justify_center().p_3()
                 .child(div().absolute().inset_0()
                     .bg(Background::from(rgba(0x00000055)).backdrop_blur(20.))
@@ -3862,7 +3892,8 @@ impl Render for ChatPane {
             .relative()
             .flex()
             .flex_col()
-            .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15))
+            // The retained dock background paints the focus/hover surface.
+            .when(self.dock_group.is_none(), |this| this.bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15)))
             .text_color(rgb(palette.ink))
             .child(measurement)
             .child(upper_workspace)

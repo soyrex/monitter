@@ -214,6 +214,8 @@ pub(super) struct ChatAttachments {
     task_id: String,
     scope: AttachmentScope,
     drafts: Vec<AttachmentDraft>,
+    entrances: std::collections::HashMap<String, super::feedback::Clock>,
+    visible: bool,
     generation: u64,
     pending: bool,
     touched: bool,
@@ -230,6 +232,8 @@ impl ChatAttachments {
             task_id,
             scope,
             drafts: vec![],
+            entrances: std::collections::HashMap::new(),
+            visible: true,
             generation: 0,
             pending: false,
             touched: false,
@@ -238,6 +242,20 @@ impl ChatAttachments {
             error: None,
             notice: None,
         }
+    }
+    pub(super) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible { return; }
+        self.visible = visible;
+        for clock in self.entrances.values() { clock.borrow_mut().set_visible(visible); }
+        cx.notify();
+    }
+    fn push_ready(&mut self, draft: AttachmentDraft) {
+        let clock = super::feedback::FeedbackClock::new();
+        clock.borrow_mut().set_visible(self.visible);
+        if self.visible { clock.borrow_mut().start(std::time::Duration::from_millis(120)); }
+        self.entrances.insert(draft.id.clone(), clock);
+        self.drafts.push(draft);
+        self.touched = true;
     }
     pub fn ids(&self) -> Vec<String> {
         self.drafts.iter().map(|draft| draft.id.clone()).collect()
@@ -382,6 +400,7 @@ impl ChatAttachments {
     fn remove(&mut self, id: &str, cx: &mut Context<Self>) {
         let previous_len = self.drafts.len();
         self.drafts.retain(|draft| draft.id != id);
+        self.entrances.remove(id);
         if self.drafts.len() != previous_len {
             self.touched = true;
             self.changed(cx);
@@ -395,6 +414,7 @@ impl ChatAttachments {
             self.scope = scope;
             self.generation = self.generation.wrapping_add(1);
             self.drafts.clear();
+            self.entrances.clear();
             self.touched = true;
             self.pending = false;
             self.error = None;
@@ -407,6 +427,7 @@ impl ChatAttachments {
         let ids = ids.iter().collect::<HashSet<_>>();
         let previous_len = self.drafts.len();
         self.drafts.retain(|draft| !ids.contains(&draft.id));
+        self.entrances.retain(|id, _| !ids.contains(id));
         if self.drafts.len() != previous_len {
             self.touched = true;
             self.changed(cx);
@@ -481,8 +502,7 @@ impl ChatAttachments {
                 view.pending = false;
                 match result {
                     Ok(draft) => {
-                        view.drafts.push(draft);
-                        view.touched = true;
+                        view.push_ready(draft);
                     }
                     Err(error) => view.error = Some(error),
                 }
@@ -550,8 +570,7 @@ impl ChatAttachments {
                 view.pending = false;
                 match result {
                     Ok(draft) => {
-                        view.drafts.push(draft);
-                        view.touched = true;
+                        view.push_ready(draft);
                     }
                     Err(error) => view.error = Some(error),
                 }
@@ -647,8 +666,7 @@ impl ChatAttachments {
                     if view.generation == generation {
                         match result {
                             Ok(draft) => {
-                                view.drafts.push(draft);
-                                view.touched = true;
+                                view.push_ready(draft);
                             }
                             Err(error) => view.error = Some(error),
                         }
@@ -815,7 +833,14 @@ impl Render for ChatAttachments {
                             view.remove(&id, cx);
                         })),
                 );
-            strip = strip.child(chip);
+            if let Some(clock) = self.entrances.get(&draft.id) {
+                let progress = clock.borrow_mut().progress(cx.reduce_motion() || !crate::native_motion::motion_allowed());
+                // Relative positioning preserves the final allocation and input caret.
+                strip = strip.child(super::feedback::painted(
+                    chip.relative().top(px(3. * (1. - progress))).opacity(progress), clock.clone()));
+            } else {
+                strip = strip.child(chip);
+            }
         }
         // An empty attachment strip still contributes its vertical margins.
         // Only real attachments reserve space above the composer input row.

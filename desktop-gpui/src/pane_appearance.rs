@@ -11,6 +11,8 @@ use serde_json::Value;
 pub struct PaneAppearance {
     pub tile_theme: NativeTileTheme,
     pub tile_backdrop_color: u32,
+    pub paper_color: u32,
+    pub dark: bool,
     pub border_opacity: u16,
     pub show_active_border: bool,
     pub active_border_color: u32,
@@ -26,6 +28,8 @@ impl PaneAppearance {
         Self {
             tile_theme: crate::design::tile_theme(),
             tile_backdrop_color: tile_backdrop(palette),
+            paper_color: palette.paper,
+            dark: palette.dark,
             border_opacity: crate::design::border_opacity(),
             show_active_border: settings["showActivePaneBorder"].as_bool().unwrap_or(true),
             active_border_color: palette.accent,
@@ -64,6 +68,107 @@ impl PaneAppearance {
         } else {
             self.active_border_color
         }
+    }
+}
+
+/// Background-only emphasis, separate from cached content opacity and the
+/// immediate native focus outline. The focused endpoint is the existing fill.
+#[derive(Clone, Copy, Debug, Default)]
+struct BackgroundEmphasis {
+    current: f32,
+    from: f32,
+    target: f32,
+    seeded: bool,
+}
+impl BackgroundEmphasis {
+    fn target(active: bool, hovered: bool, appearance: PaneAppearance) -> f32 {
+        let _ = appearance;
+        if active { 1. } else if hovered { 0.5 } else { 0. }
+    }
+    fn observe(&mut self, target: f32, visible: bool, allowed: bool, progress: f32) -> bool {
+        self.current = self.from + (self.target - self.from) * progress;
+        if !self.seeded || !visible || !allowed {
+            self.current = target; self.from = target; self.target = target; self.seeded = true;
+            return false;
+        }
+        if (self.target - target).abs() < 0.0001 { return false; }
+        self.from = self.current;
+        self.target = target;
+        true
+    }
+    fn sample(&mut self, progress: f32) -> f32 {
+        self.current = self.from + (self.target - self.from) * progress;
+        self.current
+    }
+    fn snap(&mut self) { self.current = self.target; self.from = self.target; }
+}
+
+fn emphasized_background(fill: Background, appearance: Option<PaneAppearance>, emphasis: f32) -> Background {
+    let emphasis = emphasis.clamp(0., 1.);
+    let inactive = appearance.filter(|appearance| appearance.dim_inactive).map_or(1., |appearance| appearance.inactive_opacity);
+    let opacity = inactive + (1. - inactive) * emphasis;
+    // Preserve the focused fill exactly; a quiet 2.5-point lightness shift
+    // remains visible when users disable dimming or choose opacity=1.
+    if let Some(mut color) = fill.as_solid() {
+        color.l = (color.l - 0.025 * (1. - emphasis)).clamp(0., 1.);
+        let mut surface: Background = color.into();
+        surface.blend_mode = fill.blend_mode;
+        surface.opacity(opacity)
+    } else { fill.opacity(opacity) }
+}
+
+pub(crate) struct PaneBackground {
+    emphasis: BackgroundEmphasis,
+    clock: crate::chat::feedback::Clock,
+    fill: Background,
+    appearance: Option<PaneAppearance>,
+    active: bool,
+    hovered: bool,
+    visible: bool,
+}
+impl PaneBackground {
+    pub(crate) fn new() -> Self {
+        Self { emphasis: Default::default(), clock: crate::chat::feedback::FeedbackClock::new(),
+            fill: rgba(0x00000000).into(), appearance: None, active: false, hovered: false, visible: false }
+    }
+    pub(crate) fn set_appearance(&mut self, appearance: PaneAppearance, fill: Background, active: bool, cx: &mut Context<Self>) {
+        let changed = self.appearance != Some(appearance) || self.fill != fill;
+        self.appearance = Some(appearance);
+        self.fill = fill;
+        self.active = active;
+        self.retarget(cx);
+        if changed { cx.notify(); }
+    }
+    pub(crate) fn set_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.hovered == hovered { return; }
+        self.hovered = hovered;
+        self.retarget(cx);
+        cx.notify();
+    }
+    fn retarget(&mut self, cx: &mut Context<Self>) {
+        let Some(appearance) = self.appearance else { return; };
+        let allowed = !cx.reduce_motion() && crate::native_motion::motion_allowed();
+        let progress = self.clock.borrow_mut().progress(!allowed);
+        let target = BackgroundEmphasis::target(self.active, self.hovered, appearance);
+        if self.emphasis.observe(target, self.visible && self.clock.borrow().painted, allowed, progress) {
+            self.clock.borrow_mut().start(std::time::Duration::from_millis(140));
+            cx.notify();
+        }
+    }
+    pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible { return; }
+        self.visible = visible;
+        self.clock.borrow_mut().set_visible(visible);
+        if !visible { self.hovered = false; self.emphasis.snap(); }
+        cx.notify();
+    }
+}
+impl Render for PaneBackground {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = self.clock.borrow_mut().progress(cx.reduce_motion() || !crate::native_motion::motion_allowed());
+        let emphasis = self.emphasis.sample(progress);
+        let fill = emphasized_background(self.fill, self.appearance, emphasis);
+        crate::chat::feedback::painted(div().size_full().bg(fill), self.clock.clone())
     }
 }
 
@@ -138,6 +243,34 @@ mod tests {
             code: 0xeeeeee,
             accent: 0x123456,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn background_reversal_preserves_displayed_emphasis() {
+        let mut motion = BackgroundEmphasis::default();
+        assert!(!motion.observe(0., false, true, 1.));
+        assert!(motion.observe(1., true, true, 1.));
+        let middle = motion.sample(0.4);
+        assert!(motion.observe(0., true, true, 0.4));
+        assert_eq!(motion.sample(0.), middle);
+        assert_eq!(motion.sample(1.), 0.);
+        assert!(!motion.observe(1., true, false, 1.));
+        assert_eq!(motion.current, 1.);
+        assert!(!motion.observe(0.5, false, true, 1.));
+        assert_eq!(motion.current, 0.5);
+    }
+
+    #[::core::prelude::v1::test]
+    fn background_focus_hover_and_inactive_remain_distinct_without_dimming() {
+        let mut appearance = PaneAppearance::from_settings(&json!({"inactivePaneOpacity":1,"dimInactivePanes":false}), palette());
+        appearance.inactive_opacity = 1.;
+        let fill: Background = rgb(0x79818a).into();
+        let idle = emphasized_background(fill, Some(appearance), BackgroundEmphasis::target(false, false, appearance)).as_solid().unwrap();
+        let hover = emphasized_background(fill, Some(appearance), BackgroundEmphasis::target(false, true, appearance)).as_solid().unwrap();
+        let focused = emphasized_background(fill, Some(appearance), BackgroundEmphasis::target(true, true, appearance));
+        assert!(idle.l < hover.l && hover.l < focused.as_solid().unwrap().l);
+        assert_eq!(focused, fill);
+        assert_eq!(idle.a, hover.a);
     }
 
     #[::core::prelude::v1::test]

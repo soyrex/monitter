@@ -148,7 +148,9 @@ pub use positioner::{Align, Positioner, ResolvedPosition};
 pub use progress::{Progress, ProgressIndicator, ProgressTrack};
 pub use radio::{Radio, RadioStyles};
 pub use radio_group::RadioGroup;
-pub use reduce_motion::apply_system_reduce_motion;
+pub use reduce_motion::{
+    SystemMotionPreference, apply_system_reduce_motion, set_system_reduce_motion_override,
+};
 pub use resizable::{
     HandleEdge, ResizablePanel, ResizablePanelEvent, ResizablePanelGroup, ResizableState,
     ResizeHandleContext, ResizeHandleRenderer, ResizeHandleState, h_resizable, resizable_panel,

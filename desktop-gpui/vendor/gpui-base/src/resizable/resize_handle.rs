@@ -486,6 +486,7 @@ pub(crate) fn handle_color(theme: &crate::Theme, active: bool) -> gpui::Hsla {
 
 #[cfg(test)]
 mod tests {
+    use gpui::MouseButton;
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{

@@ -12,6 +12,70 @@ mod sidebar_compact;
 #[path = "sidebar_hover.rs"]
 mod sidebar_hover;
 
+
+use crate::collaboration::completion_feedback::CompletionMarker;
+
+#[derive(Default)]
+struct TaskMarkers {
+    markers: HashMap<(String, u8), Entity<CompletionMarker>>,
+    visible_view: Option<u8>,
+    statuses: Option<Arc<HashMap<String, String>>>,
+}
+impl Global for TaskMarkers {}
+fn marker_view(view: SidebarView) -> u8 {
+    match view { SidebarView::Agents => 0, SidebarView::Projects => 1, SidebarView::Activity => 2 }
+}
+fn ensure_markers(cx: &mut App) {
+    if cx.try_global::<TaskMarkers>().is_none() { cx.set_global(TaskMarkers::default()); }
+}
+pub(crate) fn set_task_markers_visible(visible: bool, view: SidebarView, cx: &mut App) {
+    ensure_markers(cx);
+    let next = visible.then_some(marker_view(view));
+    if cx.global::<TaskMarkers>().visible_view == next { return; }
+    cx.global_mut::<TaskMarkers>().visible_view = next;
+    let markers = cx.global::<TaskMarkers>().markers.clone();
+    for ((_, view), marker) in markers {
+        marker.update(cx, |marker, cx| marker.set_visible(next == Some(view), cx));
+    }
+}
+pub(crate) fn sync_task_markers(index: &monitter_gpui_desktop::native_publication::PublicationIndex, reset: bool, cx: &mut App) {
+    ensure_markers(cx);
+    let statuses = index.task_statuses();
+    if !reset && cx.global::<TaskMarkers>().statuses.as_ref().is_some_and(|previous| Arc::ptr_eq(previous, &statuses)) { return; }
+    cx.global_mut::<TaskMarkers>().statuses = Some(statuses);
+    if cx.global::<TaskMarkers>().markers.is_empty() { return; }
+    cx.global_mut::<TaskMarkers>().markers.retain(|(id, _), _| index.task_status(id).is_some());
+    let registry = cx.global::<TaskMarkers>();
+    let visible_view = registry.visible_view;
+    let markers = registry.markers.clone();
+    for ((id, view), marker) in markers {
+        let Some(status) = index.task_status(&id) else { continue; };
+        marker.update(cx, |marker, cx| {
+            if reset { marker.suppress(cx); }
+            marker.set_status(&id, status, !reset && visible_view == Some(view), cx);
+        });
+    }
+}
+fn task_marker(task: &Value, view: SidebarView, palette: design::Palette, cx: &mut App) -> Entity<CompletionMarker> {
+    ensure_markers(cx);
+    let id = field(task, "id");
+    let status = field(task, "status");
+    let key = (id.clone(), marker_view(view));
+    let marker = cx.global::<TaskMarkers>().markers.get(&key).cloned().unwrap_or_else(|| {
+        let marker = cx.new(|_| CompletionMarker::new(&id, &status));
+        cx.global_mut::<TaskMarkers>().markers.insert(key.clone(), marker.clone());
+        marker
+    });
+    let visible = cx.global::<TaskMarkers>().visible_view == Some(key.1);
+    let icon = match status.as_str() { "running" => "◌", "completed" => "✓", "error" => "!", "interrupted" => "■", _ => "" };
+    marker.update(cx, |marker, cx| {
+        marker.set_visible(visible, cx);
+        marker.set_appearance(icon, design::status_color(&status, palette), 14., cx);
+        marker.show_done(cx);
+    });
+    marker
+}
+
 struct ProjectCollapseState {
     collapsed: bool,
 }
@@ -99,6 +163,7 @@ impl Desktop {
         let older = task_is_older(task, sidebar_now_ms());
         let active = self.selected.as_ref() == Some(&task_id);
         let status = field(task, "status");
+        let completion_marker = task_marker(task, self.sidebar_view, palette, cx);
         let provider = provider_label(&self.snapshot, task);
         let model = field(task, "model");
         let project_name = context.filter(|name| !name.is_empty());
@@ -168,9 +233,7 @@ impl Desktop {
                         .when_some(relative_time, |row, time| row.child(div().flex_shrink_0().whitespace_nowrap().child(time))),
                     ),
             )
-            .when(status == "running", |row| row.child(
-                Icon::new(IconName::LoaderCircle).size(px(14.)).text_color(rgb(palette.accent)),
-            ))
+            .when(matches!(status.as_str(), "running" | "completed" | "error" | "interrupted"), |row| row.child(completion_marker))
             .on_click(cx.listener(move |view, _, window, cx| {
                 view.switch_surface(Sidebar::Chats, window, cx);
                 view.selected = Some(task_id.clone());

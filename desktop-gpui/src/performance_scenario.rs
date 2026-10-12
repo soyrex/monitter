@@ -6,11 +6,14 @@ use crate::{
     docking::{DockWorkspace, PaneSpec},
     streaming_display,
 };
-use gpui_kit::component::{ActiveTheme as _, dock::DockPlacement};
+use gpui_kit::component::{
+    ActiveTheme as _, Placement,
+    dock::{DockPlacement, InsertTarget},
+};
 use gpui_kit::{
     App, AppContext as _, Bounds, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
     Render, Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, canvas, div, point,
-    rgb, size,
+    prelude::*, rgb, size,
 };
 use monitter_gpui_desktop::native_publication::{
     self, PreparedChildTranscripts, PreparedPublication, PublicationChanges, PublicationIndex,
@@ -33,6 +36,7 @@ enum Scenario {
     StreamingBody,
     PipelineUpdates,
     BrowserAdjacent,
+    Motion,
 }
 impl Scenario {
     fn name(self) -> &'static str {
@@ -42,6 +46,7 @@ impl Scenario {
             Self::StreamingBody => "streaming-body + active sparkles",
             Self::PipelineUpdates => "pipeline-updates + active sparkles",
             Self::BrowserAdjacent => "browser-adjacent + active sparkles",
+            Self::Motion => "motion controls + retained chats + native browser",
         }
     }
 }
@@ -59,6 +64,13 @@ struct PerformanceScenario {
     rows: usize,
     palette: design::Palette,
     invalid_option: Option<String>,
+    sidebar_width: f32,
+    sidebar_target: f32,
+    sidebar_motion: crate::layout_motion::WidthMotion,
+    sidebar_frame_pending: bool,
+    sidebar_callbacks: u64,
+    disclosure_open: bool,
+    disclosure_expanded: bool,
 }
 impl Render for PerformanceScenario {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -73,13 +85,176 @@ impl Render for PerformanceScenario {
                         self.scenario.name(), self.chats.len(), self.rows)))
                 .children(self.invalid_option.as_ref().map(|option|
                     div().child(format!("Unknown scenario {option:?}; showing static fixture.")))))
-            .child(div().flex_1().min_h_0()
-                .child(self.dock.clone()))
+            .when(self.scenario == Scenario::Motion, |view| view.child(self.motion_controls(cx)))
+            .when(self.scenario == Scenario::Motion && self.disclosure_open, |view| view.child(self.disclosure_fixture(window, cx)))
+            .child(div().flex_1().min_h_0().flex()
+                .when(self.scenario == Scenario::Motion && self.sidebar_width > 0., |view| {
+                    view.child(div().w(gpui_kit::px(self.sidebar_width)).h_full().flex_shrink_0()
+                        .overflow_hidden().bg(rgb(self.palette.card)).border_r_1().border_color(rgb(self.palette.line))
+                        .child(div().p_2().whitespace_nowrap().child(if self.sidebar_target <= 48. { "◆" } else { "Synthetic motion rail" })))
+                })
+                .child(div().flex_1().min_w_0().size_full().child(self.dock.clone())))
             .child(gpui_kit::deferred(canvas(|_,_,_|(),|_,_,window,_|crate::native_pane_highlight::finish_frame(window))
                 .absolute().inset_0()).with_priority(5))
     }
 }
 impl PerformanceScenario {
+    fn motion_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::{Sizable as _, button::Button};
+        let modes = crate::native_motion::MotionPreference::ALL;
+        let mode_buttons = modes.into_iter().map(|mode| {
+            Button::new(format!("fixture-motion-{}", mode.id()))
+                .compact()
+                .label(mode.label())
+                .on_click(cx.listener(move |scene, _, window, cx| {
+                    crate::native_motion::set_preference_for_ui_fixture(mode, cx);
+                    if !crate::native_motion::motion_allowed() {
+                        scene.sidebar_width = scene.sidebar_target;
+                        scene.sidebar_motion.cancel();
+                    }
+                    window.refresh();
+                    cx.notify();
+                }))
+        });
+        let sidebar_buttons = [("Expanded", 252.), ("Compact", 48.), ("Hidden", 0.)]
+            .into_iter()
+            .map(|(label, width)| {
+                Button::new(format!("fixture-sidebar-{label}"))
+                    .compact()
+                    .label(label)
+                    .on_click(cx.listener(move |scene, _, window, cx| {
+                        scene.sidebar_target = width;
+                        scene.sidebar_motion.start(
+                            scene.sidebar_width,
+                            width,
+                            std::time::Instant::now(),
+                            crate::native_motion::motion_allowed(),
+                        );
+                        if scene.sidebar_motion.active() {
+                            scene.schedule_sidebar_frame(window, cx);
+                        } else {
+                            scene.sidebar_width = width;
+                        }
+                        cx.notify();
+                    }))
+            });
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .children(mode_buttons)
+            .children(sidebar_buttons)
+            .child(
+                Button::new("fixture-equalize")
+                    .compact()
+                    .label("Equalise panes")
+                    .on_click(cx.listener(|scene, _, window, cx| {
+                        scene.dock.update(cx, |dock, cx| {
+                            dock.equalize_workspace(window, cx);
+                        });
+                    })),
+            )
+            .child(
+                Button::new("fixture-disclosure")
+                    .compact()
+                    .label("Disclosure")
+                    .on_click(cx.listener(|scene, _, _, cx| {
+                        scene.disclosure_open = !scene.disclosure_open;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("fixture-completion")
+                    .compact()
+                    .label("Complete task")
+                    .on_click(cx.listener(|scene, _, _, cx| scene.complete_fixture_task(cx))),
+            )
+            .child(div().text_size(gpui_kit::px(11.)).child(format!(
+                "{} · rail callbacks {} · {}",
+                crate::native_motion::current().label(),
+                self.sidebar_callbacks,
+                if self.sidebar_motion.active() {
+                    "moving"
+                } else {
+                    "settled"
+                }
+            )))
+    }
+    fn disclosure_fixture(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let owner = cx.weak_entity();
+        crate::approval_prompt::render_approval_prompt(
+            &json!({"id":"synthetic-disclosure", "tool":"Synthetic tool", "summary":"Synthetic disclosure fixture — decisions disabled", "detail":"{\"fixture\":true,\"message\":\"Disconnected native UI; no command will run.\"}"}),
+            &self.snapshot["tasks"][0],
+            &self.snapshot,
+            self.palette,
+            cx.theme().font_family.clone(),
+            gpui_kit::px(12.),
+            true,
+            self.disclosure_expanded,
+            false,
+            Rc::new(|_, _, _| {}),
+            Rc::new(move |_, cx| {
+                let _ = owner.update(cx, |scene, cx| {
+                    scene.disclosure_expanded = !scene.disclosure_expanded;
+                    cx.notify();
+                });
+            }),
+            window,
+            cx,
+        )
+    }
+    fn complete_fixture_task(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot["tasks"][0]["status"] == "completed" {
+            return;
+        }
+        let mut snapshot = self.snapshot.as_ref().clone();
+        snapshot["tasks"][0]["status"] = json!("completed");
+        self.snapshot = Rc::new(snapshot);
+        crate::activity_effects::sync(&self.snapshot, self.palette, cx);
+        for chat in self.chats.values() {
+            chat.update(cx, |chat, cx| {
+                chat.sync(
+                    self.snapshot.clone(),
+                    Some("synthetic-completed".into()),
+                    cx,
+                )
+            });
+        }
+        cx.notify();
+    }
+    fn schedule_sidebar_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_frame_pending || !self.sidebar_motion.active() {
+            return;
+        }
+        self.sidebar_frame_pending = true;
+        let owner = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = owner.update(cx, |scene, cx| {
+                scene.sidebar_frame_pending = false;
+                scene.sidebar_callbacks += 1;
+                if !scene.sidebar_motion.active() {
+                    return;
+                }
+                if !crate::native_motion::motion_allowed() {
+                    scene.sidebar_width = scene.sidebar_target;
+                    scene.sidebar_motion.cancel();
+                } else if let Some(width) = scene.sidebar_motion.sample(std::time::Instant::now()) {
+                    scene.sidebar_width = width;
+                }
+                if scene.sidebar_motion.active() {
+                    scene.schedule_sidebar_frame(window, cx);
+                }
+                cx.notify();
+            });
+        });
+    }
     fn queue_pipeline_update(&mut self, cx: &mut Context<Self>) {
         // Match production's backpressure: do not advance the source revision
         // faster than one preparation can finish and install it.
@@ -209,6 +384,20 @@ impl PerformanceScenario {
         crate::retire_snapshot(retired_snapshot, cx);
     }
 }
+/// Startup has no painted focus path yet. Resolve the group from the retained
+/// center topology, which is authoritative immediately after pane insertion.
+fn fixture_group_node(
+    dock: &DockWorkspace,
+    id: &str,
+    cx: &App,
+) -> Option<gpui_kit::component::dock::NodeId> {
+    let panel = dock.panel_key(id)?;
+    dock.area()
+        .read(cx)
+        .layout(DockPlacement::Center)?
+        .find_panel_node(panel)
+}
+
 fn snapshot(scenario: Scenario, row_count: usize, pane_count: usize) -> Value {
     let now = chrono::Utc::now().timestamp_millis();
     let mut messages = Vec::new();
@@ -258,6 +447,7 @@ pub fn open_if_requested(cx: &mut App) -> bool {
         "streaming-body" | "streaming" => (Scenario::StreamingBody, None),
         "pipeline-updates" => (Scenario::PipelineUpdates, None),
         "browser-adjacent" => (Scenario::BrowserAdjacent, None),
+        "motion" => (Scenario::Motion, None),
         _ => (Scenario::Static, Some(option)),
     };
     let row_count = std::env::var("MONITTER_GPUI_PERF_HISTORY_ROWS")
@@ -265,13 +455,19 @@ pub fn open_if_requested(cx: &mut App) -> bool {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(10_000)
         .clamp(1_000, 100_000);
-    let pane_count = if scenario == Scenario::PipelineUpdates {
-        4
-    } else {
-        1
+    let pane_count = match scenario {
+        Scenario::PipelineUpdates => 4,
+        Scenario::Motion => 3,
+        _ => 1,
     };
     crate::surface_blend::initialize_for_ui_fixture();
     crate::native_motion::initialize_for_ui_fixture(cx);
+    if let Some(mode) = std::env::var("MONITTER_GPUI_PERF_MOTION")
+        .ok()
+        .and_then(|value| crate::native_motion::MotionPreference::parse(&value))
+    {
+        crate::native_motion::set_preference_for_ui_fixture(mode, cx);
+    }
     // Production applies the native theme through SettingsView before drawing.
     // The isolated scene bypasses preferences, so initialize component colors.
     gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
@@ -352,19 +548,43 @@ pub fn open_if_requested(cx: &mut App) -> bool {
                         }
                     })),
                 };
-                let placement = match pane_index {
-                    0 => DockPlacement::Center,
-                    1 => DockPlacement::Right,
-                    2 => DockPlacement::Bottom,
-                    _ => DockPlacement::Left,
+                let placement = if scenario == Scenario::Motion {
+                    DockPlacement::Center
+                } else {
+                    match pane_index {
+                        0 => DockPlacement::Center,
+                        1 => DockPlacement::Right,
+                        2 => DockPlacement::Bottom,
+                        _ => DockPlacement::Left,
+                    }
                 };
                 dock.update(cx, |dock, cx| {
                     dock.add(spec, placement, Some(gpui_kit::px(380.)), window, cx)
                 })
                 .expect("add synthetic native dock pane");
+                if scenario == Scenario::Motion && pane_index > 0 {
+                    dock.update(cx, |dock, cx| {
+                        let node = fixture_group_node(dock, &format!("chat:{TASK}-0"), cx)
+                            .expect("retained fixture group");
+                        assert!(dock.move_pane(
+                            &format!("chat:{task}"),
+                            InsertTarget::Split {
+                                node,
+                                placement: if pane_index == 1 {
+                                    Placement::Right
+                                } else {
+                                    Placement::Bottom
+                                },
+                                size: Some(gpui_kit::px(if pane_index == 1 { 290. } else { 220. })),
+                            },
+                            window,
+                            cx
+                        ));
+                    });
+                }
                 chats.insert(task, chat);
             }
-            if scenario == Scenario::BrowserAdjacent {
+            if matches!(scenario, Scenario::BrowserAdjacent | Scenario::Motion) {
                 let browser =
                     cx.new(|cx| crate::browser::BrowserTab::performance_fixture(window, cx));
                 let native = browser.clone();
@@ -390,13 +610,33 @@ pub fn open_if_requested(cx: &mut App) -> bool {
                 dock.update(cx, |dock, cx| {
                     dock.add(
                         spec,
-                        DockPlacement::Right,
+                        if scenario == Scenario::Motion {
+                            DockPlacement::Center
+                        } else {
+                            DockPlacement::Right
+                        },
                         Some(gpui_kit::px(480.)),
                         window,
                         cx,
                     )
                 })
                 .expect("add incognito static browser beside synthetic chat");
+                if scenario == Scenario::Motion {
+                    dock.update(cx, |dock, cx| {
+                        let node = fixture_group_node(dock, &format!("chat:{TASK}-1"), cx)
+                            .expect("retained fixture chat group");
+                        assert!(dock.move_pane(
+                            "browser:synthetic-isolated",
+                            InsertTarget::Split {
+                                node,
+                                placement: Placement::Right,
+                                size: Some(gpui_kit::px(340.)),
+                            },
+                            window,
+                            cx
+                        ));
+                    });
+                }
             }
             let first = format!("{TASK}-0");
             chats[&first]
@@ -428,20 +668,39 @@ pub fn open_if_requested(cx: &mut App) -> bool {
                 })
                 .detach();
             }
-            let scene = cx.new(|_| PerformanceScenario {
-                dock,
-                chats,
-                snapshot,
-                source,
-                publication: PublicationQueue::default(),
-                index: None,
-                records: HashMap::new(),
-                child_transcripts: HashMap::new(),
-                sequence: 0,
-                scenario,
-                rows: row_count,
-                palette,
-                invalid_option,
+            let scene = cx.new(|cx| {
+                cx.observe_global::<crate::native_motion::MotionSelection>(
+                    |scene: &mut PerformanceScenario, cx| {
+                        if !crate::native_motion::motion_allowed() {
+                            scene.sidebar_width = scene.sidebar_target;
+                            scene.sidebar_motion.cancel();
+                        }
+                        cx.notify();
+                    },
+                )
+                .detach();
+                PerformanceScenario {
+                    dock,
+                    chats,
+                    snapshot,
+                    source,
+                    publication: PublicationQueue::default(),
+                    index: None,
+                    records: HashMap::new(),
+                    child_transcripts: HashMap::new(),
+                    sequence: 0,
+                    scenario,
+                    rows: row_count,
+                    palette,
+                    invalid_option,
+                    sidebar_width: 252.,
+                    sidebar_target: 252.,
+                    sidebar_motion: Default::default(),
+                    sidebar_frame_pending: false,
+                    sidebar_callbacks: 0,
+                    disclosure_open: false,
+                    disclosure_expanded: false,
+                }
             });
             if scenario == Scenario::PipelineUpdates {
                 let owner = scene.downgrade();
@@ -496,6 +755,15 @@ mod tests {
         assert_eq!(service.subscribe_changes().unwrap_err(), disconnected);
     }
     #[test]
+    fn motion_fixture_is_detached_with_three_independent_chat_histories() {
+        let value = snapshot(Scenario::Motion, 1_000, 3);
+        let source: Snapshot = serde_json::from_value(value).expect("typed motion fixture");
+        assert_eq!(source.tasks.len(), 3);
+        assert_eq!(source.messages.len(), 3_000);
+        assert!(source.hosts.is_empty());
+        assert!(source.tasks.iter().all(|task| task.cwd.is_empty()));
+    }
+    #[test]
     fn pipeline_fixture_is_a_valid_typed_snapshot_with_four_independent_histories() {
         let value = snapshot(Scenario::PipelineUpdates, 1_000, 4);
         let source: Snapshot =
@@ -504,5 +772,104 @@ mod tests {
         assert_eq!(source.messages.len(), 4_004);
         assert!(source.hosts.is_empty());
         assert!(source.tasks.iter().all(|task| task.cwd.is_empty()));
+    }
+
+    struct StartupPane(std::rc::Rc<std::cell::Cell<usize>>);
+    impl gpui_kit::Render for StartupPane {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            _: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            self.0.set(self.0.get() + 1);
+            gpui_kit::div()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn motion_startup_assembles_four_visible_groups_before_first_paint(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{
+            AppContext as _,
+            component::{
+                Placement,
+                dock::{DockPlacement, InsertTarget},
+            },
+        };
+        cx.update(|cx| gpui_kit::init(cx));
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let dock = cx.new(|cx| {
+                let renders = std::rc::Rc::new(std::cell::Cell::new(0));
+                let mut dock = crate::docking::DockWorkspace::new(
+                    "motion-startup-test",
+                    std::rc::Rc::new(|_, _, _| None),
+                    window,
+                    cx,
+                );
+                let ids = [
+                    "chat:startup-0",
+                    "chat:startup-1",
+                    "chat:startup-2",
+                    "browser:startup",
+                ];
+                for (index, id) in ids.iter().enumerate() {
+                    let content = cx.new(|_| StartupPane(renders.clone()));
+                    dock.add(
+                        crate::docking::PaneSpec {
+                            id: (*id).into(),
+                            title: "Synthetic startup pane".into(),
+                            content: content.into(),
+                            focus: cx.focus_handle(),
+                            closable: false,
+                            lifecycle: None,
+                        },
+                        DockPlacement::Center,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+                    if index > 0 {
+                        let anchor = if index == 3 { ids[1] } else { ids[0] };
+                        let node = super::fixture_group_node(&dock, anchor, cx)
+                            .expect("topology exists before focus has a painted path");
+                        assert!(dock.move_pane(
+                            id,
+                            InsertTarget::Split {
+                                node,
+                                placement: if index == 2 {
+                                    Placement::Bottom
+                                } else {
+                                    Placement::Right
+                                },
+                                size: Some(gpui_kit::px(if index == 2 { 220. } else { 290. })),
+                            },
+                            window,
+                            cx
+                        ));
+                    }
+                }
+                assert_eq!(
+                    renders.get(),
+                    0,
+                    "startup assembly must not depend on any pane render"
+                );
+                let groups: std::collections::HashSet<_> = ids
+                    .iter()
+                    .map(|id| super::fixture_group_node(&dock, id, cx).unwrap())
+                    .collect();
+                assert_eq!(
+                    groups.len(),
+                    4,
+                    "all chats and browser occupy independent retained groups"
+                );
+                dock
+            });
+            gpui_kit::component::Root::new(dock, window, cx)
+        });
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
     }
 }

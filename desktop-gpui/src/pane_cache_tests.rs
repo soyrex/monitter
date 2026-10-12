@@ -71,6 +71,7 @@ fn native_panel_caches_content_but_repaints_visibility_each_frame(cx: &mut TestA
             retaining_layout: Rc::new(Cell::new(false)),
             appearance: Rc::new(Cell::new(None)),
             auto_hide_tabs: Rc::new(Cell::new(false)),
+            background: None,
         });
         NativePanelCacheHarness {
             panel,
@@ -164,6 +165,7 @@ fn cached_native_panel_scrolls_repeatedly_after_parent_replay(cx: &mut TestAppCo
             retaining_layout: Rc::new(Cell::new(false)),
             appearance: Rc::new(Cell::new(None)),
             auto_hide_tabs: Rc::new(Cell::new(false)),
+            background: None,
         });
         NativePanelCacheHarness {
             panel,
@@ -257,4 +259,64 @@ fn nested_cache_rebuilds_skipped_child_and_respects_changes_and_explicit_refresh
     assert!(after_text > after_bounds, "inherited text style invalidates its cache");
     cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(cx); });
     assert!(child_renders.get() > after_text, "explicit refresh invalidates clean descendants");
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn pane_background_hover_keeps_focus_cache_and_settles_without_callbacks(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::native_motion::initialize_for_ui_fixture(cx);
+    });
+    let renders = Rc::new(Cell::new(0));
+    let capture = renders.clone();
+    let (harness, visual) = cx.add_window_view(move |window, cx| {
+        let content = cx.new(|_| CountedContent { renders: capture });
+        let palette = crate::design::palette(&serde_json::Value::Null, window.appearance());
+        let appearance = crate::pane_appearance::PaneAppearance::from_settings(
+            &serde_json::json!({"dimInactivePanes":false,"focusFollowsMouse":false}), palette);
+        let panel = cx.new(|cx| NativePanel {
+            spec: PaneSpec { id: "chat:background-probe".into(), title: "Probe".into(),
+                content: content.into(), focus: cx.focus_handle(), lifecycle: None, closable: true },
+            paint: Rc::new(RefCell::new(PaintState { shown: true, ..Default::default() })),
+            removed: false, retaining_layout: Rc::new(Cell::new(false)),
+            appearance: Rc::new(Cell::new(Some(appearance))), auto_hide_tabs: Rc::new(Cell::new(false)),
+            background: None,
+        });
+        NativePanelCacheHarness { panel, renders: Rc::new(Cell::new(0)) }
+    });
+    visual.simulate_mouse_move(gpui::point(gpui::px(10000.), gpui::px(10000.)), None, gpui::Modifiers::default());
+    visual.update(|window, cx| { window.draw(cx).clear(cx); window.simulate_next_frame(cx); });
+    let before = renders.get();
+    let original_focus = visual.update(|window, cx| window.focused(cx));
+    visual.simulate_mouse_move(gpui::point(gpui::px(20.), gpui::px(20.)), None, gpui::Modifiers::default());
+    visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert_eq!(window.focused(cx), original_focus, "hover emphasis must not focus a pane");
+        assert!(window.simulate_next_frame(cx) >= 1, "painted background should request its finite transition");
+    });
+    for _ in 0..5 {
+        visual.update(|window, cx| { window.draw(cx).clear(cx); window.simulate_next_frame(cx); });
+        assert_eq!(renders.get(), before, "background frames must replay cached content");
+    }
+    let panel = harness.read_with(visual, |view, _| view.panel.clone());
+    visual.update(|window, cx| {
+        let focus = panel.read(cx).spec.focus.clone();
+        window.focus(&focus, cx);
+        panel.update(cx, |_, cx| cx.notify());
+        window.draw(cx).clear(cx);
+        assert!(focus.contains_focused(window, cx), "semantic focus should move immediately");
+    });
+    let after_focus = renders.get();
+    for _ in 0..5 {
+        visual.update(|window, cx| { window.draw(cx).clear(cx); window.simulate_next_frame(cx); });
+        assert_eq!(renders.get(), after_focus, "background-only frames must replay the focused content cache");
+    }
+    visual.update(|window, cx| {
+        cx.set_reduce_motion(true);
+        window.draw(cx).clear(cx);
+        window.simulate_next_frame(cx);
+        window.draw(cx).clear(cx);
+        assert_eq!(window.simulate_next_frame(cx), 0, "settled background has no remaining frame demand");
+    });
 }

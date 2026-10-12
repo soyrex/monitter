@@ -36,6 +36,7 @@ pub struct ResizablePanelGroup {
     children: Vec<ResizablePanel>,
     on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
     handle_appearance: Option<ResizeHandleRenderer>,
+    resizable: bool,
 }
 
 impl ResizablePanelGroup {
@@ -49,6 +50,7 @@ impl ResizablePanelGroup {
             size: None,
             on_resize: Rc::new(|_, _, _| {}),
             handle_appearance: None,
+            resizable: true,
         }
     }
 
@@ -58,6 +60,12 @@ impl ResizablePanelGroup {
     /// returns `None` for a given handle leaves the built-in line on it.
     pub fn with_handle_appearance(mut self, appearance: ResizeHandleRenderer) -> Self {
         self.handle_appearance = Some(appearance);
+        self
+    }
+
+    /// Keep the layout mounted while disabling its divider hit targets.
+    pub fn resizable(mut self, enabled: bool) -> Self {
+        self.resizable = enabled;
         self
     }
 
@@ -175,6 +183,7 @@ impl RenderOnce for ResizablePanelGroup {
                         panel.axis = self.axis;
                         panel.state = Some(state.clone());
                         panel.handle_appearance = self.handle_appearance.clone();
+                        panel.resizable = self.resizable;
                         panel
                     }),
             )
@@ -249,6 +258,7 @@ pub struct ResizablePanel {
     visible: bool,
     style: StyleRefinement,
     handle_appearance: Option<ResizeHandleRenderer>,
+    resizable: bool,
 }
 
 impl ResizablePanel {
@@ -264,6 +274,7 @@ impl ResizablePanel {
             visible: true,
             style: StyleRefinement::default(),
             handle_appearance: None,
+            resizable: true,
         }
     }
 
@@ -362,7 +373,7 @@ impl RenderOnce for ResizablePanel {
                 }
             })
             .children(self.children)
-            .when(self.panel_ix > 0, |this| {
+            .when(self.panel_ix > 0 && self.resizable, |this| {
                 let ix = self.panel_ix - 1;
                 this.child(
                     resize_handle(("resizable-handle", ix), self.axis)

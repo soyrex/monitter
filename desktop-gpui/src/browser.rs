@@ -812,7 +812,7 @@ impl Render for BrowserTab {
                     .when(crate::design::tile_theme()
                         == monitter_lib::experimental_desktop::NativeTileTheme::Tern
                         && crate::design::border_opacity() == 0, |this| this.border_b_0())
-                    .bg(*cx.theme().tokens.tab_active)
+                    .when(!self.docked_mode, |this| this.bg(*cx.theme().tokens.tab_active))
                     .text_color(rgb(palette.muted))
                     .child(browser_mark)
                     .child(

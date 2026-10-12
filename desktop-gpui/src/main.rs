@@ -115,6 +115,8 @@ mod settings;
 mod shell;
 mod sidebar_usage;
 mod sidebar_tabs_motion;
+mod layout_motion;
+mod chrome_motion;
 mod gui_process_metrics;
 mod startup_splash;
 use mail::MailPane;
@@ -160,15 +162,23 @@ fn sidebar_split_element(
     state: &Entity<ResizableState>, width_design: f32, scale: u16,
     sidebar: AnyElement, content: AnyElement,
 ) -> AnyElement {
+    sidebar_split_with_visibility(state, width_design, scale, sidebar, content, false, false)
+}
+
+fn sidebar_split_with_visibility(
+    state: &Entity<ResizableState>, width_design: f32, scale: u16,
+    sidebar: AnyElement, content: AnyElement, hidden: bool, moving: bool,
+) -> AnyElement {
     h_resizable("native-sidebar-split")
+        .resizable(!hidden)
         .when(design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern, |split| {
             split.with_handle_appearance(gpui_kit::component::resizable::rounded_resize_handle_appearance())
         })
         .with_state(state)
         .child(resizable_panel()
             .size(design::ui_px(width_design, scale))
-            .size_range(gpui_kit::px(design::COMPACT_SIDEBAR_WIDTH_POINTS)..design::ui_px(design::SIDEBAR_MAX_WIDTH, scale))
-            .flex_none().child(sidebar))
+            .size_range((if moving || hidden { gpui_kit::px(0.) } else { gpui_kit::px(design::COMPACT_SIDEBAR_WIDTH_POINTS) })..design::ui_px(design::SIDEBAR_MAX_WIDTH, scale))
+            .flex_none().child(div().size_full().overflow_hidden().child(sidebar)))
         .child(resizable_panel().child(div().size_full().child(content)))
         .into_any_element()
 }
@@ -259,6 +269,11 @@ struct Desktop {
     sidebar_collapsed: bool,
     sidebar_hidden: bool,
     sidebar_expanded_width: f32,
+    sidebar_motion: layout_motion::WidthMotion,
+    sidebar_motion_frame_pending: bool,
+    sidebar_motion_compact: bool,
+    sidebar_focus: FocusHandle,
+    sidebar_toggle_focus: FocusHandle,
     preferences_open: bool,
     preferences_focus: FocusHandle,
     preferences_previous_focus: Option<FocusHandle>,
@@ -518,9 +533,11 @@ impl Desktop {
                             if collapse != view.sidebar_collapsed {
                                 if collapse { view.sidebar_expanded_width = expanded_sidebar_width(view.preferences.as_ref().and_then(|p| p.data.appearance.sidebar_width).unwrap_or(252.)); }
                                 view.sidebar_collapsed = collapse;
-                                preferences_modal::save_sidebar_collapse(collapse);
-
                             }
+                            // Drag takeover can clear a Hidden target without
+                            // changing the collapse flag. Commit the resolved
+                            // visible mode on release even when that flag agrees.
+                            preferences_modal::save_sidebar_collapse(collapse);
                             if !collapse { view.sidebar_expanded_width = expanded_sidebar_width(width); }
                             view.queue_preferences_save(cx);
                         }
@@ -569,6 +586,11 @@ impl Desktop {
             sidebar_collapsed: preferences_modal::load_sidebar_collapse(),
             sidebar_hidden: preferences_modal::load_sidebar_hidden(),
             sidebar_expanded_width: 252.,
+            sidebar_motion: Default::default(),
+            sidebar_motion_frame_pending: false,
+            sidebar_motion_compact: false,
+            sidebar_focus: cx.focus_handle(),
+            sidebar_toggle_focus: cx.focus_handle(),
             preferences_open: false,
             preferences_focus: cx.focus_handle(),
             preferences_previous_focus: None,
@@ -1401,6 +1423,7 @@ impl Desktop {
                                 }
                             }
                             ApplyResult::FullReset(changes) => {
+                                if let Some(pane) = &view.subagents { pane.update(cx, |pane, cx| pane.suppress_completion_motion(cx)); }
                                 view.native_state = state;
                                 view.queue_native_publication(PublicationChanges::from_changes(true, changes), cx);
                             }
@@ -1524,6 +1547,9 @@ impl Desktop {
         self.collaboration_records = prepared.collaboration_records;
         self.collaboration_transcripts = prepared.collaboration_transcripts;
         let retired_snapshot = std::mem::replace(&mut self.snapshot, Rc::new(prepared.snapshot));
+        if let Some(index) = self.publication_index.as_ref() {
+            shell::sync_task_markers(index, reset, cx);
+        }
         self.revision = revision;
         for pane in self.terminal_panes.values() {
             pane.update(cx, |pane, cx| pane.set_context(&self.snapshot, None, cx));
@@ -2459,6 +2485,7 @@ impl Desktop {
         entries
     }
     fn current_sidebar_width(&self, cx: &App) -> f32 {
+        if self.sidebar_motion.active() || self.sidebar_is_hidden() { return expanded_sidebar_width(self.sidebar_expanded_width); }
         if self.sidebar_collapsed { return expanded_sidebar_width(self.sidebar_expanded_width); }
         self.sidebar_resize
             .read(cx)
@@ -2487,8 +2514,72 @@ impl Desktop {
     fn sidebar_is_hidden(&self) -> bool {
         self.sidebar_hidden && design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern
     }
+    fn displayed_sidebar_width(&self, cx: &App) -> f32 {
+        self.sidebar_resize.read(cx).sizes().first()
+            .map(|width| *width / design::ui_px(1., self.sidebar_scale))
+            .filter(|width| width.is_finite())
+            .unwrap_or_else(|| if self.sidebar_is_hidden() { 0. } else if self.sidebar_collapsed { design::compact_sidebar_width_design(self.sidebar_scale) } else { self.sidebar_expanded_width })
+    }
+    fn start_sidebar_motion(&mut self, from: f32, target: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_width_touched = true;
+        self.sidebar_resize_generation = self.sidebar_resize_generation.wrapping_add(1);
+        self.sidebar_motion.start(from, target, std::time::Instant::now(), native_motion::motion_allowed());
+        self.sidebar_resize_suppressed = true;
+        if self.sidebar_motion.active() {
+            self.schedule_sidebar_motion_frame(window, cx);
+        } else {
+            self.set_sidebar_displayed_width(target, window, cx);
+            self.sidebar_resize_suppressed = false;
+            self.queue_preferences_save(cx);
+        }
+    }
+    fn set_sidebar_displayed_width(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
+        if (self.displayed_sidebar_width(cx) - width).abs() > 0.01 {
+            self.sidebar_resize.update(cx, |state, cx| state.resize_panel_for_layout(0, design::ui_px(width, self.sidebar_scale), window, cx));
+        }
+    }
+    fn finish_sidebar_motion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.sidebar_motion.target() {
+            self.sidebar_motion.cancel();
+            self.set_sidebar_displayed_width(target, window, cx);
+            self.sidebar_resize_suppressed = false;
+            self.queue_preferences_save(cx);
+        }
+    }
+    fn schedule_sidebar_motion_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_motion_frame_pending || !self.sidebar_motion.active() { return; }
+        self.sidebar_motion_frame_pending = true;
+        let weak = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = weak.update(cx, |view, cx| {
+                view.sidebar_motion_frame_pending = false;
+                if !view.sidebar_motion.active() { return; }
+                if view.sidebar_resize.read(cx).is_resizing() {
+                    view.sidebar_motion.cancel();
+                    view.sidebar_resize_suppressed = false;
+                    view.sidebar_hidden = false;
+                    return;
+                }
+                if !native_motion::motion_allowed() || view.closing || view.close_pending || crate::session_lock::locked(cx) {
+                    view.finish_sidebar_motion(window, cx);
+                    cx.notify();
+                    return;
+                }
+                if let Some(width) = view.sidebar_motion.sample(std::time::Instant::now()) {
+                    view.set_sidebar_displayed_width(width, window, cx);
+                }
+                if view.sidebar_motion.active() {
+                    view.schedule_sidebar_motion_frame(window, cx);
+                } else {
+                    view.sidebar_resize_suppressed = false;
+                    view.queue_preferences_save(cx);
+                }
+                cx.notify();
+            });
+        });
+    }
     fn sidebar_split(&mut self, sidebar: AnyElement, content: AnyElement, palette: design::Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let width = if self.sidebar_collapsed { design::compact_sidebar_width_design(design::interface_scale()) } else if self.sidebar_resize_suppressed { expanded_sidebar_width(self.sidebar_expanded_width) } else if self.sidebar_width_touched {
+        let width = if self.sidebar_motion.active() { self.displayed_sidebar_width(cx) } else if self.sidebar_is_hidden() { 0. } else if self.sidebar_collapsed { design::compact_sidebar_width_design(design::interface_scale()) } else if self.sidebar_resize_suppressed { expanded_sidebar_width(self.sidebar_expanded_width) } else if self.sidebar_width_touched {
             self.current_sidebar_width(cx)
         } else { self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width).map(expanded_sidebar_width).unwrap_or(252.0) };
         if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
@@ -2503,12 +2594,17 @@ impl Desktop {
                     .border_t_0()
                     .border_color(rgba(0x00000000))
                     .child(content));
-            if self.sidebar_is_hidden() { return column.into_any_element(); }
-            return sidebar_split_element(&self.sidebar_resize, width, self.sidebar_scale, sidebar, column.into_any_element());
+            return sidebar_split_with_visibility(&self.sidebar_resize, width, self.sidebar_scale, sidebar, column.into_any_element(), self.sidebar_is_hidden() && !self.sidebar_motion.active(), self.sidebar_motion.active());
         }
-        sidebar_split_element(&self.sidebar_resize, width, self.sidebar_scale, sidebar, content)
+        sidebar_split_with_visibility(&self.sidebar_resize, width, self.sidebar_scale, sidebar, content, false, self.sidebar_motion.active())
     }
     fn apply_saved_sidebar_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sidebar_width_touched && !self.sidebar_motion.active() {
+            if let Some(width) = self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width) {
+                self.sidebar_expanded_width = expanded_sidebar_width(width);
+            }
+        }
+        if self.sidebar_motion.active() || self.sidebar_is_hidden() { return; }
         let has_panels = self.sidebar_resize.read(cx).sizes().len() == 2;
         if !has_panels {
             return;
@@ -3158,7 +3254,15 @@ impl Desktop {
         } else {
             None
         };
+        let subagents = if surface == Sidebar::Subagents { self.subagents.clone() } else { None };
         let lifecycle: docking::LifecycleHook = Rc::new(move |event, window, cx| {
+            if let Some(pane) = &subagents {
+                match event {
+                    docking::PaneLifecycle::Visible(visible) => pane.update(cx, |pane, cx| pane.set_visible(visible, cx)),
+                    docking::PaneLifecycle::Removed => pane.update(cx, |pane, cx| pane.set_visible(false, cx)),
+                    _ => {}
+                }
+            }
             if let Some(browser) = &browser {
                 browser.update(cx, |browser, cx| match event {
                     docking::PaneLifecycle::Visible(true) => browser.show(cx),
@@ -3688,11 +3792,16 @@ impl Desktop {
             .into_iter()
             .filter(|t| t["archived"] != true)
             .collect();
-        let sidebar = if self.sidebar_is_hidden() { div().into_any_element() } else if self.sidebar_collapsed {
+        shell::set_task_markers_visible(
+            (!self.sidebar_is_hidden() || self.sidebar_motion.active())
+                && !self.sidebar_collapsed && !(self.sidebar_is_hidden() && self.sidebar_motion_compact)
+                && !self.preferences_open && !session_lock::locked(cx) && !self.closing, self.sidebar_view, cx);
+        let sidebar = if self.sidebar_is_hidden() && !self.sidebar_motion.active() { div().into_any_element() } else if self.sidebar_collapsed || (self.sidebar_is_hidden() && self.sidebar_motion_compact) {
             self.render_compact_sidebar(&agents, &tasks, palette, window, cx)
         } else { self.render_sidebar(&agents, &tasks, palette, window, cx) };
         let sidebar = div()
             .id("native-preferences-sidebar")
+            .track_focus(&self.sidebar_focus)
             .w_full()
             .min_w_0()
             .flex()
@@ -4212,6 +4321,11 @@ impl Render for Desktop {
         }
         window.set_rem_size(design::ui_scaled_px(16.));
         let new_scale = design::interface_scale();
+        if self.sidebar_motion.active() && self.sidebar_resize.read(cx).is_resizing() {
+            self.sidebar_motion.cancel();
+            self.sidebar_resize_suppressed = false;
+            self.sidebar_hidden = false;
+        }
         let resize_target = {
             let state = self.sidebar_resize.read(cx);
             if state.sizes().len() == 2 && !self.sidebar_resize_suppressed && !self.sidebar_is_hidden() {
@@ -4234,6 +4348,7 @@ impl Render for Desktop {
             self.sidebar_resize_suppressed = false;
         }
         if self.sidebar_scale != new_scale {
+            self.finish_sidebar_motion(window, cx);
             self.dock.update(cx, |dock, cx| {
                 dock.set_tab_appearance(&self.snapshot["settings"], new_scale, cx)
             });

@@ -2,6 +2,20 @@
 //! before painting the modal card. No readback or delayed snapshot replacement.
 use super::*;
 use gpui_kit::component::{WindowExt as _, FocusTrapElement as _};
+use crate::chat::feedback::{self, Clock, FeedbackClock};
+
+struct PreferencesOverlay {
+    owner: WeakEntity<Desktop>,
+    clock: Clock,
+}
+impl Render for PreferencesOverlay {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = self.clock.borrow_mut().progress(cx.reduce_motion());
+        let clock = self.clock.clone();
+        self.owner.update(cx, |view, cx| view.render_preferences_surface(window, cx, progress, clock))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
 
 #[derive(Default)]
 struct WorkspaceOverlayState { open: bool }
@@ -29,6 +43,18 @@ impl Desktop {
         cx.notify();
     }
     pub(super) fn render_preferences_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let owner = cx.weak_entity();
+        let holder = window.use_keyed_state("preferences-overlay-state", cx, |_, cx| cx.new(|_| {
+            let clock = FeedbackClock::new();
+            clock.borrow_mut().start(std::time::Duration::from_millis(140));
+            PreferencesOverlay { owner, clock }
+        }));
+        let overlay = holder.read(cx).clone();
+        // The uncached overlay renders when its parent changes. Only its local
+        // entrance clock requests additional frames.
+        overlay.into_any_element()
+    }
+    fn render_preferences_surface(&mut self, window: &mut Window, cx: &mut Context<Self>, progress: f32, clock: Clock) -> AnyElement {
         let size = window.viewport_size();
         let palette = self.apply_native_theme(window, cx);
         let content = self.render_preferences_content(window, cx);
@@ -50,7 +76,7 @@ impl Desktop {
                     view.close_preferences(window, cx);
                     cx.stop_propagation();
                 })))
-            .child(div().id("preferences-card").w(size.width * 0.9).max_w(gpui_kit::px(1200.)).h(size.height * 0.9)
+            .child(feedback::painted(div().id("preferences-card").w(size.width * 0.9).max_w(gpui_kit::px(1200.)).h(size.height * 0.9)
                 .debug_selector(|| "preferences-card".to_string())
                 .min_w_0().min_h_0().flex().flex_col().overflow_hidden()
                 .shadow(vec![
@@ -63,7 +89,15 @@ impl Desktop {
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Preferences"))
                     .child(Button::new("close-preferences").compact().label("Done").accessibility_label("Close preferences")
                         .on_click(cx.listener(|view, _, window, cx| view.close_preferences(window, cx)))))
-                .child(div().flex_1().min_h_0().min_w_0().child(content)))
+                .child(div().flex_1().min_h_0().min_w_0().child(content))
+                .relative()
+                .top(design::ui_scaled_px(4. * (1. - progress)))
+                .opacity(progress)
+                // GPUI fades primitives independently; suppress shadow bleed.
+                .shadow(vec![
+                    gpui_kit::BoxShadow::new(px(0.), px(18.), rgba(0x00000066).opacity(progress.powi(3)).into()).blur_radius(px(48.)),
+                    gpui_kit::BoxShadow::new(px(0.), px(4.), rgba(0x00000033).opacity(progress.powi(3)).into()).blur_radius(px(12.)),
+                ]), clock))
             .focus_trap("preferences-modal-focus", &self.preferences_focus)
             .into_any_element()
     }
@@ -87,39 +121,23 @@ fn load_sidebar_mode() -> SidebarMode {
 }
 impl Desktop {
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sidebar_collapsed && !self.sidebar_is_hidden() {
+        let from = self.displayed_sidebar_width(cx);
+        if !self.sidebar_motion.active() && !self.sidebar_collapsed && !self.sidebar_is_hidden() {
             self.sidebar_expanded_width = super::expanded_sidebar_width(self.current_sidebar_width(cx));
         }
         let tern = design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
         let current = if self.sidebar_hidden && tern { SidebarMode::Hidden } else if self.sidebar_collapsed { SidebarMode::Icons } else { SidebarMode::Full };
         let next = if tern { current.next() } else if self.sidebar_collapsed { SidebarMode::Full } else { SidebarMode::Icons };
+        self.sidebar_motion_compact = self.sidebar_collapsed;
         self.sidebar_hidden = next == SidebarMode::Hidden;
         self.sidebar_collapsed = next == SidebarMode::Icons;
+        if self.sidebar_collapsed || (self.sidebar_is_hidden() && self.sidebar_motion_compact) { crate::shell::set_task_markers_visible(false, self.sidebar_view, cx); }
+        if self.sidebar_is_hidden() && self.sidebar_focus.contains_focused(window, cx) {
+            window.focus(&self.sidebar_toggle_focus, cx);
+        }
         save_sidebar_mode(next);
-        let width = if self.sidebar_collapsed { design::compact_sidebar_width_design(self.sidebar_scale) } else { super::expanded_sidebar_width(self.sidebar_expanded_width) };
-        self.sidebar_width_touched = true;
-        self.sidebar_resize_suppressed = true;
-        self.sidebar_resize_generation = self.sidebar_resize_generation.wrapping_add(1);
-        let generation = self.sidebar_resize_generation;
-        self.sidebar_resize.update(cx, |state, cx| state.resize_panel(0, design::ui_px(width, self.sidebar_scale), window, cx));
-        // Reattaching the split after Hidden emits layout resize events using
-        // the previous rail width. Keep those events from changing this mode.
-        cx.spawn_in(window, async move |view, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-            let _ = view.update_in(cx, |view, window, cx| {
-                if view.sidebar_resize_generation == generation {
-                    if !view.sidebar_is_hidden() {
-                        let width = if view.sidebar_collapsed { design::compact_sidebar_width_design(view.sidebar_scale) } else { super::expanded_sidebar_width(view.sidebar_expanded_width) };
-                        // Hidden removes the split. Restore width once the
-                        // reattached split has current window bounds.
-                        view.sidebar_resize.update(cx, |state, cx| state.resize_panel(0, design::ui_px(width, view.sidebar_scale), window, cx));
-                    }
-                    view.sidebar_resize_suppressed = false;
-                    cx.notify();
-                }
-            });
-        }).detach();
-        self.queue_preferences_save(cx);
+        let target = if self.sidebar_is_hidden() { 0. } else if self.sidebar_collapsed { design::compact_sidebar_width_design(self.sidebar_scale) } else { super::expanded_sidebar_width(self.sidebar_expanded_width) };
+        self.start_sidebar_motion(from, target, window, cx);
         cx.notify();
     }
 }

@@ -92,6 +92,20 @@ struct CachedSplit {
     _subscription: Subscription,
 }
 
+/// A retained split's displayed shares and stable child order. The host can
+/// interpolate these without rebuilding trees or touching tab/panel entities.
+#[derive(Clone)]
+pub struct DockSplitSnapshot {
+    pub node: NodeId,
+    pub children: Vec<NodeId>,
+    pub shares: Vec<f32>,
+    pub target_shares: Vec<f32>,
+    pub animated: bool,
+    topology: Vec<NodeId>,
+    topology_panels: Vec<PanelId>,
+    original_extent: Pixels,
+}
+
 /// The main area of the dock.
 ///
 /// It owns one [`PaneTree`] per region and the entity cache that mirrors
@@ -235,6 +249,78 @@ impl DockArea {
         self.panels.extend(panels);
         self.reconcile(window, cx);
         cx.emit(DockEvent::LayoutChanged);
+    }
+
+    /// Capture split shares. Hidden and unmeasured splits receive their final
+    /// proportions immediately, and never start their own frame callbacks.
+    pub fn split_geometry(&self, cx: &App) -> Vec<DockSplitSnapshot> {
+        let mut result = Vec::new();
+        for placement in [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom] {
+            let Some(tree) = self.layout(placement) else { continue; };
+            tree.root().walk(&mut |node| {
+                let PaneRef::Split { children, .. } = node.kind() else { return; };
+                let Some(cached) = self.splits.get(&node.id()) else { return; };
+                let state = cached.entity.read(cx);
+                if children.len() < 2 || state.sizes().len() != children.len() { return; }
+                let total = state.sizes().iter().map(|size| size.as_f32()).sum::<f32>();
+                if !total.is_finite() || total <= 0. { return; }
+                result.push(DockSplitSnapshot {
+                    node: node.id(), children: children.iter().map(PaneNode::id).collect(),
+                    shares: state.sizes().iter().map(|size| size.as_f32() / total).collect(),
+                    target_shares: state.equalized_layout_shares(),
+                    animated: state.container_size() > Pixels::ZERO
+                        && (placement == DockPlacement::Center || self.is_dock_open(placement))
+                        && children.iter().all(|child| self.is_node_visible(child, cx)),
+                    topology: tree.node_ids(),
+                    topology_panels: tree.panels().collect(),
+                    original_extent: gpui::px(total),
+                });
+            });
+        }
+        result
+    }
+
+    pub fn has_visible_split_geometry(&self, snapshots: &[DockSplitSnapshot], cx: &App) -> bool {
+        !self.is_zoomed() && snapshots.iter().any(|snapshot| {
+            snapshot.animated && self.placement_of_node(snapshot.node).is_some_and(|placement| {
+                (placement == DockPlacement::Center || self.is_dock_open(placement))
+                    && self.layout(placement).and_then(|tree| tree.find_node(snapshot.node))
+                        .is_some_and(|node| self.is_node_visible(node, cx))
+            })
+        })
+    }
+
+    /// Apply a coordinated transition to equal shares. Validate the complete
+    /// topology before touching any split; a live divider or structural edit
+    /// interrupts the whole transition. Only the settled frame emits a save.
+    pub fn equalize_split_geometry(&mut self, snapshots: &[DockSplitSnapshot], progress: f32, settled: bool, cx: &mut Context<Self>) -> bool {
+        let mut updates = Vec::with_capacity(snapshots.len());
+        for snapshot in snapshots {
+            let Some(placement) = self.placement_of_node(snapshot.node) else { return false; };
+            let Some(tree) = self.layout(placement) else { return false; };
+            if tree.node_ids() != snapshot.topology || tree.panels().ne(snapshot.topology_panels.iter().copied()) { return false; }
+            let Some(node) = tree.find_node(snapshot.node) else { return false; };
+            let PaneRef::Split { children, .. } = node.kind() else { return false; };
+            if children.iter().map(PaneNode::id).ne(snapshot.children.iter().copied()) { return false; }
+            let Some(cached) = self.splits.get(&snapshot.node) else { return false; };
+            let state = cached.entity.read(cx);
+            if state.is_resizing() || state.sizes().len() != snapshot.shares.len() { return false; }
+            let extent = if state.container_size() > Pixels::ZERO { state.container_size() } else { snapshot.original_extent };
+            let progress = if snapshot.animated && children.iter().all(|child| self.is_node_visible(child, cx))
+                && (placement == DockPlacement::Center || self.is_dock_open(placement)) { progress.clamp(0., 1.) } else { 1. };
+            let sizes = snapshot.shares.iter().zip(&snapshot.target_shares).map(|(share, target)| extent * (share + (target - share) * progress)).collect::<Vec<_>>();
+            updates.push((placement, snapshot.node, cached.entity.clone(), sizes));
+        }
+        for (placement, node, state, sizes) in updates {
+            state.update(cx, |state, cx| state.apply_layout_sizes(&sizes, cx));
+            // Size-only edits retain every container and active tab. Do not
+            // reconcile groups or send panel lifecycle events on a tick.
+            let sizes = state.read(cx).sizes().iter().copied().map(Some).collect::<Vec<_>>();
+            if let Some(tree) = self.tree_mut(placement) { tree.set_sizes(node, sizes.clone()); }
+            if let Some(cached) = self.splits.get_mut(&node) { cached.sizes = sizes; }
+        }
+        if settled && !snapshots.is_empty() { cx.emit(DockEvent::LayoutChanged); }
+        true
     }
 
     /// Replace one dock with a described layout, creating the dock if the area
@@ -3196,6 +3282,91 @@ mod tests {
             "Ghost",
             "and the unknown panel still survives the next save"
         );
+    }
+
+    #[gpui::test]
+    fn unmeasured_equalize_geometry_applies_final_finite_shares(cx: &mut TestAppContext) {
+        let (area, cx) = setup(cx);
+        cx.update(|window, cx| area.update(cx, |area, cx| {
+            let alpha = TestPanel::new("UnmeasuredAlpha", cx);
+            let beta = TestPanel::new("UnmeasuredBeta", cx);
+            area.set_center(DockLayout::h_split()
+                .child(DockLayout::tabs().panel(alpha), Some(px(150.)))
+                .child(DockLayout::tabs().panel(beta), Some(px(450.))), window, cx);
+            let snapshots = area.split_geometry(cx);
+            assert_eq!(snapshots.len(), 1);
+            assert!(!snapshots[0].animated);
+            assert!(snapshots[0].target_shares.iter().all(|share| share.is_finite()));
+            assert!(area.equalize_split_geometry(&snapshots, 0., true, cx));
+            let PaneRef::Split { sizes, .. } = area.center.root().kind() else { panic!("split missing") };
+            assert_eq!(sizes, &[Some(px(300.)), Some(px(300.))]);
+        }));
+    }
+
+    #[gpui::test]
+    fn equalize_geometry_retains_nested_containers_active_tabs_and_focus(cx: &mut TestAppContext) {
+        let log = log_of();
+        let (area, cx) = setup(cx);
+        let focus = cx.update(|window, cx| {
+            let alpha = TestPanel::logging("EqualAlpha", &log, cx);
+            let beta = TestPanel::logging("EqualBeta", &log, cx);
+            let gamma = TestPanel::logging("EqualGamma", &log, cx);
+            let delta = TestPanel::logging("EqualDelta", &log, cx);
+            let focus = alpha.read(cx).focus_handle(cx);
+            area.update(cx, |area, cx| area.set_center(
+                DockLayout::h_split()
+                    .child(DockLayout::tabs().panel(alpha), Some(px(150.)))
+                    .child(DockLayout::v_split()
+                        .child(DockLayout::tabs().panel(beta).panel(delta).active_index(1), Some(px(120.)))
+                        .child(DockLayout::tabs().panel(gamma), Some(px(280.))), Some(px(450.))),
+                window, cx));
+            window.focus(&focus, cx);
+            focus
+        });
+        cx.run_until_parked();
+        let (containers, before, snapshots) = cx.read(|cx| {
+            let area = area.read(cx);
+            (area.container_entity_ids(), area.center.clone(), area.split_geometry(cx))
+        });
+        assert_eq!(snapshots.len(), 2);
+        drain(&log);
+        for progress in [0.2, 0.65, 1.] {
+            cx.update(|_, cx| area.update(cx, |area, cx| {
+                assert!(area.equalize_split_geometry(&snapshots, progress, progress == 1., cx));
+                assert_eq!(area.container_entity_ids(), containers);
+                assert_eq!(area.center.node_ids(), before.node_ids());
+                before.root().walk(&mut |old| {
+                    if let PaneRef::Tabs { active_ix, panels } = old.kind() {
+                        let PaneRef::Tabs { active_ix: current, panels: current_panels } = area.center.find_node(old.id()).unwrap().kind() else { panic!("tab group replaced") };
+                        assert_eq!(current, active_ix);
+                        assert_eq!(current_panels, panels);
+                    }
+                });
+            }));
+        }
+        cx.update(|window, cx| assert!(focus.is_focused(window)));
+        assert!(drain(&log).is_empty(), "geometry must not generate panel lifecycle operations");
+        cx.read(|cx| {
+            for split in area.read(cx).split_geometry(cx) {
+                let equal = 1. / split.shares.len() as f32;
+                assert!(split.shares.iter().all(|share| (share - equal).abs() < 0.001));
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn stale_equalize_geometry_never_overwrites_a_changed_topology(cx: &mut TestAppContext) {
+        let log = log_of();
+        let (area, alpha, cx) = two_groups(&log, cx);
+        cx.run_until_parked();
+        let snapshots = cx.read(|cx| area.read(cx).split_geometry(cx));
+        assert!(!snapshots.is_empty());
+        cx.update(|window, cx| area.update(cx, |area, cx| area.remove_panel(alpha, window, cx)));
+        let before = cx.read(|cx| area.read(cx).center.clone());
+        cx.update(|_, cx| area.update(cx, |area, cx| {
+            assert!(!area.equalize_split_geometry(&snapshots, 0.5, false, cx));
+            assert_eq!(area.center, before);
+        }));
     }
 
     #[gpui::test]
