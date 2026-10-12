@@ -609,3 +609,113 @@ fn hidden_substantive_sync_still_requires_preparation_after_unaffected_publicati
         );
     });
 }
+
+#[cfg(feature = "performance-profiling")]
+fn observe_fixture_terminal_events(
+    pane: &Entity<super::super::ChatPane>,
+    visual: &mut VisualTestContext,
+) -> (Rc<RefCell<Vec<(String, Option<String>)>>>, Subscription) {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    let subscription = visual.update(|_, cx| {
+        cx.subscribe(pane, move |_, event: &super::super::ChatEvent, _| {
+            if let super::super::ChatEvent::Terminal { task_id, command } = event {
+                observed
+                    .borrow_mut()
+                    .push((task_id.clone(), command.clone()));
+            }
+        })
+    });
+    (events, subscription)
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn cleared_slash_draft_cannot_repeat_terminal_and_explicit_send_rechecks_editor(
+    cx: &mut TestAppContext,
+) {
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(retention_snapshot(0)));
+    let (events, _subscription) = observe_fixture_terminal_events(&pane, visual);
+    visual.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            assert!(pane.restore_draft("/terminal echo fixture", window, cx));
+            assert!(pane.submit_current_slash_input(cx));
+        });
+    });
+    draw(visual);
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[("quiet-task".into(), Some("echo fixture".into()))]
+    );
+    pane.update(visual, |pane, cx| {
+        assert!(pane.composer.read(cx).value().is_empty());
+        assert!(!pane.slash.read(cx).is_open());
+        assert!(
+            !pane
+                .slash
+                .update(cx, |slash, cx| slash.submit_typed_input(cx)),
+            "programmatic clear must also clear the palette's cached command"
+        );
+        assert!(
+            !pane.submit_current_slash_input(cx),
+            "an empty native editor cannot repeat the last terminal command"
+        );
+        // Simulate a future untracked programmatic writer leaving its derived
+        // cache stale. Explicit Send must still treat the editor as authority.
+        pane.slash.update(cx, |slash, cx| {
+            slash.set_input("/terminal stale command", cx)
+        });
+        assert!(!pane.submit_current_slash_input(cx));
+        assert!(!pane.slash.read(cx).is_open());
+    });
+    draw(visual);
+    assert_eq!(
+        events.borrow().len(),
+        1,
+        "only the original local terminal event is permitted; no process is launched by this fixture"
+    );
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn voice_programmatic_draft_updates_palette_arguments_before_submission(cx: &mut TestAppContext) {
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(retention_snapshot(0)));
+    let (events, _subscription) = observe_fixture_terminal_events(&pane, visual);
+    visual.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            assert!(pane.restore_draft("/terminal ", window, cx));
+            // Emit the captured result through the real subscription. The
+            // disconnected fixture never requests recording or transcription.
+            pane.voice.update(cx, |_, cx| {
+                cx.emit(crate::chat_voice::VoiceComposerEvent::TranscriptReady {
+                    task_id: "quiet-task".into(),
+                    draft: "/terminal ".into(),
+                    text: "echo dictation".into(),
+                })
+            });
+        });
+    });
+    draw(visual);
+    pane.update(visual, |pane, cx| {
+        assert_eq!(
+            pane.composer.read(cx).value().as_ref(),
+            "/terminal \necho dictation"
+        );
+        assert!(pane.slash.read(cx).is_open());
+        // Deliberately use the palette's cached submission rather than the
+        // lazy Send helper, proving its displayed draft is already current.
+        assert!(
+            pane.slash
+                .update(cx, |slash, cx| slash.submit_typed_input(cx))
+        );
+    });
+    draw(visual);
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[("quiet-task".into(), Some("echo dictation".into()))]
+    );
+    pane.read_with(visual, |pane, cx| {
+        assert!(pane.composer.read(cx).value().is_empty());
+        assert!(!pane.slash.read(cx).is_open());
+    });
+}

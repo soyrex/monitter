@@ -90,6 +90,7 @@ impl ChatPane {
                 self.composer
                     .update(cx, |input, cx| input.set_value("/terminal ", window, cx));
                 self.voice.update(cx, |voice, cx| voice.set_context(task_id.clone(), "/terminal ", cx));
+                self.slash.update(cx, |slash, cx| slash.set_input("/terminal ", cx));
                 cx.emit(ChatEvent::DraftChanged { task_id: task_id.clone(), text: "/terminal ".into() });
                 self.slash.update(cx, |slash, cx| slash.dismiss(cx));
                 self.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -217,6 +218,7 @@ impl ChatPane {
                 .update(cx, |input, cx| input.set_value("", window, cx));
             let task_id = self.task_id();
             self.voice.update(cx, |voice, cx| voice.set_context(task_id.clone(), "", cx));
+            self.slash.update(cx, |slash, cx| slash.set_input("", cx));
             cx.emit(ChatEvent::DraftChanged { task_id, text: String::new() });
         }
         self.slash.update(cx, |slash, cx| slash.dismiss(cx));

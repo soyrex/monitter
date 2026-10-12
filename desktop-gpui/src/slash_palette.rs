@@ -233,6 +233,12 @@ impl SlashPalette {
 
     /// Track the owner's unsent text. Opening and provider lookup begin only
     /// when the input contains a slash command token at its start.
+    /// Explicit submission checks the native editor source. Preserve selected
+    /// suggestions and dismissed state when the cached draft already matches.
+    pub fn sync_input(&mut self, input: impl Into<String>, cx: &mut Context<Self>) {
+        let input = input.into();
+        if self.input != input { self.set_input(input, cx); }
+    }
     pub fn set_input(&mut self, input: impl Into<String>, cx: &mut Context<Self>) {
         let input = input.into();
         if self.input != input {

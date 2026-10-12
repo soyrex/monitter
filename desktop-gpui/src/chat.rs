@@ -760,6 +760,7 @@ impl ChatPane {
                     pane.composer
                         .update(cx, |input, cx| input.set_value(inserted.clone(), window, cx));
                     pane.voice.update(cx, |voice, cx| voice.set_context(task_id.clone(), inserted.clone(), cx));
+                    pane.slash.update(cx, |slash, cx| slash.set_input(inserted.clone(), cx));
                     cx.emit(ChatEvent::DraftChanged { task_id: task_id.clone(), text: inserted });
                     cx.notify();
                 }
@@ -1712,16 +1713,22 @@ impl ChatPane {
         }
         cx.notify();
     }
+    /// Programmatic editor writes emit no native change event. At the explicit
+    /// send boundary, use the actual draft rather than a previous slash command.
+    fn submit_current_slash_input(&mut self, cx: &mut Context<Self>) -> bool {
+        let text = self.composer.read(cx).value().to_string();
+        self.slash.update(cx, |slash, cx| {
+            slash.sync_input(text, cx);
+            slash.submit_typed_input(cx)
+        })
+    }
     fn send(&mut self, cx: &mut Context<Self>) {
         if self.is_performance_fixture() { return; }
         if self.busy {
             return;
         }
         self.voice.update(cx, |voice, cx| voice.cancel(cx));
-        if self
-            .slash
-            .update(cx, |slash, cx| slash.submit_typed_input(cx))
-        {
+        if self.submit_current_slash_input(cx) {
             return;
         }
         let id = self.task_id();
@@ -1967,6 +1974,7 @@ impl Render for ChatPane {
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 let voice_task = self.task_id();
                 self.voice.update(cx, |voice, cx| voice.set_context(voice_task, String::new(), cx));
+                self.slash.update(cx, |slash, cx| slash.set_input(String::new(), cx));
                 // Programmatic set_value does not emit InputEvent::Change.
                 // Persist the acknowledged clear explicitly, while keeping
                 // a newer draft typed during the send untouched.
@@ -3476,7 +3484,9 @@ impl Render for ChatPane {
                     {
                         let text = pane.composer.read(cx).value().to_string();
                         let handled = pane.slash.update(cx, |slash, cx| {
-                            if chat_slash::typed_submit_before_menu(&text) {
+                            let typed_submit = chat_slash::typed_submit_before_menu(&text);
+                            slash.sync_input(text, cx);
+                            if typed_submit {
                                 slash.submit_typed_input(cx)
                             } else {
                                 slash
@@ -3542,7 +3552,11 @@ impl Render for ChatPane {
                         m.alt,
                         m.control,
                         m.platform,
-                        || pane.composer.read(cx).value(),
+                        || {
+                            let text = pane.composer.read(cx).value();
+                            pane.slash.update(cx, |slash, cx| slash.sync_input(text.to_string(), cx));
+                            text
+                        },
                     );
                     let handled = pane.slash.update(cx, |slash, cx| {
                         if typed_submit {

@@ -201,6 +201,7 @@ pub fn rebase_history_once(
 #[derive(Default)]
 pub struct PublicationIndex {
     metadata: Value,
+    task_activity: HashMap<String, Value>,
     events: HashMap<String, Vec<Value>>,
 }
 pub type PreparedChildTranscripts = Arc<HashMap<String, Arc<Vec<Value>>>>;
@@ -250,7 +251,7 @@ pub fn prepare(
                 .is_some_and(|id| internal_agents.contains(id))
         });
     }
-    let metadata = Value::Object(
+    let mut metadata = Value::Object(
         value
             .as_object()
             .into_iter()
@@ -259,6 +260,21 @@ pub fn prepare(
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     );
+    // Stream flushes advance Task.updatedAt about every 100 ms. That marker
+    // affects the task's footer and its collaboration ancestors, but cannot
+    // invalidate unrelated panes. Keep every other metadata field conservative.
+    let mut task_activity = HashMap::new();
+    if let Some(tasks) = metadata["tasks"].as_array_mut() {
+        for task in tasks {
+            if let Some(task) = task.as_object_mut() {
+                if let Some(id) = task.get("id").and_then(Value::as_str).map(str::to_owned) {
+                    if let Some(updated_at) = task.remove("updatedAt") {
+                        task_activity.insert(id, updated_at);
+                    }
+                }
+            }
+        }
+    }
     let dependencies: HashMap<String, HashSet<String>> = panes
         .iter()
         .map(|id| {
@@ -303,6 +319,11 @@ pub fn prepare(
             .as_ref()
             .is_none_or(|old| old.events.get(id) != events.get(id));
         let messages_changed = changes.message_tasks.contains(id);
+        let activity_changed = previous.as_ref().is_none_or(|old| {
+            dependencies[id]
+                .iter()
+                .any(|task| old.task_activity.get(task) != task_activity.get(task))
+        });
         // Nested collaboration histories affect ancestor sidebars, even when
         // no child pane is open. The cycle-safe closure retains those inputs.
         let child_changed = dependencies[id].iter().any(|child| {
@@ -312,7 +333,12 @@ pub fn prepare(
                         .as_ref()
                         .is_none_or(|old| old.events.get(child) != events.get(child)))
         });
-        if changes.reset || metadata_changed || events_changed || messages_changed || child_changed
+        if changes.reset
+            || metadata_changed
+            || activity_changed
+            || events_changed
+            || messages_changed
+            || child_changed
         {
             sync_tasks.insert(id.clone());
         }
@@ -332,7 +358,11 @@ pub fn prepare(
     Ok(PreparedPublication {
         snapshot: value,
         hidden_tasks,
-        index: Arc::new(PublicationIndex { metadata, events }),
+        index: Arc::new(PublicationIndex {
+            metadata,
+            task_activity,
+            events,
+        }),
         sync_tasks,
         histories,
         collaboration_records: HashMap::new(),
@@ -401,6 +431,56 @@ mod tests {
             HashSet::from(["a".into()])
         );
         assert_eq!(next.histories["a"].len(), 2);
+    }
+    #[test]
+    fn streaming_task_activity_refreshes_its_pane_and_ancestors_only() {
+        let mut snapshot = default_snapshot();
+        snapshot.tasks = ["parent", "child", "unrelated"]
+            .into_iter()
+            .map(|id| {
+                serde_json::from_value(serde_json::json!({
+                    "id":id,"agentId":"a","title":id,"status":"running",
+                    "createdAt":0,"updatedAt":0,"hostId":"h","cwd":"",
+                    "provider":"codex","model":"default","sandbox":"read-only"
+                }))
+                .unwrap()
+            })
+            .collect();
+        snapshot.collaborations = serde_json::from_value(serde_json::json!([
+            {"id":"c1","kind":"delegation","fromAgentId":"a","fromTaskId":"parent","toTaskId":"child","toAgentId":"a","requestId":"r","text":"child","status":"running","createdAt":0,"updatedAt":0}
+        ])).unwrap();
+        let panes = HashSet::from(["parent".into(), "child".into(), "unrelated".into()]);
+        let initial = prepare(
+            snapshot.clone(),
+            panes.clone(),
+            &PublicationChanges::default(),
+            None,
+        )
+        .unwrap();
+        snapshot.tasks[1].updated_at = 100;
+        let activity = prepare(
+            snapshot.clone(),
+            panes.clone(),
+            &PublicationChanges::default(),
+            Some(initial.index),
+        )
+        .unwrap();
+        assert_eq!(
+            activity.sync_tasks,
+            HashSet::from(["parent".into(), "child".into()])
+        );
+        assert!(activity.histories.is_empty());
+        assert_eq!(activity.snapshot["tasks"][1]["updatedAt"], 100);
+        // Titles remain conservative because cross-task links can show them.
+        snapshot.tasks[1].title = "renamed child".into();
+        let renamed = prepare(
+            snapshot,
+            panes.clone(),
+            &PublicationChanges::default(),
+            Some(activity.index),
+        )
+        .unwrap();
+        assert_eq!(renamed.sync_tasks, panes);
     }
     #[test]
     fn message_removal_reconciles_empty_authoritative_history() {

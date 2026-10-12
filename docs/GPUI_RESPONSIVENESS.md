@@ -57,6 +57,7 @@ The implementation also narrows state ownership:
 - Approvals retain only task scope, matching rules, approval rows, and display labels. A 10,000-message fixture checks that unrelated transcript data does not enter the projection or change revoke guards.
 - Deferred history work remains bound to the task that produced it. Draft restoration synchronizes slash state and refuses to overwrite a subsequent native edit.
 - Unaffected panes adopt the latest shared snapshot without redrawing. Preparation keys hold weak source identity so quiet or hidden panes cannot pin older global histories. Retargeting preserves an outstanding substantive update until the pane next renders.
+- Codex and ACP flushes advance `Task.updatedAt` at about 100 ms intervals. That timestamp is compared only for the affected task and its collaboration ancestors; other metadata remains conservative. Unrelated chats therefore stay cached during ordinary streaming while footer and subagent activity stay current.
 
 The retained viewport must have an explicit full-size root: GPUI lays a cached view out independently, so a flex-only root could leave its virtual list with zero bounds. The typing regressions require visible rows before checking cache reuse. They also account for GPUI's intentional first-key refresh when switching from mouse to keyboard input; that refresh must not re-prepare history, and subsequent keys must reuse the transcript viewport and its visible rows.
 
@@ -70,7 +71,7 @@ Opt-in numeric collection is available in a build made with `npm run build:gpui 
 
 The runner makes a signed local copy with a unique bundle identifier for native UI selection. Its `LSEnvironment` keeps the copied app in fixture mode even if Launch Services reopens it without the runner. Both source and post-sign executable hashes are recorded, and observations from a different process ID are rejected. CPU samples carry timestamps so they can be aligned with the collector's actual measurement interval; browser subprocess CPU is outside the GUI process measurement.
 
-Available scenarios are `idle`, `static` (active sparkles), `streaming-body`, `pipeline-updates` (four panes through the real preparation path), and `browser-adjacent`. Set `--rows` from 1,000 to 100,000 per chat pane. Metrics include transcript preparation counts and native outline/browser show, hide, and bounds-write counts, so steady typing can be checked for unintended visibility transitions.
+Available scenarios are `idle`, `static` (active sparkles), `streaming-body`, `pipeline-updates` (four panes, rotating message and task-timestamp updates at a 100 ms cadence with preparation backpressure), and `browser-adjacent`. Set `--rows` from 1,000 to 100,000 per chat pane. Metrics include transcript preparation counts and native outline/browser show, hide, and bounds-write counts, so steady typing can be checked for unintended visibility transitions.
 
 Input latency contributes one sample per presented frame with pending input, starting from that frame's oldest pending input event. It is not a separate sample for every keystroke. `inputEventsPerFrame` makes batching visible. CPU observations use process CPU time divided by elapsed wall time, with 100% meaning one fully occupied core.
 

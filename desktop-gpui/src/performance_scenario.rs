@@ -89,8 +89,8 @@ impl PerformanceScenario {
             return;
         };
         self.sequence = self.sequence.wrapping_add(1);
-        // Update a rotating task through the persistent model History. Other
-        // panes receive only advance_revision, exactly like production fanout.
+        // Codex/ACP stream flushes update both the message and Task.updatedAt.
+        // Rotate through tasks to exercise dependency-scoped publication.
         let pane = self.sequence as usize % self.chats.len();
         let task = format!("{TASK}-{pane}");
         let message = if pane == 0 {
@@ -107,6 +107,12 @@ impl PerformanceScenario {
             .messages
             .update_by_id(&message, |message| message.text = text)
             .expect("synthetic streaming message index");
+        source
+            .tasks
+            .iter_mut()
+            .find(|row| row.id == task)
+            .expect("synthetic streaming task")
+            .updated_at = chrono::Utc::now().timestamp_millis();
         self.publication.enqueue(PublicationChanges {
             message_tasks: HashSet::from([task]),
             ..Default::default()
@@ -178,7 +184,9 @@ impl PerformanceScenario {
         crate::activity_effects::sync(&snapshot, self.palette, cx);
         for (id, pane) in &self.chats {
             if !prepared.sync_tasks.contains(id) {
-                pane.update(cx, |pane, cx| pane.advance_revision(snapshot.clone(), revision.clone(), cx));
+                pane.update(cx, |pane, cx| {
+                    pane.advance_revision(snapshot.clone(), revision.clone(), cx)
+                });
                 continue;
             }
             let history = prepared.histories.remove(id);
@@ -432,7 +440,7 @@ pub fn open_if_requested(cx: &mut App) -> bool {
                 cx.spawn(async move |cx| {
                     loop {
                         cx.background_executor()
-                            .timer(Duration::from_millis(250))
+                            .timer(Duration::from_millis(100))
                             .await;
                         if owner
                             .update(cx, |scene, cx| scene.queue_pipeline_update(cx))
