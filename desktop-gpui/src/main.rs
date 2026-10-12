@@ -270,6 +270,7 @@ struct Desktop {
     workspaces_dirty: bool,
     workspace_store_revision: i64,
     workspace_switch: Option<String>,
+    pending_workspace_removal: Option<String>,
     workspace_editor: Option<workspace_tabs::WorkspaceEditor>,
     native_drafts: BTreeMap<String, String>,
     dirty_draft_ids: HashSet<String>,
@@ -583,6 +584,7 @@ impl Desktop {
             workspaces_dirty: false,
             workspace_store_revision: 0,
             workspace_switch: None,
+            pending_workspace_removal: None,
             workspace_editor: None,
             native_drafts: BTreeMap::new(),
             dirty_draft_ids: HashSet::new(),
@@ -2496,7 +2498,9 @@ impl Desktop {
                 .child(tabs)
                 .child(div().flex_1().min_h_0().w_full()
                     .border(design::ui_scaled_px(spacing.outer_padding()))
-                    .border_t(design::ui_scaled_px(spacing.gutter / 2.))
+                    // The dock frame and its tiles already provide two half
+                    // gutters between the workspace tabs and the pane edge.
+                    .border_t_0()
                     .border_color(rgba(0x00000000))
                     .child(content));
             if self.sidebar_is_hidden() { return column.into_any_element(); }
@@ -2706,6 +2710,7 @@ impl Desktop {
     }
     fn fail_workspace_restore(&mut self, error: String, cx: &mut Context<Self>) {
         self.workspace_switch = None;
+        self.pending_workspace_removal = None;
         self.preferences_restore_suppressed = false;
         self.preferences_restoring = false;
         self.preferences_error = Some(error);
@@ -2730,6 +2735,13 @@ impl Desktop {
             Ok(()) => {
                 if let Some(id) = self.workspace_switch.take() {
                     if let Some(set) = &mut self.named_workspaces { set.active_id = id; }
+                    self.workspaces_dirty = true;
+                    self.preferences_dirty = true;
+                }
+                if let Some(id) = self.pending_workspace_removal.take() {
+                    if let Some(set) = &mut self.named_workspaces {
+                        monitter_gpui_desktop::workspace_order::remove(set, &id);
+                    }
                     self.workspaces_dirty = true;
                     self.preferences_dirty = true;
                 }
@@ -2758,6 +2770,7 @@ impl Desktop {
             }
             Err(error) => {
                 self.workspace_switch = None;
+                self.pending_workspace_removal = None;
                 self.preferences_restore_suppressed = false;
                 self.preferences_restoring = false;
                 eprintln!(
@@ -4252,6 +4265,7 @@ impl Render for Desktop {
         let mut root = div()
             .size_full()
             .relative()
+            .on_modifiers_changed(|_, window, _| window.refresh())
             .key_context(if self.snapshot["settings"]["shortcutMode"] == "vim" { "MonitterDesktop shortcutMode=vim" } else { "MonitterDesktop shortcutMode=standard" })
             .child(pointer_guard::PointerReleaseGuard)
             .capture_key_down(|event, window, cx| {

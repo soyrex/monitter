@@ -56,6 +56,15 @@ impl PaneAppearance {
         }
         panel
     }
+
+    /// Color used by the active pane outline and its matching header divider.
+    pub(crate) fn resolved_active_border_color(&self) -> u32 {
+        if self.tile_theme == NativeTileTheme::Tern {
+            quiet_active_color(self.active_border_color, self.tile_backdrop_color)
+        } else {
+            self.active_border_color
+        }
+    }
 }
 
 /// Keep the selected palette, but give inset tiles a quieter workspace behind

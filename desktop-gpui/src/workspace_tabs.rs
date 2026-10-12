@@ -20,6 +20,44 @@ use monitter_lib::experimental_desktop::{
 use rand_core::{OsRng, RngCore};
 use serde_json::{Value, json};
 
+#[derive(Clone)]
+struct WorkspaceTabDrag {
+    id: String,
+    name: String,
+    icon: IconName,
+    color: Rgba,
+    ink: Rgba,
+    background: Rgba,
+}
+impl Render for WorkspaceTabDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().h(px(32.)).px(px(12.)).flex().items_center().gap(px(8.))
+            .rounded(px(12.)).border_1().border_color(self.color)
+            .bg(self.background).text_color(self.ink)
+            .font_family(cx.theme().font_family.clone())
+            .text_size((cx.theme().font_size - px(4.)).max(px(8.)))
+            .child(Icon::new(self.icon.clone()).with_size(px(16.)))
+            .child(self.name.clone())
+    }
+}
+fn reorderable_tab(
+    tab: Stateful<Div>,
+    drag: WorkspaceTabDrag,
+    on_drop: impl Fn(&WorkspaceTabDrag, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let target = drag.id.clone();
+    let color = drag.color;
+    tab.on_drag(drag, |drag, _, _, cx| {
+        cx.stop_propagation();
+        cx.new(|_| drag.clone())
+    })
+    .can_drop(move |value, _, _| value.downcast_ref::<WorkspaceTabDrag>()
+        .is_some_and(|source| source.id != target))
+    .drag_over::<WorkspaceTabDrag>(move |style, _, _, _|
+        style.border_color(color).bg(color.opacity(0.18)))
+    .on_drop(on_drop)
+}
+
 fn new_id() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
@@ -76,6 +114,7 @@ pub struct WorkspaceEditor {
     color: Entity<InputState>,
     icon: String,
     error: Option<String>,
+    confirm_remove: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl Desktop {
@@ -183,6 +222,7 @@ impl Desktop {
             color,
             icon: item.icon.clone(),
             error: None,
+            confirm_remove: false,
             _subscriptions: subscriptions,
         });
         cx.notify();
@@ -219,6 +259,34 @@ impl Desktop {
         self.workspaces_dirty = true;
         self.queue_preferences_save(cx);
     }
+    fn reorder_named_workspace(&mut self, source: &str, target: &str, cx: &mut Context<Self>) {
+        if !self.workspace_ready() { return; }
+        if self.named_workspaces.as_mut().is_some_and(|set|
+            monitter_gpui_desktop::workspace_order::reorder(set, source, target)) {
+            self.workspaces_dirty = true;
+            self.queue_preferences_save(cx);
+            cx.notify();
+        }
+    }
+    fn remove_named_workspace(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.workspace_ready() { return; }
+        let Some(set) = self.named_workspaces.as_ref() else { return; };
+        if set.items.len() <= 1 { return; }
+        let Some(index) = set.items.iter().position(|item| item.id == id) else { return; };
+        if set.active_id == id {
+            let neighbor = set.items[if index + 1 < set.items.len() { index + 1 } else { index - 1 }].id.clone();
+            // Commit removal only after the neighbour's layout restores successfully.
+            self.pending_workspace_removal = Some(id.into());
+            self.switch_named_workspace(neighbor, window, cx);
+            if self.workspace_switch.is_none() { self.pending_workspace_removal = None; }
+        } else {
+            monitter_gpui_desktop::workspace_order::remove(self.named_workspaces.as_mut().unwrap(), id);
+            self.workspace_editor = None;
+            self.workspaces_dirty = true;
+            self.queue_preferences_save(cx);
+        }
+        cx.notify();
+    }
     pub(super) fn render_workspace_tabs(
         &mut self,
         palette: design::Palette,
@@ -248,12 +316,6 @@ impl Desktop {
                 let id = item.id.clone();
                 let edit_id = id.clone();
                 let menu_id = id.clone();
-                let hovered = window.use_keyed_state(
-                    SharedString::from(format!("workspace-pill-hover-state-{id}")),
-                    cx,
-                    |_, _| false,
-                );
-                let is_hovered = *hovered.read(cx);
                 let is_open = self
                     .workspace_editor
                     .as_ref()
@@ -271,24 +333,22 @@ impl Desktop {
                     .clone();
                 let click_focus = focus.clone();
                 let color = rgb(design::parse_color(&item.color, palette.accent));
-                // Keep hover visibility in state because the native button
-                // reapplies its styles for semantic states.
+                let drop_id = id.clone();
+                let drag = WorkspaceTabDrag {
+                    id: id.clone(), name: item.name.clone(), icon: icon(&item.icon),
+                    color, ink: rgb(palette.ink), background: rgb(palette.panel),
+                };
                 let trigger = Button::new(SharedString::from(format!("edit-workspace-{id}")))
                     .ghost()
                     .compact()
                     .w(px(22.))
                     .h(px(22.))
                     .p_0()
-                    .icon(IconName::Pencil)
+                    .icon(icon(&item.icon))
                     .accessibility_label(format!("Edit {} workspace", item.name))
                     .tooltip("Edit workspace")
                     .disabled(!ready && !is_open)
-                    .opacity(if is_open || is_hovered || focus.is_focused(window) {
-                        1.
-                    } else {
-                        0.
-                    })
-                    .focus(|style| style.opacity(1.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, _, cx| cx.stop_propagation());
                 let editor_focus = self
                     .workspace_editor
@@ -355,16 +415,11 @@ impl Desktop {
                         .tab_index(0)
                         .focus(|style| style.border_color(color))
                         .hover(|style| style.bg(color.opacity(0.10)))
-                        .on_hover(cx.listener(move |_, value, _, cx| {
-                            let changed = hovered.update(cx, |hovered, _| {
-                                let changed = *hovered != *value;
-                                *hovered = *value;
-                                changed
-                            });
-                            if changed {
-                                cx.notify();
-                            }
-                        }))
+                        .when(ready, |tab| reorderable_tab(tab, drag,
+                            cx.listener(move |view, drag: &WorkspaceTabDrag, _, cx| {
+                                view.reorder_named_workspace(&drag.id, &drop_id, cx);
+                                cx.stop_propagation();
+                            })))
                         .role(Role::Tab)
                         .aria_selected(active)
                         .aria_label(format!(
@@ -372,11 +427,10 @@ impl Desktop {
                             item.name,
                             if active { ", selected" } else { "" }
                         ))
-                        .child(Icon::new(icon(&item.icon)).with_size(px(16.)))
+                        .child(menu)
                         .child(div().min_w_0().truncate()
                             .text_size((cx.theme().font_size - px(4.)).max(px(8.)))
                             .child(item.name.clone()))
-                        .child(menu)
                         .child(div().size(px(8.)).rounded_full().bg(color))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             click_focus.focus(window, cx);
@@ -475,6 +529,9 @@ impl Desktop {
             .w_full()
             .flex()
             .flex_col()
+            // Reclaim the row's empty lower half without moving its controls.
+            // The dock's two half-insets then supply exactly the density gutter.
+            .when(tern, |row| row.mb((px(32.) - gpui_kit::px(58.)) / 2.))
             .font_family(cx.theme().font_family.clone())
             .text_size(cx.theme().font_size)
             .text_color(rgb(palette.ink))
@@ -486,6 +543,30 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(editor) = &self.workspace_editor {
+            let can_remove = self.workspace_ready()
+                && self.named_workspaces.as_ref().is_some_and(|set| set.items.len() > 1);
+            if editor.confirm_remove {
+                let id = editor.id.clone();
+                return div().id("workspace-remove-confirmation")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .w(px(320.)).flex().flex_col().gap(px(10.))
+                    .text_color(rgb(palette.ink)).font_family(cx.theme().font_family.clone())
+                    .text_size(cx.theme().font_size)
+                    .child("Remove this workspace?")
+                    .child("Its chats and running agents will remain available.")
+                    .child(div().flex().justify_end().gap(px(5.))
+                        .child(Button::new("cancel-workspace-removal").compact().label("Cancel")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                if let Some(editor) = &mut view.workspace_editor { editor.confirm_remove = false; }
+                                cx.notify();
+                            })))
+                        .child(Button::new("confirm-workspace-removal").compact().label("Remove workspace")
+                            .disabled(!can_remove)
+                            .on_click(cx.listener(move |view, _, window, cx|
+                                view.remove_named_workspace(&id, window, cx)))))
+                    .into_any_element();
+            }
             let mut icons = div().flex().gap(px(5.));
             for choice in ["folder", "code", "terminal", "globe", "sparkles"] {
                 let selected = editor.icon == choice;
@@ -610,6 +691,13 @@ impl Desktop {
                         .as_ref()
                         .map(|error| div().text_color(rgb(0xd35e5e)).child(error.clone())),
                 )
+                .child(Button::new("remove-workspace").ghost().compact()
+                    .label("Remove workspace…").disabled(!can_remove)
+                    .tooltip(if can_remove { "Remove this workspace" } else { "Keep at least one workspace" })
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        if let Some(editor) = &mut view.workspace_editor { editor.confirm_remove = true; }
+                        cx.notify();
+                    })))
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -621,6 +709,63 @@ mod tests {
     use super::{empty_layout, loaded_workspaces, new_id};
     use monitter_lib::experimental_desktop::{NativePreferenceData, NativeWorkspace};
     use serde_json::json;
+    use gpui_kit::{AppContext as _, Context, Render, IntoElement, TestAppContext, Window,
+        MouseButton, Modifiers, SharedString, ParentElement as _, Styled as _,
+        InteractiveElement as _, StatefulInteractiveElement as _, div, point, rgb};
+    struct DragFixture {
+        set: monitter_lib::experimental_desktop::NativeWorkspaceSet,
+        clicks: usize,
+    }
+    impl Render for DragFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut row = div().w(gpui_kit::px(600.)).h(gpui_kit::px(80.)).flex().gap(gpui_kit::px(5.));
+            for item in &self.set.items {
+                let id = item.id.clone();
+                let drag = super::WorkspaceTabDrag { id: id.clone(), name: item.name.clone(),
+                    icon: gpui_kit::assets::IconName::Folder, color: rgb(0x38bfd2),
+                    ink: rgb(0xffffff), background: rgb(0x111111) };
+                let tab = div().id(SharedString::from(format!("drag-fixture-{id}")))
+                    .w(gpui_kit::px(160.)).h(gpui_kit::px(32.)).flex_shrink_0()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|view, _, _, cx| { view.clicks += 1; cx.notify(); }));
+                row = row.child(super::reorderable_tab(tab, drag, cx.listener(
+                    move |view, drag: &super::WorkspaceTabDrag, _, cx| {
+                        monitter_gpui_desktop::workspace_order::reorder(&mut view.set, &drag.id, &id);
+                        cx.stop_propagation(); cx.notify();
+                    })));
+            }
+            row
+        }
+    }
+    #[gpui::test]
+    fn workspace_drag_reorders_both_directions_without_clicking(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|_, _| DragFixture {
+            set: monitter_lib::experimental_desktop::NativeWorkspaceSet {
+                active_id: "b".into(), items: ["a", "b", "c"].into_iter().map(|id| NativeWorkspace {
+                    id: id.into(), name: id.into(), icon: "folder".into(), color: "#38BFD2".into(), layout: None,
+                }).collect(),
+            }, clicks: 0,
+        });
+        cx.run_until_parked(); cx.update(|window, cx| window.draw(cx).clear(cx));
+        for (from, to, expected) in [(80., 410., vec!["b", "c", "a"]), (410., 80., vec!["a", "b", "c"])] {
+            let start = point(gpui_kit::px(from), gpui_kit::px(16.));
+            let end = point(gpui_kit::px(to), gpui_kit::px(16.));
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+            cx.simulate_mouse_move(point(gpui_kit::px(from + 10.), gpui_kit::px(16.)), Some(MouseButton::Left), Modifiers::none());
+            cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let state = view.read(cx);
+                assert_eq!(state.set.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), expected);
+                assert_eq!(state.set.active_id, "b"); assert_eq!(state.clicks, 0);
+                window.draw(cx).clear(cx);
+            });
+        }
+        cx.simulate_click(point(gpui_kit::px(80.), gpui_kit::px(16.)), Modifiers::none());
+        cx.update(|_, cx| assert_eq!(view.read(cx).clicks, 1));
+    }
     #[test]
     fn legacy_layout_becomes_default_workspace_without_losing_panes() {
         let layout = empty_layout();

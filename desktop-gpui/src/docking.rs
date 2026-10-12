@@ -212,7 +212,7 @@ impl Panel for NativePanel {
         let appearance = appearance.filter(|_| candidate)?;
         let color = appearance.active_border_color;
         if appearance.tile_theme == NativeTileTheme::Tern {
-            let mut color = rgb(crate::pane_appearance::quiet_active_color(color, appearance.tile_backdrop_color));
+            let mut color = rgb(appearance.resolved_active_border_color());
             color.a = appearance.border_opacity as f32 / 100.;
             return Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
                 if crate::preferences_modal::workspace_blocked(cx) { return; }
