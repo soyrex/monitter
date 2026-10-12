@@ -25,6 +25,42 @@ fn spec(id: &str, lifecycle: LifecycleHook, cx: &mut Context<DockWorkspace>) -> 
 }
 
 #[gpui_kit::test]
+fn palette_layout_presets_keep_native_panels_focus_and_lifecycles(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let mut dock = None;
+    let events = Rc::new(RefCell::new(Vec::<PaneLifecycle>::new()));
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let factory: PaneFactory = Rc::new(|_, _, _| None);
+        let entity = cx.new(|cx| DockWorkspace::new("preset-test", factory, window, cx));
+        dock = Some(entity.clone());
+        gpui_kit::component::Root::new(entity, window, cx)
+    });
+    let dock = dock.unwrap();
+    visual.update(|window, cx| dock.update(cx, |dock, cx| {
+        let capture = events.clone();
+        let lifecycle: LifecycleHook = Rc::new(move |event, _, _| capture.borrow_mut().push(event));
+        for id in ["chat:first", "chat:second", "terminal:retained"] {
+            dock.add(spec(id, lifecycle.clone(), cx), DockPlacement::Center, None, window, cx).unwrap();
+        }
+        dock.focus("chat:second", window, cx);
+        let original = dock.panels.borrow().iter().map(|(id,panel)| (id.clone(),panel.entity_id())).collect::<Vec<_>>();
+        for (preset, count) in [("columns",2), ("grid",4), ("grid-3x2",6), ("grid-4x2",8), ("columns-3",3), ("columns-4",4), ("single",1)] {
+            dock.apply_layout_preset(preset, window, cx).unwrap();
+            let area = dock.area.read(cx);
+            assert_eq!(super::groups_in(area.layout(DockPlacement::Center).unwrap().root()).len(), count);
+            assert_eq!(dock.focused_pane_id(window, cx).as_deref(), Some("chat:second"));
+            for (id,key) in &original { assert_eq!(dock.panels.borrow()[id].entity_id(), *key); }
+            let ids = DockWorkspace::saved_ids(&dock.serialize(cx).unwrap()).unwrap();
+            for (id,_) in &original { assert!(ids.contains(id)); }
+            assert!(!events.borrow().iter().any(|event| matches!(event, PaneLifecycle::Removed)));
+        }
+        let before = dock.serialize(cx).unwrap();
+        assert!(dock.apply_layout_preset("bad", window, cx).is_err());
+        assert_eq!(dock.serialize(cx).unwrap(), before);
+    }));
+}
+
+#[gpui_kit::test]
 fn workspace_switch_retains_pane_identity_until_explicit_close(cx: &mut TestAppContext) {
     cx.update(|cx| gpui_kit::init(cx));
     let events = Rc::new(RefCell::new(Vec::<PaneLifecycle>::new()));

@@ -342,7 +342,8 @@ impl AgentHostPane {
             .map_err(|error| format!("Invalid host configuration: {error}"))?;
         Ok(value)
     }
-    fn select_agent(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_agent(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = Mode::Agents;
         self.agent_drafts
             .insert(text(&self.agent, "id"), self.agent_value(cx));
         if let Some(agent) = self.agent_drafts.get(id).cloned().or_else(|| {
@@ -361,6 +362,8 @@ impl AgentHostPane {
         self.error = None;
         cx.notify();
     }
+    pub(super) fn show_agents(&mut self, cx: &mut Context<Self>) { self.mode=Mode::Agents; cx.notify(); }
+    pub(super) fn show_hosts(&mut self, cx: &mut Context<Self>) { self.mode=Mode::Hosts; cx.notify(); }
     fn select_host(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Ok(host) = self.host_value(cx) {
             self.host_drafts.insert(text(&self.host, "id"), host);

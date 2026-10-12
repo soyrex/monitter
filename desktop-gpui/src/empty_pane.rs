@@ -223,6 +223,7 @@ impl Render for EmptyPane {
                 range
                     .map(|index| match &rows[index] {
                         PickerRow::Heading(label) => div()
+                            .w_full()
                             .h(px(48.))
                             .px_3()
                             .flex()
@@ -242,6 +243,7 @@ impl Render for EmptyPane {
                                 .join(" · ");
                             div()
                                 .id(SharedString::from(format!("existing-session-{id}")))
+                                .w_full()
                                 .role(Role::Button)
                                 .aria_label(format!(
                                     "Open existing chat: {} · {metadata}",
@@ -293,7 +295,11 @@ impl Render for EmptyPane {
                                     |row, at| {
                                         row.child(
                                             div()
+                                                .debug_selector({ let id = id.clone(); move || format!("empty-pane-date-{id}").into() })
+                                                .w(px(56.))
                                                 .flex_shrink_0()
+                                                .text_right()
+                                                .whitespace_nowrap()
                                                 .text_size(px(10.))
                                                 .text_color(rgb(palette.muted))
                                                 .child(at.format("%b %-d").to_string()),
@@ -312,34 +318,48 @@ impl Render for EmptyPane {
                     .collect::<Vec<_>>()
             },
         )
+        .debug_selector({ let id = self.id.clone(); move || format!("empty-pane-results-{id}").into() })
         .w_full()
-        .h(px(288.))
+        .flex_1()
+        .min_h_0()
         .track_scroll(&self.scroll);
+        let list = ScrollEdgeFade::new(
+            list,
+            self.scroll.0.borrow().base_handle.clone(),
+            Axis::Vertical,
+            gpui_kit::px(20.),
+        );
         let picker = div()
             .w_full()
-            .mt(px(24.))
+            .flex_1()
+            .min_h_0()
+            .mt(px(20.))
             .flex()
             .flex_col()
             .gap_2()
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_size(px(13.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(palette.muted))
                     .child("Open an existing chat"),
             )
             .child(
-                Input::new(&self.query)
-                    .aria_label("Search all unarchived chats")
-                    .disabled(busy),
+                div().w_full().flex_shrink_0().child(
+                    Input::new(&self.query)
+                        .aria_label("Search all unarchived chats")
+                        .disabled(busy)),
             )
             .child(list);
 
         div()
             .id(SharedString::from(format!("native-empty-pane-{}", self.id)))
+            .debug_selector({ let id = self.id.clone(); move || format!("native-empty-pane-{id}").into() })
             .size_full()
             .min_size_0()
-            .overflow_y_scroll()
+            .overflow_hidden()
+            .bg(rgba(if palette.dark { 0x0000001a } else { 0xffffff1a }))
             .flex()
             .flex_col()
             .items_center()
@@ -366,18 +386,17 @@ impl Render for EmptyPane {
             .child(
                 div()
                     .w_full()
-                    .my_auto()
-                    .flex_shrink_0()
-                    .max_w(px(620.))
+                    .flex_1()
+                    .min_h_0()
                     .min_w_0()
                     .flex()
                     .flex_col()
                     .child(
                         div()
+                            .w_full()
                             .flex()
-                            .flex_wrap()
-                            .justify_center()
-                            .gap(px(16.0))
+                            .flex_shrink_0()
+                            .gap(px(10.0))
                             .child(action_card(
                                 format!("{}-new-chat", self.id),
                                 "New chat",
@@ -439,7 +458,11 @@ fn action_card(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let group = SharedString::from(format!("empty-pane-card-{id}"));
+    let selector = format!("empty-pane-action-{id}");
     Button::new(id)
+        .debug_selector(move || selector.clone())
+        .flex_1()
+        .min_w_0()
         .group(group.clone())
         .h_auto()
         .p_0()
@@ -467,13 +490,62 @@ fn action_card(
         .child(
             div()
                 .flex()
+                .min_w_0()
                 .items_center()
+                .justify_center()
                 .rounded(px(10.0))
-                .p(px(20.0))
-                .px(px(24.0))
-                .gap(px(12.0))
-                .child(Icon::new(icon).size(px(22.0)))
-                .child(div().text_size(font_size).child(label)),
+                .py(px(14.0))
+                .px(px(10.0))
+                .gap(px(8.0))
+                .child(Icon::new(icon).size(px(22.0)).flex_shrink_0())
+                .child(div().min_w_0().truncate().text_size(font_size).child(label)),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{EmptyPane, PickerGroups, SessionEntry};
+    use gpui_kit::{AppContext as _, TestAppContext, px, size};
+
+    #[gpui_kit::test]
+    fn empty_pane_actions_stay_in_three_columns_and_results_fill_height(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut pane = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| EmptyPane::new("layout", window, cx));
+            pane = Some(view.clone());
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let pane = pane.unwrap();
+        let sessions = PickerGroups { running: vec![], recent: (0..30).map(|i| SessionEntry {
+            id: format!("session-{i}"), title: if i == 0 { "A very long chat title that must truncate within its row".into() } else { "Chat".into() },
+            agent_name: "Codex".into(), project_name: "Monitter".into(), search_text: "chat".into(),
+            updated_at: 1_791_831_000_000 - i * 86_400_000, status: "idle".into(),
+        }).collect() };
+        cx.update(|_, cx| pane.update(cx, |pane, cx| pane.set_sessions(&sessions, cx)));
+        let mut short_height = None;
+        for (width, height) in [(320., 500.), (640., 800.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.run_until_parked(); cx.update(|window, cx| window.draw(cx).clear(cx));
+            let actions: Vec<_> = ["empty-pane-action-layout-new-chat", "empty-pane-action-layout-new-terminal", "empty-pane-action-layout-new-browser"].into_iter()
+                .map(|selector| cx.debug_bounds(selector)
+                    .expect("action has native layout bounds")).collect();
+            assert!((actions[0].top() - actions[2].top()).abs() < px(1.));
+            assert!((actions[0].size.width - actions[2].size.width).abs() < px(1.));
+            assert!(actions[0].right() < actions[1].left() && actions[1].right() < actions[2].left());
+            let results = cx.debug_bounds("empty-pane-results-layout").unwrap();
+            let root = cx.debug_bounds("native-empty-pane-layout").unwrap();
+            assert!((results.bottom() - (root.bottom() - super::px(20.))).abs() < px(1.));
+            let first_date = cx.debug_bounds("empty-pane-date-session-0").unwrap();
+            let second_date = cx.debug_bounds("empty-pane-date-session-1").unwrap();
+            assert!((first_date.right() - second_date.right()).abs() < px(1.));
+            assert!(first_date.right() <= results.right());
+            if let Some(previous) = short_height { assert!(results.size.height > previous + px(200.)); }
+            else { short_height = Some(results.size.height); }
+            // The list remains a scroll surface instead of growing the whole pane.
+            let offset = cx.update(|_, cx| pane.read(cx).scroll.0.borrow().base_handle.max_offset().y);
+            assert!(offset > px(0.));
+        }
+    }
 }

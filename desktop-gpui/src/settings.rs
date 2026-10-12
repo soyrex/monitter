@@ -11,7 +11,7 @@ use gpui_kit::component::{
 use monitter_lib::experimental_desktop::{NativeAppearance, NativeTileTheme};
 use std::collections::HashSet;
 #[path = "native_appearance.rs"]
-mod native_appearance;
+pub(super) mod native_appearance;
 #[path = "settings_appearance.rs"]
 mod settings_appearance;
 #[path = "settings_general.rs"]
@@ -176,6 +176,7 @@ pub(super) struct NativeSettings {
     errors: HashMap<String, String>,
 }
 impl NativeSettings {
+    pub(super) fn select_category(&mut self, category: &str) { self.category = category.into(); }
     pub(super) fn select_general(&mut self) {self.category="profile".into();}
     pub fn new(settings: &Value, window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let mut families = cx.text_system().all_font_names();
@@ -590,7 +591,7 @@ impl Desktop {
         }
         palette
     }
-    fn patch_settings(&mut self, patch: Value, cx: &mut Context<Self>) {
+    pub(super) fn patch_settings(&mut self, patch: Value, cx: &mut Context<Self>) {
         let Some(mut settings) = self
             .snapshot
             .get("settings")

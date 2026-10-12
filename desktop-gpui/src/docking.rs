@@ -1306,6 +1306,79 @@ impl DockWorkspace {
         true
     }
 
+    /// Arrange retained panes into a legacy layout preset without closing them.
+    pub fn apply_layout_preset(
+        &mut self,
+        preset: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let (columns, rows) = match preset {
+            "single" => (1, 1), "columns" => (2, 1), "columns-3" => (3, 1),
+            "columns-4" => (4, 1), "grid" => (2, 2), "grid-3x2" => (3, 2),
+            "grid-4x2" => (4, 2), _ => return Err("Unknown pane layout preset.".into()),
+        };
+        let focused = self.focused_pane_id(window, cx);
+        let mut groups = {
+            let area = self.area.read(cx);
+            [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+                .into_iter().filter_map(|placement| area.layout(placement))
+                .flat_map(|tree| groups_in(tree.root()))
+                .filter(|group| !group.panels.is_empty())
+                .map(|group| (group.panels, group.active_ix)).collect::<Vec<_>>()
+        };
+        let count = columns * rows;
+        // Match the legacy presets: excess panes become tabs in the first
+        // group. Retain every existing panel and its task/terminal lifecycle.
+        if groups.len() > count {
+            let overflow = groups.split_off(count);
+            groups[0].0.extend(overflow.into_iter().flat_map(|group| group.0));
+        }
+        while groups.len() < count {
+            let mut n = 1;
+            let id = loop {
+                let id = format!("{EMPTY_TAB_PREFIX}preset-{n}");
+                if !self.contains(&id) { break id; }
+                n += 1;
+            };
+            let spec = self.empty_spec(&id, window, cx)?;
+            let panel = self.retain(spec, cx)?;
+            groups.push((vec![PanelId::from(panel.entity_id())], 0));
+        }
+        let retained = self.panels.borrow().values().map(|panel|
+            (PanelId::from(panel.entity_id()), panel.clone())).collect::<HashMap<_, _>>();
+        let mut cells = Vec::new();
+        for (keys, active) in groups {
+            let mut tabs = DockLayout::tabs();
+            for key in keys {
+                let panel = retained.get(&key).ok_or("A pane is no longer available.")?;
+                tabs = tabs.panel_view(panel_handle(panel.clone()), cx);
+            }
+            cells.push(tabs.active_index(active));
+        }
+        let mut row_layouts = Vec::new();
+        let mut cells = cells.into_iter();
+        for _ in 0..rows {
+            let row_cells = cells.by_ref().take(columns).collect::<Vec<_>>();
+            let row = if columns == 1 { row_cells.into_iter().next().unwrap() }
+                else { row_cells.into_iter().fold(DockLayout::h_split(), |row, cell| row.child(cell, None)) };
+            row_layouts.push(row);
+        }
+        let layout = if rows == 1 { row_layouts.into_iter().next().unwrap() }
+            else { row_layouts.into_iter().fold(DockLayout::v_split(), |layout, row| layout.child(row, None)) };
+        self.retaining_layout.set(true);
+        self.area.update(cx, |area, cx| {
+            area.set_center(layout, window, cx);
+            for placement in [DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom] {
+                area.remove_dock(placement, window, cx);
+            }
+        });
+        self.retaining_layout.set(false);
+        if let Some(id) = focused { self.focus(&id, window, cx); }
+        cx.notify();
+        Ok(())
+    }
+
     /// Equalize nested split shares in place, keeping all native entities,
     /// active tabs, focus, terminals and composers throughout the transition.
     pub fn equalize_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1461,6 +1534,9 @@ impl DockWorkspace {
                 }
             });
         }
+    }
+    pub fn pane_title(&self, id: &str, cx: &App) -> Option<SharedString> {
+        self.panels.borrow().get(id).map(|panel| panel.read(cx).spec.title.clone())
     }
     pub fn focus(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(panel) = self.panels.borrow().get(id).cloned() else {

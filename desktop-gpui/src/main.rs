@@ -38,6 +38,7 @@ mod fork_dialog;
 mod chat_voice;
 mod collaboration;
 mod command_palette;
+mod palette_catalog;
 mod companion_sidebar;
 mod composer_footer;
 mod composer_git;
@@ -261,6 +262,8 @@ struct Desktop {
     dock: Entity<docking::DockWorkspace>,
     palette: Option<Entity<command_palette::CommandPalette>>,
     palette_subscription: Option<Subscription>,
+    palette_terminal_sessions: Vec<Value>,
+    palette_terminals_loading: bool,
     _layout_subscription: Subscription,
     _activation_subscription: Subscription,
     sidebar_resize: Entity<ResizableState>,
@@ -599,6 +602,8 @@ impl Desktop {
             sidebar_tabs_motion: Default::default(),
             palette: None,
             palette_subscription: None,
+            palette_terminal_sessions: vec![],
+            palette_terminals_loading: false,
             _layout_subscription: layout_subscription,
             _activation_subscription: activation_subscription,
             preferences: None,
@@ -1640,7 +1645,7 @@ impl Desktop {
         }
         if let Some(palette) = &self.palette {
             if palette.read(cx).is_open() {
-                let entries = self.palette_entries(palette.read(cx).mode());
+                let entries = self.palette_entries(palette.read(cx).mode(), cx);
                 let result = palette.update(cx, |palette, cx| palette.set_entries(entries, cx));
                 if let Err(error) = result {
                     self.error = Some(error);
@@ -1892,120 +1897,8 @@ impl Desktop {
             ("git", "Repository", Sidebar::Git),
         ]
     }
-    fn palette_entries(
-        &self,
-        mode: command_palette::PaletteMode,
-    ) -> Vec<command_palette::PaletteEntry> {
-        use command_palette::{EntryKind, PaletteEntry, PaletteMode};
-        let mut entries: Vec<_> = Self::palette_routes()
-            .into_iter()
-            .map(|(id, label, _)| PaletteEntry {
-                id: format!("route:{id}"),
-                label: label.into(),
-                subtitle: "Open native workspace surface".into(),
-                kind: EntryKind::Route,
-                keywords: String::new(),
-                disabled: self.service.is_none(),
-                checked: None,
-            })
-            .collect();
-        if mode == PaletteMode::Switch {
-            let mut tasks = rows(&self.snapshot, "tasks");
-            tasks.retain(|task| task["channelId"].as_str().is_none());
-            tasks.sort_by_key(|task| std::cmp::Reverse(task["updatedAt"].as_i64().unwrap_or(0)));
-            for task in tasks {
-                let archived = task["archived"].as_bool() == Some(true);
-                let agent = rows(&self.snapshot, "agents")
-                    .into_iter()
-                    .find(|agent| field(agent, "id") == field(&task, "agentId"));
-                if !agent
-                    .as_ref()
-                    .is_some_and(|agent| agent["internal"].as_bool() != Some(true))
-                {
-                    continue;
-                }
-                entries.push(PaletteEntry {
-                    id: format!("task:{}", field(&task, "id")),
-                    label: field(&task, "title"),
-                    subtitle: format!(
-                        "{}{}",
-                        if archived {
-                            "Restore archived chat · "
-                        } else {
-                            ""
-                        },
-                        agent
-                            .map(|agent| field(&agent, "name"))
-                            .unwrap_or_else(|| field(&task, "archivedAgentName"))
-                    ),
-                    kind: if archived {
-                        EntryKind::ArchivedTask
-                    } else {
-                        EntryKind::Task
-                    },
-                    keywords: format!(
-                        "{} {} {}",
-                        field(&task, "provider"),
-                        field(&task, "model"),
-                        field(&task, "cwd")
-                    ),
-                    disabled: archived && self.busy,
-                    checked: None,
-                });
-            }
-        } else {
-            for theme in ["light", "dark", "system"] {
-                entries.push(PaletteEntry {
-                    id: format!("theme:{theme}"),
-                    label: format!("{theme} theme"),
-                    subtitle: "Saved workspace appearance".into(),
-                    kind: EntryKind::Command,
-                    keywords: "appearance color".into(),
-                    disabled: self.busy || self.service.is_none(),
-                    checked: Some(field(&self.snapshot["settings"], "theme") == theme),
-                });
-            }
-            for (id, label) in [
-                ("monitter", "Live workspace palette"),
-                ("reference", "Warm paper palette"),
-            ] {
-                entries.push(PaletteEntry {
-                    id: format!("native-palette:{id}"),
-                    label: label.into(),
-                    subtitle: "Private native appearance preference".into(),
-                    kind: EntryKind::Command,
-                    keywords: "appearance theme".into(),
-                    disabled: false,
-                    checked: Some(self.native_theme_preset == id),
-                });
-            }
-            if let Some(task) = rows(&self.snapshot, "tasks")
-                .iter()
-                .find(|task| Some(field(task, "id")) == self.selected)
-            {
-                let running = field(task, "status") == "running";
-                entries.push(PaletteEntry {
-                    id: if running {
-                        "current:stop"
-                    } else {
-                        "current:archive"
-                    }
-                    .into(),
-                    label: if running {
-                        "Stop current chat"
-                    } else {
-                        "Archive current chat"
-                    }
-                    .into(),
-                    subtitle: field(task, "title"),
-                    kind: EntryKind::Command,
-                    keywords: String::new(),
-                    disabled: self.busy,
-                    checked: None,
-                });
-            }
-        }
-        entries
+    fn palette_entries(&self, _mode: command_palette::PaletteMode, cx: &App) -> Vec<command_palette::PaletteEntry> {
+        palette_catalog::entries(self, cx)
     }
     fn open_palette(
         &mut self,
@@ -2032,7 +1925,28 @@ impl Desktop {
                 );
             self.palette = Some(pane);
         }
-        let entries = self.palette_entries(mode);
+        if !self.palette_terminals_loading {
+            if let Some(service)=self.service.clone() {
+                self.palette_terminals_loading=true;
+                let lookup=cx.background_executor().spawn(async move {service.invoke("list_terminals",json!({}))});
+                cx.spawn(async move |view,cx| {
+                    let result=lookup.await;
+                    let _=view.update(cx,|view,cx| {
+                        view.palette_terminals_loading=false;
+                        match result {
+                            Ok(value)=>view.palette_terminal_sessions=value.as_array().cloned().unwrap_or_default(),
+                            Err(error)=>{view.error=Some(format!("Terminal palette lookup: {error}"));}
+                        }
+                        if let Some(palette)=view.palette.clone() {
+                            let entries=view.palette_entries(palette.read(cx).mode(),cx);
+                            if let Err(error)=palette.update(cx,|palette,cx|palette.set_entries(entries,cx)){view.error=Some(error);}
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+            }
+        }
+        let entries = self.palette_entries(mode, cx);
         let result = self
             .palette
             .as_ref()
@@ -2058,7 +1972,7 @@ impl Desktop {
             .map(|pane| pane.read(cx).mode())
             .unwrap_or(command_palette::PaletteMode::Switch);
         let current = self
-            .palette_entries(mode)
+            .palette_entries(mode, cx)
             .into_iter()
             .find(|current| current.id == entry.id && !current.disabled);
         let Some(entry) = current.as_ref() else {
@@ -2068,6 +1982,7 @@ impl Desktop {
             );
             return;
         };
+        if self.execute_catalog_entry(entry, window, cx) { return; }
         if let Some(route) = entry.id.strip_prefix("route:") {
             if let Some((_, _, surface)) = Self::palette_routes()
                 .into_iter()
@@ -2584,16 +2499,24 @@ impl Desktop {
         } else { self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width).map(expanded_sidebar_width).unwrap_or(252.0) };
         if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
             let spacing = design::tern_spacing(&self.snapshot["settings"]);
+            // Keep the newer flush sidebar edge while it slides out; restore
+            // the hidden workspace gutter continuously near zero width.
+            let edge = (width / design::compact_sidebar_width_design(self.sidebar_scale)).clamp(0., 1.);
             let tabs = self.render_workspace_tabs(palette, window, cx);
             let column = div().size_full().flex().flex_col().min_w_0()
                 .child(tabs)
-                .child(div().flex_1().min_h_0().w_full()
+                .child(div().flex_1().min_h_0().w_full().flex()
                     .border(design::ui_scaled_px(spacing.outer_padding()))
                     // The dock frame and its tiles already provide two half
                     // gutters between the workspace tabs and the pane edge.
                     .border_t_0()
+                    .border_l(design::ui_scaled_px(spacing.outer_padding() * (1. - edge)))
                     .border_color(rgba(0x00000000))
-                    .child(content));
+                    .child(div().flex_1().min_w_0().h_full()
+                        // Cancel the dock frame and tile's left half-gutters
+                        // only at the sidebar divider. Other pane gaps stay intact.
+                        .ml(-design::ui_scaled_px(spacing.gutter * edge))
+                        .child(content)));
             return sidebar_split_with_visibility(&self.sidebar_resize, width, self.sidebar_scale, sidebar, column.into_any_element(), self.sidebar_is_hidden() && !self.sidebar_motion.active(), self.sidebar_motion.active());
         }
         sidebar_split_with_visibility(&self.sidebar_resize, width, self.sidebar_scale, sidebar, content, false, self.sidebar_motion.active())

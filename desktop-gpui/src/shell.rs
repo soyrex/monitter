@@ -379,7 +379,8 @@ impl Desktop {
             .flex_col()
             .gap(px(design::space::TIGHT))
             .px(px(design::space::INSET))
-            .py(px(design::space::INSET));
+            .py(px(design::space::INSET))
+            .when(tern, |tree| tree.pt_0());
         if self.sidebar_view == SidebarView::Agents {
             for agent in agents {
                 let id = field(agent, "id");
@@ -690,20 +691,25 @@ impl Desktop {
             let next_view = tab.view;
             let active = active_view == tab.view;
             tern_view_toggles = tern_view_toggles.child(
-                Button::new(SharedString::from(format!(
+                div().rounded(px(4.)).overflow_hidden().border_1()
+                    .border_color(rgb(palette.accent).opacity(if active { 0.65 } else { 0. }))
+                    .bg(rgb(palette.accent).opacity(if active { 0.14 } else { 0. }))
+                    .child(Button::new(SharedString::from(format!(
                     "tern-sidebar-view-{}",
                     tab.label.to_ascii_lowercase()
                 )))
                     .ghost()
                     .compact()
-                    .icon(Icon::default().data(tab.icon).with_size(design::ui_scaled_px(16.)))
+                    .icon(Icon::default().data(tab.icon).with_size(design::ui_scaled_px(16.))
+                        .text_color(rgb(if active { palette.accent } else { palette.ink })))
                     .tooltip(tab.label)
                     .accessibility_label(tab.label)
-                    .when(active, |button| button.outline())
+                    .toggled(active)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |desktop, _, _, cx| {
                         desktop.sidebar_view = next_view;
                         cx.notify();
-                    })),
+                    }))),
             );
         }
 
@@ -819,8 +825,8 @@ impl Desktop {
                 .id("tern-sidebar-titlebar-row")
                 .absolute()
                 .top(px(-outer_pad))
-                .left_0()
-                .right_0()
+                .left(px(-outer_pad))
+                .right(px(-outer_pad))
                 .h(gpui_kit::px(58.))
                 .pl(gpui_kit::px(82.))
                 .flex()

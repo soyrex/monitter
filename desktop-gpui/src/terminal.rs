@@ -544,6 +544,7 @@ fn initial_operations(mode: &PaneMode) -> VecDeque<Operation> {
     }
 }
 impl TerminalPane {
+    pub(super) fn palette_sessions(&self) -> &[Value] { &self.sessions }
     pub(crate) fn foreground_surface(&self) -> Rgba {
         rgb(PALETTES[self.palette].foreground)
     }

@@ -4,11 +4,8 @@ use super::*;
 use gpui_kit::{
     assets::__private as icons_assets,
     component::{Icon, Sizable, hover_card::HoverCard, tooltip::Tooltip, button::*},
-    Image,
 };
-use std::{sync::Arc, rc::Rc};
-
-pub(super) fn brand_mark() -> Arc<Image> { branding::mark() }
+use std::rc::Rc;
 
 fn icon_button(
     id: impl Into<SharedString>,

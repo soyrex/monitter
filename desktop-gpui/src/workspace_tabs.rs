@@ -135,7 +135,7 @@ impl Desktop {
             && !self.closing
             && !self.close_pending
     }
-    fn switch_named_workspace(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn switch_named_workspace(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.workspace_ready()
             || self
                 .named_workspaces
@@ -231,6 +231,7 @@ impl Desktop {
         let Some(editor) = &mut self.workspace_editor else {
             return;
         };
+        if editor.confirm_remove { return; }
         let name = editor.name.read(cx).value().trim().to_owned();
         let color = editor.color.read(cx).value().trim().to_owned();
         if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
@@ -335,7 +336,7 @@ impl Desktop {
                 let color = rgb(design::parse_color(&item.color, palette.accent));
                 let selection_chrome = crate::chrome_motion::selection_chrome(
                     SharedString::from(format!("workspace-selection-motion-{id}")), active,
-                    color, px(if tern { 12. } else { 5. }), window, cx,
+                    color, px(4.), window, cx,
                 );
                 let drop_id = id.clone();
                 let drag = WorkspaceTabDrag {
@@ -402,7 +403,7 @@ impl Desktop {
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .rounded(px(if tern { 12. } else { 5. }))
+                        .rounded(px(4.))
                         .border_1()
                         .border_color(rgb(palette.line).opacity(0.))
                         .text_color(rgb(if active { palette.ink } else { palette.muted }))

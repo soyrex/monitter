@@ -4054,6 +4054,7 @@ impl ChatPane {
             .child(identity_mark)
             .child(div().flex_1().min_w_0().flex().flex_col().child(
                 div().text_size(px(13.2))
+                    .when(tern_tiles, |title| title.relative().top(px(2.)))
                     .font_weight(if tern_tiles { FontWeight::MEDIUM } else { FontWeight::BOLD })
                     .truncate().child(title),
             ));

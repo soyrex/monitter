@@ -35,8 +35,13 @@ gpui_kit::assets::icon_assets!(
         Palette,
         Database,
         Layers,
-        Folder
-        ,Activity
+        Folder,
+        Activity,
+        Command,
+        LayoutGrid,
+        Archive,
+        Radio,
+        PanelsTopLeft
     ]
 );
 pub struct DesktopIcons;
@@ -92,6 +97,11 @@ mod tests {
             gpui_kit::assets::IconName::Layers,
             gpui_kit::assets::IconName::Folder,
             gpui_kit::assets::IconName::Activity,
+            gpui_kit::assets::IconName::Command,
+            gpui_kit::assets::IconName::LayoutGrid,
+            gpui_kit::assets::IconName::Archive,
+            gpui_kit::assets::IconName::Radio,
+            gpui_kit::assets::IconName::PanelsTopLeft,
         ] {
             let path = icon.path();
             let bytes = DesktopIcons
