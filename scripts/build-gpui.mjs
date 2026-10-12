@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
@@ -94,7 +94,8 @@ copyFileSync(icon, join(resources, 'AppIcon.icns'));
 const lanWeb = join(root, 'build');
 const lanAssets = existsSync(join(lanWeb, 'index.html'));
 if (lanAssets) {
-  cpSync(lanWeb, join(resources, 'lan-web'), { recursive: true });
+  // Worktrees may share the web build through a symlink; bundles must own it.
+  cpSync(realpathSync(lanWeb), join(resources, 'lan-web'), { recursive: true });
 } else {
   console.warn('LAN client assets are absent. Build the web client before testing native LAN access.');
 }
@@ -138,7 +139,7 @@ mkdirSync(join(serverContents, 'MacOS'), { recursive: true });
 mkdirSync(join(serverContents, 'Resources'), { recursive: true });
 copyFileSync(serverBinary, join(serverContents, 'MacOS', 'monitter-gpui-server'));
 copyFileSync(icon, join(serverContents, 'Resources', 'AppIcon.icns'));
-if (lanAssets) cpSync(lanWeb, join(serverContents, 'Resources', 'lan-web'), { recursive: true });
+if (lanAssets) cpSync(realpathSync(lanWeb), join(serverContents, 'Resources', 'lan-web'), { recursive: true });
 writeFileSync(join(serverContents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
