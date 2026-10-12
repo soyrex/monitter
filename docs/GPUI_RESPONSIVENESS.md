@@ -100,4 +100,17 @@ The second optimized pass at `5b758f3` eliminated repeated transcript preparatio
 
 A second native stack sample identified the next cost: `TaskActivityPane::set_context` cloned entire message/event histories before calculating current computer activity. Its calculation only needs user timestamps and event fields. That path accounted for 331 of 3,245 main-thread samples; body reconciliation still had full-history equality checks and shared-handle vector copies. Snapshot destruction and transcript projection work had fallen substantially. Sample counts are inclusive observations, not measured durations.
 
-Final streaming-repair validation remains in progress. No installed-app performance claim follows from these isolated fixtures; the user's live GUI and persistent backend are not replaced by this worktree.
+The activity repair at `a7df249` passes all 124 selected regressions. Coverage includes actual GPUI composer/viewport isolation, streamed-row remount and current Copy text, scrollback and return-to-bottom, current-turn computer activity, deferred activity fallback, native outline lifecycle, browser visibility coalescing, native publication ordering/reset/removal, and approval scoping. This is focused verification, not a claim that every repository test was run.
+
+Both optimized configurations build successfully from clean source at `a7df249f2c8c32a6da3117dbdf6d041d304e6385`:
+
+| Candidate | Package under `artifacts/gpui/release/` | Desktop SHA-256 |
+| --- | --- | --- |
+| Normal release, profiling and visual export disabled | `build-1791833894391/Monitter GPUI.app` | `69977b4fb81e9222eff03748cd8ec969bcd89446970a7642dfa0f9f41e2f7ea4` |
+| Optimized profiling release, visual export disabled | `build-1791832923865/Monitter GPUI.app` | `5c46e15f389d8e272052425ce9342565298bac455b162c591c0c07fbe61e9fa0` |
+
+The normal package is arm64; its actual executable hash matches the build manifest. Its app and server bundles pass strict deep code-signature verification. Neither package has been installed by this repair task.
+
+Final native verification of the activity repair is still pending. The first attempted observation changed width, companion visibility, and detail settings during an interrupted input sequence; its draft completion was not verified. A fresh repeat then received unexpected draft input before the intended sequence. It was stopped to avoid competing desktop input. These runs are explicitly excluded in their `observation-status.json` files. Fixture source was checked: drafts and pane layout are memory-only and are not restored from a prior process. An uninterrupted desktop interval was requested before trying again. The last valid heavy-streaming measurement remains the `5b758f3` result above; no further measured improvement is attributed to `a7df249` yet.
+
+No installed-app performance claim follows from these isolated fixtures. The persistent backend remained running throughout this work. The main GPUI checkout and installed GUI continued changing in other sessions, so these repair commits need integration against the current checkout before installation; the packaged candidate must not silently replace those concurrent changes.
