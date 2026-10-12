@@ -8,7 +8,7 @@ use gpui_kit::{
     App, AppContext as _, Context, Empty, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, Render, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
-use gpui_kit::{Modifiers, MouseButton, Styled as _, ParentElement as _};
+use gpui_kit::{Modifiers, MouseButton, Styled as _, ParentElement as _, InteractiveElement as _};
 
 const PANE_IDS: [&str; 4] = [
     "chat:drag-fixture-a",
@@ -66,8 +66,10 @@ impl Focusable for DragTab {
 }
 
 impl Render for DragTab {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(Empty)
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().track_focus(&self.focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|pane, _, window, cx| window.focus(&pane.focus, cx)))
+            .child(Empty)
     }
 }
 
@@ -219,4 +221,52 @@ fn modern_drag_reaches_both_empty_space_ends_with_toolbar_in_content(
         far_persisted_ids,
         vec![PANE_IDS[2], PANE_IDS[3], PANE_IDS[0], PANE_IDS[1]]
     );
+}
+
+
+#[gpui_kit::test]
+fn pane_body_drag_requires_command_or_control_and_uses_native_drop(cx: &mut TestAppContext) {
+    let (area, _, cx) = setup(cx);
+    let start = point(px(600.), px(300.));
+    let moved = point(px(620.), px(300.));
+    // Plain gestures focus the retained pane, but never arm a pane drag.
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(moved, Some(MouseButton::Left), Modifiers::none());
+    assert!(!cx.update(|_, cx| cx.has_active_drag()));
+    cx.simulate_mouse_up(moved, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    for modifier in [Modifiers { platform: true, ..Modifiers::none() },
+        Modifiers { control: true, ..Modifiers::none() }] {
+        cx.simulate_modifiers_change(modifier);
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let body = cx.debug_bounds("dock-pane-body-drag-region")
+            .expect("modifier change mounts native pane body drag surface");
+        let start = body.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, modifier);
+        cx.simulate_mouse_move(start + point(px(20.), px(0.)), Some(MouseButton::Left), modifier);
+        assert!(cx.update(|_, cx| cx.has_active_drag()), "Cmd and Ctrl start native dock drags");
+        // Target the tab strip's far trailing space, retaining all four panes.
+        let target = point(px(2480.), px(17.));
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), modifier);
+        cx.simulate_mouse_up(target, MouseButton::Left, modifier);
+        cx.run_until_parked();
+        assert!(!cx.update(|_, cx| cx.has_active_drag()));
+        let state = cx.update(|_, cx| area.read(cx).dump(cx));
+        let mut ids = Vec::new();
+        persisted_native_ids(&state.center, &mut ids);
+        assert_eq!(ids.len(), PANE_IDS.len());
+        if modifier.platform {
+            assert_eq!(ids, vec![PANE_IDS[1], PANE_IDS[2], PANE_IDS[3], PANE_IDS[0]],
+                "Cmd body drag routes through native dock tab reordering");
+        }
+        cx.simulate_modifiers_change(Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("dock-pane-body-drag-region").is_none());
+        // The completed move may activate a different retained pane.
+        cx.simulate_click(point(px(600.), px(300.)), Modifiers::none());
+        cx.run_until_parked();
+    }
 }

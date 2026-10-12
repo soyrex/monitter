@@ -76,7 +76,7 @@ impl WorkspacePane {
         self.snapshot = snapshot;
         cx.notify();
     }
-    fn select(&mut self, project: Value, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select(&mut self, project: Value, window: &mut Window, cx: &mut Context<Self>) {
         let id = text(&project, "id");
         self.selected = (!id.is_empty()).then_some(id);
         self.name

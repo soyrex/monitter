@@ -8,3 +8,4 @@ pub mod streaming_display;
 pub mod session_picker;
 
 pub mod workspace_store;
+pub mod workspace_order;

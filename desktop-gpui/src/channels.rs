@@ -198,7 +198,7 @@ impl ChannelPane {
             .into_iter()
             .find(|channel| Some(field(channel, "id")) == self.selected)
     }
-    fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(previous) = &self.selected {
             self.drafts
                 .insert(previous.clone(), self.composer.read(cx).value().to_string());
@@ -238,7 +238,7 @@ impl ChannelPane {
             .update(cx, |input, cx| input.set_value(draft, window, cx));
         cx.notify();
     }
-    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.select(None, window, cx);
         self.creating = true;
         cx.notify();

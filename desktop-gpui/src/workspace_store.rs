@@ -199,4 +199,20 @@ mod tests {
         );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
+    #[test]
+    fn reordered_and_removed_workspaces_survive_reload() {
+        let path = temp(); let mut set = fixture();
+        let first = set.items[0].id.clone();
+        let mut second = set.items[0].clone();
+        second.id = "22222222-2222-4222-8222-222222222222".into(); second.name = "Second".into();
+        let second_id = second.id.clone(); set.items.push(second);
+        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern).unwrap();
+        assert!(crate::workspace_order::reorder(&mut set, &first, &second_id));
+        let revision = save_at(&path, revision, &set, NativeTileTheme::Tern).unwrap();
+        assert_eq!(load_at(&path).unwrap().1, Some(set.clone()));
+        assert!(crate::workspace_order::remove(&mut set, &first));
+        save_at(&path, revision, &set, NativeTileTheme::Tern).unwrap();
+        assert_eq!(load_at(&path).unwrap().1, Some(set));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }

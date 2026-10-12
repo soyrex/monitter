@@ -4,11 +4,8 @@ use super::*;
 use gpui_kit::{
     assets::__private as icons_assets,
     component::{Icon, Sizable, hover_card::HoverCard, tooltip::Tooltip, button::*},
-    Image,
 };
-use std::{sync::Arc, rc::Rc};
-
-pub(super) fn brand_mark() -> Arc<Image> { branding::mark() }
+use std::rc::Rc;
 
 fn icon_button(
     id: impl Into<SharedString>,
@@ -187,9 +184,6 @@ pub(super) fn render(
                 .pt(gpui_kit::px(38.))
                 .child(icon_button("compact-sidebar-hide", "Hide sidebar", icons_assets::ChevronLeft.1,
                     false, palette, |view, window, cx| view.toggle_sidebar(window, cx), cx))
-                .child(div().id("compact-brand-mark").w(px(32.)).h(px(32.)).flex().items_center().justify_center()
-                    .managed_tooltip(|window, cx| Tooltip::new("Monitter").build(window, cx)).aria_label("Monitter")
-                    .child(img(brand_mark()).w(px(23.)).h(px(23.))))
                 .child(views)
                 .child(div().h(px(1.)).w(px(28.)).bg(rgb(palette.line)))
                 .child(ScrollEdgeFade::new(chat_icons, chat_scroll, Axis::Vertical, gpui_kit::px(20.)))
@@ -222,9 +216,6 @@ pub(super) fn render(
         .bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar))
         .child(icon_button("compact-sidebar-expand", "Expand sidebar", icons_assets::ChevronRight.1,
             false, palette, |view, window, cx| view.toggle_sidebar(window, cx), cx))
-        .child(div().id("compact-brand-mark").w(px(32.)).h(px(32.)).flex().items_center().justify_center()
-            .managed_tooltip(|window, cx| Tooltip::new("Monitter").build(window, cx)).aria_label("Monitter")
-            .child(img(brand_mark()).w(px(23.)).h(px(23.))))
         .child(views)
         .child(div().h(px(1.)).w(px(28.)).bg(rgb(palette.line)))
         .child(ScrollEdgeFade::new(chat_icons, chat_scroll, Axis::Vertical, gpui_kit::px(20.)))

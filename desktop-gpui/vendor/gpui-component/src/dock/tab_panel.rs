@@ -80,6 +80,20 @@ pub fn pane_menu(
         })
 }
 
+fn pane_move_modifier(modifiers: gpui::Modifiers) -> bool {
+    modifiers.platform || modifiers.control
+}
+
+fn drop_placement_label(placement: Option<crate::Placement>) -> &'static str {
+    match placement {
+        Some(crate::Placement::Top) => "Top",
+        Some(crate::Placement::Bottom) => "Bottom",
+        Some(crate::Placement::Left) => "Left",
+        Some(crate::Placement::Right) => "Right",
+        None => "Center",
+    }
+}
+
 /// Names the tab bar's zoom button in the debug-bounds map, so a test can ask
 /// a really-drawn frame whether the control was offered.
 const ZOOM_CONTROL_SELECTOR: &str = "dock-tab-bar-zoom-control";
@@ -96,6 +110,7 @@ const DRAG_PREVIEW_SIZE: gpui::Size<gpui::Pixels> = gpui::size(px(96.), px(30.))
 /// `gpui_base::dock::DragPanel` is the payload and draws nothing; this is the
 /// appearance half, reintroduced here.
 pub struct DragPanelPreview {
+    radius: Pixels,
     panel: Arc<dyn gpui_base::dock::PanelView>,
 }
 
@@ -109,9 +124,9 @@ impl Render for DragPanelPreview {
             .w_24()
             .overflow_hidden()
             .whitespace_nowrap()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
+            .border_2()
+            .border_color(cx.theme().primary)
+            .rounded(self.radius)
             .text_color(cx.theme().tab_foreground)
             .bg(cx.theme().tokens.tab_active)
             .opacity(0.75)
@@ -209,6 +224,7 @@ fn tab_drag(group: &TabGroupContext, ix: usize, cx: &App) -> Option<DragPanel> {
 /// Make the noninteractive part of a pane header an ordinary native dock drag
 /// target. Callers keep buttons and editable fields outside this region.
 pub fn pane_drag_region(region: Div, group: &TabGroupContext, cx: &App) -> Stateful<Div> {
+    let radius = group.drag_preview_radius();
     let panel = group.active_panel().cloned();
     let drag = panel.as_ref().and_then(|panel| {
         group.panels().iter().position(|candidate| candidate.panel_id(cx) == panel.panel_id(cx))
@@ -220,13 +236,14 @@ pub fn pane_drag_region(region: Div, group: &TabGroupContext, cx: &App) -> State
             cx.stop_propagation();
             drag.set_drag_offset(offset);
             drag.set_preview_size(DRAG_PREVIEW_SIZE);
-            cx.new(|_| DragPanelPreview { panel: panel.clone().expect("drag has a panel") })
+            cx.new(|_| DragPanelPreview { radius, panel: panel.clone().expect("drag has a panel") })
         }))
 }
 
 /// Move and close the owning active pane through the ordinary dock lifecycle.
 /// Reusable in a pane's own header and the skin's floating corner controls.
 pub fn pane_controls(group: &TabGroupContext, cx: &App) -> AnyElement {
+    let radius = group.drag_preview_radius();
     let panel = group.active_panel().cloned();
     let panel_id = panel.as_ref().map(|panel| panel.panel_id(cx));
     let drag = panel.as_ref().and_then(|panel| {
@@ -243,7 +260,7 @@ pub fn pane_controls(group: &TabGroupContext, cx: &App) -> AnyElement {
                 cx.stop_propagation();
                 drag.set_drag_offset(offset);
                 drag.set_preview_size(DRAG_PREVIEW_SIZE);
-                cx.new(|_| DragPanelPreview { panel: panel.clone().expect("drag has a panel") })
+                cx.new(|_| DragPanelPreview { radius, panel: panel.clone().expect("drag has a panel") })
             })))
         .child(Button::new("pane-close").icon(IconName::Close).small().ghost()
             .disabled(!group.is_closable()).tooltip("Close pane").accessibility_label("Close pane")
@@ -491,11 +508,13 @@ impl TabGroupSkin {
                     .when_some(drag, |this, drag| {
                         this.on_drag(drag, {
                             let panel = panel.clone();
+                            let radius = group.drag_preview_radius();
                             move |drag, offset, _, cx| {
                                 cx.stop_propagation();
                                 drag.set_drag_offset(offset);
                                 drag.set_preview_size(DRAG_PREVIEW_SIZE);
                                 cx.new(|_| DragPanelPreview {
+                                    radius,
                                     panel: panel.clone(),
                                 })
                             }
@@ -788,11 +807,13 @@ impl TabGroupSkin {
                                 this.when_some(drag, |this, drag| {
                                     this.on_drag(drag, {
                                         let panel = panel.clone();
+                                        let radius = group.drag_preview_radius();
                                         move |drag, offset, _, cx| {
                                             cx.stop_propagation();
                                             drag.set_drag_offset(offset);
                                             drag.set_preview_size(DRAG_PREVIEW_SIZE);
                                             cx.new(|_| DragPanelPreview {
+                                                radius,
                                                 panel: panel.clone(),
                                             })
                                         }
@@ -996,7 +1017,13 @@ fn rounded_tile_mask(radius: Pixels, backdrop: gpui::Hsla, edge: gpui::Hsla) -> 
     }).absolute().inset_0().into_any_element()
 }
 
+fn tile_radius(style: DockTileStyle) -> Pixels {
+    match style { DockTileStyle::Rounded { radius, .. } => radius, _ => px(0.) }
+}
+
 impl TabGroupRenderer for TabGroupSkin {
+    fn drag_preview_radius(&self) -> Pixels { tile_radius(self.shared.tile_style()) }
+
     fn drop_placement(&self, placement: Option<crate::Placement>) -> Option<crate::Placement> {
         if self.shared.panel_style() == PanelStyle::Hidden { placement.or(Some(crate::Placement::Right)) }
         else { placement }
@@ -1124,15 +1151,19 @@ impl TabGroupRenderer for TabGroupSkin {
         &self,
         panel: AnyView,
         group: &TabGroupContext,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         if group.is_collapsed() {
             return Empty.into_any_element();
         }
 
+        let radius = group.drag_preview_radius();
         let content = div()
             .id("tab-content")
+            // A native overlay owns gestures only while the move modifier is
+            // held. Ordinary pane descendants receive all unmodified events.
+            .on_modifiers_changed(|_, window, _| window.refresh())
             .relative()
             .overflow_y_scroll()
             .overflow_x_hidden()
@@ -1151,6 +1182,23 @@ impl TabGroupRenderer for TabGroupSkin {
                     .child(div().invisible().group_hover(hover_group, |style| style.visible())
                         .child(pane_controls(group, cx))))
             })
+            .when(pane_move_modifier(window.modifiers()), |this| {
+                let panel = group.active_panel().cloned();
+                let drag = panel.as_ref().and_then(|panel| {
+                    group.panels().iter().position(|candidate| candidate.panel_id(cx) == panel.panel_id(cx))
+                        .and_then(|ix| tab_drag(group, ix, cx))
+                });
+                this.when_some(drag, |this, drag| {
+                    this.child(div().id("pane-body-drag-region").absolute().size_full().occlude()
+                        .debug_selector(|| "dock-pane-body-drag-region".into())
+                        .cursor_grab().on_drag(drag, move |drag, offset, _, cx| {
+                            let drag = drag.clone();
+                            drag.set_drag_offset(offset);
+                            drag.set_preview_size(DRAG_PREVIEW_SIZE);
+                            cx.new(|_| DragPanelPreview { radius, panel: panel.clone().expect("drag has a panel") })
+                        }))
+                })
+            })
             .into_any_element();
         #[cfg(target_os = "macos")]
         if self.shared.panel_style() == PanelStyle::Hidden {
@@ -1168,6 +1216,9 @@ impl TabGroupRenderer for TabGroupSkin {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let to = indicator.to();
+        let label = drop_placement_label(indicator.placement());
+        let radius = tile_radius(self.shared.tile_style());
+        let accent = cx.theme().primary;
         // The placeholder chases the drop it would land in. Its rect was
         // previously replayed from the drag source on every epoch, so crossing
         // several drop zones in one drag restarted the walk at each one; the
@@ -1195,7 +1246,11 @@ impl TabGroupRenderer for TabGroupSkin {
         Some(
             div()
                 .absolute()
-                .bg(cx.theme().tokens.drop_target)
+                .bg(accent.opacity(0.20))
+                .border_2().border_color(accent).rounded(radius)
+                .flex().items_center().justify_center()
+                .text_color(accent).font_weight(gpui::FontWeight::BOLD)
+                .child(label)
                 .left(left)
                 .top(top)
                 .w(width)
@@ -1226,6 +1281,23 @@ mod tests {
             test_support::{HideableProbe, MeasuredProbe},
         },
     };
+
+    #[test]
+    fn pane_move_modifier_requires_command_or_control() {
+        assert!(!pane_move_modifier(Modifiers::none()));
+        assert!(pane_move_modifier(Modifiers { platform: true, ..Modifiers::none() }));
+        assert!(pane_move_modifier(Modifiers { control: true, ..Modifiers::none() }));
+        assert!(!pane_move_modifier(Modifiers { shift: true, alt: true, ..Modifiers::none() }));
+    }
+
+    #[test]
+    fn drop_labels_name_native_placements() {
+        assert_eq!(drop_placement_label(Some(crate::Placement::Top)), "Top");
+        assert_eq!(drop_placement_label(Some(crate::Placement::Bottom)), "Bottom");
+        assert_eq!(drop_placement_label(Some(crate::Placement::Left)), "Left");
+        assert_eq!(drop_placement_label(Some(crate::Placement::Right)), "Right");
+        assert_eq!(drop_placement_label(None), "Center");
+    }
 
     struct Probe {
         focus_handle: FocusHandle,

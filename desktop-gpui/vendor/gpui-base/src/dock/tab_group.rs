@@ -274,6 +274,7 @@ impl TabGroup {
 
         TabGroupContext {
             node: self.node,
+            drag_preview_radius: self.renderer.drag_preview_radius(),
             panels: self.panels.clone(),
             active_panel: self.active_panel(cx),
             active_ix: self.active_ix,
@@ -774,6 +775,7 @@ type DropItemHandler = Rc<dyn Fn(AnyDrag, Option<Placement>, &mut Window, &mut A
 #[derive(Clone)]
 pub struct TabGroupContext {
     node: NodeId,
+    drag_preview_radius: Pixels,
     panels: Vec<Arc<dyn PanelView>>,
     active_panel: Option<Arc<dyn PanelView>>,
     active_ix: usize,
@@ -791,6 +793,9 @@ pub struct TabGroupContext {
 }
 
 impl TabGroupContext {
+    /// The skin's pane corner radius, also used by native drag previews.
+    pub fn drag_preview_radius(&self) -> Pixels { self.drag_preview_radius }
+
     /// The `Tabs` node this group mirrors, for a skin that needs to name the
     /// group in a drag payload or a drop target.
     pub fn node(&self) -> NodeId {
@@ -907,6 +912,8 @@ impl TabGroupContext {
 /// painted area on different elements.
 #[allow(unused_variables)]
 pub trait TabGroupRenderer: 'static {
+    /// Keep cursor previews consistent with the skin's pane geometry.
+    fn drag_preview_radius(&self) -> Pixels { px(0.) }
     /// A tabless skin may keep center drops as visible splits instead of stacking panes.
     fn drop_placement(&self, placement: Option<Placement>) -> Option<Placement> { placement }
     /// Optional presentation-only inset around the entire painted group.

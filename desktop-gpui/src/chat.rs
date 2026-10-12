@@ -3971,6 +3971,12 @@ impl ChatPane {
         });
         let tern_tiles = design::tile_theme()
             == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+        let pane_appearance = crate::pane_appearance::PaneAppearance::from_settings(
+            &self.snapshot["settings"], palette,
+        );
+        let active_border_visible = pane_appearance.show_active_border
+            && crate::docking::pane_visual_active(&self.focus, window, cx)
+            && !crate::preferences_modal::workspace_blocked(cx);
         let density = field(&self.snapshot["settings"], "interfaceDensity");
         let header_padding_y = match (tern_tiles, density.as_str()) {
             (true, "spacious") => 8.,
@@ -4017,6 +4023,7 @@ impl ChatPane {
             .child(identity_mark)
             .child(div().flex_1().min_w_0().flex().flex_col().child(
                 div().text_size(px(13.2))
+                    .when(tern_tiles, |title| title.relative().top(px(2.)))
                     .font_weight(if tern_tiles { FontWeight::MEDIUM } else { FontWeight::BOLD })
                     .truncate().child(title),
             ));
@@ -4044,6 +4051,17 @@ impl ChatPane {
                     .border_blend_mode(0)
             })
             .when(tern_tiles && design::border_opacity() == 0, |this| this.border_b_0())
+            .when(active_border_visible, |this| {
+                if tern_tiles && pane_appearance.border_opacity == 0 {
+                    this.border_b_0()
+                } else {
+                    let mut color = rgb(pane_appearance.resolved_active_border_color());
+                    if tern_tiles {
+                        color.a = pane_appearance.border_opacity as f32 / 100.;
+                    }
+                    this.border_color(color).border_blend_mode(0)
+                }
+            })
             .child({
                 let geometry = self.decoration_bounds.header.clone();
                 canvas(move |bounds, _, _| geometry.set(Some(bounds)), |_, _, _, _| ())

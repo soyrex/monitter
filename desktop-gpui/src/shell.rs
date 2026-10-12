@@ -4,7 +4,7 @@ use crate::design::ui_scaled_px as px;
 use gpui_kit::{
     assets::{__private as icons_assets, IconName},
     component::menu::{DropdownMenu, PopupMenuItem},
-    component::{ActiveTheme as _, Icon, Sizable},
+    component::{button::*, ActiveTheme as _, Icon, Sizable},
 };
 
 #[path = "sidebar_compact.rs"]
@@ -316,7 +316,8 @@ impl Desktop {
             .flex_col()
             .gap(px(design::space::TIGHT))
             .px(px(design::space::INSET))
-            .py(px(design::space::INSET));
+            .py(px(design::space::INSET))
+            .when(tern, |tree| tree.pt_0());
         if self.sidebar_view == SidebarView::Agents {
             for agent in agents {
                 let id = field(agent, "id");
@@ -616,6 +617,39 @@ impl Desktop {
             );
         }
 
+        // Tern keeps its view navigation in the native titlebar control row.
+        // The controls sit at the same 16px size as the compact sidebar reveal.
+        let mut tern_view_toggles = div()
+            .id("tern-sidebar-view-toggles")
+            .flex()
+            .items_center()
+            .gap(px(2.));
+        for tab in VIEWS {
+            let next_view = tab.view;
+            let active = active_view == tab.view;
+            tern_view_toggles = tern_view_toggles.child(
+                div().rounded(px(4.)).overflow_hidden().border_1()
+                    .border_color(rgb(palette.accent).opacity(if active { 0.65 } else { 0. }))
+                    .bg(rgb(palette.accent).opacity(if active { 0.14 } else { 0. }))
+                    .child(Button::new(SharedString::from(format!(
+                    "tern-sidebar-view-{}",
+                    tab.label.to_ascii_lowercase()
+                )))
+                    .ghost()
+                    .compact()
+                    .icon(Icon::default().data(tab.icon).with_size(design::ui_scaled_px(16.))
+                        .text_color(rgb(if active { palette.accent } else { palette.ink })))
+                    .tooltip(tab.label)
+                    .accessibility_label(tab.label)
+                    .toggled(active)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |desktop, _, _, cx| {
+                        desktop.sidebar_view = next_view;
+                        cx.notify();
+                    }))),
+            );
+        }
+
         let density = field(&self.snapshot["settings"], "interfaceDensity");
         let chat_header_height = match density.as_str() {
             "tight" => 26. + 2. * design::space::TIGHT,
@@ -723,20 +757,40 @@ impl Desktop {
             .children(usage_stats);
         let tree = ScrollEdgeFade::new(tree, tree_scroll, Axis::Vertical, gpui_kit::px(20.));
         let sidebar = if tern {
+            let outer_pad = design::tern_spacing(&self.snapshot["settings"]).gutter / 2.;
+            let header = div()
+                .id("tern-sidebar-titlebar-row")
+                .absolute()
+                .top(px(-outer_pad))
+                .left(px(-outer_pad))
+                .right(px(-outer_pad))
+                .h(gpui_kit::px(58.))
+                .pl(gpui_kit::px(82.))
+                .flex()
+                .items_center()
+                .child(tern_view_toggles)
+                .on_mouse_down(MouseButton::Left, |event, window, _| {
+                    if event.click_count == 2 {
+                        window.titlebar_double_click();
+                    } else {
+                        window.start_window_move();
+                    }
+                });
+            let sidebar_content_top = gpui_kit::px(29.)
+                + px(16. + design::tern_spacing(&self.snapshot["settings"]).gutter - outer_pad);
             sidebar
                 .p(px(design::tern_spacing(&self.snapshot["settings"]).gutter / 2.))
                 .gap(px(design::tern_spacing(&self.snapshot["settings"]).gutter))
                 .child(div()
                     .id("sidebar-navigation")
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .flex()
                     .flex_col()
-                    // Reserve native window controls in the full-height sidebar.
-                    .pt(gpui_kit::px(38.))
-                    .child(brand_row)
-                    .child(tabs)
+                    .pt(sidebar_content_top)
+                    .child(header)
                     .children(approval_block)
                     .child(tree))
                 .child(footer)
