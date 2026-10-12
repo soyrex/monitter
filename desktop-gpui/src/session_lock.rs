@@ -339,21 +339,76 @@ impl SessionLock {
     }
     pub fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let retrying = self.retry_after.is_some_and(|t| Instant::now() < t);
-        let mut card=div().w_full().flex().flex_col().gap(px(10.)).p(px(16.)).rounded(px(8.)).border_1().border_color(rgb(self.palette.line)).bg(design::surface_color(self.palette.card))
+        let mut card=div().debug_selector(|| "settings-card-Session lock".into()).w_full().min_w_0().flex().flex_col().gap(px(14.)).p(px(18.)).rounded(px(10.)).border_1().border_color(rgb(self.palette.line)).bg(design::surface_color(self.palette.panel))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Session lock"))
-            .child(div().text_sm().text_color(rgb(self.palette.muted)).child(if cfg!(target_os="macos") {"Blur and lock this GPUI session with a 4–8 digit PIN. Running agents continue. Lock with ⌘⇧L or the app menu."} else {"Blur and lock this GPUI session with a 4–8 digit PIN. Running agents continue. Lock with Ctrl+Shift+L or the app menu."}));
+            .child(div().text_size(crate::settings::settings_text_size(0.8)).whitespace_normal().text_color(rgb(self.palette.muted)).child(if cfg!(target_os="macos") {"Use a 4–8 digit PIN to lock Monitter. Agents continue running. Lock with ⌘⇧L or the app menu."} else {"Use a 4–8 digit PIN to lock Monitter. Agents continue running. Lock with Ctrl+Shift+L or the app menu."}));
         if self.configured() {
-            card = card.child(Input::new(&self.current).disabled(self.busy));
+            card = card.child(
+                div()
+                    .w_full()
+                    .max_w(px(320.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Current PIN"),
+                    )
+                    .child(
+                        Input::new(&self.current)
+                            .aria_label("Current session PIN")
+                            .disabled(self.busy),
+                    ),
+            );
         }
         card = card
-            .child(Input::new(&self.pin).disabled(self.busy))
-            .child(Input::new(&self.confirmation).disabled(self.busy))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(320.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("New PIN"),
+                    )
+                    .child(
+                        Input::new(&self.pin)
+                            .aria_label("New session PIN")
+                            .disabled(self.busy),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(320.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Confirm PIN"),
+                    )
+                    .child(
+                        Input::new(&self.confirmation)
+                            .aria_label("Confirm session PIN")
+                            .disabled(self.busy),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .gap(px(8.))
                     .child(
                         Button::new("save-session-pin")
+                            .primary()
                             .label(if self.busy {
                                 "Saving…"
                             } else if self.configured() {

@@ -41,7 +41,13 @@ gpui_kit::assets::icon_assets!(
         LayoutGrid,
         Archive,
         Radio,
-        PanelsTopLeft
+        PanelsTopLeft,
+        Blocks,
+        KeyRound,
+        Users,
+        BadgeCheck,
+        Wifi,
+        ShieldCheck
     ]
 );
 pub struct DesktopIcons;

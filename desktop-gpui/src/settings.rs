@@ -3,7 +3,7 @@ use super::*;
 #[path = "lan_settings.rs"]
 mod lan_settings;
 use gpui_kit::component::{
-    ActiveTheme as _, IndexPath, Theme, ThemeMode,
+    ActiveTheme as _, Selectable as _, IndexPath, Theme, ThemeMode,
     select::{Select, SelectState, SelectEvent},
     color_picker::{ColorPickerState, ColorPickerEvent},
     slider::{Slider, SliderEvent, SliderState},
@@ -18,6 +18,8 @@ mod settings_appearance;
 mod settings_general;
 #[path = "settings_services.rs"]
 mod settings_services;
+#[path = "settings_navigation.rs"]
+mod settings_navigation;
 
 static SETTINGS_FONT_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(14_f32.to_bits());
 /// Settings use the interface font size, independent of the workspace's 16px rem grid.
@@ -30,7 +32,7 @@ pub(super) fn settings_hint(text: impl Into<SharedString>, palette: Palette) -> 
 }
 pub(super) fn settings_card(title: &str, description: &str, palette: Palette) -> Div {
     let selector = format!("settings-card-{title}");
-    div().debug_selector(move || selector).w_full().min_w_0().flex().flex_col().gap(design::ui_scaled_px(14.))
+    div().debug_selector(move || selector).w_full().min_w_0().flex_shrink_0().flex().flex_col().gap(design::ui_scaled_px(14.))
         .p(design::ui_scaled_px(18.)).border_1().border_color(rgb(palette.line))
         .rounded(design::ui_scaled_px(10.)).bg(design::surface_color(palette.panel))
         .child(div().flex().flex_col().gap(design::ui_scaled_px(4.))
@@ -176,8 +178,9 @@ pub(super) struct NativeSettings {
     errors: HashMap<String, String>,
 }
 impl NativeSettings {
-    pub(super) fn select_category(&mut self, category: &str) { self.category = category.into(); }
-    pub(super) fn select_general(&mut self) {self.category="profile".into();}
+    pub(super) fn select_category(&mut self, category: &str) { self.category = settings_navigation::category(category).id.into(); }
+    // The native Lock Session action calls this when no PIN is configured.
+    pub(super) fn select_security(&mut self) {self.category="security".into();}
     pub fn new(settings: &Value, window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let mut families = cx.text_system().all_font_names();
         families.sort();
@@ -1045,31 +1048,12 @@ impl Desktop {
         }
         let palette = self.apply_native_theme(window, cx);
         SETTINGS_FONT_BITS.store(f32::from(cx.theme().font_size).to_bits(), std::sync::atomic::Ordering::Relaxed);
-        use gpui_kit::assets::IconName;
-        let categories = [
-            ("profile", "Profile", "Your name for new chats", IconName::UserRound),
-            ("lan", "LAN access", "Open Monitter in a browser", IconName::ShieldCheck),
-            ("agents", "Agents", "Browse and configure your agents", IconName::Bot),
-            ("extensions", "MCP & Plugins", "Servers, skills and safety", IconName::Blocks),
-            ("secrets", "Environment & Secrets", "Shared keys for local agents", IconName::KeyRound),
-            ("appearance", "Appearance", "Theme, accent and panes", IconName::Palette),
-            ("typography", "Typography", "Fonts and base sizes", IconName::Type),
-            ("behaviour", "Permissions & behaviour", "Focus and busy messages", IconName::ShieldCheck),
-            ("approvals", "Approvals", "Saved always-approve rules", IconName::ShieldCheck),
-            ("conversation", "Conversation", "Messages and activity", IconName::MessageSquare),
-            ("accounts", "Accounts", "Connected agent accounts", IconName::UserRound),
-            ("providers", "Providers & models", "Providers and chat models", IconName::Bot),
-            ("mail", "Mail integrations", "Connected mail providers", IconName::Mail),
-            ("collaboration", "Collaboration", "Delegation and queued work", IconName::Users),
-        ];
         let category = self.native_settings.as_ref().unwrap().category.clone();
-        let title = categories
-            .iter()
-            .find(|(id, _, _, _)| *id == category)
-            .map(|(_, label, _, _)| *label)
-            .unwrap_or("Profile");
+        let destination = settings_navigation::category(&category);
+        let title = destination.label;
         let mut body = match category.as_str() {
             "general" | "profile" => settings_general::render_profile(self, window, cx, palette),
+            "security" => settings_general::render_security(self, window, cx, palette),
             "behaviour" => settings_general::render_behavior(self, cx, palette),
             "conversation" => settings_general::render_conversation(self, cx, palette),
             "appearance" | "interface" | "typography" | "terminal" => {
@@ -1140,37 +1124,67 @@ impl Desktop {
                 .child(catalog)
                 .into_any_element();
         }
-        let compact = window.viewport_size().width < px(780.);
+        if category == "collaboration" {
+            let boards = settings_general::render_boards(self, cx, palette);
+            body = div().w_full().flex().flex_col().gap(design::ui_scaled_px(16.))
+                .child(body).child(boards).into_any_element();
+        }
+        if matches!(category.as_str(), "providers" | "accounts" | "collaboration") {
+            body = div().w_full().min_w_0().flex().flex_col().gap(design::ui_scaled_px(16.))
+                .child(div().flex().items_center().justify_between().flex_wrap().gap(design::ui_scaled_px(8.))
+                    .child(settings_hint("Configure these choices for each agent.", palette))
+                    .child(Button::new("preferences-open-agents").compact().label("Configure agents")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            if let Some(state) = &mut view.native_settings { state.select_category("agents"); }
+                            cx.notify();
+                        }))))
+                .child(body).into_any_element();
+        }
+        // At large interface scales, the icon rail also preserves room for forms.
+        let compact = window.viewport_size().width * 0.9 < design::ui_scaled_px(740.);
+        let mut rows = Vec::<AnyElement>::new();
+        let mut previous_group = "";
+        for item in settings_navigation::CATEGORIES {
+            if item.group != previous_group {
+                rows.push(div().mt(design::ui_scaled_px(if previous_group.is_empty() { 0. } else { 14. }))
+                    .when(!compact, |this| this.px(design::ui_scaled_px(9.)).pb(design::ui_scaled_px(6.))
+                        .text_size(settings_text_size(0.71)).font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(palette.muted)).child(item.group))
+                    .when(compact && !previous_group.is_empty(), |this| this.border_t_1().border_color(rgb(palette.line)).pt(design::ui_scaled_px(8.)))
+                    .into_any_element());
+                previous_group = item.group;
+            }
+            let id = item.id;
+            let selected = destination.id == id;
+            rows.push(Button::new(SharedString::from(format!("settings-category-{id}"))).ghost()
+                .selected(selected)
+                .w_full().h_auto().compact().justify_start().py(design::ui_scaled_px(8.)).px(design::ui_scaled_px(8.))
+                .bg(if selected { rgba((palette.accent << 8) | 0x21) } else { rgba(0) })
+                .text_color(rgb(if selected { palette.accent } else { palette.ink }))
+                .accessibility_label(item.label).tooltip(format!("{} — {}", item.label, item.description))
+                .child(div().debug_selector(move || format!("settings-nav-{id}")).w_full().min_w_0().flex().items_center().gap(design::ui_scaled_px(9.))
+                    .child(div().flex_shrink_0().size(design::ui_scaled_px(18.)).flex().items_center().justify_center()
+                        .child(gpui_kit::component::Icon::new(item.icon.clone()).size(design::ui_scaled_px(16.))))
+                    .when(!compact, |this| this.child(div().flex_1().min_w_0().whitespace_normal()
+                        .text_size(settings_text_size(0.86)).font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                        .child(item.label))))
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    if let Some(state) = &mut view.native_settings { state.select_category(id); }
+                    view.error = None;
+                    cx.notify();
+                })).into_any_element());
+        }
         let navigation = div().id("preferences-navigation").min_h_0().overflow_y_scroll()
-            .w(design::ui_scaled_px(if compact { 54. } else { 220. })).flex_shrink_0().h_full()
-            .flex().flex_col().gap(design::ui_scaled_px(3.)).py(design::ui_scaled_px(20.)).px(design::ui_scaled_px(12.))
+            .w(design::ui_scaled_px(if compact { 58. } else { 224. })).flex_shrink_0().h_full()
+            .flex().flex_col().gap(design::ui_scaled_px(2.)).py(design::ui_scaled_px(18.)).px(design::ui_scaled_px(if compact { 8. } else { 12. }))
             .border_r_1().border_color(rgb(palette.line)).bg(design::surface_color(palette.paper))
-            .when(!compact, |this| this.child(div().px(design::ui_scaled_px(9.)).pb(design::ui_scaled_px(11.))
-                .text_size(crate::settings::settings_text_size(0.714)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(palette.muted)).child("SETTINGS")))
-            .children(categories.map(|(id, label, detail, icon)| {
-                let selected = category == id;
-                Button::new(SharedString::from(format!("settings-category-{id}"))).ghost()
-                    .w_full().h_auto().compact().justify_start().py(design::ui_scaled_px(10.)).px(design::ui_scaled_px(9.))
-                    .bg(if selected { rgba((palette.accent << 8) | 0x21) } else { rgba(0) })
-                    .text_color(rgb(if selected { palette.accent } else { palette.muted }))
-                    .accessibility_label(label).tooltip(detail)
-                    .child(div().debug_selector(move || format!("settings-nav-{id}")).w_full().min_w_0().flex().items_start().gap(design::ui_scaled_px(9.))
-                        .child(gpui_kit::component::Icon::new(icon).size(design::ui_scaled_px(16.)))
-                        .when(!compact, |this| this.child(div().flex_1().min_w_0().flex().flex_col().gap(design::ui_scaled_px(2.))
-                            .child(div().whitespace_normal().text_size(crate::settings::settings_text_size(0.86)).font_weight(FontWeight::SEMIBOLD).child(label))
-                            .child(div().truncate().text_size(crate::settings::settings_text_size(0.714)).text_color(rgb(palette.muted)).child(detail)))))
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        if let Some(state) = &mut view.native_settings { state.category=id.into(); }
-                        view.error=None;
-                        cx.notify();
-                    }))
-            }));
+            .children(rows);
         let status = if self.preferences_busy {
             "Saving private preferences…"
         } else if self.busy {
             "Saving settings…"
         } else {
-            "Changes save automatically"
+            ""
         };
         div()
             .id("native-preferences-content")
@@ -1182,7 +1196,7 @@ impl Desktop {
             .child(navigation)
             .child(
                 div()
-                    .id("native-preferences-page-scroll")
+                    .id(SharedString::from(format!("native-preferences-page-scroll-{}", destination.id)))
                     .h_full()
                     .flex_1()
                     .min_w_0()
@@ -1191,17 +1205,12 @@ impl Desktop {
                     .gap(px(design::space::SECTION))
                     .p(design::ui_scaled_px(if compact { 16. } else { 28. }))
                     .overflow_y_scroll()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(div().flex().flex_col().gap(design::ui_scaled_px(4.))
-                                .child(div().text_size(crate::settings::settings_text_size(0.714)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(palette.muted)).child("PREFERENCES"))
-                                .child(div().text_size(crate::settings::settings_text_size(1.714)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned())))
-                            .child(div().text_size(crate::settings::settings_text_size(0.786)).text_color(rgb(palette.muted)).child(status)),
-                    )
-                    .child(body)
+                    .child(div().w_full().flex_shrink_0().max_w(design::ui_scaled_px(760.)).mx_auto().flex().flex_col().gap(design::ui_scaled_px(8.))
+                        .child(div().flex().items_center().flex_wrap().justify_between().gap(design::ui_scaled_px(8.))
+                            .child(div().text_size(settings_text_size(1.5)).font_weight(FontWeight::SEMIBOLD).child(title))
+                            .when(!status.is_empty(), |this| this.child(settings_hint(status, palette))))
+                        .child(settings_hint(destination.description, palette)))
+                    .child(div().w_full().min_w_0().flex_shrink_0().max_w(design::ui_scaled_px(760.)).mx_auto().child(body))
                     .when_some(self.error.clone(), |this, error| {
                         this.child(
                             div()
@@ -1296,9 +1305,12 @@ mod modal_layout_tests {
         assert!(visual.debug_bounds("settings-card-Your name").is_some());
         for (category,selector,card_selector) in [
             ("appearance","settings-nav-appearance","settings-card-Appearance mode"),
+            ("interface","settings-nav-interface","settings-card-Tile layout"),
             ("typography","settings-nav-typography","settings-card-Fonts"),
             ("behaviour","settings-nav-behaviour","settings-card-Keyboard shortcuts"),
-            ("conversation","settings-nav-conversation","settings-card-Conversation activity"),
+            ("conversation","settings-nav-conversation","settings-card-Messages"),
+            ("collaboration","settings-nav-collaboration","settings-card-Project boards"),
+            ("security","settings-nav-security","settings-card-Session lock"),
         ] {
             let mut button=visual.debug_bounds(selector).expect("category is present");
             if button.bottom() > gpui_kit::px(700.) {
@@ -1320,6 +1332,27 @@ mod modal_layout_tests {
             });
             assert!(visual.debug_bounds(card_selector).is_some(),"category cards render");
         }
+        // Compact navigation keeps every destination reachable, with form
+        // content contained by the dialog instead of stretching the window.
+        visual.simulate_resize(size(gpui_kit::px(700.),gpui_kit::px(700.)));
+        visual.update(|window,cx| window.draw(cx).clear(cx));
+        let dialog = visual.debug_bounds("preferences-card").unwrap();
+        for selector in [
+            "settings-nav-profile", "settings-nav-appearance", "settings-nav-interface",
+            "settings-nav-typography", "settings-nav-behaviour", "settings-nav-conversation",
+            "settings-nav-agents", "settings-nav-providers", "settings-nav-accounts",
+            "settings-nav-collaboration", "settings-nav-extensions", "settings-nav-mail",
+            "settings-nav-security", "settings-nav-approvals", "settings-nav-secrets", "settings-nav-lan",
+        ] {
+            let nav = visual.debug_bounds(selector).unwrap();
+            assert!(nav.size.width < gpui_kit::px(50.), "compact menu uses icons");
+            assert!(nav.left() >= dialog.left() && nav.right() <= dialog.right());
+        }
+        desktop.update(visual, |desktop, cx| {
+            desktop.native_settings.as_mut().unwrap().select_security();
+            assert_eq!(desktop.native_settings.as_ref().unwrap().category, "security");
+            cx.notify();
+        });
         visual.simulate_resize(size(gpui_kit::px(1800.),gpui_kit::px(900.)));
         visual.update(|window,cx| window.draw(cx).clear(cx));
         let card=visual.debug_bounds("preferences-card").expect("modal card is present");

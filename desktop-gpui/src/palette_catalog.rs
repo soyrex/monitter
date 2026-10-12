@@ -65,8 +65,9 @@ const TOGGLES: &[(&str, &str, &str, bool)] = &[
 ];
 const SETTINGS: &[(&str, &str, &str)] = &[
     ("appearance", "Appearance settings", "appearance"),
-    ("typography-settings", "Typography settings", "typography"),
-    ("behaviour-settings", "Behaviour settings", "behaviour"),
+    ("typography-settings", "Fonts & text", "typography"),
+    ("behaviour-settings", "Keyboard & focus", "behaviour"),
+    ("session-lock-settings", "Session lock", "security"),
     (
         "conversation-settings",
         "Conversation settings",
@@ -75,8 +76,8 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("environment-secrets", "Environment & Secrets", "secrets"),
     (
         "pane-appearance-settings",
-        "Pane appearance settings",
-        "appearance",
+        "Layout & panes",
+        "interface",
     ),
     (
         "appearance-detail-settings",
@@ -945,6 +946,7 @@ mod tests {
             "appearance",
             "typography-settings",
             "behaviour-settings",
+            "session-lock-settings",
             "conversation-settings",
             "environment-secrets",
             "pane-appearance-settings",
@@ -963,6 +965,8 @@ mod tests {
             "auto-hide-tabs",
         ];
         assert_eq!(ids, expected.into_iter().map(str::to_owned).collect());
+        assert_eq!(SETTINGS.iter().find(|(id, _, _)| *id == "pane-appearance-settings").unwrap().2, "interface");
+        assert_eq!(SETTINGS.iter().find(|(id, _, _)| *id == "session-lock-settings").unwrap().2, "security");
         let appearance_ids = settings::native_appearance::PRESETS
             .iter()
             .flat_map(|(id, _)| {

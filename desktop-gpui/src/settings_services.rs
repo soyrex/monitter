@@ -40,6 +40,7 @@ fn rows(value: &Value, key: &str) -> Vec<Value> {
 }
 fn card(title: &str, palette: Palette) -> Div {
     div()
+        .w_full().min_w_0().flex_shrink_0()
         .flex()
         .flex_col()
         .gap(px(16.))
@@ -59,6 +60,7 @@ fn card(title: &str, palette: Palette) -> Div {
 }
 fn note(value: impl Into<SharedString>, palette: Palette) -> Div {
     div()
+        .min_w_0().whitespace_normal().line_height(gpui_kit::relative(1.5))
         .text_size(crate::settings::settings_text_size(0.8))
         .text_color(rgb(palette.muted))
         .child(value.into())
@@ -66,6 +68,7 @@ fn note(value: impl Into<SharedString>, palette: Palette) -> Div {
 
 fn field(label: &str, detail: &str, control: impl IntoElement, palette: Palette) -> Div {
     div()
+        .w_full().min_w_0()
         .flex()
         .flex_col()
         .gap(px(5.))
@@ -314,7 +317,7 @@ impl ServicePreferencesPane {
 
     fn render_accounts(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let mut panel = card("Local Codex accounts", palette)
-            .child(note("Account homes are read from the local harness configuration. Choosing an account for a new agent or chat stays in the agent editor; this page does not change a default account.", palette))
+            .child(note("Load the accounts available on this desktop. Choose an account for each agent in Configure agents.", palette))
             .child(Button::new("settings-accounts-load").label("Load local accounts").disabled(self.busy.contains("accounts"))
                 .on_click(cx.listener(|pane, _, _, cx| pane.invoke("accounts", "list_codex_accounts", json!({}), cx))));
         if let Some(accounts) = &self.accounts {
@@ -361,7 +364,7 @@ impl ServicePreferencesPane {
                 .push(agent);
         }
         let mut panel = card("Provider and harness setup", palette)
-            .child(note("These rows reflect saved agents in the current native snapshot. Provider, host, model, account and ACP launcher changes belong to each agent's editor; no account probe or provider request runs while viewing this page.", palette));
+            .child(note("Providers and models used by your saved agents. Use Configure agents to change a provider, host, model or account.", palette));
         if grouped.is_empty() {
             panel = panel.child(note("No user agents are configured.", palette));
         }
@@ -421,8 +424,8 @@ impl ServicePreferencesPane {
         let queued = rows(&self.snapshot, "queuedMessages");
         let panel = card("Agent collaboration", palette)
             .child(note(format!("{} of {} saved agents have collaboration enabled.", enabled, agents.len()), palette))
-            .child(note(format!("Current snapshot: {} collaboration records · {} queued messages.", collaborations.len(), queued.len()), palette))
-            .child(note("Per-agent collaboration permissions and provider handoff settings are edited in the agent editor. This overview reads only the current owner snapshot and does not start or send any delegated work.", palette));
+            .child(note(format!("{} delegation records · {} queued messages.", collaborations.len(), queued.len()), palette))
+            .child(note("Use Configure agents to choose which agents may delegate work and how they hand it off.", palette));
         panel.into_any_element()
     }
 

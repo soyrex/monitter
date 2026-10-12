@@ -20,7 +20,11 @@ impl FontChoice {
                     .text_size(crate::settings::settings_text_size(1.))
                     .child("Aa"),
             )
-            .child(div().text_size(crate::settings::settings_text_size(0.86)).child(self.label.clone()))
+            .child(
+                div()
+                    .text_size(crate::settings::settings_text_size(0.86))
+                    .child(self.label.clone()),
+            )
     }
 }
 impl SelectItem for FontChoice {
@@ -151,7 +155,7 @@ pub(super) fn render(
     let settings = desktop.snapshot["settings"].clone();
     let mut content = div()
         .w_full()
-        .max_w(px(820.))
+        .max_w(px(760.))
         .mx_auto()
         .flex()
         .flex_col()
@@ -159,10 +163,10 @@ pub(super) fn render(
 
     let theme = field(&settings, "theme");
     let surface = field(&settings, "windowSurface");
-    let mut theme_card =
+    let theme_card =
         card(
             "Appearance mode",
-            "Follow the operating system, or keep one appearance active.",
+            "Use the system appearance or choose light or dark.",
             palette,
         )
         .child(div().flex().gap(px(crate::design::space::TIGHT)).children(
@@ -180,7 +184,7 @@ pub(super) fn render(
             }),
         ));
     let appearance_mode = theme_card;
-    let mut theme_card = card("Primary window surface", "Choose how much of the desktop shows through the Monitter background.", palette)
+    let mut theme_card = card("Primary window surface", "Set the window material and background transparency.", palette)
         .child("Window surface")
         .child(
             div().flex().gap(px(crate::design::space::TIGHT)).children(
@@ -227,7 +231,7 @@ pub(super) fn render(
     }
     if category == "appearance" && advanced_open {
         let mode = crate::wallpaper_theme::mode();
-        let wallpaper = card("Advanced · Wallpaper accent", "Match the Monitter palette to your wallpaper. Highlight picks a colour from the image; Mood follows its warm or cool tones. Manual restores your chosen accent. Saved on this device.", palette)
+        let wallpaper = card("Advanced · Wallpaper accent", "Highlight uses a wallpaper colour; Mood follows its tones. Manual uses your chosen accent. Saved on this device.", palette)
             .child(div().flex().flex_wrap().gap(px(crate::design::space::TIGHT)).children(crate::wallpaper_theme::Mode::ALL.map(|choice| {
                 Button::new(SharedString::from(format!("wallpaper-accent-{}", choice.id())))
                     .label(if mode == choice { format!("✓ {}", choice.label()) } else { choice.label().to_owned() })
@@ -254,76 +258,119 @@ pub(super) fn render(
     let native = state.appearance.as_ref();
     let mut app_theme = card(
         "App theme",
-        "Choose separate palettes for each appearance. Custom accent and contrast apply immediately after saving.",
+        "Choose a palette for light and dark mode. Changes save automatically.",
         palette,
     );
     if let Some(native) = native {
-        let tile_theme = desktop.preferences.as_ref()
+        let tile_theme = desktop
+            .preferences
+            .as_ref()
             .map(|preferences| preferences.data.appearance.tile_theme)
             .unwrap_or_default();
         let tile_layout = card(
             "Tile layout",
-            "Monitter keeps the original workspace. Tern uses rounded, separated tiles with compact controls. Your light, dark and accent choices stay unchanged. Saved on this device.",
+            "Use the original workspace or rounded Tern tiles. Saved on this device.",
             palette,
         )
-        .child(div().flex().gap(px(crate::design::space::TIGHT)).children(
-            [(NativeTileTheme::Monitter, "Monitter"), (NativeTileTheme::Tern, "Tern")].map(|(choice, label)| {
-                Button::new(SharedString::from(format!("tile-theme-{label}")))
-                    .label(if tile_theme == choice { format!("✓ {label}") } else { label.to_owned() })
-                    .disabled(desktop.preferences_busy || desktop.preferences.is_none())
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.save_native_tile_theme(choice, cx)
-                    }))
-            }),
-        ));
-        app_theme = app_theme
-            .child("Light theme")
-            .child(
-                Select::new(&native.light).text_size(crate::settings::settings_text_size(0.86))
-                    .accessibility_label("Light palette")
-                    .disabled(desktop.preferences_busy),
-            )
-            .child("Dark theme")
-            .child(
-                Select::new(&native.dark).text_size(crate::settings::settings_text_size(0.86))
-                    .accessibility_label("Dark palette")
-                    .disabled(desktop.preferences_busy),
-            );
+        .child(
+            div().flex().gap(px(crate::design::space::TIGHT)).children(
+                [
+                    (NativeTileTheme::Monitter, "Monitter"),
+                    (NativeTileTheme::Tern, "Tern"),
+                ]
+                .map(|(choice, label)| {
+                    Button::new(SharedString::from(format!("tile-theme-{label}")))
+                        .label(if tile_theme == choice {
+                            format!("✓ {label}")
+                        } else {
+                            label.to_owned()
+                        })
+                        .disabled(desktop.preferences_busy || desktop.preferences.is_none())
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.save_native_tile_theme(choice, cx)
+                        }))
+                }),
+            ),
+        );
+        app_theme = app_theme.child(
+            div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .gap(px(16.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(220.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(settings_hint("Light palette", palette))
+                        .child(
+                            Select::new(&native.light)
+                                .text_size(crate::settings::settings_text_size(0.86))
+                                .accessibility_label("Light palette")
+                                .disabled(desktop.preferences_busy),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(220.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(settings_hint("Dark palette", palette))
+                        .child(
+                            Select::new(&native.dark)
+                                .text_size(crate::settings::settings_text_size(0.86))
+                                .accessibility_label("Dark palette")
+                                .disabled(desktop.preferences_busy),
+                        ),
+                ),
+        );
         let workspace_accent = card(
             "Workspace accent",
-            "Accent shared with connected workspace clients.",
+            "Set the accent shared with connected workspace clients.",
             palette,
         )
         .child("Workspace accent (#RRGGBB)")
         .child(
-            Input::new(&state.accent).text_size(crate::settings::settings_text_size(0.86))
-                .aria_label("Workspace accent")
-                .disabled(desktop.busy),
+            div().w_full().max_w(px(280.)).child(
+                Input::new(&state.accent)
+                    .text_size(crate::settings::settings_text_size(0.86))
+                    .aria_label("Workspace accent")
+                    .disabled(desktop.busy),
+            ),
         )
         .child(
-            Button::new("save-workspace-accent")
-                .label("Save workspace accent")
-                .disabled(desktop.busy)
-                .on_click(cx.listener(|view, _, _, cx| {
-                    let Some(settings) = &view.native_settings else {
-                        return;
-                    };
-                    let accent = settings.accent.read(cx).value().to_string();
-                    let digits = accent.trim().strip_prefix('#').unwrap_or(&accent);
-                    if digits.len() != 6 || !digits.chars().all(|digit| digit.is_ascii_hexdigit()) {
-                        view.error = Some("Accent must be a six-digit #RRGGBB value.".into());
-                        cx.notify();
-                        return;
-                    }
-                    view.patch_settings(
-                        json!({"accent":format!("#{}", digits.to_ascii_uppercase())}),
-                        cx,
-                    );
-                })),
+            div().w_full().flex().justify_end().pt(px(8.)).child(
+                Button::new("save-workspace-accent")
+                    .label("Save workspace accent")
+                    .disabled(desktop.busy)
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        let Some(settings) = &view.native_settings else {
+                            return;
+                        };
+                        let accent = settings.accent.read(cx).value().to_string();
+                        let digits = accent.trim().strip_prefix('#').unwrap_or(&accent);
+                        if digits.len() != 6
+                            || !digits.chars().all(|digit| digit.is_ascii_hexdigit())
+                        {
+                            view.error = Some("Accent must be a six-digit #RRGGBB value.".into());
+                            cx.notify();
+                            return;
+                        }
+                        view.patch_settings(
+                            json!({"accent":format!("#{}", digits.to_ascii_uppercase())}),
+                            cx,
+                        );
+                    })),
+            ),
         );
         let accent_card = card(
             "Accent colour",
-            "Override the selected themes with one accent in both modes.",
+            "Use one accent in both modes and adjust its surface tint.",
             palette,
         )
         .child(div().flex().items_center().gap(px(10.)).children(
@@ -348,9 +395,12 @@ pub(super) fn render(
         .child(ColorPicker::new(&native.accent_picker).label("Custom accent colour"))
         .child("Custom accent (#RRGGBB; blank uses each palette accent)")
         .child(
-            Input::new(&native.accent).text_size(crate::settings::settings_text_size(0.86))
-                .aria_label("Custom palette accent")
-                .disabled(desktop.preferences_busy),
+            div().w_full().max_w(px(280.)).child(
+                Input::new(&native.accent)
+                    .text_size(crate::settings::settings_text_size(0.86))
+                    .aria_label("Custom palette accent")
+                    .disabled(desktop.preferences_busy),
+            ),
         )
         .child(format!(
             "Surface tint: {}%",
@@ -365,7 +415,21 @@ pub(super) fn render(
             "50%",
             palette,
             cx,
-        ));
+        ))
+        .child(
+            div().w_full().flex().justify_end().pt(px(8.)).child(
+                Button::new("save-native-appearance")
+                    .primary()
+                    .label(if desktop.preferences_busy {
+                        "Saving…"
+                    } else {
+                        "Save palette settings"
+                    })
+                    .disabled(desktop.preferences_busy || desktop.preferences.is_none())
+                    .on_click(cx.listener(|view, _, _, cx| view.save_native_appearance(cx))),
+            ),
+        );
+
         let borders_card = card(
             "Borders & dividers",
             "Adjust structural lines in both themes.",
@@ -384,21 +448,10 @@ pub(super) fn render(
             "100%",
             palette,
             cx,
-        ))
-        .child(
-            Button::new("save-native-appearance")
-                .primary()
-                .label(if desktop.preferences_busy {
-                    "Saving…"
-                } else {
-                    "Save palette settings"
-                })
-                .disabled(desktop.preferences_busy || desktop.preferences.is_none())
-                .on_click(cx.listener(|view, _, _, cx| view.save_native_appearance(cx))),
-        );
+        ));
         let contrast_card = card(
             "Contrast",
-            "Push surfaces and text further apart while keeping the selected themes.",
+            "Increase the contrast between surfaces and text.",
             palette,
         )
         .child(format!(
@@ -436,14 +489,15 @@ pub(super) fn render(
         ));
         if category == "appearance" {
             content = content
-                .child(tile_layout)
                 .child(app_theme)
                 .child(contrast_card)
                 .child(accent_card)
-                .child(borders_card)
-                .child(scale_card);
+                .child(borders_card);
         }
-        if advanced_open {
+        if category == "interface" {
+            content = content.child(tile_layout).child(scale_card);
+        }
+        if category == "appearance" && advanced_open {
             advanced = advanced.child(workspace_accent);
         }
     } else {
@@ -482,7 +536,7 @@ pub(super) fn render(
         advanced = advanced.child(palette_source);
         let mut blends = card(
             "Advanced · Surface blending",
-            "Choose a blend for each area and separator lines. Blends use surfaces rendered behind them inside this window; text and icons keep their normal colors. Saved on this device.",
+            "Blend each area with the surfaces behind it. Text and icons keep their colours. Saved on this device.",
             palette,
         );
         for area in crate::surface_blend::Area::ALL {
@@ -511,8 +565,10 @@ pub(super) fn render(
             );
         }
         advanced = advanced.child(blends);
+    }
+    if category == "interface" {
         let selected_motion = crate::native_motion::current();
-        let motion = card("Advanced · Motion", "System and Subtle respect Reduce Motion. On overrides it; Off disables native animations. Saved on this device.", palette)
+        let motion = card("Motion", "System and Subtle respect Reduce Motion. On overrides it; Off disables native animations. Saved on this device.", palette)
             .child(div().flex().flex_wrap().gap(px(crate::design::space::TIGHT)).children(crate::native_motion::MotionPreference::ALL.map(|mode| {
                 Button::new(SharedString::from(format!("native-motion-{}", mode.id())))
                     .label(if selected_motion == mode { format!("✓ {}", mode.label()) } else { mode.label().to_owned() })
@@ -521,7 +577,7 @@ pub(super) fn render(
                         cx.notify();
                     }))
             })));
-        advanced = advanced.child(motion);
+        content = content.child(motion);
     }
 
     let density = ["tight", "normal", "spacious"][state
@@ -531,7 +587,7 @@ pub(super) fn render(
         .end()
         .round()
         .clamp(0., 2.) as usize];
-    let mut interface = card(
+    let interface = card(
         "Interface density",
         "Adjust the height and spacing of tabs, sidebars and pane controls.",
         palette,
@@ -548,7 +604,7 @@ pub(super) fn render(
             .child("Normal")
             .child("Spacious"),
     );
-    if category == "interface" || category == "appearance" {
+    if category == "interface" {
         content = content.child(interface);
     }
     let mut interface =
@@ -582,7 +638,7 @@ pub(super) fn render(
         ("Dim inactive panes", "dimInactivePanes", true),
     ] {
         if key == "showActivePaneBorder" {
-            if category == "interface" || category == "appearance" {
+            if category == "interface" {
                 content = content.child(interface);
             }
             interface = card(
@@ -622,7 +678,7 @@ pub(super) fn render(
         )
         .child(Slider::new(&state.inactive_pane_opacity).disabled(desktop.busy || !dim_inactive))
         .child(range_footer("10%", "90%", palette));
-    if category == "interface" || category == "appearance" {
+    if category == "interface" {
         content = content.child(interface);
     }
 
@@ -648,7 +704,7 @@ pub(super) fn render(
     let controls = &state.fonts;
     let mut typography = card(
         "Fonts",
-        "Choose from fonts installed on this desktop. Base sizes are before interface scaling; use a monospace font for terminals.",
+        "Family and weight changes save immediately; size changes save when you leave the field. Sizes: 8–32 px.",
         palette,
     );
     for ((family_key, _, _, label, _), row) in TYPOGRAPHY.iter().zip(controls) {
@@ -661,19 +717,64 @@ pub(super) fn render(
             continue;
         }
         typography = typography.child(
-            div().w_full().min_w_0().flex().flex_col().gap(px(12.)).pb(px(16.))
-                .border_b_1().border_color(rgb(palette.line))
-                .child(div().w_full().min_w_0().flex().flex_wrap().gap(px(12.))
-                    .child(div().flex_1().min_w(px(150.)).flex().flex_col().gap(px(6.))
-                        .child(settings_hint(format!("{label} font"),palette))
-                        .child(Select::new(&row.family).text_size(crate::settings::settings_text_size(0.86)).cleanable(true)
-                            .placeholder("Default font").accessibility_label(format!("{label} font family")).disabled(desktop.busy)))
-                    .child(div().w(px(150.)).min_w_0().flex().flex_col().gap(px(6.))
-                        .child(settings_hint(format!("{label} font base size (px)"),palette))
-                        .child(Input::new(&row.size).text_size(crate::settings::settings_text_size(0.86)).aria_label(format!("{label} font size")).disabled(desktop.busy))))
-                .child(format!("{label} font weight: {}",row.weight.read(cx).value().end().round() as u16))
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .pb(px(16.))
+                .border_b_1()
+                .border_color(rgb(palette.line))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(200.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(settings_hint(format!("{label} font"), palette))
+                                .child(
+                                    Select::new(&row.family)
+                                        .text_size(crate::settings::settings_text_size(0.86))
+                                        .cleanable(true)
+                                        .placeholder("Default font")
+                                        .accessibility_label(format!("{label} font family"))
+                                        .disabled(desktop.busy),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(settings_hint("Size (px)", palette))
+                                .child(
+                                    Input::new(&row.size)
+                                        .text_size(crate::settings::settings_text_size(0.86))
+                                        .aria_label(format!("{label} font size"))
+                                        .disabled(desktop.busy),
+                                ),
+                        ),
+                )
+                .child(format!(
+                    "{label} font weight: {}",
+                    row.weight.read(cx).value().end().round() as u16
+                ))
                 .child(Slider::new(&row.weight).disabled(desktop.busy))
-                .child(settings_hint("Light · Regular · Medium · Semibold · Bold",palette)),
+                .child(settings_hint(
+                    "Light · Regular · Medium · Semibold · Bold",
+                    palette,
+                )),
         );
     }
     let line_heights = card("Line height", "Control the vertical space in chat messages and terminal output.", palette)

@@ -4813,7 +4813,10 @@ fn main() {
                     if desktop.session_lock.read(cx).configured() {desktop.session_lock.update(cx,|lock,cx|lock.lock(window,cx));}
                     else {
                         desktop.show_preferences(window,cx);
-                        if let Some(settings)=&mut desktop.native_settings {settings.select_general();}
+                        if desktop.native_settings.is_none() {
+                            desktop.native_settings = Some(settings::NativeSettings::new(&desktop.snapshot["settings"], window, cx));
+                        }
+                        if let Some(settings)=&mut desktop.native_settings {settings.select_security();}
                         cx.notify();
                     }
                 });});});

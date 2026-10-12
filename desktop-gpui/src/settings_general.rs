@@ -1,4 +1,4 @@
-//! General, behaviour and conversation controls use the canonical save_settings path.
+//! Profile, keyboard, conversation and board controls use the canonical save_settings path.
 use super::*;
 use gpui_kit::component::{Selectable as _, switch::Switch};
 
@@ -73,7 +73,7 @@ fn choices(
 
 pub(super) fn render_profile(
     desktop: &mut Desktop,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<Desktop>,
     palette: Palette,
 ) -> AnyElement {
@@ -81,39 +81,57 @@ pub(super) fn render_profile(
         return settings_hint("Preferences are loading…", palette).into_any_element();
     };
     let name = state.user_name.clone();
-    let profile = settings_card("Your name", "Used by agents in new chats.", palette)
-        .child(div().font_weight(FontWeight::MEDIUM).child("Your name"))
-        .child(
-            Input::new(&name).text_size(crate::settings::settings_text_size(0.86))
-                .aria_label("Your name")
-                .disabled(desktop.busy),
-        )
-        .child(
-            Button::new("save-profile-name")
-                .primary()
-                .label("Save name")
-                .disabled(desktop.busy)
-                .on_click(cx.listener(|view, _, _, cx| {
-                    let Some(settings) = &view.native_settings else {
-                        return;
-                    };
-                    let name = settings.user_name.read(cx).value().trim().to_owned();
-                    if name.chars().any(char::is_control) || name.chars().count() > 80 {
-                        view.error = Some(
+    let profile = settings_card("Your name", "Used by agents in new chats.", palette).child(
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .child(
+                div().flex_1().min_w_0().max_w(px(420.)).child(
+                    Input::new(&name)
+                        .text_size(crate::settings::settings_text_size(0.86))
+                        .aria_label("Your name")
+                        .disabled(desktop.busy),
+                ),
+            )
+            .child(
+                Button::new("save-profile-name")
+                    .primary()
+                    .label("Save name")
+                    .disabled(desktop.busy)
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        let Some(settings) = &view.native_settings else {
+                            return;
+                        };
+                        let name = settings.user_name.read(cx).value().trim().to_owned();
+                        if name.chars().any(char::is_control) || name.chars().count() > 80 {
+                            view.error = Some(
                             "Name must be at most 80 characters and contain no control characters."
                                 .into(),
                         );
-                        cx.notify();
-                        return;
-                    }
-                    view.patch_settings(json!({"userName":name}), cx);
-                })),
-        );
+                            cx.notify();
+                            return;
+                        }
+                        view.patch_settings(json!({"userName":name}), cx);
+                    })),
+            ),
+    );
+    stack().child(profile).into_any_element()
+}
+
+pub(super) fn render_security(
+    desktop: &mut Desktop,
+    window: &mut Window,
+    cx: &mut Context<Desktop>,
+    palette: Palette,
+) -> AnyElement {
     let lock = desktop.session_lock.update(cx, |lock, cx| {
         lock.set_palette(palette);
         lock.render_settings(window, cx)
     });
-    stack().child(profile).child(lock).into_any_element()
+    stack().child(lock).into_any_element()
 }
 
 // Keep the former entry point available while the parent migrates category routing.
@@ -142,11 +160,26 @@ pub(super) fn render_behavior(
         .child(div().font_weight(FontWeight::MEDIUM).child("Shortcut mode"))
         .child(choices(desktop, cx, palette, "shortcutMode", "Shortcut mode", shortcut,
             &[("standard", "Standard"), ("vim", "Vim")]))
-        .child(settings_hint(if shortcut == "vim" {
-            "Escape then : opens commands. Ctrl/Cmd-W then an arrow or h/j/k/l moves between panes. Use :q to close a tab. Terminal keystrokes stay with the terminal. Cmd/Ctrl+Shift+arrow moves the current tab to a pane in that direction, creating one if needed. Cmd/Ctrl+Option/Alt+Up/Down focuses the pane above or below."
-        } else {
-            "Cmd/Ctrl-W closes the current tab. Preferences and the command palette keep their standard shortcuts. Cmd/Ctrl+Shift+arrow moves the current tab to a pane in that direction, creating one if needed. Cmd/Ctrl+Option/Alt+Up/Down focuses the pane above or below."
-        }, palette));
+        .child(settings_hint(if cfg!(target_os = "macos") { "Use Command (⌘) and Option (⌥) on macOS." } else { "Use Ctrl and Alt on this platform." }, palette))
+        .children({
+            let command = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
+            let option = if cfg!(target_os = "macos") { "⌥" } else { "Alt" };
+            let mut rows = vec![
+                (format!("{command}+Shift+arrow"), "Move tab to a pane; create a pane if needed"),
+                (format!("{command}+{option}+Up / Down"), "Focus the pane above or below"),
+            ];
+            if shortcut == "vim" {
+                rows.insert(0, ("Escape, then :".to_owned(), "Open workspace commands"));
+                rows.insert(1, (format!("Ctrl / {command}+W, then arrow or h/j/k/l"), "Focus another pane"));
+                rows.insert(2, (":q".to_owned(), "Close the current tab"));
+            } else {
+                rows.insert(0, (format!("{command}+W"), "Close the current tab"));
+            }
+            rows.into_iter().map(|(keys, action)| div().w_full().min_w_0().flex().flex_wrap().gap(px(12.))
+                .child(div().w(px(240.)).flex_shrink_0().font_weight(FontWeight::MEDIUM).child(keys))
+                .child(div().flex_1().min_w(px(140.)).whitespace_normal().text_color(rgb(palette.muted)).child(action)))
+        })
+        .child(settings_hint("Terminal keystrokes stay with the terminal. Preferences and the command palette keep their standard shortcuts.", palette));
     let focus = settings_card(
         "Workspace focus",
         "Set how split panes respond as you move through them.",
@@ -161,17 +194,8 @@ pub(super) fn render_behavior(
         "focusFollowsMouse",
         settings["focusFollowsMouse"] == true,
     ));
-    let busy = settings_card("Busy agents", "Choose what happens when you send another message during a running turn.", palette)
-        .child(settings_toggle("Default to steering busy agents", "Off queues a message for the next turn. On steers a live Codex turn or an ACP agent that explicitly supports it; other harnesses queue safely.", settings["busyMessageMode"] == "steer", palette)
-            .child(Switch::new("settings-busy-message-mode").checked(settings["busyMessageMode"] == "steer")
-                .disabled(desktop.busy).accessibility_label("Default to steering busy agents")
-                .on_change(cx.listener(|view, enabled, _, cx| {
-                    view.patch_settings(json!({"busyMessageMode":if *enabled {"steer"} else {"queue"}}), cx);
-                }))))
-        .child(settings_hint("Follow-ups stay queued until the active harness confirms the steer. Queued messages appear above the input box.", palette));
-    stack().child(keyboard).child(focus).child(busy)
-        .child(settings_card("Agent permissions", "Permission modes are configured per agent. Each task keeps the permission mode captured when it was created, so changing an agent affects future tasks.", palette))
-        .into_any_element()
+
+    stack().child(keyboard).child(focus).into_any_element()
 }
 
 pub(super) fn render_conversation(
@@ -239,7 +263,29 @@ pub(super) fn render_conversation(
             if voice_engine.is_empty() { "whisper" } else { &voice_engine },
             &[("whisper", "Whisper (local)"), ("apple", "Apple on-device")]))
         .child(settings_hint("Apple on-device transcription is available in the macOS app. Whisper remains the default. Voice recordings become editable draft text before you send them.", palette));
-    let mut content = stack().child(streaming_controls(cx, palette)).child(activity).child(messages).child(voice);
+    let busy = settings_card("Busy agents", "Choose what happens when you send another message during a running turn.", palette)
+        .child(settings_toggle("Default to steering busy agents", "Off queues a message for the next turn. On steers a live Codex turn or an ACP agent that explicitly supports it; other harnesses queue safely.", settings["busyMessageMode"] == "steer", palette)
+            .child(Switch::new("settings-busy-message-mode").checked(settings["busyMessageMode"] == "steer")
+                .disabled(desktop.busy).accessibility_label("Default to steering busy agents")
+                .on_change(cx.listener(|view, enabled, _, cx| {
+                    view.patch_settings(json!({"busyMessageMode":if *enabled {"steer"} else {"queue"}}), cx);
+                }))))
+        .child(settings_hint("Follow-ups stay queued until the active harness confirms the steer. Queued messages appear above the input box.", palette));
+    stack()
+        .child(messages)
+        .child(voice)
+        .child(busy)
+        .child(streaming_controls(cx, palette))
+        .child(activity)
+        .into_any_element()
+}
+
+pub(super) fn render_boards(
+    desktop: &mut Desktop,
+    cx: &mut Context<Desktop>,
+    palette: Palette,
+) -> AnyElement {
+    let settings = desktop.snapshot["settings"].clone();
     if let Some(state) = desktop.native_settings.as_ref() {
         let guidance = state.board_guidance.clone();
         let length = guidance.read(cx).value().chars().count();
@@ -265,9 +311,11 @@ pub(super) fn render_conversation(
                         }
                         view.patch_settings(json!({"boardGuidanceText":if text.trim().is_empty() {Value::Null} else {json!(text)}}), cx);
                     }))));
-        content = content.child(boards);
+        return stack().child(boards).into_any_element();
     }
-    content.into_any_element()
+    stack()
+        .child(settings_hint("Preferences are loading…", palette))
+        .into_any_element()
 }
 
 fn streaming_controls(cx: &mut Context<Desktop>, palette: Palette) -> Div {
@@ -292,7 +340,10 @@ fn streaming_controls(cx: &mut Context<Desktop>, palette: Palette) -> Div {
                     streaming_display::set(Options { characters_per_second: speed, ..streaming_display::current(cx) }, cx); cx.notify();
                 }))
         })));
-    if let Some(error) = cx.try_global::<Selection>().and_then(|selection| selection.error.as_ref()) {
+    if let Some(error) = cx
+        .try_global::<Selection>()
+        .and_then(|selection| selection.error.as_ref())
+    {
         card = card.child(error.clone());
     }
     card
