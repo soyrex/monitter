@@ -268,6 +268,9 @@ pub fn open_if_requested(cx: &mut App) -> bool {
     };
     crate::surface_blend::initialize_for_ui_fixture();
     crate::native_motion::initialize_for_ui_fixture(cx);
+    // Production applies the native theme through SettingsView before drawing.
+    // The isolated scene bypasses preferences, so initialize component colors.
+    gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     cx.set_global(streaming_display::Selection {
         options: streaming_display::Options {
             mode: if matches!(

@@ -1,6 +1,8 @@
 use std::{ops::Deref, rc::Rc};
 #[cfg(feature = "performance-profiling")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "performance-profiling")]
+use std::sync::OnceLock;
 
 use wry::{
     Rect,
@@ -15,6 +17,10 @@ use gpui::{
 
 #[cfg(feature = "performance-profiling")]
 static BOUNDS_WRITES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static BOUNDS_TRACE_WRITES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static BOUNDS_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
 #[cfg(feature = "performance-profiling")]
 static SHOW_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "performance-profiling")]
@@ -35,6 +41,24 @@ pub fn performance_counts() -> PerformanceCounts {
         show_transitions: SHOW_TRANSITIONS.load(Ordering::Relaxed),
         hide_transitions: HIDE_TRANSITIONS.load(Ordering::Relaxed),
     }
+}
+
+#[cfg(feature = "performance-profiling")]
+fn trace_bounds_enabled() -> bool {
+    *BOUNDS_TRACE_ENABLED.get_or_init(|| {
+        std::env::var_os("MONITTER_GPUI_PERF_TRACE_BOUNDS").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+    })
+}
+
+#[cfg(feature = "performance-profiling")]
+fn numeric_bounds(bounds: Bounds<Pixels>) -> (f32, f32, f32, f32) {
+    (
+        bounds.origin.x.into(),
+        bounds.origin.y.into(),
+        bounds.size.width.into(),
+        bounds.size.height.into(),
+    )
 }
 
 /// An owned, UI-thread-local handle to the raw wry webview.
@@ -253,6 +277,19 @@ impl Element for WebViewElement {
         if self.parent.read(cx).applied_native_bounds != Some(bounds) {
             #[cfg(feature = "performance-profiling")]
             BOUNDS_WRITES.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "performance-profiling")]
+            if trace_bounds_enabled() {
+                let trace_index = BOUNDS_TRACE_WRITES.fetch_add(1, Ordering::Relaxed);
+                if trace_index < 100 {
+                    let old = self.parent.read(cx).applied_native_bounds.map(numeric_bounds);
+                    eprintln!(
+                        "GPUI PERF native_bounds_change #{} old={:?} new={:?}",
+                        trace_index + 1,
+                        old,
+                        numeric_bounds(bounds),
+                    );
+                }
+            }
             let result = self.view.set_bounds(Rect {
                 size: dpi::Size::Logical(LogicalSize {
                     width: bounds.size.width.into(),

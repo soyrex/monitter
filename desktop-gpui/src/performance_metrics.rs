@@ -51,6 +51,7 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
             (window.input_latency_snapshot(), window.frame_duration_snapshot())
         }) else { return; };
         let start_transcript = crate::chat::transcript_preparation_counts();
+        let start_reasons = crate::chat::transcript_preparation_reason_counts();
         let start_outline = crate::native_pane_highlight::performance_counts();
         let start_browser = crate::browser::performance_counts();
         let start_webview = gpui_wry::performance_counts();
@@ -75,6 +76,10 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
         let measured_seconds = started.elapsed().as_secs_f64();
         let finished_at = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|time| time.as_millis() as u64);
         let transcript = crate::chat::transcript_preparation_counts();
+        let preparation_reasons: serde_json::Map<String, serde_json::Value> =
+            crate::chat::transcript_preparation_reason_counts().into_iter().zip(start_reasons)
+                .map(|((reason, count), (_, start))| (reason.to_owned(), json!(count.saturating_sub(start))))
+                .collect();
         let outline = crate::native_pane_highlight::performance_counts();
         let browser = crate::browser::performance_counts();
         let webview = gpui_wry::performance_counts();
@@ -98,6 +103,7 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
             "animationFrameIntervalMs": summary!(frames.present_interval_histogram, 1_000_000.0),
             "transcriptPreparations": transcript.0.saturating_sub(start_transcript.0),
             "transcriptRowsPrepared": transcript.1.saturating_sub(start_transcript.1),
+            "transcriptPreparationReasons": preparation_reasons,
             "outlineShows": outline.shows.saturating_sub(start_outline.shows),
             "outlineHides": outline.hides.saturating_sub(start_outline.hides),
             "outlineGeometryPaints": outline.geometry_paints.saturating_sub(start_outline.geometry_paints),

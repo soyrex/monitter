@@ -43,6 +43,11 @@ pub(crate) fn transcript_preparation_counts() -> (u64, u64) {
     (TRANSCRIPT_PREPARATIONS.load(Relaxed), TRANSCRIPT_PREPARED_ROWS.load(Relaxed))
 }
 
+#[cfg(feature = "performance-profiling")]
+pub(crate) fn transcript_preparation_reason_counts() -> Vec<(&'static str, u64)> {
+    transcript_view::preparation_reason_counts()
+}
+
 fn mix_rgb(base: u32, color: u32, amount: f32) -> u32 {
     let channel = |shift: u32| {
         let base = ((base >> shift) & 0xffu32) as f32;
@@ -2025,6 +2030,10 @@ impl Render for ChatPane {
         if self.transcript_preparation_key.as_ref() != Some(&preparation_key)
             || self.transcript_viewport.is_none()
         {
+            #[cfg(feature = "performance-profiling")]
+            preparation_key.record_invalidation(
+                self.transcript_preparation_key.as_ref(), self.transcript_viewport.is_none(),
+            );
             #[cfg(any(test, feature = "performance-profiling"))]
             TRANSCRIPT_PREPARATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut history_error = None;

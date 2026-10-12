@@ -72,7 +72,6 @@ impl TranscriptPreparationKey {
             self.snapshot = Rc::downgrade(next);
         }
     }
-
 }
 impl PartialEq for TranscriptPreparationKey {
     fn eq(&self, other: &Self) -> bool {
@@ -99,6 +98,106 @@ impl PartialEq for TranscriptPreparationKey {
             && self.refreshing == other.refreshing
             && self.disclosure_generation == other.disclosure_generation
             && self.date == other.date
+    }
+}
+
+#[cfg(feature = "performance-profiling")]
+const PREPARATION_REASONS: [&str; 21] = [
+    "initial",
+    "missingViewport",
+    "snapshot",
+    "rows",
+    "selection",
+    "palette",
+    "interfaceFamily",
+    "appearance",
+    "typography",
+    "scale",
+    "width",
+    "companionWidth",
+    "companionVisible",
+    "compactDetail",
+    "historyError",
+    "historyLoading",
+    "historyComplete",
+    "historyTop",
+    "refreshing",
+    "disclosure",
+    "date",
+];
+#[cfg(feature = "performance-profiling")]
+static PREPARATION_REASON_COUNTS: [std::sync::atomic::AtomicU64; 21] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 21];
+
+#[cfg(feature = "performance-profiling")]
+pub(super) fn preparation_reason_counts() -> Vec<(&'static str, u64)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    PREPARATION_REASONS
+        .iter()
+        .zip(&PREPARATION_REASON_COUNTS)
+        .map(|(reason, count)| (*reason, count.load(Relaxed)))
+        .collect()
+}
+
+#[cfg(feature = "performance-profiling")]
+impl TranscriptPreparationKey {
+    /// Only runs after the preparation gate opens. Reports dependency changes
+    /// without message, draft, task, provider or source payload information.
+    pub(super) fn record_invalidation(&self, previous: Option<&Self>, missing_viewport: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut flags = [false; 21];
+        flags[0] = previous.is_none();
+        flags[1] = missing_viewport;
+        if let Some(old) = previous {
+            flags[2] = !std::rc::Weak::ptr_eq(&old.snapshot, &self.snapshot);
+            flags[3] = match (&old.rows, &self.rows) {
+                (Some(left), Some(right)) => !Rc::ptr_eq(left, right),
+                (None, None) => false,
+                _ => true,
+            };
+            flags[4] = old.selected != self.selected;
+            flags[5] = old.palette != self.palette;
+            flags[6] = old.interface_family != self.interface_family;
+            flags[7] = old.appearance != self.appearance;
+            flags[8] = old.typography != self.typography;
+            flags[9] = old.scale != self.scale;
+            flags[10] = old.width != self.width;
+            flags[11] = old.companion_width != self.companion_width;
+            flags[12] = old.companion_visible != self.companion_visible;
+            flags[13] = old.compact_detail != self.compact_detail;
+            flags[14] = old.history_error != self.history_error;
+            flags[15] = old.loading != self.loading;
+            flags[16] = old.complete != self.complete;
+            flags[17] = old.history_top_reached != self.history_top_reached;
+            flags[18] = old.refreshing != self.refreshing;
+            flags[19] = old.disclosure_generation != self.disclosure_generation;
+            flags[20] = old.date != self.date;
+        }
+        for (changed, count) in flags.iter().zip(&PREPARATION_REASON_COUNTS) {
+            if *changed {
+                count.fetch_add(1, Relaxed);
+            }
+        }
+        if std::env::var_os("MONITTER_GPUI_TRACE_TRANSCRIPT_PREPARATION").is_some() {
+            let reasons: Vec<_> = flags
+                .iter()
+                .zip(PREPARATION_REASONS)
+                .filter_map(|(changed, reason)| changed.then_some(reason))
+                .collect();
+            eprintln!(
+                "[transcript-preparation] reasons={reasons:?} width={:?}->{:.3} companionWidth={:?}->{:.3} scale={:?}->{} compact={:?}->{} historyTop={:?}->{}",
+                previous.map(|old| old.width),
+                self.width,
+                previous.map(|old| old.companion_width),
+                self.companion_width,
+                previous.map(|old| old.scale),
+                self.scale,
+                previous.map(|old| old.compact_detail),
+                self.compact_detail,
+                previous.map(|old| old.history_top_reached),
+                self.history_top_reached
+            );
+        }
     }
 }
 
