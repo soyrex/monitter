@@ -576,6 +576,7 @@ fn hidden_substantive_sync_still_requires_preparation_after_unaffected_publicati
             Some("synthetic-2".into()),
             std::sync::Arc::new(vec![]),
             std::sync::Arc::new(std::collections::HashMap::new()),
+            false,
             cx,
         );
         pane.advance_revision(latest.clone(), Some("synthetic-3".into()), cx);
@@ -717,5 +718,149 @@ fn voice_programmatic_draft_updates_palette_arguments_before_submission(cx: &mut
     pane.read_with(visual, |pane, cx| {
         assert!(pane.composer.read(cx).value().is_empty());
         assert!(!pane.slash.read(cx).is_open());
+    });
+}
+
+
+#[cfg(feature = "performance-profiling")]
+fn streaming_snapshot() -> Value {
+    let mut snapshot = retention_snapshot(0);
+    snapshot["messages"] = Value::Array((0..10_000).map(|index| json!({
+        "id":format!("stream-{index}"), "taskId":"quiet-task", "role":"assistant",
+        "text":format!("Synthetic retained history {index}"), "createdAt":index + 1,
+        "streamStatus":if index == 9_980 || index == 9_999 { "streaming" } else { "complete" },
+    })).collect());
+    snapshot
+}
+
+#[cfg(feature = "performance-profiling")]
+fn publish_stream_fixture(
+    pane: &Entity<super::super::ChatPane>, visual: &mut VisualTestContext, snapshot: &Value,
+) {
+    pane.update(visual, |pane, cx| {
+        pane.sync_prepared(Rc::new(snapshot.clone()), Some("synthetic-stream".into()),
+            std::sync::Arc::new(vec![]), std::sync::Arc::new(std::collections::HashMap::new()), true, cx);
+        pane.reconcile_history(snapshot["messages"].as_array().unwrap().clone(), false, cx);
+    });
+    draw(visual);
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn streaming_bodies_reuse_preparation_and_remount_current_text(cx: &mut TestAppContext) {
+    let mut snapshot = streaming_snapshot();
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(snapshot.clone()));
+    visual.update(|window, cx| {
+        pane.read(cx).composer.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    draw(visual);
+    visual.simulate_keystrokes("right");
+    visual.simulate_input("preserved draft");
+    draw(visual);
+    let baseline = super::super::transcript_preparation_counts();
+    let (renderer, offscreen_body, tail_body, cursor) = pane.read_with(visual, |pane, cx| {
+        let offscreen = pane.streaming_bodies["stream-9980"].clone();
+        assert_eq!(offscreen.read(cx).render_count, 0, "the older body starts outside the viewport");
+        (pane.detail_transcript_cache.as_ref().unwrap().read(cx).rows.clone(), offscreen,
+            pane.streaming_bodies["stream-9999"].clone(), pane.composer.read(cx).cursor())
+    });
+    for version in 1..=3 {
+        snapshot["messages"][9_980]["text"] = json!(format!("Offscreen streamed body version {version}"));
+        snapshot["messages"][9_999]["text"] = json!(format!("Visible streamed body version {version}"));
+        publish_stream_fixture(&pane, visual, &snapshot);
+        assert_eq!(super::super::transcript_preparation_counts(), baseline,
+            "text-only streaming must perform zero transcript preparations and history visits");
+        pane.read_with(visual, |pane, cx| {
+            let state = &pane.transcripts["quiet-task"];
+            assert!(Rc::ptr_eq(&renderer, &pane.detail_transcript_cache.as_ref().unwrap().read(cx).rows));
+            assert_eq!(offscreen_body.read(cx).source()["text"], snapshot["messages"][9_980]["text"]);
+            assert_eq!(tail_body.read(cx).source()["text"], snapshot["messages"][9_999]["text"]);
+            assert!(Rc::ptr_eq(offscreen_body.read(cx).source(), &state.messages[9_980]));
+            let TimelineRow::Message(row) = &state.rows[9_980] else { panic!("expected message") };
+            assert!(Rc::ptr_eq(row, &state.messages[9_980]), "canonical flat rows must not retain stale bodies");
+            let crate::transcript::ConversationItem::Message(projected) = &state.projection[9_980]
+                else { panic!("expected projected message") };
+            assert!(Rc::ptr_eq(projected, &state.messages[9_980]));
+            assert_eq!(pane.composer.read(cx).value().as_ref(), "preserved draft");
+            assert_eq!(pane.composer.read(cx).cursor(), cursor);
+        });
+    }
+    pane.update(visual, |pane, cx| {
+        // This is the exact action used by the retained Copy click handler.
+        pane.copy_message_text("quiet-task", "stream-9980", cx);
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "Offscreen streamed body version 3");
+    });
+    let scroll_position = pane.read_with(visual, |pane, _| {
+        pane.decoration_bounds.chat_column.get().unwrap().origin + gpui::point(gpui::px(50.), gpui::px(50.))
+    });
+    // Unknown virtual rows carry zero cumulative height. Native wheel input
+    // reveals another measured slice at each edge; it cannot jump to message0
+    // using one huge pixel delta. Reach this nearby offscreen row explicitly.
+    for _ in 0..8 {
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position:scroll_position, delta:gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(1_000.))),
+            ..Default::default()
+        });
+        draw(visual);
+        if offscreen_body.read_with(visual, |body, _| body.render_count) > 0 { break; }
+    }
+    pane.read_with(visual, |_, cx| {
+        assert!(offscreen_body.read(cx).render_count > 0, "the old cached row really remounted in the native viewport");
+        assert_eq!(offscreen_body.read(cx).source()["text"], "Offscreen streamed body version 3");
+    });
+    assert_eq!(super::super::transcript_preparation_counts(), baseline);
+
+    // Completion must rebuild status/actions/markdown even though the worker
+    // permits an own-message update in otherwise unchanged row context.
+    let tail_renders = tail_body.read_with(visual, |body, _| body.render_count);
+    pane.update(visual, |pane, cx| pane.finish_bottom_jump(cx));
+    draw(visual);
+    assert!(tail_body.read_with(visual, |body, _| body.render_count) > tail_renders,
+        "production back-to-bottom must invalidate the retained list and remount its visible tail body");
+    assert_eq!(super::super::transcript_preparation_counts(), baseline,
+        "a programmatic scroll must reuse prepared transcript wrappers");
+    snapshot["messages"][9_999]["streamStatus"] = json!("complete");
+    publish_stream_fixture(&pane, visual, &snapshot);
+    assert!(super::super::transcript_preparation_counts().0 > baseline.0);
+    pane.read_with(visual, |pane, cx| {
+        assert_eq!(tail_body.read(cx).source()["streamStatus"], "complete");
+        assert!(!Rc::ptr_eq(&renderer, &pane.detail_transcript_cache.as_ref().unwrap().read(cx).rows));
+    });
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn streaming_bodies_preserve_scrollback_until_reader_follows(cx: &mut TestAppContext) {
+    let mut snapshot = streaming_snapshot();
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(snapshot.clone()));
+    draw(visual);
+    let scroll_position = pane.read_with(visual, |pane, _| {
+        pane.decoration_bounds.chat_column.get().unwrap().origin + gpui::point(gpui::px(50.), gpui::px(50.))
+    });
+    visual.simulate_event(gpui::ScrollWheelEvent {
+        position:scroll_position, delta:gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(1_000.))),
+        ..Default::default()
+    });
+    draw(visual);
+    let (anchor, body) = pane.read_with(visual, |pane, _| {
+        let state = &pane.transcripts["quiet-task"];
+        assert!(!state.list.is_following_tail());
+        (state.list.logical_scroll_top(), pane.streaming_bodies["stream-9999"].clone())
+    });
+    snapshot["messages"][9_999]["text"] = json!("Held latest body while reader is scrolled back");
+    publish_stream_fixture(&pane, visual, &snapshot);
+    pane.read_with(visual, |pane, cx| {
+        let state = &pane.transcripts["quiet-task"];
+        assert!(state.has_pending_live());
+        assert_eq!(state.list.logical_scroll_top().item_ix, anchor.item_ix);
+        assert_eq!(state.list.logical_scroll_top().offset_in_item, anchor.offset_in_item);
+        assert_ne!(state.messages[9_999]["text"], snapshot["messages"][9_999]["text"]);
+        assert_ne!(body.read(cx).source()["text"], snapshot["messages"][9_999]["text"]);
+    });
+    pane.update(visual, |pane, cx| pane.finish_bottom_jump(cx));
+    draw(visual);
+    pane.read_with(visual, |pane, cx| {
+        assert!(!pane.transcripts["quiet-task"].has_pending_live());
+        assert_eq!(body.read(cx).source()["text"], snapshot["messages"][9_999]["text"]);
     });
 }

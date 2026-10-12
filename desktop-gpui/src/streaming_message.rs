@@ -10,6 +10,8 @@ use serde_json::Value;
 use std::rc::Rc;
 
 pub struct StreamingMessage {
+    #[cfg(test)]
+    pub(crate) render_count: usize,
     source: Rc<Value>,
     reveal: RevealState,
     options: Options,
@@ -54,6 +56,8 @@ impl StreamingMessage {
         })
         .detach();
         let mut body = Self {
+            #[cfg(test)]
+            render_count: 0,
             source,
             reveal,
             options,
@@ -66,6 +70,9 @@ impl StreamingMessage {
         body.schedule(cx);
         body
     }
+    #[cfg(test)]
+    pub(crate) fn source(&self) -> &Rc<Value> { &self.source }
+
     pub fn set_message(&mut self, source: Rc<Value>, cx: &mut Context<Self>) {
         if Rc::ptr_eq(&self.source, &source) {
             return;
@@ -156,6 +163,8 @@ impl StreamingMessage {
 }
 impl Render for StreamingMessage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        { self.render_count += 1; }
         let text = self.source["text"].as_str().unwrap_or_default();
         let typing =
             self.visible && self.options.mode == Mode::Typing && self.reveal.cursor_visible("body");

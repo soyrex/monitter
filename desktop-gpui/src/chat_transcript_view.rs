@@ -72,6 +72,14 @@ impl TranscriptPreparationKey {
             self.snapshot = Rc::downgrade(next);
         }
     }
+    /// Text-only substitution preserves every prepared wrapper and grouping.
+    /// Do not erase an already-pending structural invalidation.
+    pub(super) fn advance_stream_rows(&mut self, previous: &Rc<Vec<TimelineRow>>, next: &Rc<Vec<TimelineRow>>) {
+        if self.rows.as_ref().is_some_and(|rows| Rc::ptr_eq(rows, previous)) {
+            self.rows = Some(next.clone());
+        }
+    }
+
 }
 impl PartialEq for TranscriptPreparationKey {
     fn eq(&self, other: &Self) -> bool {

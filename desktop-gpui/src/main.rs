@@ -134,6 +134,11 @@ gpui_kit::actions!(
     [SendMessage, Quit]
 );
 
+fn retire_snapshot(snapshot: Rc<Value>, cx: &App) {
+    if let Some(snapshot) = native_publication::take_unshared_snapshot(snapshot) {
+        cx.background_executor().spawn(async move { drop(snapshot) }).detach();
+    }
+}
 fn field(value: &Value, key: &str) -> String {
     value
         .get(key)
@@ -1496,7 +1501,7 @@ impl Desktop {
         self.publication_index = Some(prepared.index);
         self.collaboration_records = prepared.collaboration_records;
         self.collaboration_transcripts = prepared.collaboration_transcripts;
-        self.snapshot = Rc::new(prepared.snapshot);
+        let retired_snapshot = std::mem::replace(&mut self.snapshot, Rc::new(prepared.snapshot));
         self.revision = revision;
         for pane in self.terminal_panes.values() {
             pane.update(cx, |pane, cx| pane.set_context(&self.snapshot, None, cx));
@@ -1634,7 +1639,7 @@ impl Desktop {
                 let history = prepared.histories.remove(id);
                 let boundary = changes.task_boundary(id, self.revision.as_deref(), &self.snapshot);
                 pane.update(cx, |pane, cx| {
-                    pane.sync_prepared(self.snapshot.clone(), self.revision.clone(), self.collaboration_records[id].clone(), self.collaboration_transcripts[id].clone(), cx);
+                    pane.sync_prepared(self.snapshot.clone(), self.revision.clone(), self.collaboration_records[id].clone(), self.collaboration_transcripts[id].clone(), prepared.transcript_context_unchanged_tasks.contains(id), cx);
                     if let Some(messages) = history { pane.reconcile_history(messages, reset, cx); }
                     if let Some(boundary) = boundary { pane.restore_history_boundary(boundary.next_before_id.clone(), cx); }
                 });
@@ -1657,6 +1662,7 @@ impl Desktop {
                 mail.set_context(&self.snapshot, selected, cx)
             });
         }
+        retire_snapshot(retired_snapshot, cx);
         cx.notify();
     }
     fn compact_inactive_task(&mut self, task_id: &str, cx: &mut Context<Self>) {
@@ -3598,8 +3604,11 @@ impl Desktop {
                 widget.update(cx, |widget, cx| {
                     widget.set_snapshot_shared(self.snapshot.clone(), self.revision.as_deref(), cx)
                 });
-                self.sidebar_usage_snapshot = Some(self.snapshot.clone());
+                let retired_snapshot = self.sidebar_usage_snapshot.replace(self.snapshot.clone());
                 self.sidebar_usage_revision = self.revision.clone();
+                if let Some(snapshot) = retired_snapshot {
+                    retire_snapshot(snapshot, cx);
+                }
             }
         }
         let agents: Vec<_> = rows(&self.snapshot, "agents")

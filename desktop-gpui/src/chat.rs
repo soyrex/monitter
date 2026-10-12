@@ -608,6 +608,7 @@ pub struct ChatPane {
     message_action_focus: HashMap<String, FocusHandle>,
     streaming_bodies: HashMap<String, Entity<crate::streaming_message::StreamingMessage>>,
     streaming_bodies_initialized: bool,
+    transcript_context_unchanged: bool,
     pub(crate) decoration_bounds: crate::activity_sparkles::ChatDecorationBounds,
     task_actions: Option<Entity<crate::chat_task_actions::ChatTaskActionsPane>>,
     task_actions_subscription: Option<Subscription>,
@@ -1014,6 +1015,7 @@ impl ChatPane {
             message_action_focus: HashMap::new(),
             streaming_bodies: HashMap::new(),
             streaming_bodies_initialized: false,
+            transcript_context_unchanged: false,
             task_actions: None,
             task_actions_subscription: None,
             fork_dialog: None,
@@ -1199,6 +1201,17 @@ impl ChatPane {
         cx.notify();
         true
     }
+    /// Resolve text at activation time: retained streaming row closures may
+    /// have been prepared before the latest canonical body arrived.
+    fn copy_message_text(&self, task_id: &str, message_id: &str, cx: &mut App) {
+        if self.task_id() != task_id { return; }
+        let Some(message) = self.transcripts.get(task_id).and_then(|state| {
+            state.messages.iter().find(|message| message["id"].as_str() == Some(message_id))
+        }) else { return; };
+        let text = field(message, "text");
+        let text = if message["role"] == "user" { split_operator_message(&text).1 } else { text };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
     pub fn task_id(&self) -> String {
         self.selected.clone().unwrap_or_default()
     }
@@ -1211,16 +1224,24 @@ impl ChatPane {
     pub fn sync_prepared(
         &mut self, snapshot: Rc<Value>, revision: Option<String>,
         companion_records: std::sync::Arc<Vec<Value>>,
-        companion_transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts, cx: &mut Context<Self>,
+        companion_transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts, transcript_context_unchanged: bool, cx: &mut Context<Self>,
     ) {
-        self.sync_with_companion(snapshot, revision, Some((companion_records, companion_transcripts)), cx);
+        let previous = self.snapshot.clone();
+        self.sync_with_companion(snapshot, revision, Some((companion_records, companion_transcripts)), transcript_context_unchanged, cx);
+        self.transcript_context_unchanged = transcript_context_unchanged;
+        if transcript_context_unchanged {
+            if let Some(key) = &mut self.transcript_preparation_key {
+                key.advance_unaffected_snapshot(&previous, &self.snapshot);
+            }
+        }
     }
     pub fn sync(&mut self, snapshot: Rc<Value>, revision: Option<String>, cx: &mut Context<Self>) {
-        self.sync_with_companion(snapshot, revision, None, cx);
+        self.transcript_context_unchanged = false;
+        self.sync_with_companion(snapshot, revision, None, false, cx);
     }
     fn sync_with_companion(
         &mut self, snapshot: Rc<Value>, revision: Option<String>,
-        companion_records: Option<(std::sync::Arc<Vec<Value>>, monitter_gpui_desktop::native_publication::PreparedChildTranscripts)>, cx: &mut Context<Self>,
+        companion_records: Option<(std::sync::Arc<Vec<Value>>, monitter_gpui_desktop::native_publication::PreparedChildTranscripts)>, transcript_context_unchanged: bool, cx: &mut Context<Self>,
     ) {
         if self.error.as_deref().is_some_and(connection_recovery::transient) {
             self.error = None;
@@ -1296,7 +1317,7 @@ impl ChatPane {
             });
         }
         self.refreshing = false;
-        if let Some(transcript) = self.transcripts.get(&self.task_id()) {
+        if !transcript_context_unchanged && let Some(transcript) = self.transcripts.get(&self.task_id()) {
             let messages = transcript.messages.as_ref().clone();
             self.composer_footer
                 .update(cx, |footer, cx| footer.set_context_messages(messages, cx));
@@ -1347,6 +1368,29 @@ impl ChatPane {
     /// loaded older pages. Never use this with a bounded compact snapshot tail.
     pub fn reconcile_history(&mut self, messages: Vec<Value>, reset: bool, cx: &mut Context<Self>) {
         let task_id = self.task_id();
+        let context_unchanged = std::mem::take(&mut self.transcript_context_unchanged);
+        if context_unchanged && !reset {
+            let state = self.transcripts.entry(task_id.clone()).or_default();
+            let previous_rows = state.rows.clone();
+            if let Some((changed, indices)) = state.reconcile_stream_bodies(
+                &messages, |id| self.streaming_bodies.contains_key(id),
+            ) {
+                if let Some(key) = &mut self.transcript_preparation_key {
+                    key.advance_stream_rows(&previous_rows, &state.rows);
+                }
+                for message in changed {
+                    self.streaming_bodies[&field(&message, "id")].update(cx, |body, cx| body.set_message(message, cx));
+                }
+                let remeasured = !indices.is_empty();
+                for index in indices { state.list.remeasure_items(index..index + 1); }
+                if remeasured { self.invalidate_transcript_list(cx); }
+                // The publication already owns canonical payloads. Dropping its
+                // duplicate full-history transport Vec is background work.
+                cx.background_executor().spawn(async move { drop(messages); }).detach();
+                cx.notify();
+                return;
+            }
+        }
         let events = rows(&self.snapshot, "events")
             .into_iter()
             .filter(|event| {
@@ -1676,6 +1720,13 @@ impl ChatPane {
         .detach();
         cx.notify();
     }
+    /// ListState carries geometry, not entity invalidation. Programmatic
+    /// scroll/remeasure must invalidate its retained native render owner.
+    fn invalidate_transcript_list(&self, cx: &mut Context<Self>) {
+        if let Some(list) = &self.detail_transcript_cache {
+            list.update(cx, |_, cx| cx.notify());
+        }
+    }
     fn finish_bottom_jump(&mut self, cx: &mut Context<Self>) {
         self.bottom_jump = None;
         self.composer_scroll_distance = gpui_kit::px(0.);
@@ -1684,6 +1735,7 @@ impl ChatPane {
             state.list.set_follow_mode(FollowMode::Tail);
             state.list.scroll_to_end();
         }
+        self.invalidate_transcript_list(cx);
         cx.notify();
     }
     fn back_to_bottom(&mut self, cx: &mut Context<Self>) {
@@ -1716,6 +1768,7 @@ impl ChatPane {
             state.list.scroll_by(distance - remaining);
             self.composer_scroll_distance = remaining;
         }
+        self.invalidate_transcript_list(cx);
         cx.notify();
     }
     /// Programmatic editor writes emit no native change event. At the explicit
@@ -1751,6 +1804,7 @@ impl ChatPane {
             state.release_live();
             state.list.scroll_to_end();
         }
+        self.invalidate_transcript_list(cx);
         self.command(
             "send_message",
             json!({"taskId":id,"text":chat_slash::literal_prompt(&text),"attachmentIds":attachment_ids}),
@@ -2658,7 +2712,9 @@ impl Render for ChatPane {
                     let message_id = field(message, "id");
                     let group: SharedString = format!("message-actions-{message_id}").into();
                     if message_action_focus.contains_key(&message_id) {
-                        let copy_text = visible_text.clone();
+                        let copy_message = message_id.clone();
+                        let copy_task = field(&task_snapshot, "id");
+                        let copy_pane = pane.clone();
                         let reply_message = message_id.clone();
                         let reply_author = label.clone();
                         let reply_task = field(&task_snapshot, "id");
@@ -2677,7 +2733,9 @@ impl Render for ChatPane {
                                 .disabled(visible_text.is_empty())
                                 .accessibility_label("Copy message text").tooltip("Copy message text")
                                 .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                                    let _ = copy_pane.update(cx, |pane, cx| {
+                                        pane.copy_message_text(&copy_task, &copy_message, cx);
+                                    });
                                 }))
                             .child(Button::new(SharedString::from(format!("reply-message-{message_id}")))
                                 .ghost().compact().w(px(23.)).h(px(23.)).p_0()

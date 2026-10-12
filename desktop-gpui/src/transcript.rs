@@ -272,6 +272,74 @@ impl TranscriptState {
             }
         }
     }
+    /// Replace only bodies of existing nonempty streaming assistant messages.
+    /// All canonical views advance together; chronology, grouping and list
+    /// geometry are preserved until the caller remeasures affected items.
+    /// A scrolled-back reader keeps the existing frozen/pending-live path.
+    pub fn reconcile_stream_bodies(
+        &mut self,
+        incoming: &[Value],
+        body_available: impl Fn(&str) -> bool,
+    ) -> Option<(Vec<Rc<Value>>, Vec<usize>)> {
+        if !self.list.is_following_tail() || self.has_pending_live() || self.loading
+            || incoming.len() != self.messages.len()
+            || self.last_compact.len() != self.messages.len()
+        {
+            return None;
+        }
+        let mut changed = HashMap::new();
+        for ((previous, compact), next) in self.messages.iter().zip(&self.last_compact).zip(incoming) {
+            // A page merge may have advanced visible history independently.
+            if !Rc::ptr_eq(previous, compact) || id(previous).is_empty() || id(previous) != id(next) {
+                return None;
+            }
+            if previous.as_ref() == next { continue; }
+            let (Some(old), Some(new)) = (previous.as_object(), next.as_object()) else { return None; };
+            if old.len() != new.len()
+                || old.iter().any(|(key, value)| key != "text" && new.get(key) != Some(value))
+                || previous["role"] != "assistant" || next["role"] != "assistant"
+                || previous["streamStatus"] != "streaming" || next["streamStatus"] != "streaming"
+                || previous["text"].as_str().is_none_or(|text| text.trim().is_empty())
+                || next["text"].as_str().is_none_or(|text| text.trim().is_empty())
+                || !body_available(id(next))
+            {
+                return None;
+            }
+            // Duplicate IDs are not a safe render identity.
+            if changed.insert(id(next).to_owned(), Rc::new(next.clone())).is_some() { return None; }
+        }
+        if changed.is_empty() { return Some((vec![], vec![])); }
+        // Share every unchanged JSON payload. No sort, grouping, key generation,
+        // full projection equality pass, splice or reader-scroll command runs.
+        let mut matches = 0;
+        let messages: Vec<_> = self.messages.iter().map(|message| {
+            if let Some(next) = changed.get(id(message)) { matches += 1; next.clone() }
+            else { message.clone() }
+        }).collect();
+        if matches != changed.len() { return None; }
+        let rows = self.rows.iter().map(|row| match row {
+            TimelineRow::Message(message) => TimelineRow::Message(
+                changed.get(id(message)).cloned().unwrap_or_else(|| message.clone())),
+            _ => row.clone(),
+        }).collect();
+        let mut indices = vec![];
+        let projection = self.projection.iter().enumerate().map(|(index, item)| match item {
+            ConversationItem::Message(message) => {
+                if let Some(next) = changed.get(id(message)) {
+                    indices.push(index);
+                    ConversationItem::Message(next.clone())
+                } else { item.clone() }
+            }
+            _ => item.clone(),
+        }).collect();
+        let projection_current = self.projection_source.as_ref().is_some_and(|rows| Rc::ptr_eq(rows, &self.rows));
+        self.last_compact = messages.clone();
+        self.messages = Rc::new(messages);
+        self.rows = Rc::new(rows);
+        self.projection = Rc::new(projection);
+        if projection_current { self.projection_source = Some(self.rows.clone()); }
+        Some((changed.into_values().collect(), indices))
+    }
     /// Reconcile the native cache's entire known task history, including loaded
     /// pages. Unlike a compact tail, this list is authoritative for removals.
     /// A journal reset invalidates page cursors and any held prior revision.
@@ -357,6 +425,40 @@ mod tests {
     use serde_json::json;
     // Allow the grouping projection to be referenced from test code without
     // pulling the public api into the renderer's call path.
+
+    #[::core::prelude::v1::test]
+    fn streaming_body_shortcut_rejects_structure_metadata_and_empty_transitions() {
+        let original = json!({"id":"stream", "taskId":"task", "role":"assistant", "text":"initial body",
+            "streamStatus":"streaming", "createdAt":1, "attachments":[], "responseMetadata":null});
+        let mut state = TranscriptState::default();
+        state.reconcile(vec![original.clone()], true);
+        let initial_rows = state.rows.clone();
+        let mut body = original.clone();
+        body["text"] = json!("new streamed body");
+        assert!(state.reconcile_stream_bodies(&[body.clone()], |_| false).is_none(), "unprepared bodies require normal preparation");
+        for (key, value) in [
+            ("streamStatus", json!("complete")), ("attachments", json!([{"id":"attachment"}])),
+            ("responseMetadata", json!({"model":"new-model"})), ("phase", json!("final_answer")),
+            ("createdAt", json!(2)), ("role", json!("user")), ("text", json!("")), ("text", json!("   ")),
+            ("id", json!("replacement")),
+        ] {
+            let mut rejected = body.clone(); rejected[key] = value;
+            assert!(state.reconcile_stream_bodies(&[rejected], |_| true).is_none(), "{key} must use structural reconciliation");
+            assert!(Rc::ptr_eq(&state.rows, &initial_rows), "failed proof cannot mutate canonical state");
+        }
+        assert!(state.reconcile_stream_bodies(&[], |_| true).is_none());
+        assert!(state.reconcile_stream_bodies(&[body.clone(), body.clone()], |_| true).is_none());
+        let (changed, indices) = state.reconcile_stream_bodies(&[body.clone()], |_| true).unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(indices, vec![0]);
+        assert_eq!(state.messages[0].as_ref(), &body);
+        let rows = state.rows.clone();
+        let projection = state.projection.clone();
+        state.sync_projection(&[]);
+        assert!(Rc::ptr_eq(&state.rows, &rows));
+        assert!(Rc::ptr_eq(&state.projection, &projection), "no redundant projection after body substitution");
+        assert!(state.reconcile_stream_bodies(&[body], |_| true).unwrap().0.is_empty());
+    }
 
     #[::core::prelude::v1::test]
     fn inactive_tail_eviction_restores_cursor_and_protects_held_reader() {

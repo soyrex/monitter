@@ -48,6 +48,7 @@ impl Scenario {
 struct PerformanceScenario {
     dock: Entity<DockWorkspace>,
     chats: HashMap<String, Entity<ChatPane>>,
+    snapshot: Rc<Value>,
     source: Option<Snapshot>,
     publication: PublicationQueue,
     index: Option<Arc<PublicationIndex>>,
@@ -180,6 +181,7 @@ impl PerformanceScenario {
         self.records = prepared.collaboration_records;
         self.child_transcripts = prepared.collaboration_transcripts;
         let snapshot = Rc::new(prepared.snapshot);
+        let retired_snapshot = std::mem::replace(&mut self.snapshot, snapshot.clone());
         let revision = Some(format!("synthetic-{generation}"));
         crate::activity_effects::sync(&snapshot, self.palette, cx);
         for (id, pane) in &self.chats {
@@ -196,6 +198,7 @@ impl PerformanceScenario {
                     revision.clone(),
                     self.records[id].clone(),
                     self.child_transcripts[id].clone(),
+                    prepared.transcript_context_unchanged_tasks.contains(id),
                     cx,
                 );
                 if let Some(messages) = history {
@@ -203,6 +206,7 @@ impl PerformanceScenario {
                 }
             });
         }
+        crate::retire_snapshot(retired_snapshot, cx);
     }
 }
 fn snapshot(scenario: Scenario, row_count: usize, pane_count: usize) -> Value {
@@ -427,6 +431,7 @@ pub fn open_if_requested(cx: &mut App) -> bool {
             let scene = cx.new(|_| PerformanceScenario {
                 dock,
                 chats,
+                snapshot,
                 source,
                 publication: PublicationQueue::default(),
                 index: None,

@@ -3,7 +3,15 @@ use crate::native_state::ChangeSet;
 use monitter_lib::model::Snapshot;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
+
+/// Hold the previous source across consumer rebinding, then transfer its owned
+/// JSON to a background destructor only when no consumer still references it.
+/// Shared sources are never cloned or removed from their remaining owners.
+pub fn take_unshared_snapshot(snapshot: Rc<Value>) -> Option<Value> {
+    Rc::try_unwrap(snapshot).ok()
+}
 
 #[derive(Default, Clone)]
 pub struct PublicationChanges {
@@ -210,6 +218,10 @@ pub struct PreparedPublication {
     pub hidden_tasks: HashSet<String>,
     pub index: Arc<PublicationIndex>,
     pub sync_tasks: HashSet<String>,
+    /// Own message changes still require row/body validation by the pane. This
+    /// only proves its non-message transcript context is unchanged, allowing
+    /// source identity to advance without invalidating retained preparation.
+    pub transcript_context_unchanged_tasks: HashSet<String>,
     pub histories: HashMap<String, Vec<Value>>,
     pub collaboration_records: HashMap<String, Arc<Vec<Value>>>,
     pub collaboration_transcripts: HashMap<String, PreparedChildTranscripts>,
@@ -313,6 +325,7 @@ pub fn prepare(
         .as_ref()
         .is_none_or(|old| old.metadata["settings"] != metadata["settings"]);
     let mut sync_tasks = HashSet::new();
+    let mut transcript_context_unchanged_tasks = HashSet::new();
     let mut history_tasks = HashSet::new();
     for id in &panes {
         let events_changed = previous
@@ -333,6 +346,22 @@ pub fn prepare(
                         .as_ref()
                         .is_none_or(|old| old.events.get(child) != events.get(child)))
         });
+        let descendant_activity_changed = previous.as_ref().is_none_or(|old| {
+            dependencies[id].iter().any(|child| {
+                child != id && old.task_activity.get(child) != task_activity.get(child)
+            })
+        });
+        if !changes.reset
+            && !metadata_changed
+            && !events_changed
+            && !child_changed
+            && !descendant_activity_changed
+        {
+            // The owner's updatedAt drives its footer, not transcript rows.
+            // Descendant timestamps drive retained collaboration records and
+            // therefore remain a conservative context invalidation.
+            transcript_context_unchanged_tasks.insert(id.clone());
+        }
         if changes.reset
             || metadata_changed
             || activity_changed
@@ -364,6 +393,7 @@ pub fn prepare(
             events,
         }),
         sync_tasks,
+        transcript_context_unchanged_tasks,
         histories,
         collaboration_records: HashMap::new(),
         collaboration_transcripts: HashMap::new(),
@@ -471,6 +501,16 @@ mod tests {
         );
         assert!(activity.histories.is_empty());
         assert_eq!(activity.snapshot["tasks"][1]["updatedAt"], 100);
+        assert!(
+            activity
+                .transcript_context_unchanged_tasks
+                .contains("child")
+        );
+        assert!(
+            !activity
+                .transcript_context_unchanged_tasks
+                .contains("parent")
+        );
         // Titles remain conservative because cross-task links can show them.
         snapshot.tasks[1].title = "renamed child".into();
         let renamed = prepare(
@@ -481,6 +521,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(renamed.sync_tasks, panes);
+        assert!(renamed.transcript_context_unchanged_tasks.is_empty());
     }
     #[test]
     fn message_removal_reconciles_empty_authoritative_history() {
@@ -543,6 +584,82 @@ mod tests {
         .unwrap();
         assert_eq!(next.sync_tasks, HashSet::from(["parent".into()]));
         assert!(next.histories.is_empty());
+        assert!(!next.transcript_context_unchanged_tasks.contains("parent"));
+    }
+    #[test]
+    fn own_message_changes_reuse_context_but_reset_metadata_and_events_do_not() {
+        let mut snapshot = default_snapshot();
+        snapshot.messages = vec![message("stream", "a")].into();
+        let panes = HashSet::from(["a".into()]);
+        let first = prepare(
+            snapshot.clone(),
+            panes.clone(),
+            &PublicationChanges::default(),
+            None,
+        )
+        .unwrap();
+        assert!(first.transcript_context_unchanged_tasks.is_empty());
+        snapshot
+            .messages
+            .update_by_id("stream", |message| message.text = "new body".into())
+            .unwrap();
+        let changes = PublicationChanges {
+            message_tasks: panes.clone(),
+            ..Default::default()
+        };
+        let streamed =
+            prepare(snapshot.clone(), panes.clone(), &changes, Some(first.index)).unwrap();
+        assert_eq!(streamed.transcript_context_unchanged_tasks, panes);
+        assert_eq!(streamed.histories["a"][0]["text"], "new body");
+        let reset = prepare(
+            snapshot.clone(),
+            panes.clone(),
+            &PublicationChanges {
+                reset: true,
+                ..Default::default()
+            },
+            Some(streamed.index.clone()),
+        )
+        .unwrap();
+        assert!(reset.transcript_context_unchanged_tasks.is_empty());
+        let mut settings_changed = serde_json::to_value(snapshot.clone()).unwrap();
+        settings_changed["settings"]["chatFontSize"] = serde_json::json!(27);
+        let settings_changed = prepare(
+            serde_json::from_value(settings_changed).unwrap(),
+            panes.clone(),
+            &changes,
+            Some(streamed.index.clone()),
+        )
+        .unwrap();
+        assert!(
+            settings_changed
+                .transcript_context_unchanged_tasks
+                .is_empty()
+        );
+        snapshot.events = serde_json::from_value(serde_json::json!([{"id":"event","taskId":"a","kind":"status","title":"status changed","detail":"detail","createdAt":0}])).unwrap();
+        let event_changed = prepare(snapshot, panes, &changes, Some(streamed.index)).unwrap();
+        assert!(event_changed.transcript_context_unchanged_tasks.is_empty());
+    }
+    #[test]
+    fn retiring_snapshot_keeps_json_until_consumers_rebind_without_cloning() {
+        let retired = Rc::new(serde_json::json!({"messages":[{"text":"retained body"}]}));
+        let weak = Rc::downgrade(&retired);
+        let mut pane = retired.clone();
+        let mut sidebar = retired.clone();
+        let next = Rc::new(serde_json::json!({"messages":[]}));
+        pane = next.clone();
+        assert!(weak.upgrade().is_some());
+        // A remaining sidebar owner prevents transfer. Its separately held
+        // retirement reference protects the eventual final consumer release.
+        assert!(take_unshared_snapshot(retired).is_none());
+        let sidebar_retired = std::mem::replace(&mut sidebar, next);
+        assert!(Rc::ptr_eq(&pane, &sidebar));
+        let owned = take_unshared_snapshot(sidebar_retired).unwrap();
+        assert!(weak.upgrade().is_none());
+        assert_eq!(owned["messages"][0]["text"], "retained body");
+        // `owned` now contains the original payload and is Send, so production
+        // can destroy it on its background executor after this UI transfer.
+        std::thread::spawn(move || drop(owned)).join().unwrap();
     }
     #[test]
     fn local_history_race_rebases_once_but_reset_revision_never_replays() {
