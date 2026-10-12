@@ -1201,6 +1201,21 @@ A matching future request is auditable with its rule ID and `approve_always` dec
 to every native harness is always one-shot approve. Rules never survive a scope change, do not replay stale
 work after cancellation/restart, and can be revoked from Settings or the Approvals sidebar.
 
+Codex MCP tool approval elicitations are a provider-owned permission surface. A
+fieldless form with explicit `serverName`, `_meta.codex_approval_kind = "mcp_tool_call"`
+and a supported empty object schema can offer native persistence scopes advertised
+by `_meta.persist` (`session`, `always`, or an array of these). Desktop command
+`read_mcp_approval_support` returns `{nativeScopes:true}`; a GUI connected to
+an older resident backend retains one-shot input handling and hides unsupported
+scope choices. `resolve_mcp_approval` takes `{approvalId, decision}` (`approve_once`,
+`approve_session`, or `approve_always`). The backend validates the pending live
+request and advertised scope before responding. Allow once returns MCP
+`{action:"accept", content:null, _meta:null}`; scoped choices return only
+`_meta:{persist:"session"|"always"}`. Request metadata is never echoed as a grant.
+Codex owns these permissions; no Monitter exact-action rule is created. Denial
+uses `resolve_approval` with `deny`. Ordinary forms, questions and URL steps keep
+the existing input protocol and cannot inherit these permission options.
+
 Current interactive approval transports include local and SSH Codex app-server, legacy Hermes' local full-duplex gateway and Claude's local
 stream-json host protocol. A Claude `can_use_tool` request creates one durable desktop approval and the
 chosen one-time allow or deny is returned to that exact control request ID with the provider's original
@@ -2463,3 +2478,10 @@ and their cursor are transient views only: copying, reply/fork actions and
 persistence continue using the complete authoritative text. A completed response
 may finish its visual reveal before switching to final Markdown; interruption,
 hiding the pane or selecting As received flushes the display immediately.
+
+The GPUI new-tab session picker is a local presentation of existing unarchived
+chat metadata. It searches across projects/workspaces and uses the existing
+internal-task visibility projection. Choosing a result revalidates the current
+record and moves/reuses its retained `chat:<taskId>` pane into the landing tab's
+group. It does not create a task, send a prompt, change archiving, or attach to
+an unrelated native session. This adds no desktop/mobile/shared protocol fields.

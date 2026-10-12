@@ -567,9 +567,11 @@ pub struct ChatPane {
     details: Entity<crate::pane_details::PaneDetails>,
     approvals: Entity<crate::pane_approvals::PaneApprovals>,
     approval_popup_id: Option<String>,
+    pub(super) interaction_request_id: Option<String>,
+    pub(super) mcp_approval_supported: bool,
     approval_popup_open: bool,
     approval_focus: FocusHandle,
-    approval_details_expanded: bool,
+    pub(super) approval_details_expanded: bool,
     response_details_expanded: HashSet<String>,
     companion_context: (Option<String>, String),
     companion_width: f32,
@@ -593,6 +595,20 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // A GUI-only update can reconnect to an older resident backend.
+        // Probe capabilities without interrupting any resident agent.
+        let capability_service = service.clone();
+        let (capability_sender, capability_receiver) = futures::channel::oneshot::channel();
+        let _ = std::thread::Builder::new().name("monitter-approval-capabilities".into())
+            .stack_size(8 * 1024 * 1024).spawn(move || {
+                let supported = capability_service.invoke("read_mcp_approval_support", json!({}))
+                    .is_ok_and(|value| value["nativeScopes"] == true);
+                let _ = capability_sender.send(supported);
+            });
+        cx.spawn(async move |pane, cx| {
+            let supported = capability_receiver.await.unwrap_or(false);
+            let _ = pane.update(cx, |pane, cx| { pane.mcp_approval_supported = supported; cx.notify(); });
+        }).detach();
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 12)
@@ -957,6 +973,8 @@ impl ChatPane {
             details,
             approvals,
             approval_popup_id: None,
+            interaction_request_id: None,
+            mcp_approval_supported: false,
             approval_popup_open: false,
             approval_focus: cx.focus_handle(),
             approval_details_expanded: false,
@@ -1388,7 +1406,7 @@ impl ChatPane {
         let Some(service) = self.service.clone() else {
             return;
         };
-        let resolved_request = matches!(command, "resolve_input" | "resolve_approval")
+        let resolved_request = matches!(command, "resolve_input" | "resolve_approval" | "resolve_mcp_approval")
             .then(|| field(&args, "approvalId"));
         self.busy = true;
         self.composer_footer
@@ -3095,7 +3113,8 @@ impl Render for ChatPane {
         let pending_approval = self.pending_tool_approval();
         let next_approval_id = pending_approval.as_ref().map(|r| field(r, "id"));
         if next_approval_id != self.approval_popup_id {
-            self.approval_popup_open = next_approval_id.is_some();
+            // Pending requests stay in the approval dock above the composer.
+            self.approval_popup_open = false;
             if self.approval_popup_open && self.focus.contains_focused(window,cx) { window.focus(&self.approval_focus,cx); }
             self.approval_details_expanded = false;
             self.approval_popup_id = next_approval_id;
@@ -3111,7 +3130,7 @@ impl Render for ChatPane {
                 let _ = owner.update(cx, |pane, cx| { pane.approval_details_expanded = !pane.approval_details_expanded; cx.notify(); });
             });
             let task = rows(&self.snapshot, "tasks").into_iter().find(|t| field(t,"id") == self.task_id()).unwrap_or(Value::Null);
-            let prompt = crate::approval_prompt::render_approval_prompt(&request, &task, &self.snapshot, palette, cx.theme().font_family.clone(), cx.theme().font_size, self.busy, self.approval_details_expanded, decision, toggle);
+            let prompt = crate::approval_prompt::render_approval_prompt(&request, &task, &self.snapshot, palette, cx.theme().font_family.clone(), cx.theme().font_size, self.busy, self.approval_details_expanded, self.mcp_approval_supported, decision, toggle);
             content = content.child(div().absolute().inset_0().occlude().flex().items_center().justify_center().p_3()
                 .child(div().absolute().inset_0()
                     .bg(Background::from(rgba(0x00000055)).backdrop_blur(20.))
@@ -3180,9 +3199,7 @@ impl Render for ChatPane {
                                 scale,
                             ))
                             .max_w_full()
-                            .bg(crate::surface_blend::background(
-                                crate::surface_blend::Area::Pane, palette.paper,
-                            ))
+                            .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15))
                             .overflow_hidden()
                             .child(rail),
                     );
@@ -3449,9 +3466,7 @@ impl Render for ChatPane {
             .relative()
             .flex()
             .flex_col()
-            .bg(crate::surface_blend::background(
-                                crate::surface_blend::Area::Pane, palette.paper,
-                            ))
+            .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15))
             .text_color(rgb(palette.ink))
             .child(measurement)
             .child(upper_workspace)
@@ -3628,6 +3643,10 @@ impl ChatPane {
             .border_b_1()
             .border_color(rgb(palette.line))
             .border_blend_mode(crate::surface_blend::separator_mode())
+            .when(tern_tiles, |this| {
+                this.border_color(design::tile_border_color(palette))
+                    .border_blend_mode(0)
+            })
             .when(tern_tiles && design::border_opacity() == 0, |this| this.border_b_0())
             .child({
                 let geometry = self.decoration_bounds.header.clone();

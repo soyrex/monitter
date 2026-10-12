@@ -293,7 +293,7 @@ fn tern_new_tab_creates_a_vertical_split_and_monitter_keeps_tabs(cx: &mut TestAp
                 let palette = crate::design::palette(&settings, gpui::WindowAppearance::Dark);
                 dock.set_pane_appearance(&settings, palette, cx);
                 dock.set_tab_appearance(&settings, 100, cx);
-                let first = dock.empty_spec("empty:start", cx).unwrap();
+                let first = dock.empty_spec("empty:start", window, cx).unwrap();
                 dock.add(first, DockPlacement::Center, None, window, cx).unwrap();
                 dock.focus("empty:start", window, cx);
                 let group = dock.focused_group_node(window, cx).unwrap();

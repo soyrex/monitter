@@ -1907,6 +1907,11 @@ impl Service {
             "revoke_approval_rule" => {
                 snapshot_value(self.revoke_approval_rule(&arg::<String>(&args, "ruleId")?)?)
             }
+            "read_mcp_approval_support" => Ok(serde_json::json!({"nativeScopes":true})),
+            "resolve_mcp_approval" => snapshot_value(self.resolve_mcp_approval_request(
+                &arg::<String>(&args, "approvalId")?,
+                &arg::<String>(&args, "decision")?,
+            )?),
             "resolve_input" => snapshot_value(self.resolve_input_request(
                 &arg::<String>(&args, "approvalId")?,
                 arg(&args, "response")?,

@@ -246,6 +246,7 @@ struct Desktop {
     _sidebar_resize_subscription: Subscription,
     sidebar_width_touched: bool,
     sidebar_collapsed: bool,
+    sidebar_hidden: bool,
     sidebar_expanded_width: f32,
     preferences_open: bool,
     preferences_focus: FocusHandle,
@@ -305,6 +306,7 @@ struct Desktop {
     error: Option<String>,
     busy: bool,
     empty_terminal_pending: bool,
+    pending_empty_session: Option<(String, String)>,
     refreshing: bool,
     refresh_requested: bool,
     _changes: Option<Task<()>>,
@@ -336,6 +338,7 @@ struct Desktop {
     usage_revision: Option<String>,
     app_resources: Option<Entity<usage::AppResourcePane>>,
     sidebar_usage: Option<Entity<sidebar_usage::SidebarUsageWidget>>,
+    workspace_usage_rings: Option<Entity<sidebar_usage::WorkspaceUsageRings>>,
     sidebar_usage_snapshot: Option<Rc<Value>>,
     sidebar_usage_revision: Option<String>,
     schedules: Option<Entity<schedules::SchedulePane>>,
@@ -427,6 +430,19 @@ impl Desktop {
                 }
                 return;
             }
+            if let docking::WorkspaceEvent::EmptySession { pane_id, task_id } = event {
+                let valid = rows(&view.snapshot, "tasks").iter().any(|task| field(task, "id") == *task_id && task["archived"] != true);
+                if valid && !view.closing && !view.busy && view.service.is_some()
+                    && view.dock.read(cx).panel_key(pane_id).is_some() {
+                    view.pending_empty_session = Some((pane_id.clone(), task_id.clone()));
+                    view.selected = Some(task_id.clone());
+                    view.sidebar = Sidebar::Chats;
+                    view.draft_creation_open = false;
+                    view.dock_current = None;
+                    cx.notify();
+                }
+                return;
+            }
             if matches!(event, docking::WorkspaceEvent::LayoutChanged)
                 && !view.closing
                 && view.preferences.is_some()
@@ -471,6 +487,7 @@ impl Desktop {
                         let width = *width / design::ui_px(1., view.sidebar_scale);
                         if width.is_finite()
                             && !view.sidebar_resize_suppressed
+                            && !view.sidebar_is_hidden()
                             && !view.preferences_restore_suppressed
                         {
                             view.sidebar_width_touched = true;
@@ -531,6 +548,7 @@ impl Desktop {
             _sidebar_resize_subscription: sidebar_resize_subscription,
             sidebar_width_touched: false,
             sidebar_collapsed: preferences_modal::load_sidebar_collapse(),
+            sidebar_hidden: preferences_modal::load_sidebar_hidden(),
             sidebar_expanded_width: 252.,
             preferences_open: false,
             preferences_focus: cx.focus_handle(),
@@ -594,6 +612,7 @@ impl Desktop {
             error: None,
             busy: false,
             empty_terminal_pending: false,
+            pending_empty_session: None,
             refreshing: false,
             refresh_requested: false,
             _changes: None,
@@ -626,6 +645,7 @@ impl Desktop {
             usage_revision: None,
             app_resources: None,
             sidebar_usage: None,
+            workspace_usage_rings: None,
             sidebar_usage_snapshot: None,
             sidebar_usage_revision: None,
             schedules: None,
@@ -2316,16 +2336,36 @@ impl Desktop {
             .map(expanded_sidebar_width)
             .unwrap_or(252.0)
     }
-    fn sidebar_split(&self, sidebar: AnyElement, content: AnyElement, cx: &App) -> AnyElement {
-        let width = if self.sidebar_collapsed { design::compact_sidebar_width_design(design::interface_scale()) } else if self.sidebar_width_touched {
-            self.current_sidebar_width(cx)
+    fn workspace_route_background(&self, palette: design::Palette, cx: &App) -> gpui::Background {
+        let has_dock = self.dock.read(cx).has_panes()
+            && self.sidebar != Sidebar::Settings && !self.close_pending;
+        if design::workspace_route_needs_fill(design::tile_theme(), has_dock) {
+            crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper)
         } else {
-            self.preferences
-                .as_ref()
-                .and_then(|preferences| preferences.data.appearance.sidebar_width)
-                .map(expanded_sidebar_width)
-                .unwrap_or(252.0)
-        };
+            // Retained terminal/auxiliary panes share chat's one-layer backdrop.
+            rgba(0x00000000).into()
+        }
+    }
+    fn sidebar_is_hidden(&self) -> bool {
+        self.sidebar_hidden && design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern
+    }
+    fn sidebar_split(&mut self, sidebar: AnyElement, content: AnyElement, palette: design::Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let width = if self.sidebar_collapsed { design::compact_sidebar_width_design(design::interface_scale()) } else if self.sidebar_resize_suppressed { expanded_sidebar_width(self.sidebar_expanded_width) } else if self.sidebar_width_touched {
+            self.current_sidebar_width(cx)
+        } else { self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width).map(expanded_sidebar_width).unwrap_or(252.0) };
+        if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+            let spacing = design::tern_spacing(&self.snapshot["settings"]);
+            let tabs = self.render_workspace_tabs(palette, window, cx);
+            let column = div().size_full().flex().flex_col().min_w_0()
+                .child(tabs)
+                .child(div().flex_1().min_h_0().w_full()
+                    .border(design::ui_scaled_px(spacing.outer_padding()))
+                    .border_t(design::ui_scaled_px(spacing.gutter / 2.))
+                    .border_color(rgba(0x00000000))
+                    .child(content));
+            if self.sidebar_is_hidden() { return column.into_any_element(); }
+            return sidebar_split_element(&self.sidebar_resize, width, self.sidebar_scale, sidebar, column.into_any_element());
+        }
         sidebar_split_element(&self.sidebar_resize, width, self.sidebar_scale, sidebar, content)
     }
     fn apply_saved_sidebar_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2916,6 +2956,7 @@ impl Desktop {
                 Err(error) => { desktop.error = Some(error); cx.notify(); }
             }
         }).detach();
+        self.workspace_usage_rings = Some(cx.new(|cx| sidebar_usage::WorkspaceUsageRings::new(widget.clone(), cx)));
         self.sidebar_usage = Some(widget);
         self.sidebar_usage_snapshot = Some(snapshot);
         self.sidebar_usage_revision = revision;
@@ -3273,6 +3314,11 @@ impl Desktop {
                     }
                     dock.set_shown(true, window, cx);
                 });
+                if let Some((origin, requested)) = self.pending_empty_session.take() {
+                    if requested == task_id && !self.dock.update(cx, |dock, cx| dock.replace_empty_with_chat(&origin, &stable_id, window, cx)) {
+                        self.error = Some("Could not place this chat in the selected pane. The chat remains open.".into());
+                    }
+                }
                 self.dock_current = Some(stable_id);
             }
         }
@@ -3281,11 +3327,11 @@ impl Desktop {
         }
         let mut content = div().flex_1().h_full().min_w_0();
         if !self.dock.read(cx).has_panes() {
-            content = content.bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper)).child("Select a saved chat or create one from an agent.");
+            content = content.bg(self.workspace_route_background(palette, cx)).child("Select a saved chat or create one from an agent.");
         } else {
             content = content.child(self.dock.clone());
         }
-        let workspace = self.sidebar_split(sidebar, content.into_any_element(), cx);
+        let workspace = self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx);
         // Each non-overlapping pane and the sidebar own their single surface
         // fill. A second workspace fill here would compound the glass alpha.
         div()
@@ -3374,10 +3420,16 @@ impl Desktop {
                 cx,
             )
         });
+        let sessions = monitter_gpui_desktop::session_picker::build_entries(
+            self.snapshot["tasks"].as_array().map(Vec::as_slice).unwrap_or_default(),
+            self.snapshot["agents"].as_array().map(Vec::as_slice).unwrap_or_default(),
+            self.snapshot["projects"].as_array().map(Vec::as_slice).unwrap_or_default(), "",
+        );
+        self.dock.update(cx, |dock, cx| dock.set_empty_sessions(&sessions, cx));
         if self.closing {
             return div()
                 .size_full()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .child("Closing native surfaces…");
         }
         if let Some(browser) = &self.browser {
@@ -3478,7 +3530,7 @@ impl Desktop {
             .into_iter()
             .filter(|t| t["archived"] != true)
             .collect();
-        let sidebar = if self.sidebar_collapsed {
+        let sidebar = if self.sidebar_is_hidden() { div().into_any_element() } else if self.sidebar_collapsed {
             self.render_compact_sidebar(&agents, &tasks, palette, window, cx)
         } else { self.render_sidebar(&agents, &tasks, palette, window, cx) };
         let sidebar = div()
@@ -3499,9 +3551,9 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Archived {
             self.ensure_archives(window, cx);
@@ -3524,7 +3576,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3532,7 +3584,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Git {
             if self.git.is_none() {
@@ -3567,7 +3619,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3575,7 +3627,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Subagents {
             if self.subagents.is_none() {
@@ -3611,7 +3663,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3619,7 +3671,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Agents {
             if self.agent_editor.is_none() {
@@ -3655,7 +3707,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3663,7 +3715,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Schedules {
             if self.schedules.is_none() {
@@ -3692,7 +3744,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3700,7 +3752,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Usage {
             if self.usage.is_none() {
@@ -3729,7 +3781,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3737,7 +3789,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Terminal {
             if self
@@ -3754,9 +3806,9 @@ impl Desktop {
                 return div()
                     .size_full()
                     .flex()
-                    .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                    .bg(self.workspace_route_background(palette, cx))
                     .text_color(rgb(palette.ink))
-                    .child(self.sidebar_split(sidebar, content, cx));
+                    .child(self.sidebar_split(sidebar, content, palette, window, cx));
             }
             if self.terminal.is_none() {
                 if let Some(service) = self.service.clone() {
@@ -3787,7 +3839,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3795,7 +3847,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Channels {
             if self.channels.is_none() {
@@ -3846,7 +3898,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3854,7 +3906,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Mail {
             if self.mail.is_none() {
@@ -3882,7 +3934,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3890,7 +3942,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Projects {
             if self.workspace.is_none() {
@@ -3915,7 +3967,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3923,7 +3975,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         if self.sidebar == Sidebar::Settings {
             self.dock
@@ -3937,7 +3989,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3945,7 +3997,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, settings_content, cx));
+                .child(self.sidebar_split(sidebar, settings_content, palette, window, cx));
         }
         if self.sidebar == Sidebar::Browser {
             if self.browser.is_none() {
@@ -3967,7 +4019,7 @@ impl Desktop {
             return div()
                 .size_full()
                 .flex()
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper))
+                .bg(self.workspace_route_background(palette, cx))
                 .text_color(rgb(palette.ink))
                 .font_weight(FontWeight(
                     self.snapshot["settings"]["interfaceFontWeight"]
@@ -3975,7 +4027,7 @@ impl Desktop {
                         .unwrap_or(400)
                         .clamp(300, 700) as f32,
                 ))
-                .child(self.sidebar_split(sidebar, content.into_any_element(), cx));
+                .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
         self.render_chat_workspace(sidebar, palette, window, cx)
     }
@@ -4001,7 +4053,7 @@ impl Render for Desktop {
         let new_scale = design::interface_scale();
         let resize_target = {
             let state = self.sidebar_resize.read(cx);
-            if state.sizes().len() == 2 {
+            if state.sizes().len() == 2 && !self.sidebar_resize_suppressed && !self.sidebar_is_hidden() {
                 let actual = state.sizes()[0] / design::ui_px(1., self.sidebar_scale);
                 sidebar_resize_target(
                     actual,
@@ -4086,9 +4138,14 @@ impl Render for Desktop {
             // Keep the workspace painted beneath ordered native backdrop filters.
             let surface = self.render_surface(window, cx);
             let palette = self.apply_native_theme(window, cx);
-            root = root.child(div().size_full().flex().flex_col()
-                .child(self.render_workspace_tabs(palette, window, cx))
-                .child(div().flex_1().min_h_0().w_full().child(surface)));
+            if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+                // The sidebar and the workspace column share full window height.
+                root = root.child(surface);
+            } else {
+                root = root.child(div().size_full().flex().flex_col()
+                    .child(self.render_workspace_tabs(palette, window, cx))
+                    .child(div().flex_1().min_h_0().w_full().child(surface)));
+            }
         }
         if !self.preferences_open {
             if let Some(error) = self.preferences_error.clone() {

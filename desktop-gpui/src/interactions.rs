@@ -1,7 +1,12 @@
 //! Native approval/input and durable queue controls. All decisions go to Service.
 use super::*;
+use gpui_kit::component::ActiveTheme;
 use crate::design::ui_scaled_px as px;
 use gpui_kit::component::accordion::Accordion;
+use gpui_kit::{
+    assets::IconName,
+    component::{Icon, Sizable},
+};
 #[path = "interaction_input.rs"]
 mod input;
 
@@ -100,22 +105,105 @@ impl chat::ChatPane {
         let Some(task_id) = self.selected.clone() else {
             return div().into_any_element();
         };
-        let mut panel = div()
-            .id("task-interactions")
-            .max_h(px(300.))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap_3();
+        let mut panel = div().id("task-interactions").flex().flex_col().gap_3();
         let mut requests: Vec<_> = rows(&self.snapshot, "approvalRequests")
             .into_iter()
             .filter(|request| {
-                field(request, "taskId") == task_id && field(request, "status") == "pending" && !request["input"].is_null()
+                field(request, "taskId") == task_id && field(request, "status") == "pending"
             })
             .collect();
         requests.sort_by_key(|request| request["createdAt"].as_i64().unwrap_or_default());
-        for request in requests {
+        let count = requests.len();
+        let selected = self
+            .interaction_request_id
+            .as_ref()
+            .and_then(|id| {
+                requests
+                    .iter()
+                    .position(|request| field(request, "id") == *id)
+            })
+            .unwrap_or(0);
+        self.interaction_request_id = requests.get(selected).map(|request| field(request, "id"));
+        if count > 1 {
+            let previous = field(&requests[(selected + count - 1) % count], "id");
+            let next = field(&requests[(selected + 1) % count], "id");
+            panel = panel.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("previous-pending-approval")
+                            .label("Previous")
+                            .accessibility_label("Previous approval")
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                pane.interaction_request_id = Some(previous.clone());
+                                cx.notify();
+                            })),
+                    )
+                    .child(format!(
+                        "{} of {} awaiting your response",
+                        selected + 1,
+                        count
+                    ))
+                    .child(
+                        Button::new("next-pending-approval")
+                            .label("Next")
+                            .accessibility_label("Next approval")
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                pane.interaction_request_id = Some(next.clone());
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        for request in requests.into_iter().skip(selected).take(1) {
             let id = field(&request, "id");
+            let mcp_approval = !crate::approval_prompt::mcp_approval_choices(&request).is_empty();
+            if request["input"].is_null() || mcp_approval {
+                let approval_id = id.clone();
+                let native_mcp_supported = self.mcp_approval_supported;
+                let owner = cx.weak_entity();
+                let decision = Rc::new(
+                    move |decision: &'static str, _: &mut Window, cx: &mut App| {
+                        let _ = owner.update(cx, |pane, cx| {
+                            if mcp_approval && !native_mcp_supported && decision == "approve_once" {
+                                pane.command("resolve_input", json!({"approvalId": approval_id, "response":{}}), cx);
+                            } else {
+                                pane.command(
+                                    if mcp_approval && decision != "deny" { "resolve_mcp_approval" } else { "resolve_approval" },
+                                    json!({"approvalId": approval_id, "decision": decision}), cx);
+                            }
+                        });
+                    },
+                );
+                let owner = cx.weak_entity();
+                let toggle = Rc::new(move |_: &mut Window, cx: &mut App| {
+                    let _ = owner.update(cx, |pane, cx| {
+                        pane.approval_details_expanded = !pane.approval_details_expanded;
+                        cx.notify();
+                    });
+                });
+                let task = rows(&self.snapshot, "tasks")
+                    .into_iter()
+                    .find(|task| field(task, "id") == task_id)
+                    .unwrap_or(Value::Null);
+                panel = panel.child(crate::approval_prompt::render_approval_prompt(
+                    &request,
+                    &task,
+                    &self.snapshot,
+                    palette,
+                    cx.theme().font_family.clone(),
+                    cx.theme().font_size,
+                    self.busy,
+                    self.approval_details_expanded,
+                    self.mcp_approval_supported,
+                    decision,
+                    toggle,
+                ));
+                continue;
+            }
             let pending = field(&request, "status") == "pending";
             let input = request.get("input").filter(|input| !input.is_null());
             let summary = field(&request, "summary");
@@ -146,32 +234,18 @@ impl chat::ChatPane {
                 hidden_details.push(format!("Request detail:\n{bounded_detail}"));
             }
             let mut card = div()
-                .p_3()
-                .rounded_md()
-                .bg(crate::design::surface_color(if pending {
-                    palette.sidebar
-                } else {
-                    palette.card
-                }))
+                .id(SharedString::from(format!("input-body-{id}")))
+                .max_h(px(220.))
+                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(format!(
-                    "{} · {}",
-                    if input.is_some() {
-                        "Input request"
-                    } else {
-                        "Approval request"
-                    },
-                    field(&request, "status")
-                ))
-                .child(summary_preview)
-                .child(div().text_sm().child(format!(
-                    "{} · {} · risk {}",
-                    field(&request, "provider"),
-                    field(&request, "tool"),
-                    field(&request, "risk")
-                )));
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(summary_preview),
+                );
+            let mut actions = div().flex().flex_wrap().gap_2().flex_shrink_0();
             if !detail.trim().is_empty() && !detail_needs_disclosure {
                 card = card.child(
                     div()
@@ -245,9 +319,12 @@ impl chat::ChatPane {
                             card = card.child(Input::new(&state).disabled(self.busy));
                         }
                         let request = request.clone();
-                        card = card.child(
+                        actions = actions.child(
                             Button::new(SharedString::from(format!("submit-{id}")))
                                 .label("Submit answers")
+                                .icon(Icon::new(IconName::Check))
+                                .primary()
+                                .h(px(44.))
                                 .disabled(self.busy)
                                 .on_click(cx.listener(move |view, _, _, cx| {
                                     view.submit_questions(&request, cx)
@@ -257,6 +334,9 @@ impl chat::ChatPane {
                         match input::fields(&input["schema"]) {
                             Err(error) => card = card.child(error),
                             Ok(fields) => {
+                                if fields.is_empty() {
+                                    card = card.child("No fields are required. Submit response continues this tool request; Deny declines it.");
+                                }
                                 for (name, schema) in fields {
                                     let key = (id.clone(), name.clone());
                                     let title = schema["title"].as_str().unwrap_or(name);
@@ -286,8 +366,15 @@ impl chat::ChatPane {
                                             let selected =
                                                 self.form_choices.get(&key) == Some(&option);
                                             let label = option
-                                                .as_str()
-                                                .map(str::to_owned)
+                                                .as_bool()
+                                                .map(|value| {
+                                                    if value {
+                                                        "Yes".to_owned()
+                                                    } else {
+                                                        "No".to_owned()
+                                                    }
+                                                })
+                                                .or_else(|| option.as_str().map(str::to_owned))
                                                 .unwrap_or_else(|| option.to_string());
                                             let key = key.clone();
                                             card = card.child(
@@ -338,9 +425,12 @@ impl chat::ChatPane {
                                     }
                                 }
                                 let request = request.clone();
-                                card = card.child(
+                                actions = actions.child(
                                     Button::new(SharedString::from(format!("submit-form-{id}")))
                                         .label("Submit response")
+                                        .icon(Icon::new(IconName::Check))
+                                        .primary()
+                                        .h(px(44.))
                                         .disabled(self.busy)
                                         .on_click(cx.listener(move |view, _, _, cx| {
                                             view.submit_form(&request, cx)
@@ -360,9 +450,12 @@ impl chat::ChatPane {
                                         .on_click(move |_, _, cx| cx.open_url(&url)),
                                 );
                                 let id = id.clone();
-                                card = card.child(
+                                actions = actions.child(
                                     Button::new(SharedString::from(format!("complete-input-{id}")))
                                         .label("I have completed this step")
+                                        .icon(Icon::new(IconName::Check))
+                                        .primary()
+                                        .h(px(44.))
                                         .disabled(self.busy)
                                         .on_click(cx.listener(move |view, _, _, cx| {
                                             view.command(
@@ -407,9 +500,12 @@ impl chat::ChatPane {
                         );
                     }
                 }
-                card = card.child(
+                actions = actions.child(
                     Button::new(SharedString::from(format!("deny-{id}")))
                         .label("Deny")
+                        .icon(Icon::new(IconName::X))
+                        .danger()
+                        .h(px(44.))
                         .disabled(self.busy)
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.command(
@@ -426,7 +522,49 @@ impl chat::ChatPane {
                         .child(format!("Decision: {}", field(&request, "decision"))),
                 );
             }
-            panel = panel.child(card);
+            panel = panel.child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(palette.accent))
+                    .bg(crate::design::modal_surface_color(palette.panel))
+                    .font_family(cx.theme().font_family.clone())
+                    .text_size(cx.theme().font_size)
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .size(px(18.))
+                                    .text_color(rgb(palette.accent)),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Your input is needed"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(palette.muted))
+                            .child(format!(
+                                "{} · {} · {} risk",
+                                field(&request, "provider"),
+                                field(&request, "tool"),
+                                field(&request, "risk")
+                            )),
+                    )
+                    .child(card)
+                    .child(actions.pt_3().border_t_1().border_color(rgb(palette.line))),
+            );
         }
         // Saved rules are managed in the pane's Approvals view; they are not
         // active requests and must not occupy the conversation/composer area.

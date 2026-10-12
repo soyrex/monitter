@@ -125,6 +125,17 @@ pub fn background(area: Area, color: u32) -> Background {
     fill
 }
 
+/// Tint pane RGB without changing transparency or adding another surface layer.
+pub fn tinted_pane_background(color: u32, dark: bool, amount: f32) -> Background {
+    let channel = |shift: u32| {
+        let value = ((color >> shift) & 255) as f32;
+        if dark { (value * (1. - amount)).round() as u32 }
+        else { (value + (255. - value) * amount).round() as u32 }
+    };
+    let tint = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+    background(Area::Pane, tint)
+}
+
 pub fn raised_background(area: Area, color: u32) -> Background {
     let mut fill: Background = crate::design::raised_surface_color(color).into();
     fill.blend_mode = current(area).shader();

@@ -70,28 +70,64 @@ impl Desktop {
 }
 
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarMode { Hidden, Icons, Full }
+impl SidebarMode {
+    fn next(self) -> Self { match self { Self::Full => Self::Icons, Self::Icons => Self::Hidden, Self::Hidden => Self::Full } }
+    fn id(self) -> &'static str { match self { Self::Hidden => "hidden", Self::Icons => "icons", Self::Full => "full" } }
+}
+fn load_sidebar_mode() -> SidebarMode {
+    let Some(dir) = monitter_lib::experimental_desktop::profile_dir().ok() else { return SidebarMode::Full; };
+    match std::fs::read_to_string(dir.join("sidebar-mode.v2")).ok().as_deref().map(str::trim) {
+        Some("hidden") => SidebarMode::Hidden,
+        Some("icons") => SidebarMode::Icons,
+        Some("full") => SidebarMode::Full,
+        _ => if std::fs::read(dir.join("sidebar-collapsed.v1")).is_ok_and(|bytes| bytes == b"true\n") { SidebarMode::Icons } else { SidebarMode::Full },
+    }
+}
 impl Desktop {
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sidebar_collapsed { self.sidebar_expanded_width = super::expanded_sidebar_width(self.current_sidebar_width(cx)); }
-        self.sidebar_collapsed = !self.sidebar_collapsed;
-        save_sidebar_collapse(self.sidebar_collapsed);
+        if !self.sidebar_collapsed && !self.sidebar_is_hidden() {
+            self.sidebar_expanded_width = super::expanded_sidebar_width(self.current_sidebar_width(cx));
+        }
+        let tern = design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+        let current = if self.sidebar_hidden && tern { SidebarMode::Hidden } else if self.sidebar_collapsed { SidebarMode::Icons } else { SidebarMode::Full };
+        let next = if tern { current.next() } else if self.sidebar_collapsed { SidebarMode::Full } else { SidebarMode::Icons };
+        self.sidebar_hidden = next == SidebarMode::Hidden;
+        self.sidebar_collapsed = next == SidebarMode::Icons;
+        save_sidebar_mode(next);
         let width = if self.sidebar_collapsed { design::compact_sidebar_width_design(self.sidebar_scale) } else { super::expanded_sidebar_width(self.sidebar_expanded_width) };
         self.sidebar_width_touched = true;
         self.sidebar_resize_suppressed = true;
+        self.sidebar_resize_generation = self.sidebar_resize_generation.wrapping_add(1);
+        let generation = self.sidebar_resize_generation;
         self.sidebar_resize.update(cx, |state, cx| state.resize_panel(0, design::ui_px(width, self.sidebar_scale), window, cx));
-        self.sidebar_resize_suppressed = false;
+        // Reattaching the split after Hidden emits layout resize events using
+        // the previous rail width. Keep those events from changing this mode.
+        cx.spawn_in(window, async move |view, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                if view.sidebar_resize_generation == generation {
+                    if !view.sidebar_is_hidden() {
+                        let width = if view.sidebar_collapsed { design::compact_sidebar_width_design(view.sidebar_scale) } else { super::expanded_sidebar_width(view.sidebar_expanded_width) };
+                        // Hidden removes the split. Restore width once the
+                        // reattached split has current window bounds.
+                        view.sidebar_resize.update(cx, |state, cx| state.resize_panel(0, design::ui_px(width, view.sidebar_scale), window, cx));
+                    }
+                    view.sidebar_resize_suppressed = false;
+                    cx.notify();
+                }
+            });
+        }).detach();
         self.queue_preferences_save(cx);
+        cx.notify();
     }
 }
-/// GUI-only presentation metadata. Expanded width continues through the
-/// authoritative native preference revision; this file never carries task data.
-pub fn load_sidebar_collapse() -> bool {
-    monitter_lib::experimental_desktop::profile_dir().ok()
-        .and_then(|dir| std::fs::read(dir.join("sidebar-collapsed.v1")).ok())
-        .is_some_and(|bytes| bytes == b"true\n")
-}
-pub fn save_sidebar_collapse(collapsed: bool) {
-    // Serialize rapid toggles so an older worker cannot overwrite the last one.
+/// GUI-only presentation state, compatible with an older resident backend.
+pub fn load_sidebar_collapse() -> bool { load_sidebar_mode() == SidebarMode::Icons }
+pub fn load_sidebar_hidden() -> bool { load_sidebar_mode() == SidebarMode::Hidden }
+pub fn save_sidebar_collapse(collapsed: bool) { save_sidebar_mode(if collapsed { SidebarMode::Icons } else { SidebarMode::Full }); }
+fn save_sidebar_mode(mode: SidebarMode) {
     static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -99,10 +135,18 @@ pub fn save_sidebar_collapse(collapsed: bool) {
         let Ok(_guard) = LOCK.lock() else { return; };
         if GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation { return; }
         if let Ok(dir) = monitter_lib::experimental_desktop::profile_dir() {
-            let temp = dir.join("sidebar-collapsed.v1.tmp");
-            if std::fs::write(&temp, if collapsed { b"true\n".as_slice() } else { b"false\n".as_slice() }).is_ok() {
-                let _ = std::fs::rename(temp, dir.join("sidebar-collapsed.v1"));
-            }
+            let temp = dir.join("sidebar-mode.v2.tmp");
+            if std::fs::write(&temp, format!("{}\n", mode.id())).is_ok() { let _ = std::fs::rename(temp, dir.join("sidebar-mode.v2")); }
         }
     });
+}
+#[cfg(test)]
+mod sidebar_mode_tests {
+    use super::SidebarMode;
+    #[test]
+    fn tern_sidebar_cycle_has_a_reachable_hidden_state_and_restore_path() {
+        assert_eq!(SidebarMode::Full.next(), SidebarMode::Icons);
+        assert_eq!(SidebarMode::Icons.next(), SidebarMode::Hidden);
+        assert_eq!(SidebarMode::Hidden.next(), SidebarMode::Full);
+    }
 }

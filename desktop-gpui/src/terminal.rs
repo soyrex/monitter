@@ -1780,7 +1780,7 @@ impl Render for TerminalPane {
                 .min_h_0()
                 .overflow_hidden()
                 .p(px(14. * interface_font_ratio))
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Pane, palette.paper))
+                .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.25))
                 .child(grid);
             if let Some((message, error)) = state {
                 screen = screen.child(
@@ -1885,7 +1885,7 @@ impl Render for TerminalPane {
             .min_h_0()
             .gap(px(4.))
             .p(px(8.))
-            .bg(crate::surface_blend::background(crate::surface_blend::Area::Pane, palette.paper))
+            .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.25))
             .child(controls);
         if let Some(error) = &self.error {
             pane = pane.child(

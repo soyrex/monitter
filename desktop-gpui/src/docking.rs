@@ -30,6 +30,9 @@ mod pane_header_tests;
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "workspace_switch_tests.rs"]
 mod workspace_switch_tests;
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "empty_session_tests.rs"]
+mod empty_session_tests;
 
 #[derive(Clone, Debug)]
 pub enum PaneLifecycle {
@@ -65,6 +68,7 @@ pub enum WorkspaceEvent {
         pane_id: String,
         action: EmptyPaneAction,
     },
+    EmptySession { pane_id: String, task_id: String },
 }
 #[derive(Default)]
 struct PaintState {
@@ -448,9 +452,10 @@ impl DockWorkspace {
         self.skin.set_tile_style(match appearance.tile_theme {
             NativeTileTheme::Monitter => DockTileStyle::Contiguous,
             NativeTileTheme::Tern => DockTileStyle::Rounded {
-                gutter: px(6.),
+                gutter: px(crate::design::tern_spacing(settings).gutter),
                 radius: px(8.),
-                backdrop: crate::design::surface_color(appearance.tile_backdrop_color).into(),
+                // Expose the same native window finish as the workspace bar.
+                backdrop: rgba(0x00000000).into(),
                 border_color: crate::design::tile_border_color(palette).into(),
             },
         }, cx);
@@ -1021,7 +1026,7 @@ impl DockWorkspace {
             }
             index = index.saturating_add(1);
         };
-        let spec = self.empty_spec(&id, cx)?;
+        let spec = self.empty_spec(&id, window, cx)?;
         self.add(spec, DockPlacement::Center, None, window, cx)?;
         if !self.move_pane(
             &id,
@@ -1322,7 +1327,7 @@ impl DockWorkspace {
             }
             index = index.saturating_add(1);
         };
-        let spec = self.empty_spec(&id, cx)?;
+        let spec = self.empty_spec(&id, window, cx)?;
         self.add(spec, DockPlacement::Center, None, window, cx)?;
         if !self.move_pane(
             &id,
@@ -1504,7 +1509,7 @@ impl DockWorkspace {
             if !self.panels.borrow().contains_key(&id) {
                 let spec = match (self.factory)(&id, window, cx) {
                     Some(spec) => spec,
-                    None if id.starts_with(EMPTY_TAB_PREFIX) => self.empty_spec(&id, cx)?,
+                    None if id.starts_with(EMPTY_TAB_PREFIX) => self.empty_spec(&id, window, cx)?,
                     None => {
                         return Err(format!(
                             "Pane {id} is unavailable; existing layout retained."
@@ -1550,14 +1555,14 @@ impl DockWorkspace {
         cx.notify();
         Ok(())
     }
-    fn empty_spec(&mut self, id: &str, cx: &mut Context<Self>) -> Result<PaneSpec, String> {
+    fn empty_spec(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<PaneSpec, String> {
         if !id.starts_with(EMPTY_TAB_PREFIX) || id.len() <= EMPTY_TAB_PREFIX.len() {
             return Err("Invalid empty pane identity.".into());
         }
         let pane = if let Some(pane) = self.empty_panes.get(id) {
             pane.clone()
         } else {
-            let pane = cx.new(|cx| EmptyPane::new(id, cx));
+            let pane = cx.new(|cx| EmptyPane::new(id, window, cx));
             let event_id = id.to_owned();
             let subscription = cx.subscribe(
                 &pane,
@@ -1572,11 +1577,10 @@ impl DockWorkspace {
                         .get(&event_id)
                         .is_some_and(|panel| !panel.read(cx).removed);
                     if is_current && is_retained {
-                        let EmptyPaneEvent::Action(action) = event;
-                        cx.emit(WorkspaceEvent::EmptyAction {
-                            pane_id: event_id.clone(),
-                            action: *action,
-                        });
+                        match event {
+                            EmptyPaneEvent::Action(action) => cx.emit(WorkspaceEvent::EmptyAction { pane_id: event_id.clone(), action: *action }),
+                            EmptyPaneEvent::OpenSession(task_id) => cx.emit(WorkspaceEvent::EmptySession { pane_id: event_id.clone(), task_id: task_id.clone() }),
+                        }
                     }
                 },
             );
@@ -1607,6 +1611,42 @@ impl DockWorkspace {
                 pane.set_presentation(palette, interface_font_ratio, busy, browser_available, cx)
             });
         }
+    }
+    pub fn set_empty_sessions(&mut self, sessions: &monitter_gpui_desktop::session_picker::PickerGroups, cx: &mut Context<Self>) {
+        for pane in self.empty_panes.values() {
+            pane.update(cx, |pane, cx| pane.set_sessions(sessions, cx));
+        }
+    }
+    /// Move a retained chat into the exact group containing the landing tab.
+    /// The existing chat entity is reused, including a running native session.
+    pub fn replace_empty_with_chat(&mut self, empty: &str, chat: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !empty.starts_with(EMPTY_TAB_PREFIX) || !chat.starts_with("chat:") { return false; }
+        let Some(empty_key) = self.panel_key(empty) else { return false; };
+        let Some(chat_key) = self.panel_key(chat) else { return false; };
+        let destination = {
+            let area = self.area.read(cx);
+            [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+                .into_iter().filter_map(|placement| area.layout(placement))
+                .find_map(|tree| {
+                    let node = tree.find_panel_node(empty_key)?;
+                    let PaneRef::Tabs { panels, .. } = tree.find_node(node)?.kind() else { return None; };
+                    let index = panels.iter().position(|key| *key == empty_key)?;
+                    Some((node, index))
+                })
+        };
+        let Some((node, index)) = destination else { return false; };
+        self.area.update(cx, |area, cx| area.move_panel(chat_key, InsertTarget::Tabs { node, ix: Some(index), activate: true }, window, cx));
+        // Verify the insertion before retiring the landing pane.
+        let moved = {
+            let area = self.area.read(cx);
+            [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+                .into_iter().filter_map(|placement| area.layout(placement))
+                .any(|tree| tree.find_panel_node(chat_key) == Some(node))
+        };
+        if !moved { return false; }
+        self.remove(empty, window, cx);
+        self.focus(chat, window, cx);
+        true
     }
     /// Call before hiding a route/window. Browser hooks must hide native child
     /// views here; before window removal the host must close and blank-draw them.

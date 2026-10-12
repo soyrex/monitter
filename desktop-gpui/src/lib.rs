@@ -4,5 +4,6 @@ pub mod native_state;
 pub mod terminal_model;
 pub mod streaming_reveal;
 pub mod streaming_display;
+pub mod session_picker;
 
 pub mod workspace_store;
