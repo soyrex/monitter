@@ -609,6 +609,9 @@ pub struct ChatPane {
     streaming_bodies: HashMap<String, Entity<crate::streaming_message::StreamingMessage>>,
     streaming_bodies_initialized: bool,
     transcript_context_unchanged: bool,
+    activity_refresh_pending: bool,
+    #[cfg(test)]
+    activity_context_refreshes: usize,
     pub(crate) decoration_bounds: crate::activity_sparkles::ChatDecorationBounds,
     task_actions: Option<Entity<crate::chat_task_actions::ChatTaskActionsPane>>,
     task_actions_subscription: Option<Subscription>,
@@ -1016,6 +1019,9 @@ impl ChatPane {
             streaming_bodies: HashMap::new(),
             streaming_bodies_initialized: false,
             transcript_context_unchanged: false,
+            activity_refresh_pending: false,
+            #[cfg(test)]
+            activity_context_refreshes: 0,
             task_actions: None,
             task_actions_subscription: None,
             fork_dialog: None,
@@ -1239,6 +1245,27 @@ impl ChatPane {
         self.transcript_context_unchanged = false;
         self.sync_with_companion(snapshot, revision, None, false, cx);
     }
+    fn refresh_activity_context(&mut self, cx: &mut Context<Self>) {
+        self.activity_refresh_pending = false;
+        #[cfg(test)]
+        { self.activity_context_refreshes += 1; }
+        self.activity.update(cx, |view, cx| {
+            view.set_context(&self.snapshot, &self.task_id(), cx)
+        });
+    }
+    fn defer_activity_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.activity_refresh_pending { return; }
+        self.activity_refresh_pending = true;
+        let owner = cx.weak_entity();
+        // The publication installs history synchronously after context. Its
+        // exact body-only proof may cancel this work; a sync-only caller must
+        // still refresh activity from the latest authoritative snapshot.
+        cx.defer(move |cx| {
+            let _ = owner.update(cx, |pane, cx| {
+                if pane.activity_refresh_pending { pane.refresh_activity_context(cx); }
+            });
+        });
+    }
     fn sync_with_companion(
         &mut self, snapshot: Rc<Value>, revision: Option<String>,
         companion_records: Option<(std::sync::Arc<Vec<Value>>, monitter_gpui_desktop::native_publication::PreparedChildTranscripts)>, transcript_context_unchanged: bool, cx: &mut Context<Self>,
@@ -1285,9 +1312,7 @@ impl ChatPane {
         let scope = Self::attachment_scope(&snapshot, &self.task_id());
         self.attachments
             .update(cx, |attachments, cx| attachments.set_scope(scope, cx));
-        self.activity.update(cx, |view, cx| {
-            view.set_context(&snapshot, &self.task_id(), cx)
-        });
+
         let pending: HashSet<_> = rows(&snapshot, "approvalRequests")
             .into_iter()
             .filter(|request| field(request, "status") == "pending")
@@ -1297,6 +1322,8 @@ impl ChatPane {
         self.form_choices.retain(|(id, _), _| pending.contains(id));
         self.snapshot = snapshot;
         self.revision = revision;
+        if transcript_context_unchanged { self.defer_activity_refresh(cx); }
+        else { self.refresh_activity_context(cx); }
         // Open only after the canonical revisioned snapshot contains the fork.
         // A mutation response cannot replace a newer snapshot journal entry.
         if let Some(id) = self.pending_fork_open.as_ref()
@@ -1375,6 +1402,7 @@ impl ChatPane {
             if let Some((changed, indices)) = state.reconcile_stream_bodies(
                 &messages, |id| self.streaming_bodies.contains_key(id),
             ) {
+                self.activity_refresh_pending = false;
                 if let Some(key) = &mut self.transcript_preparation_key {
                     key.advance_stream_rows(&previous_rows, &state.rows);
                 }
@@ -1391,6 +1419,10 @@ impl ChatPane {
                 return;
             }
         }
+        // Activity follows canonical current-turn facts even when the reader
+        // holds an older transcript off-tail. Only a successful body proof can
+        // omit this refresh; completion/new users/metadata/order all drain it.
+        if self.activity_refresh_pending { self.refresh_activity_context(cx); }
         let events = rows(&self.snapshot, "events")
             .into_iter()
             .filter(|event| {

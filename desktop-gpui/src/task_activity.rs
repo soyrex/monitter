@@ -44,12 +44,16 @@ fn text(value: &Value, key: &str) -> String {
 }
 
 /// Only current-turn, observed started/completed records imply active computer use.
-fn active_tools(task: &Value, messages: &[Value], events: &[Value]) -> Vec<String> {
+fn active_tools<'a>(
+    task: &Value,
+    messages: impl IntoIterator<Item = &'a Value>,
+    events: impl IntoIterator<Item = &'a Value>,
+) -> Vec<String> {
     if task["status"] != "running" {
         return vec![];
     }
     let Some(start) = messages
-        .iter()
+        .into_iter()
         .filter(|m| m["role"] == "user")
         .filter_map(|m| m["createdAt"].as_i64())
         .max()
@@ -58,7 +62,7 @@ fn active_tools(task: &Value, messages: &[Value], events: &[Value]) -> Vec<Strin
     };
     let mut active = BTreeMap::new();
     for event in events
-        .iter()
+        .into_iter()
         .filter(|e| e["createdAt"].as_i64().is_some_and(|at| at >= start))
     {
         if event["kind"] == "status"
@@ -72,7 +76,7 @@ fn active_tools(task: &Value, messages: &[Value], events: &[Value]) -> Vec<Strin
         if event["kind"] != "computer" {
             continue;
         }
-        let Ok(data) = serde_json::from_str::<Value>(&text(event, "detail")) else {
+        let Ok(data) = serde_json::from_str::<Value>(event["detail"].as_str().unwrap_or_default()) else {
             continue;
         };
         let Some(id) = data["id"].as_str() else {
@@ -100,21 +104,17 @@ fn active_tools(task: &Value, messages: &[Value], events: &[Value]) -> Vec<Strin
 }
 
 fn snapshot_active_tools(task: &Value, task_id: &str, snapshot: &Value) -> Vec<String> {
-    let messages: Vec<_> = snapshot["messages"]
+    let messages = snapshot["messages"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|message| message["taskId"] == task_id)
-        .cloned()
-        .collect();
-    let events: Vec<_> = snapshot["events"]
+        .filter(|message| message["taskId"] == task_id);
+    let events = snapshot["events"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|event| event["taskId"] == task_id)
-        .cloned()
-        .collect();
-    active_tools(task, &messages, &events)
+        .filter(|event| event["taskId"] == task_id);
+    active_tools(task, messages, events)
 }
 /// Absent goals need no maintenance. Read failures back off quietly; only
 /// known non-complete goals in a running task refresh once per minute.
@@ -135,6 +135,10 @@ fn next_goal_read(goal: Option<&Value>, running: bool, failures: u32) -> Option<
 }
 
 impl TaskActivityPane {
+    #[cfg(test)]
+    pub(crate) fn tools(&self) -> &[String] {
+        &self.tools
+    }
     pub fn new(service: DesktopService, _cx: &mut Context<Self>) -> Self {
         Self {
             service,
@@ -799,5 +803,43 @@ mod tests {
             .unwrap()
             .push(completed);
         assert!(snapshot_active_tools(&task, "own", &completed_snapshot).is_empty());
+    }
+    #[::core::prelude::v1::test]
+    fn borrowed_activity_uses_latest_user_cutoff_and_preserves_event_order() {
+        let task = json!({"id":"own","status":"running","provider":"codex","nativeSessionId":"session"});
+        let event = |id: &str, phase: &str, at: i64| json!({"taskId":"own","kind":"computer","createdAt":at,
+            "detail":json!({"id":id,"phase":phase,"summary":id}).to_string()});
+        let mut snapshot = json!({
+            "messages":[
+                {"taskId":"own","role":"user","createdAt":30},
+                {"taskId":"own","role":"assistant","createdAt":200,"text":"large payload".repeat(100_000)},
+                {"taskId":"other","role":"user","createdAt":300},
+                {"taskId":"own","role":"user","createdAt":10},
+                {"taskId":"own","role":"user","createdAt":"invalid"}
+            ],
+            "events":[event("previous-turn","started",29), event("at-cutoff","started",30),
+                {"taskId":"other","kind":"status","createdAt":31,"title":"turn.failed"},
+                {"taskId":"own","kind":"computer","createdAt":32,"detail":"malformed"},
+                event("at-cutoff","completed",33), event("current","started",34),
+                event("unknown-phase","queued",35)]
+        });
+        assert_eq!(snapshot_active_tools(&task, "own", &snapshot), ["current"]);
+        snapshot["events"].as_array_mut().unwrap().push(json!({
+            "taskId":"own","kind":"status","createdAt":36,"title":"turn.failed"
+        }));
+        assert!(snapshot_active_tools(&task, "own", &snapshot).is_empty());
+        // Preserve chronological input processing: a later observed start is
+        // still visible after the turn-failed marker, just as before this repair.
+        snapshot["events"].as_array_mut().unwrap().push(event("restarted", "started", 37));
+        assert_eq!(snapshot_active_tools(&task, "own", &snapshot), ["restarted"]);
+    }
+    #[::core::prelude::v1::test]
+    fn inactive_or_userless_activity_does_not_traverse_unused_borrowed_inputs() {
+        let never_read = std::iter::once_with(|| -> &Value { panic!("unused history was traversed") });
+        let never_read_events = std::iter::once_with(|| -> &Value { panic!("unused events were traversed") });
+        assert!(active_tools(&json!({"status":"idle"}), never_read, never_read_events).is_empty());
+        let assistant_only = [json!({"role":"assistant","createdAt":100})];
+        let never_read_events = std::iter::once_with(|| -> &Value { panic!("no user cutoff must skip events") });
+        assert!(active_tools(&json!({"status":"running"}), &assistant_only, never_read_events).is_empty());
     }
 }

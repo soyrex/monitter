@@ -864,3 +864,125 @@ fn streaming_bodies_preserve_scrollback_until_reader_follows(cx: &mut TestAppCon
         assert_eq!(body.read(cx).source()["text"], snapshot["messages"][9_999]["text"]);
     });
 }
+
+
+#[cfg(feature = "performance-profiling")]
+fn active_computer_fixture_snapshot() -> Value {
+    let mut snapshot = retention_snapshot(0);
+    snapshot["tasks"][0]["status"] = json!("running");
+    let mut history: Vec<_> = (0..100).map(|index| json!({
+        "id":format!("old-turn-{index}"), "taskId":"quiet-task", "role":"user",
+        "text":"Older synthetic turn", "createdAt":index - 200,
+    })).collect();
+    history.push(json!({"id":"active-user", "taskId":"quiet-task", "role":"user",
+        "text":"Synthetic current turn", "createdAt":100}));
+    history.push(json!({"id":"active-body", "taskId":"quiet-task", "role":"assistant",
+        "text":"Synthetic body before update", "streamStatus":"streaming", "createdAt":200}));
+    snapshot["messages"] = Value::Array(history);
+    snapshot["events"] = json!([{"id":"synthetic-computer-start", "taskId":"quiet-task",
+        "kind":"computer", "createdAt":150, "detail":json!({
+            "id":"fixture-computer", "phase":"started", "summary":"Synthetic active computer",
+        }).to_string()}]);
+    snapshot
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn activity_body_deferral_skips_only_validated_bodies_and_refreshes_held_new_turn(cx: &mut TestAppContext) {
+    let mut snapshot = active_computer_fixture_snapshot();
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(snapshot.clone()));
+    draw(visual);
+    let baseline = pane.read_with(visual, |pane, cx| {
+        assert_eq!(pane.activity.read(cx).tools(), &["Synthetic active computer"]);
+        pane.activity_context_refreshes
+    });
+    for version in 1..=3 {
+        snapshot["messages"][101]["text"] = json!(format!("Synthetic updated body {version}"));
+        publish_stream_fixture(&pane, visual, &snapshot);
+        pane.read_with(visual, |pane, cx| {
+            assert_eq!(pane.activity_context_refreshes, baseline,
+                "the successful exact body proof must cancel activity work, including its deferred fallback");
+            assert_eq!(pane.activity.read(cx).tools(), &["Synthetic active computer"]);
+            assert_eq!(pane.streaming_bodies["active-body"].read(cx).source()["text"], snapshot["messages"][101]["text"]);
+        });
+    }
+    // Incoming message order, metadata, and completion each fail the proof.
+    snapshot["messages"].as_array_mut().unwrap().swap(0, 1);
+    publish_stream_fixture(&pane, visual, &snapshot);
+    assert_eq!(pane.read_with(visual, |pane, _| pane.activity_context_refreshes), baseline + 1);
+    snapshot["messages"][101]["responseMetadata"] = json!({"model":"synthetic-model"});
+    publish_stream_fixture(&pane, visual, &snapshot);
+    assert_eq!(pane.read_with(visual, |pane, _| pane.activity_context_refreshes), baseline + 2);
+    snapshot["messages"][101]["streamStatus"] = json!("complete");
+    publish_stream_fixture(&pane, visual, &snapshot);
+    assert_eq!(pane.read_with(visual, |pane, _| pane.activity_context_refreshes), baseline + 3);
+
+    let scroll_position = pane.read_with(visual, |pane, _| {
+        pane.decoration_bounds.chat_column.get().unwrap().origin + gpui::point(gpui::px(50.), gpui::px(50.))
+    });
+    visual.simulate_event(gpui::ScrollWheelEvent {
+        position:scroll_position, delta:gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(1_000.))),
+        ..Default::default()
+    });
+    draw(visual);
+    let (held_messages, anchor) = pane.read_with(visual, |pane, _| {
+        let state = &pane.transcripts["quiet-task"];
+        assert!(!state.list.is_following_tail());
+        (state.messages.clone(), state.list.logical_scroll_top())
+    });
+    snapshot["messages"].as_array_mut().unwrap().push(json!({"id":"next-user", "taskId":"quiet-task",
+        "role":"user", "text":"Synthetic next turn", "createdAt":300}));
+    pane.update(visual, |pane, cx| {
+        pane.sync_prepared(Rc::new(snapshot.clone()), Some("synthetic-next-turn".into()),
+            std::sync::Arc::new(vec![]), std::sync::Arc::new(std::collections::HashMap::new()), true, cx);
+        pane.reconcile_history(snapshot["messages"].as_array().unwrap().clone(), false, cx);
+        assert_eq!(pane.activity_context_refreshes, baseline + 4);
+        assert!(pane.activity.read(cx).tools().is_empty(),
+            "new user current-turn facts refresh immediately despite a frozen scrollback transcript");
+        let state = &pane.transcripts["quiet-task"];
+        assert!(state.has_pending_live());
+        assert!(Rc::ptr_eq(&state.messages, &held_messages));
+        assert_eq!(state.list.logical_scroll_top().item_ix, anchor.item_ix);
+        assert_eq!(state.list.logical_scroll_top().offset_in_item, anchor.offset_in_item);
+    });
+    draw(visual);
+    assert_eq!(pane.read_with(visual, |pane, _| pane.activity_context_refreshes), baseline + 4,
+        "the queued callback must not repeat an already-drained fallback");
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn activity_body_deferral_refreshes_sync_only_and_changed_event_publications(cx: &mut TestAppContext) {
+    let mut snapshot = active_computer_fixture_snapshot();
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(snapshot.clone()));
+    draw(visual);
+    let baseline = pane.read_with(visual, |pane, _| pane.activity_context_refreshes);
+    snapshot["messages"].as_array_mut().unwrap().push(json!({"id":"next-user", "taskId":"quiet-task",
+        "role":"user", "text":"Synthetic sync-only next turn", "createdAt":300}));
+    pane.update(visual, |pane, cx| {
+        pane.sync_prepared(Rc::new(snapshot.clone()), Some("synthetic-sync-only".into()),
+            std::sync::Arc::new(vec![]), std::sync::Arc::new(std::collections::HashMap::new()), true, cx);
+        assert!(pane.activity_refresh_pending);
+        assert_eq!(pane.activity_context_refreshes, baseline);
+    });
+    draw(visual);
+    pane.read_with(visual, |pane, cx| {
+        assert!(!pane.activity_refresh_pending);
+        assert_eq!(pane.activity_context_refreshes, baseline + 1);
+        assert!(pane.activity.read(cx).tools().is_empty(), "sync-only callers must not leave old activity facts indefinitely");
+    });
+    snapshot["events"].as_array_mut().unwrap().push(json!({"id":"next-computer", "taskId":"quiet-task",
+        "kind":"computer", "createdAt":350, "detail":json!({
+            "id":"fixture-next-computer", "phase":"started", "summary":"Synthetic next computer",
+        }).to_string()}));
+    pane.update(visual, |pane, cx| {
+        // The worker's unchanged-context flag is false when an event changes.
+        pane.sync_prepared(Rc::new(snapshot.clone()), Some("synthetic-changed-event".into()),
+            std::sync::Arc::new(vec![]), std::sync::Arc::new(std::collections::HashMap::new()), false, cx);
+        assert_eq!(pane.activity_context_refreshes, baseline + 2);
+        assert_eq!(pane.activity.read(cx).tools(), &["Synthetic next computer"]);
+        assert!(!pane.activity_refresh_pending);
+    });
+    draw(visual);
+    assert_eq!(pane.read_with(visual, |pane, _| pane.activity_context_refreshes), baseline + 2);
+}
