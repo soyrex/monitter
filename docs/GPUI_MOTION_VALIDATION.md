@@ -91,8 +91,23 @@ The final packaged build is `artifacts/gpui/release/build-1791843562229/Monitter
 
 ## Remaining coverage and integration
 
-- All nine planned interactions are implemented, with 500 distinct regression checks passing. This branch has not been merged or installed.
+- All nine planned interactions are implemented, with 500 distinct regression checks passing on the original animation candidate. The subsequent authorized installation and integration checks are recorded below; the main checkout remains untouched.
 - The native motion fixture exercises the actual retained chat/dock/browser components and equalisation. Its synthetic rail uses the shared interpolation primitive; it does not instantiate the full production Desktop/sidebar/preferences lifecycle.
 - Native regression tests cover hover/focus fades, reversal, hidden settlement, Reduce Motion policy changes, copy expiry, completion suppression and attachment entrance state. Live OS accessibility settings were not changed during validation.
 - End-to-end production preferences entry, actual attachment storage, Copy feedback through the hover strip, IME composition and the full light/dark/theme/scale matrix remain unverified visually. Existing user data, profile preferences, backend sessions and the installed application were preserved.
 - The worktree begins with a frozen snapshot of pre-existing main-checkout edits. Future integration should apply the animation commits, not replay that whole snapshot onto main.
+
+## Authorized installation, 13 October 2026
+
+Alex requested installation after the isolated validation. The main checkout had subsequently gained pane controls, navigation, command-palette and sidebar styling changes. Its then-current working tree was captured as `762d46b1f6803e689c4d67cecf6275a893415c2b` using a temporary Git index, preserving the real files, index and branch. Those changes were integrated into the animation worktree as `0e6a88b0f9e0750730a1260d7d424161569d48fd`. Conflict resolution retains both feature sets, aligns the animated workspace pill with the current 4px shape, and restores the Tern edge gutter continuously as the sidebar reaches zero width.
+
+The combined source passed 54 library and 443 app tests (497 native tests), with zero failures: `/tmp/monitter-motion-install-tests.log`. A normal optimized release was built with `npm run build:gpui -- --release --jobs 4`, without visual export or performance profiling. Build/signing log: `/tmp/monitter-motion-install-build-final.log`.
+
+- Packaged source: `artifacts/gpui/release/build-1791844884741/Monitter GPUI.app`.
+- Installed path: `/Applications/Monitter.app`.
+- Installed executable SHA-256: `f69409406da2a28a3de82419b2e98c8188024d349607bd0762b9826b03ad49bf`; exact match to the signed packaged executable, with strict codesign verification after replacement.
+- Verified rollback: `artifacts/gpui/install/motion-20261013-003000/Monitter before animations.app`. The replaced original is retained beside it.
+- Native Quit closed only the old GUI. The new GUI launched as PID 69629; an IPC handshake verified the same backend PID 21624 and instance ID before and after replacement. The server bundle was not replaced or signaled.
+- The live workspace and its three chat panes reopened. Native UI checks exercised expanded → compact → hidden → expanded sidebar states, returning to the original expanded layout. Existing pane controls and navigation remained present. No message was sent and no draft text was entered.
+
+Install metadata, source snapshot, hashes and continuity proof: `artifacts/gpui/install/motion-20261013-003000/install.json`. The earlier profiling results apply to the isolated animation candidate; the combined install candidate received the native regression suite and installed-app smoke checks, not another full performance comparison.
