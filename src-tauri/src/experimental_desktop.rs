@@ -83,10 +83,23 @@ const MAX_NATIVE_BROWSER_TABS: usize = 64;
 const MAX_NATIVE_BROWSER_URL_BYTES: usize = 8192;
 const MAX_NATIVE_BROWSER_TITLE_BYTES: usize = 512;
 const MAX_NATIVE_BROWSER_METADATA_BYTES: usize = 256 * 1024;
+/// Native-only tile layout; independent of light/dark palettes and workspace settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeTileTheme {
+    #[default]
+    Monitter,
+    Tern,
+}
+
+fn is_default_tile_theme(theme: &NativeTileTheme) -> bool { *theme == NativeTileTheme::Monitter }
+
 /// No mail/browser bodies, credentials, harness config or workspace snapshots.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeAppearance {
+    #[serde(default, skip_serializing_if = "is_default_tile_theme")]
+    pub tile_theme: NativeTileTheme,
     #[serde(default)]
     pub sidebar_width: Option<f32>,
     #[serde(default)]
@@ -126,6 +139,7 @@ fn default_interface_scale() -> u16 {
 impl Default for NativeAppearance {
     fn default() -> Self {
         Self {
+            tile_theme: NativeTileTheme::default(),
             sidebar_width: None,
             warm_paper: false,
             last_route: None,
@@ -145,6 +159,9 @@ pub struct NativePreferenceData {
     /// GPUI DockAreaState schema; validation admits identity/layout fields only.
     #[serde(default)]
     pub layout: Option<Value>,
+    /// Named owner-local layouts; domain tasks and sessions remain global.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspaces: Option<NativeWorkspaceSet>,
     #[serde(default)]
     pub appearance: NativeAppearance,
     /// Explicitly saved chat composer drafts, keyed by task UUID. Never filled
@@ -165,6 +182,22 @@ pub struct NativePreferenceData {
     /// Never includes page bodies, cookies, browser history, or credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_metadata: Option<NativeBrowserMetadata>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeWorkspace {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub icon: String,
+    #[serde(default)]
+    pub layout: Option<Value>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeWorkspaceSet {
+    pub active_id: String,
+    pub items: Vec<NativeWorkspace>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -421,28 +454,64 @@ fn validate_native_data(data: &NativePreferenceData) -> Result<(), String> {
             return Err("Native browser metadata exceeds its limits or is invalid.".into());
         }
     }
+    if let Some(workspaces) = &data.workspaces { validate_native_workspace_set(workspaces)?; }
     if let Some(layout) = &data.layout {
-        let layout: PreferenceLayout =
-            serde_json::from_value(layout.clone()).map_err(|_| "Invalid native layout schema.")?;
-        if layout.version != Some(1) {
-            return Err("Unsupported native layout version.".into());
-        }
-        let mut count = 0;
+        validate_native_layout(layout)?;
+    }
+    Ok(())
+}
+
+/// Validate client-local workspace metadata and layouts without changing backend state.
+pub fn validate_native_workspace_set(workspaces: &NativeWorkspaceSet) -> Result<(), String> {
         let mut ids = std::collections::HashSet::new();
-        validate_preference_pane(&layout.center, 0, &mut count, &mut ids)?;
-        for dock in [layout.left_dock, layout.right_dock, layout.bottom_dock]
-            .into_iter()
-            .flatten()
-        {
-            if !["left", "right", "bottom"].contains(&dock.placement.as_str())
-                || !dock.size.is_finite()
-                || !(0.0..=100000.0).contains(&dock.size)
-            {
-                return Err("Invalid native dock placement/size.".into());
-            }
-            let _ = dock.open;
-            validate_preference_pane(&dock.panel, 0, &mut count, &mut ids)?;
+        if workspaces.items.is_empty() || workspaces.items.len() > 24 {
+            return Err("Native workspaces must contain between 1 and 24 items.".into());
         }
+        for workspace in &workspaces.items {
+            let id = uuid::Uuid::parse_str(&workspace.id)
+                .map_err(|_| "Invalid native workspace ID.")?;
+            if !ids.insert(id)
+                || workspace.name.trim().is_empty()
+                || workspace.name.chars().count() > 80
+                || workspace.name.chars().any(char::is_control)
+                || workspace.color.len() != 7
+                || !workspace.color.starts_with('#')
+                || !workspace.color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !["folder", "code", "terminal", "globe", "sparkles"].contains(&workspace.icon.as_str())
+            {
+                return Err("Invalid native workspace metadata or duplicate ID.".into());
+            }
+            if let Some(layout) = &workspace.layout {
+                validate_native_layout(layout)?;
+            }
+        }
+        if !workspaces.items.iter().any(|item| item.id == workspaces.active_id) {
+            return Err("Native active workspace does not exist.".into());
+        }
+    Ok(())
+}
+
+fn validate_native_layout(layout: &Value) -> Result<(), String> {
+    let layout: PreferenceLayout =
+        serde_json::from_value(layout.clone()).map_err(|_| "Invalid native layout schema.")?;
+    if layout.version != Some(1) {
+        return Err("Unsupported native layout version.".into());
+    }
+    let mut count = 0;
+    let mut ids = std::collections::HashSet::new();
+    validate_preference_pane(&layout.center, 0, &mut count, &mut ids)?;
+    for dock in [layout.left_dock, layout.right_dock, layout.bottom_dock]
+        .into_iter()
+        .flatten()
+    {
+        if !["left", "right", "bottom"].contains(&dock.placement.as_str())
+            || !dock.size.is_finite()
+            || !(0.0..=100000.0).contains(&dock.size)
+        {
+            return Err("Invalid native dock placement/size.".into());
+        }
+        let _ = dock.open;
+        validate_preference_pane(&dock.panel, 0, &mut count, &mut ids)?;
     }
     Ok(())
 }
@@ -1763,6 +1832,7 @@ mod tests {
         assert_eq!(legacy.surface_tint, 5);
         assert_eq!(legacy.border_opacity, 100);
         assert_eq!(legacy.interface_scale, 125);
+        assert_eq!(legacy.tile_theme, NativeTileTheme::Monitter);
         validate_native_data(&NativePreferenceData::default()).unwrap();
 
         let mut data = NativePreferenceData::default();
@@ -1780,6 +1850,25 @@ mod tests {
         data.appearance.interface_scale = 125;
         data.appearance.custom_accent = Some("blue".into());
         assert!(validate_native_data(&data).is_err());
+    }
+    #[test]
+    fn native_tile_theme_is_strict_and_round_trips() {
+        for (theme, value) in [
+            (NativeTileTheme::Monitter, "monitter"),
+            (NativeTileTheme::Tern, "tern"),
+        ] {
+            let mut data = NativePreferenceData::default();
+            data.appearance.tile_theme = theme;
+            validate_native_data(&data).unwrap();
+            let serialized = serde_json::to_value(&data).unwrap();
+            if theme == NativeTileTheme::Monitter {
+                assert!(serialized["appearance"].get("tileTheme").is_none(), "Default appearance must remain compatible with older backends");
+            } else { assert_eq!(serialized["appearance"]["tileTheme"], value); }
+            let restored: NativePreferenceData = serde_json::from_value(serialized).unwrap();
+            assert_eq!(restored.appearance.tile_theme, theme);
+        }
+        assert!(serde_json::from_value::<NativeAppearance>(json!({"tileTheme": "unknown"})).is_err());
+        assert!(serde_json::from_value::<NativeAppearance>(json!({"tileTheme": "Tern"})).is_err());
     }
     #[test]
     fn native_browser_metadata_is_optional_strict_and_bounded() {
@@ -1967,6 +2056,44 @@ mod tests {
         assert_eq!(loaded.data.browser_metadata, Some(metadata));
         assert!(store.save("0", loaded.data).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn native_workspaces_are_bounded_and_legacy_compatible() {
+        let legacy: NativePreferenceData = serde_json::from_value(json!({})).unwrap();
+        assert!(legacy.workspaces.is_none());
+        assert!(serde_json::to_value(&legacy).unwrap().get("workspaces").is_none());
+        let id = uuid::Uuid::new_v4().to_string();
+        let workspace = NativeWorkspace {
+            id: id.clone(), name: "Development".into(), color: "#Aabb09".into(),
+            icon: "code".into(),
+            layout: Some(json!({"version":1,"center":{"panel_name":"MonitterNativePane","children":[],"info":{"panel":{"id":"chat:main"}}}})),
+        };
+        let mut data = NativePreferenceData::default();
+        data.workspaces = Some(NativeWorkspaceSet { active_id: id, items: vec![workspace] });
+        validate_native_data(&data).unwrap();
+        let encoded = serde_json::to_value(&data).unwrap();
+        assert!(encoded["workspaces"]["activeId"].is_string());
+        let decoded: NativePreferenceData = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.workspaces, data.workspaces);
+        for mutation in 0..9 {
+            let mut invalid = data.clone();
+            let set = invalid.workspaces.as_mut().unwrap();
+            match mutation {
+                0 => set.active_id = uuid::Uuid::new_v4().to_string(),
+                1 => set.items.push(set.items[0].clone()),
+                2 => set.items[0].color = "#GG0000".into(),
+                3 => set.items[0].icon = "unknown".into(),
+                4 => set.items[0].layout = Some(json!({"version": 99})),
+                5 => set.items[0].name = " ".into(),
+                6 => set.items[0].name = "x".repeat(81),
+                7 => set.items[0].id = "bad-id".into(),
+                _ => set.items = (0..25).map(|_| {
+                    let mut item = set.items[0].clone();
+                    item.id = uuid::Uuid::new_v4().to_string(); item
+                }).collect(),
+            }
+            assert!(validate_native_data(&invalid).is_err(), "mutation {mutation}");
+        }
     }
     #[test]
     fn native_chat_pane_preferences_are_bounded_and_legacy_compatible() {

@@ -123,6 +123,7 @@
 
 use gpui_kit::component::tooltip::ManagedTooltipExt as _;
 use crate::design::ui_scaled_px as px;
+use gpui_kit::prelude::FluentBuilder as _;
 
 use chrono;
 use futures::channel::oneshot;
@@ -130,13 +131,13 @@ use gpui_kit::{
     Image, ImageFormat,
     assets::__private as icons_assets,
     component::{
-        Icon, Sizable, WindowExt as _,
+        ActiveTheme as _, Icon, Sizable, WindowExt as _,
         button::{Button, ButtonVariants},
         tooltip::Tooltip,
     },
     *,
 };
-use monitter_lib::experimental_desktop::DesktopService;
+use monitter_lib::experimental_desktop::{DesktopService, NativeTileTheme};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -1079,6 +1080,8 @@ pub struct SidebarUsageWidget {
     snapshot: Rc<Value>,
     revision: Option<String>,
     composed_palette: Option<crate::design::Palette>,
+    tile_theme: NativeTileTheme,
+    border_opacity: u16,
     sidebar_width: f32,
     map: SidebarUsageMap,
     usage_busy: bool,
@@ -1118,6 +1121,8 @@ impl SidebarUsageWidget {
             snapshot,
             revision: revision.map(str::to_owned),
             composed_palette: None,
+            tile_theme: crate::design::tile_theme(),
+            border_opacity: crate::design::border_opacity(),
             sidebar_width: 252.,
             map: SidebarUsageMap::new(),
             usage_busy: false,
@@ -1166,8 +1171,9 @@ impl SidebarUsageWidget {
 
     /// Retain the fully composed desktop palette so this widget can be
     /// embedded as its own GPUI entity instead of flattening its view into
-    /// the parent's render tree. The equality guard prevents palette sync
-    /// during a parent render from scheduling another render.
+    /// the parent's render tree. Palette, width and native tile theme are
+    /// retained together so a live tile-theme change invalidates this entity
+    /// even when its palette and width have not changed.
     pub fn set_composed_palette(
         &mut self,
         palette: crate::design::Palette,
@@ -1175,9 +1181,17 @@ impl SidebarUsageWidget {
         cx: &mut Context<Self>,
     ) {
         let sidebar_width = if sidebar_width.is_finite() { sidebar_width.max(1.) } else { self.sidebar_width };
-        if self.composed_palette != Some(palette) || (self.sidebar_width - sidebar_width).abs() > 0.01 {
+        let tile_theme = crate::design::tile_theme();
+        let border_opacity = crate::design::border_opacity();
+        if self.composed_palette != Some(palette)
+            || (self.sidebar_width - sidebar_width).abs() > 0.01
+            || self.tile_theme != tile_theme
+            || self.border_opacity != border_opacity
+        {
             self.composed_palette = Some(palette);
             self.sidebar_width = sidebar_width;
+            self.tile_theme = tile_theme;
+            self.border_opacity = border_opacity;
             cx.notify();
         }
     }
@@ -1457,6 +1471,13 @@ impl SidebarUsageWidget {
         }
     }
 
+    /// A collapsed Tern sidebar keeps all providers and resource readings
+    /// visible, but stacks them instead of squeezing the expanded layout.
+    fn compact_tern(&self) -> bool {
+        crate::design::tile_theme() == NativeTileTheme::Tern
+            && self.sidebar_width * crate::design::interface_scale() as f32 / 100. <= 100.
+    }
+
     /// Public render entry. Produces the lower sidebar statistics row
     /// containing the rings strip, the clock face, the metrics summary and
     /// (when expanded) the retained per-provider detail panel.
@@ -1490,16 +1511,33 @@ impl SidebarUsageWidget {
         // exact four-pixel size increment, so resize/account changes agree.
         let account_controls = merged.get(&SidebarUsageProvider::Codex)
             .is_some_and(|ring| ring.accounts.len() > 1);
-        let ring_layout = provider_ring_layout(self.sidebar_width, account_controls);
+        let ring_layout = if self.compact_tern() {
+            let scale = crate::design::interface_scale() as f32 / 100.;
+            RingRowLayout { diameter: 24. / scale, gap: 4. / scale, edge_padding: 4. / scale }
+        } else {
+            provider_ring_layout(self.sidebar_width, account_controls)
+        };
 
         let mut root = div()
             .id("sidebar-usage-stats")
             .w_full()
             .flex()
             .flex_col()
-            .gap_0()
-            .border_t_1()
-            .border_color(rgb(palette.line));
+            .gap_0();
+        root = if crate::design::tile_theme() == NativeTileTheme::Tern {
+            root
+                .min_w_0()
+                .flex_shrink_0()
+                .rounded(gpui_kit::px(8.))
+                .border_1()
+                .border_color(crate::design::tile_border_color(palette))
+                .bg(crate::surface_blend::background(
+                    crate::surface_blend::Area::Sidebar,
+                    palette.sidebar,
+                ))
+        } else {
+            root.border_t_1().border_color(rgb(palette.line))
+        };
 
         root = root.child(self.render_rings_row(&merged, ring_layout, palette, cx));
         root = root.child(self.render_clock_row(ring_layout.diameter + 4., palette, window, cx));
@@ -1549,6 +1587,9 @@ impl SidebarUsageWidget {
             .items_center()
             .justify_center()
             .px(px(layout.edge_padding));
+        if self.compact_tern() {
+            strip = strip.flex_col().py(gpui_kit::px(4.));
+        }
         for provider in SidebarUsageProvider::ALL {
             let ring = map.get(&provider).cloned().unwrap_or_default();
             strip = strip.child(self.render_ring(provider, &ring, layout.diameter, palette, cx));
@@ -1564,6 +1605,7 @@ impl SidebarUsageWidget {
         palette: crate::design::Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let compact = self.compact_tern();
         let active = ring.active.as_ref();
         let weekly = ring.weekly.as_ref();
         let fallback = Rgb(
@@ -1619,13 +1661,14 @@ impl SidebarUsageWidget {
                     .ghost()
                     .xsmall()
                     .compact()
-                    .w(px(22.))
-                    .h(px(30.))
+                    .w(if compact { gpui_kit::px(16.) } else { px(22.) })
+                    .h(if compact { gpui_kit::px(24.) } else { px(30.) })
+                    .when(compact, |button| button.min_w_0())
                     .p_0()
                     .icon(
                         Icon::default()
                             .data(icons_assets::ChevronLeft.1)
-                            .with_size(px(13.)),
+                            .with_size(if compact { gpui_kit::px(10.) } else { px(13.) }),
                     )
                     .tooltip("Previous Codex account")
                     .accessibility_label("Previous Codex account")
@@ -1710,13 +1753,14 @@ impl SidebarUsageWidget {
                     .ghost()
                     .xsmall()
                     .compact()
-                    .w(px(22.))
-                    .h(px(30.))
+                    .w(if compact { gpui_kit::px(16.) } else { px(22.) })
+                    .h(if compact { gpui_kit::px(24.) } else { px(30.) })
+                    .when(compact, |button| button.min_w_0())
                     .p_0()
                     .icon(
                         Icon::default()
                             .data(icons_assets::ChevronRight.1)
-                            .with_size(px(13.)),
+                            .with_size(if compact { gpui_kit::px(10.) } else { px(13.) }),
                     )
                     .tooltip("Next Codex account")
                     .accessibility_label("Next Codex account")
@@ -1785,6 +1829,9 @@ impl SidebarUsageWidget {
             .flex_row()
             .items_center()
             .gap(px(crate::design::space::TIGHT));
+        if self.compact_tern() {
+            body = body.flex_col().p(gpui_kit::px(4.)).gap(gpui_kit::px(4.));
+        }
         body = body.child(crate::native_clock::clock_face(
             self.now_ms.max(0) as u64,
             palette,
@@ -1796,6 +1843,7 @@ impl SidebarUsageWidget {
                 .min_w_0()
                 .flex()
                 .flex_col()
+                .when(self.compact_tern(), |metrics| metrics.w_full())
                 .gap(px(6.))
                 .child(self.render_metric_row(
                     "CPU",
@@ -1896,6 +1944,34 @@ impl SidebarUsageWidget {
             ),
             _ => ("Backend process metrics", "Backend process metrics"),
         };
+        if self.compact_tern() {
+            return div()
+                .id(format!("sidebar-usage-metric-{label}"))
+                .aria_label(accessibility_label)
+                .managed_tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_between()
+                        .text_size(gpui_kit::px(8.))
+                        .font_family(crate::design::FONT_MONO)
+                        .child(div().text_color(rgb(DEFAULT_MUTED_TOKEN)).child(label))
+                        .child(div().text_color(rgb(token)).child(compact_text)),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .h(gpui_kit::px(14.))
+                        .overflow_hidden()
+                        .child(sparkline),
+                )
+                .into_any_element();
+        }
         div()
             .id(format!("sidebar-usage-metric-{label}"))
             .aria_label(accessibility_label)

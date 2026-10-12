@@ -18,6 +18,7 @@ wry = "=0.55.1"
 url = "2"
 monitter = { path = "../src-tauri", features = ["experimental-gpui"] }
 serde_json = "1"
+unicode-segmentation = "=1.13.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ammonia = "=4.2.0"

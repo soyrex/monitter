@@ -2133,6 +2133,12 @@ pub struct DispatchEventResult {
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     /// The hard clipping bounds.
     pub bounds: Bounds<P>,
+    /// Original rounded viewport, independent of nested rectangular clips.
+    #[cfg(target_os = "macos")]
+    pub rounded_bounds: Bounds<P>,
+    /// Rounded viewport radius. Zero retains rectangular clipping.
+    #[cfg(target_os = "macos")]
+    pub rounded_radius: P,
     /// Original viewport top, independent of nested hard clipping bounds.
     #[cfg(target_os = "macos")]
     pub fade_top: P,
@@ -2166,6 +2172,15 @@ impl<P: Clone + Debug + Default + PartialEq> ContentMask<P> {
 }
 
 impl ContentMask<Pixels> {
+    /// Clip descendants to a rounded viewport without adding a surface fill.
+    #[cfg(target_os = "macos")]
+    pub fn rounded(bounds: Bounds<Pixels>, radius: Pixels) -> Self {
+        let radius = if radius.0.is_finite() {
+            radius.max(Pixels::ZERO).min(bounds.size.width / 2.).min(bounds.size.height / 2.)
+        } else { Pixels::ZERO };
+        Self { bounds, rounded_bounds: bounds, rounded_radius: radius, ..Self::default() }
+    }
+
     /// Create a vertical alpha fade anchored to these viewport bounds.
     /// Invalid or nonpositive heights disable the fade. Tall fades are limited
     /// to half the viewport height so their ramps never overlap.
@@ -2215,6 +2230,10 @@ impl ContentMask<Pixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             #[cfg(target_os = "macos")]
+            rounded_bounds: self.rounded_bounds.scale(factor),
+            #[cfg(target_os = "macos")]
+            rounded_radius: ScaledPixels(self.rounded_radius.0 * factor),
+            #[cfg(target_os = "macos")]
             fade_top: ScaledPixels(self.fade_top.0 * factor),
             #[cfg(target_os = "macos")]
             fade_bottom: ScaledPixels(self.fade_bottom.0 * factor),
@@ -2245,7 +2264,9 @@ impl ContentMask<Pixels> {
             } else {
                 self
             };
-            Self { bounds, ..*fade }
+            let rounded = if other.rounded_radius > Pixels::ZERO { other } else { self };
+            Self { bounds, rounded_bounds: rounded.rounded_bounds,
+                rounded_radius: rounded.rounded_radius, ..*fade }
         }
         #[cfg(not(target_os = "macos"))]
         Self::new(bounds)
@@ -7877,6 +7898,28 @@ mod tests {
             ContentMask::vertical_fade(row.bounds, px(8.)).intersect(&fade),
             clipped
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn rounded_content_mask_survives_nested_fades_and_scale() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(80.)));
+        let rounded = ContentMask::rounded(bounds, px(8.));
+        let row = Bounds::new(point(px(12.), px(24.)), size(px(90.), px(30.)));
+        let clipped = ContentMask::vertical_fade(row, px(5.)).intersect(&rounded);
+        assert_eq!(clipped.bounds, row);
+        assert_eq!(clipped.rounded_bounds, bounds);
+        assert_eq!(clipped.rounded_radius, px(8.));
+        assert_eq!(clipped.fade_height, px(5.));
+        let scaled = clipped.scale(2.);
+        assert_eq!(scaled.rounded_bounds, bounds.scale(2.));
+        assert_eq!(scaled.rounded_radius, ScaledPixels(16.));
+        assert_eq!(ContentMask::new(row).intersect(&clipped).rounded_bounds, bounds);
+        assert_eq!(ContentMask::rounded(bounds, px(1000.)).rounded_radius, px(40.));
+        for radius in [px(-1.), px(f32::NAN), px(f32::INFINITY)] {
+            assert_eq!(ContentMask::rounded(bounds, radius).rounded_radius, Pixels::ZERO);
+        }
+        assert_eq!(ContentMask::new(bounds).rounded_radius, Pixels::ZERO);
     }
 
     #[test]

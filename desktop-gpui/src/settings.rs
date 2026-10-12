@@ -8,7 +8,7 @@ use gpui_kit::component::{
     color_picker::{ColorPickerState, ColorPickerEvent},
     slider::{Slider, SliderEvent, SliderState},
 };
-use monitter_lib::experimental_desktop::NativeAppearance;
+use monitter_lib::experimental_desktop::{NativeAppearance, NativeTileTheme};
 use std::collections::HashSet;
 #[path = "native_appearance.rs"]
 mod native_appearance;
@@ -405,6 +405,8 @@ impl Desktop {
         let is_dark = design::palette(settings, window.appearance()).dark;
         let interface_scale = design::normalize_interface_scale(stored_appearance.interface_scale);
         design::set_interface_scale(interface_scale);
+        design::set_tile_theme(stored_appearance.tile_theme);
+        design::set_border_opacity(stored_appearance.border_opacity);
         let mut palette = if self.native_theme_preset == "reference" {
             design::palette_for(settings, window.appearance(), "reference")
         } else {
@@ -434,7 +436,7 @@ impl Desktop {
             stored_appearance.border_opacity,
         );
         let signature = format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}",
             palette.dark,
             palette.paper,
             palette.accent,
@@ -454,6 +456,7 @@ impl Desktop {
             self.native_theme_preset,
             surface,
             settings["windowTransparency"],
+            stored_appearance.tile_theme,
         );
         if self.applied_style.as_ref() != Some(&signature) {
             Theme::change(
@@ -574,6 +577,9 @@ impl Desktop {
                     }
                 }
             });
+            self.dock.update(cx, |dock, cx| {
+                dock.set_tab_appearance(settings, interface_scale, cx);
+            });
             self.applied_style = Some(signature);
         }
         self.dock.update(cx, |dock, cx| {
@@ -649,6 +655,24 @@ impl Desktop {
                 cx.notify();
             }
         }
+    }
+    fn save_native_tile_theme(&mut self, theme: NativeTileTheme, cx: &mut Context<Self>) {
+        if self.preferences_busy {
+            return;
+        }
+        let Some(preferences) = self.preferences.as_mut() else {
+            return;
+        };
+        if preferences.data.appearance.tile_theme == theme {
+            return;
+        }
+        preferences.data.appearance.tile_theme = theme;
+        self.workspaces_dirty = true;
+        design::set_tile_theme(theme);
+        self.applied_style = None;
+        self.preferences_error = None;
+        self.queue_preferences_save(cx);
+        cx.notify();
     }
     fn save_native_appearance(&mut self, cx: &mut Context<Self>) {
         if self.preferences_busy || self.preferences.is_none() {

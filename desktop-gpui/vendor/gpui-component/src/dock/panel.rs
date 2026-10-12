@@ -34,6 +34,8 @@ pub enum PanelStyle {
     Auto,
     /// Always display the tab bar.
     TabBar,
+    /// Keep pane content and docking behavior without a title or tab strip.
+    Hidden,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

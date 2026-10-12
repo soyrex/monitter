@@ -21,6 +21,14 @@ pub struct OpenNewTab;
 
 #[derive(gpui_kit::Action, Clone, PartialEq, Default, Debug)]
 #[action(namespace = monitter_desktop)]
+pub struct OpenVerticalSplit;
+
+#[derive(gpui_kit::Action, Clone, PartialEq, Default, Debug)]
+#[action(namespace = monitter_desktop)]
+pub struct OpenHorizontalSplit;
+
+#[derive(gpui_kit::Action, Clone, PartialEq, Default, Debug)]
+#[action(namespace = monitter_desktop)]
 pub struct CloseActiveTab;
 
 #[derive(gpui_kit::Action, Clone, PartialEq, Eq, Debug)]
@@ -91,6 +99,24 @@ impl NativeNavigation {
 pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx: &mut App) {
     cx.on_action({
         let navigation = navigation.clone();
+        move |_: &OpenVerticalSplit, cx| {
+            navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
+                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") { return Ok(()); }
+                desktop.open_focused_empty_split(true, window, cx)
+            });
+        }
+    });
+    cx.on_action({
+        let navigation = navigation.clone();
+        move |_: &OpenHorizontalSplit, cx| {
+            navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
+                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") { return Ok(()); }
+                desktop.open_focused_empty_split(false, window, cx)
+            });
+        }
+    });
+    cx.on_action({
+        let navigation = navigation.clone();
         move |_: &OpenNewTab, cx| {
             navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
                 if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") {
@@ -133,6 +159,8 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
     });
 
     cx.bind_keys([
+        KeyBinding::new("secondary-d", OpenVerticalSplit, None),
+        KeyBinding::new("secondary-shift-d", OpenHorizontalSplit, None),
         KeyBinding::new("cmd-t", OpenNewTab, None),
         KeyBinding::new("cmd-w", CloseActiveTab, None),
         KeyBinding::new("cmd-1", SelectTab { index: 1 }, None),

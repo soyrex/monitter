@@ -60,6 +60,8 @@ mod preferences_modal;
 mod blurred_backdrop;
 mod dialog_backdrop;
 mod native_motion;
+use monitter_gpui_desktop::streaming_display;
+mod streaming_message;
 mod activity_sparkles;
 mod activity_effects;
 mod naming_title;
@@ -73,6 +75,7 @@ mod terminal_workspace;
 mod terminal_theme;
 mod timestamps;
 mod workspace_visibility;
+mod workspace_tabs;
 mod usage;
 mod vim_command;
 use channels::ChannelPane;
@@ -147,6 +150,9 @@ fn sidebar_split_element(
     sidebar: AnyElement, content: AnyElement,
 ) -> AnyElement {
     h_resizable("native-sidebar-split")
+        .when(design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern, |split| {
+            split.with_handle_appearance(gpui_kit::component::resizable::rounded_resize_handle_appearance())
+        })
         .with_state(state)
         .child(resizable_panel()
             .size(design::ui_px(width_design, scale))
@@ -248,6 +254,11 @@ struct Desktop {
     sidebar_view: SidebarView,
     sidebar_tabs_motion: RefCell<crate::sidebar_tabs_motion::SidebarTabsMotion>,
     preferences: Option<NativePreferences>,
+    named_workspaces: Option<monitter_lib::experimental_desktop::NativeWorkspaceSet>,
+    workspaces_dirty: bool,
+    workspace_store_revision: i64,
+    workspace_switch: Option<String>,
+    workspace_editor: Option<workspace_tabs::WorkspaceEditor>,
     native_drafts: BTreeMap<String, String>,
     dirty_draft_ids: HashSet<String>,
     native_attachment_drafts: BTreeMap<String, NativeAttachmentDraft>,
@@ -344,6 +355,7 @@ enum SidebarView {
 }
 impl Desktop {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<streaming_display::Selection>(|_, cx| cx.notify()).detach();
         let session_lock = cx.new(|cx| session_lock::SessionLock::new(window,cx));
         cx.observe(&session_lock, |_,_,cx|cx.notify()).detach();
         cx.subscribe_in(&session_lock,window,|view,_,event:&session_lock::LockEvent,window,cx| {
@@ -388,7 +400,7 @@ impl Desktop {
                 if let Some(task_id) = id.strip_prefix("chat:") {
                     let pane = view.chat_panes.borrow().get(task_id).cloned();
                     if let Some(pane) = pane {
-                        pane.update(cx, |pane, _| pane.dock_visible = *visible);
+                        pane.update(cx, |pane, cx| pane.set_dock_visible(*visible, cx));
                     }
                     if !visible { view.compact_inactive_task(task_id, cx); }
                 }
@@ -421,6 +433,7 @@ impl Desktop {
                 && !view.preferences_restore
                 && !view.preferences_restore_suppressed
             {
+                view.workspaces_dirty = true;
                 view.queue_preferences_save(cx);
             }
         });
@@ -530,6 +543,11 @@ impl Desktop {
             _layout_subscription: layout_subscription,
             _activation_subscription: activation_subscription,
             preferences: None,
+            named_workspaces: None,
+            workspaces_dirty: false,
+            workspace_store_revision: 0,
+            workspace_switch: None,
+            workspace_editor: None,
             native_drafts: BTreeMap::new(),
             dirty_draft_ids: HashSet::new(),
             native_attachment_drafts: BTreeMap::new(),
@@ -919,6 +937,11 @@ impl Desktop {
         }
         match action {
             browser::BrowserWorkspaceAction::NewTab => {
+                if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+                    let key = browser_workspace::browser_pane_id(source_id);
+                    self.dock.update(cx, |dock, cx| dock.focus(&key, window, cx));
+                    return self.open_focused_empty_tab(window, cx);
+                }
                 let id = self.create_browser_tab(window, cx)?;
                 if let Err(error) = self.open_browser_tab(id, window, cx) {
                     manager.update(cx, |manager, cx| manager.remove_docked(id, cx));
@@ -1288,7 +1311,7 @@ impl Desktop {
             .spawn(async move {
                 let mut result = service.read_ui_changes(revision.as_deref());
                 for wait_ms in [150, 450] {
-                    if !result.as_ref().err().is_some_and(|error| backend_launcher::is_transient_connection_error(error)) { break; }
+                    if !result.as_ref().err().is_some_and(|error| chat::connection_recovery::transient(error)) { break; }
                     std::thread::sleep(std::time::Duration::from_millis(wait_ms));
                     result = service.read_ui_changes(revision.as_deref());
                 }
@@ -1299,7 +1322,7 @@ impl Desktop {
             let _ = view.update(cx, |view, cx| {
                 view.refreshing = false;
                 if result.is_ok() && view.error.as_deref().is_some_and(|error|
-                    backend_launcher::is_transient_connection_error(error)
+                    chat::connection_recovery::transient(error)
                         || error == "Could not reconnect to Monitter. Your agents may still be running; try again shortly.") {
                     view.error = None;
                     cx.notify();
@@ -1326,9 +1349,9 @@ impl Desktop {
                         ),
                     },
                     Err(error) => {
-                        view.error = Some(if backend_launcher::is_transient_connection_error(&error) {
-                            "Could not reconnect to Monitter. Your agents may still be running; try again shortly.".into()
-                        } else { error });
+                        if !chat::connection_recovery::transient(&error) {
+                            view.error = Some(error);
+                        }
                         cx.notify();
                     }
                 }
@@ -2019,6 +2042,9 @@ impl Desktop {
             cx.notify();
             return;
         }
+        if self.workspaces_dirty && !self.preferences_restoring && !self.preferences_restore {
+            if let Ok(layout) = self.dock.read(cx).serialize(cx) { self.capture_workspace_layout(layout); }
+        }
         let Some(service) = self.service.clone() else {
             self.preferences_error = Some("Workspace preferences service is unavailable.".into());
             cx.notify();
@@ -2034,13 +2060,21 @@ impl Desktop {
         self.preferences_busy = true;
         let worker = cx
             .background_executor()
-            .spawn(async move { service.load_native_preferences() });
+            .spawn(async move {
+                let mut preferences = service.load_native_preferences()?;
+                let (revision, workspaces, theme) = monitter_gpui_desktop::workspace_store::load()?;
+                if let Some(theme) = theme { preferences.data.appearance.tile_theme = theme; }
+                Ok::<_, String>((preferences, revision, workspaces))
+            });
         cx.spawn(async move |view, cx| {
             let result = worker.await;
             let _ = view.update(cx, |view, cx| {
                 view.preferences_busy = false;
                 match result {
-                    Ok(preferences) => {
+                    Ok((mut preferences, workspace_revision, stored_workspaces)) => {
+                        if view.workspaces_dirty {
+                            if let Some(current) = &view.preferences { preferences.data.appearance.tile_theme = current.data.appearance.tile_theme; }
+                        }
                         eprintln!("[native-preferences] operation=load generation={generation} result=success");
                         view.native_theme_preset = if preferences.data.appearance.warm_paper {
                             "reference"
@@ -2070,11 +2104,24 @@ impl Desktop {
                                 }
                             }
                         }
+                        if view.workspaces_dirty {
+                            if let Ok(layout) = view.dock.read(cx).serialize(cx) { view.capture_workspace_layout(layout); }
+                        }
+                        let missing_local_workspaces = stored_workspaces.is_none();
+                        view.workspace_store_revision = workspace_revision;
+                        if !view.workspaces_dirty {
+                            let mut source = preferences.data.clone();
+                            source.workspaces = stored_workspaces.or(source.workspaces);
+                            view.named_workspaces = Some(workspace_tabs::loaded_workspaces(&source));
+                            view.selected = None;
+                            view.dock_current = None;
+                        }
+                        view.workspaces_dirty |= missing_local_workspaces;
                         view.preferences = Some(preferences);
                         view.preferences_restore = true;
                         view.preferences_blocked = false;
                         view.preferences_dirty = !view.dirty_draft_ids.is_empty();
-                        view.preferences_dirty |= view.native_browser_dirty || view.sidebar_width_touched || !view.dirty_chat_pane_ids.is_empty() || !view.dirty_attachment_draft_ids.is_empty();
+                        view.preferences_dirty |= view.workspaces_dirty || view.native_browser_dirty || view.sidebar_width_touched || !view.dirty_chat_pane_ids.is_empty() || !view.dirty_attachment_draft_ids.is_empty();
                         view.preferences_error = None;
                     }
                     Err(error) => {
@@ -2132,6 +2179,14 @@ impl Desktop {
         };
         let layout_structure = Self::native_layout_structure(&layout);
         let mut data = preferences.data;
+        self.capture_workspace_layout(layout.clone());
+        let saved_workspaces = self.named_workspaces.clone();
+        let workspace_revision = self.workspace_store_revision;
+        let save_workspaces = self.workspaces_dirty;
+        // Client-local layouts must not require a running-backend schema upgrade.
+        data.workspaces = None;
+        let saved_tile_theme = data.appearance.tile_theme;
+        data.appearance.tile_theme = monitter_lib::experimental_desktop::NativeTileTheme::Monitter;
         data.layout = Some(layout);
         data.appearance.sidebar_width = Some(self.current_sidebar_width(cx));
         data.appearance.warm_paper = self.native_theme_preset == "reference";
@@ -2146,15 +2201,28 @@ impl Desktop {
         eprintln!("[native-preferences] operation=save generation={generation} result=started");
         self.preferences_busy = true;
         self.preferences_dirty = false;
-        let worker = cx
-            .background_executor()
-            .spawn(async move { service.save_native_preferences(&preferences.revision, data) });
+        let acknowledged_workspaces = saved_workspaces.clone();
+        let worker = cx.background_executor().spawn(async move {
+            let revision = if save_workspaces {
+                match saved_workspaces.as_ref().ok_or_else(|| "Workspace preferences are not loaded.".to_owned()).and_then(|set| monitter_gpui_desktop::workspace_store::save(workspace_revision, set, saved_tile_theme)) {
+                    Ok(revision) => revision,
+                    Err(error) => return (None, Err(error)),
+                }
+            } else { workspace_revision };
+            (Some(revision), service.save_native_preferences(&preferences.revision, data))
+        });
         cx.spawn(async move |view, cx| {
-            let result = worker.await;
+            let (workspace_revision, result) = worker.await;
             let _ = view.update(cx, |view, cx| {
                 view.preferences_busy = false;
+                if let Some(revision) = workspace_revision {
+                    view.workspace_store_revision = revision;
+                    view.workspaces_dirty = view.named_workspaces != acknowledged_workspaces
+                        || view.preferences.as_ref().is_some_and(|current| current.data.appearance.tile_theme != saved_tile_theme);
+                }
                 match result {
-                    Ok(preferences) => {
+                    Ok(mut preferences) => {
+                        preferences.data.appearance.tile_theme = view.preferences.as_ref().map(|current| current.data.appearance.tile_theme).unwrap_or(saved_tile_theme);
                         eprintln!("[native-preferences] operation=save generation={generation} result=success");
                         view.dirty_draft_ids.retain(|id| {
                             view.native_drafts.get(id) != preferences.data.drafts.get(id)
@@ -2164,6 +2232,7 @@ impl Desktop {
                         view.native_browser_dirty = view.native_browser_dirty
                             && view.native_browser_metadata != preferences.data.browser_metadata;
                         view.preferences_dirty |= view.native_browser_dirty || !view.dirty_attachment_draft_ids.is_empty();
+                        view.preferences_dirty |= view.workspaces_dirty;
                         view.preferences = Some(preferences);
                         view.preferences_error = None;
                         if view.preferences_dirty && !view.close_pending {
@@ -2349,10 +2418,10 @@ impl Desktop {
                 });
             }
         }
-        let layout = self
-            .preferences
-            .as_ref()
-            .and_then(|preferences| preferences.data.layout.clone());
+        let layout = self.named_workspaces.as_ref().and_then(|set| {
+            let id = self.workspace_switch.as_ref().unwrap_or(&set.active_id);
+            set.items.iter().find(|item| &item.id == id).map(|item| item.layout.clone().unwrap_or_else(workspace_tabs::empty_layout))
+        }).or_else(|| self.preferences.as_ref().and_then(|preferences| preferences.data.layout.clone()));
         let Some(mut layout) = layout else {
             self.preferences_restore_suppressed = false;
             self.preferences_restoring = false;
@@ -2460,6 +2529,7 @@ impl Desktop {
         .detach();
     }
     fn fail_workspace_restore(&mut self, error: String, cx: &mut Context<Self>) {
+        self.workspace_switch = None;
         self.preferences_restore_suppressed = false;
         self.preferences_restoring = false;
         self.preferences_error = Some(error);
@@ -2478,13 +2548,18 @@ impl Desktop {
             .prepare_saved_panes(&layout, &sessions, window, cx)
             .and_then(|()| {
                 self.dock
-                    .update(cx, |dock, cx| dock.restore(layout, window, cx))
+                    .update(cx, |dock, cx| dock.restore_retaining(layout, window, cx))
             });
         match result {
             Ok(()) => {
+                if let Some(id) = self.workspace_switch.take() {
+                    if let Some(set) = &mut self.named_workspaces { set.active_id = id; }
+                    self.workspaces_dirty = true;
+                    self.preferences_dirty = true;
+                }
                 self.preferences_error = None;
                 self.preferences_blocked = false;
-                self.dock_current = None;
+                self.dock_current = self.dock.read(cx).focused_pane_id(window, cx);
                 let generation = restore_generation;
                 cx.spawn(async move |view, cx| {
                     cx.background_executor()
@@ -2506,6 +2581,7 @@ impl Desktop {
                 .detach();
             }
             Err(error) => {
+                self.workspace_switch = None;
                 self.preferences_restore_suppressed = false;
                 self.preferences_restoring = false;
                 eprintln!(
@@ -4008,7 +4084,11 @@ impl Render for Desktop {
             );
         } else {
             // Keep the workspace painted beneath ordered native backdrop filters.
-            root = root.child(self.render_surface(window, cx));
+            let surface = self.render_surface(window, cx);
+            let palette = self.apply_native_theme(window, cx);
+            root = root.child(div().size_full().flex().flex_col()
+                .child(self.render_workspace_tabs(palette, window, cx))
+                .child(div().flex_1().min_h_0().w_full().child(surface)));
         }
         if !self.preferences_open {
             if let Some(error) = self.preferences_error.clone() {
@@ -4033,7 +4113,9 @@ impl Render for Desktop {
             }
         }
         if self.preferences_open {
-            root = root.child(self.render_preferences_modal(window, cx));
+            // Dock corner masks and focus contours are deferred at priorities 2/3.
+            // Paint the modal afterward so tile chrome cannot cross its card.
+            root = root.child(gpui_kit::deferred(self.render_preferences_modal(window, cx)).with_priority(4));
         }
         if !self.closing && !self.preferences_open {
             if let Some(command_bar) = vim_command::bar(cx) {
@@ -4107,7 +4189,7 @@ impl Desktop {
         if self.closing {
             return Err("Desktop is closing.".into());
         }
-        if self
+        if design::tile_theme() != monitter_lib::experimental_desktop::NativeTileTheme::Tern && self
             .dock
             .read(cx)
             .focused_pane_id(window, cx)
@@ -4121,6 +4203,20 @@ impl Desktop {
                 return Ok(());
             };
             dock.add_empty_tab(group, window, cx).map(|_| ())
+        })
+    }
+
+    /// Split beside the focused pane with a blank surface, without starting work.
+    fn open_focused_empty_split(
+        &mut self,
+        vertical: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.closing { return Err("Desktop is closing.".into()); }
+        self.dock.update(cx, |dock, cx| {
+            let Some(group) = dock.focused_group_node(window, cx) else { return Ok(()); };
+            dock.add_empty_split(group, vertical, window, cx).map(|_| ())
         })
     }
 
@@ -4387,6 +4483,7 @@ fn main() {
             gpui_kit::init(cx);
             gpui_kit::component::resizable::set_separator_blend_mode(crate::surface_blend::separator_mode());
             native_motion::initialize(cx);
+            streaming_display::initialize(cx);
             native_menu::install(cx);
             #[cfg(feature = "visual-export")]
             visual_export::install(cx);

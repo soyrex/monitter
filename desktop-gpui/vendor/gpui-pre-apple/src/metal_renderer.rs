@@ -1962,6 +1962,44 @@ mod vertical_fade_tests {
     }
 
     #[test]
+    fn rounded_tile_corners_preserve_gutter_alpha_without_pane_fill() {
+        let viewport = viewport();
+        let tile = Bounds::new(point(px(0.), px(16.)), size(px(8.), px(32.)));
+        for alpha in [0.3, 0.82, 1.0] {
+            let mut scene = Scene::default();
+            // A gutter-coloured corner path and a rectangular pane descendant:
+            // clipping must leave the gutter's single alpha layer untouched.
+            let mut wedge = gpui::PathBuilder::fill();
+            wedge.move_to(point(px(0.), px(16.)));
+            wedge.line_to(point(px(4.), px(16.)));
+            wedge.cubic_bezier_to(point(px(0.), px(20.)), point(px(1.790861), px(16.)), point(px(0.), px(17.790861)));
+            wedge.close();
+            let mut wedge = wedge.build().unwrap();
+            wedge.color = hsla(0., 0., 0.2, alpha).into();
+            wedge.content_mask = ContentMask::new(viewport);
+            scene.insert_primitive(wedge.scale(1.));
+            scene.insert_primitive(Quad {
+                order: 1,
+                bounds: tile.scale(1.),
+                content_mask: ContentMask::new(tile).intersect(&ContentMask::rounded(tile, px(4.))).scale(1.),
+                background: hsla(0., 0., 1., alpha).into(),
+                ..Quad::default()
+            });
+            let image = render(&mut scene);
+            let corner = image.get_pixel(0, 16).0;
+            let expected_alpha = (alpha * 255.).round() as u8;
+            let expected_rgb = (0.2 * alpha * 255.).round() as u8;
+            assert!(corner[3].abs_diff(expected_alpha) <= 2, "alpha={alpha}: {corner:?}");
+            for channel in &corner[..3] {
+                assert!(channel.abs_diff(expected_rgb) <= 2, "alpha={alpha}: {corner:?}");
+            }
+            let center = image.get_pixel(4, 32).0;
+            assert!(center[3].abs_diff(expected_alpha) <= 2, "pane alpha changed: {center:?}");
+            assert!(center[0].abs_diff(expected_alpha) <= 2, "pane fill changed: {center:?}");
+        }
+    }
+
+    #[test]
     fn blend_backdrop_alpha_remains_correct_after_foreground_underline() {
         let bounds = viewport();
         let mut scene = Scene::default();

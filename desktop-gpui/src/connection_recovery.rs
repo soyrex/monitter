@@ -9,6 +9,11 @@ pub fn transient(error: &str) -> bool {
         | "Private IPC is temporarily unavailable after 3 attempts. Refresh or reconnect, then try again.")
 }
 
+/// Transport interruptions recover quietly; semantic and uncertain mutation errors stay visible.
+pub fn visible_error(error: &str) -> Option<&str> {
+    (!transient(error) && error != "Could not reconnect to Monitter. Your agents may still be running; try again shortly.").then_some(error)
+}
+
 fn rows<'a>(snapshot: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
     snapshot[key].as_array().into_iter().flatten()
 }
@@ -53,6 +58,15 @@ pub fn confirmed(command: &str, args: &Value, before: &Value, after: &Value) -> 
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn presentation_hides_only_exact_transport_failures() {
+        assert!(visible_error("Private IPC connection lost; delivery may be ambiguous. Refresh state before retrying a mutation.").is_none());
+        assert!(visible_error("Private IPC connection unavailable. Reconnect and try again.").is_none());
+        assert!(visible_error("Could not reconnect to Monitter. Your agents may still be running; try again shortly.").is_none());
+        for error in ["Private IPC connection lost inside a backend validation error", "Reconnected, but could not confirm the change. Check the chat before trying again. Your draft is kept.", "Task is active"] {
+            assert_eq!(visible_error(error), Some(error));
+        }
+    }
     #[test]
     fn send_requires_new_exact_authoritative_message() {
         let args = json!({"taskId":"t", "text":"hello", "attachmentIds":["a"]});

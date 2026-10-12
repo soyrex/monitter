@@ -6,7 +6,7 @@ use std::{ops::Deref as _, rc::Rc, sync::Arc};
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Div, Element, Empty, InteractiveElement as _,
     IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
-    Stateful, Style, Styled as _, Window, div,
+    Stateful, Style, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::{
     HandleEdge, ResizeHandleContext,
@@ -19,9 +19,9 @@ use gpui_base::{
 use crate::{
     ActiveTheme as _,
     dock::{
-        DockSkin, SkinShared, invalid_panel::InvalidPanel, panel_handle, tab_panel::TabGroupSkin,
+        DockSkin, DockTileStyle, SkinShared, invalid_panel::InvalidPanel, panel_handle, tab_panel::TabGroupSkin,
     },
-    resizable::{render_resize_handle, resize_handle_appearance},
+    resizable::{render_resize_handle, render_rounded_resize_handle},
     resize_handle,
 };
 
@@ -36,12 +36,28 @@ impl Render for ResizePanel {
     }
 }
 
+/// Rounded tiles keep the base grab band, but never paint a full-length rule.
+fn render_dock_resize_handle(
+    style: DockTileStyle,
+    handle: &ResizeHandleContext,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    if matches!(style, DockTileStyle::Contiguous) {
+        return render_resize_handle(handle, window, cx);
+    }
+    render_rounded_resize_handle(handle, window, cx)
+}
+
 impl DockAreaRenderer for DockSkin {
     // The row, the fill and the clip are base's now -- applied around whatever
     // these return -- so a skin that has no appearance to add returns a bare
     // frame and still gets a dock area the right shape.
     fn frame(&self, _: &mut Window, _: &mut App) -> Stateful<Div> {
-        div().id("dock-area")
+        div().id("dock-area").when_some(match self.shared.tile_style() {
+            DockTileStyle::Contiguous => None,
+            DockTileStyle::Rounded { gutter, backdrop, .. } => Some((gutter / 2., backdrop)),
+        }, |frame, (inset, backdrop)| frame.border_t(inset).border_b(inset).border_l(inset).border_r(inset).border_color(backdrop))
     }
 
     fn center_frame(&self, _: &mut Window, _: &mut App) -> Stateful<Div> {
@@ -54,7 +70,7 @@ impl DockAreaRenderer for DockSkin {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        Some(render_resize_handle(handle, window, cx))
+        Some(render_dock_resize_handle(self.shared.tile_style(), handle, window, cx))
     }
 
     fn split_frame(&self, node: NodeId, _: Axis, _: &mut Window, _: &mut App) -> Stateful<Div> {
@@ -119,6 +135,7 @@ impl DockSkin {
     ) -> impl IntoElement {
         let placement = dock.placement();
         let shared = self.shared().clone();
+        let appearance = shared.clone();
 
         // One id per placement: the docks all render under the same stateful
         // ancestor, so a shared literal would collapse the handles into one
@@ -140,7 +157,9 @@ impl DockSkin {
         };
 
         resize_handle(id, placement.axis())
-            .with_appearance(resize_handle_appearance())
+            .with_appearance(Rc::new(move |handle, window, cx| {
+                Some(render_dock_resize_handle(appearance.tile_style(), handle, window, cx))
+            }))
             .inside(edge)
             .on_drag(ResizePanel, move |info, _, _, cx| {
                 cx.stop_propagation();

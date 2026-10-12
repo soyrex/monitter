@@ -262,6 +262,8 @@ pub(crate) struct BrowserTab {
     focus: FocusHandle,
     address: Entity<InputState>,
     webview: Option<Entity<WebView>>,
+    #[cfg(target_os = "macos")]
+    applied_corner_radius: Option<f64>,
     location: String,
     requested_url: String,
     actual_url: Option<String>,
@@ -272,6 +274,7 @@ pub(crate) struct BrowserTab {
     dirty_address: bool,
     unloaded: bool,
     docked_mode: bool,
+    dock_group: Option<WeakEntity<gpui_kit::component::dock::TabGroup>>,
     palette: Option<crate::design::Palette>,
     interface_font_ratio: f32,
     restoring_metadata: bool,
@@ -291,6 +294,58 @@ impl Focusable for BrowserTab {
 }
 
 impl BrowserTab {
+    pub(crate) fn set_dock_group(
+        &mut self,
+        group: Option<WeakEntity<gpui_kit::component::dock::TabGroup>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.dock_group = group;
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn apply_native_tile_corners(&mut self, cx: &App) {
+        use objc2::{class, msg_send};
+        use objc2::runtime::AnyObject;
+
+        let radius = if crate::design::tile_theme()
+            == monitter_lib::experimental_desktop::NativeTileTheme::Tern
+        {
+            f64::from(f32::from(crate::design::ui_scaled_px(8.)))
+        } else {
+            0.
+        };
+        if self.applied_corner_radius == Some(radius) {
+            return;
+        }
+        let Some(view) = &self.webview else {
+            return;
+        };
+        let native = view.read(cx).raw().webview();
+        // The retained Wry handle owns WKWebView, and GPUI renders on the
+        // AppKit main thread. Native child views sit above GPUI's corner masks.
+        unsafe {
+            let _: () = msg_send![&*native, setWantsLayer: true];
+            let layer: *mut AnyObject = msg_send![&*native, layer];
+            if layer.is_null() {
+                // Do not cache a failed application; retry once a layer exists.
+                return;
+            }
+            let flipped: bool = msg_send![&*native, isFlipped];
+            // CACornerMask: minX/minY = 1, maxX/minY = 2,
+            // minX/maxY = 4, maxX/maxY = 8. Only the visual bottom is rounded:
+            // the browser toolbar above this view owns the tile's top corners.
+            let bottom_corners: usize = if flipped { 4 | 8 } else { 1 | 2 };
+            let _: () = msg_send![class!(CATransaction), begin];
+            let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+            let _: () = msg_send![layer, setMaskedCorners: bottom_corners];
+            let _: () = msg_send![layer, setCornerRadius: radius];
+            let _: () = msg_send![layer, setMasksToBounds: radius > 0.];
+            let _: () = msg_send![class!(CATransaction), commit];
+        }
+        self.applied_corner_radius = Some(radius);
+    }
+
     fn focus_address(&self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.visible {
             return;
@@ -390,6 +445,8 @@ impl BrowserTab {
             focus,
             address,
             webview,
+            #[cfg(target_os = "macos")]
+            applied_corner_radius: None,
             location: "about:blank".into(),
             requested_url: "about:blank".into(),
             actual_url: None,
@@ -400,6 +457,7 @@ impl BrowserTab {
             dirty_address: false,
             unloaded: true,
             docked_mode: false,
+            dock_group: None,
             palette: None,
             interface_font_ratio: 1.,
             restoring_metadata: false,
@@ -592,6 +650,8 @@ impl BrowserTab {
 
 impl Render for BrowserTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        self.apply_native_tile_corners(cx);
         if !self.dirty_address && !self.address.read(cx).focus_handle(cx).is_focused(window) {
             if let Some(location) = self.pending_address.take() {
                 self.address
@@ -605,6 +665,16 @@ impl Render for BrowserTab {
             crate::design::palette(&serde_json::Value::Null, window.appearance())
         });
         let font_ratio = self.interface_font_ratio;
+        let browser_mark = div().flex_none().h(px(29.)).flex().items_center()
+            .child(Icon::new(IconName::Globe).with_size(px(16.)).flex_none());
+        let browser_mark = if crate::design::tile_theme()
+            == monitter_lib::experimental_desktop::NativeTileTheme::Tern
+        {
+            if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
+                gpui_kit::component::dock::pane_drag_region(browser_mark, &group.read(cx).context(cx), cx)
+                    .into_any_element()
+            } else { browser_mark.into_any_element() }
+        } else { browser_mark.into_any_element() };
         let address = Input::new(&self.address)
             .appearance(false)
             .bordered(false)
@@ -630,9 +700,13 @@ impl Render for BrowserTab {
                     .py(px(7.))
                     .border_b_1()
                     .border_color(rgb(palette.line))
+                    .border_blend_mode(crate::surface_blend::separator_mode())
+                    .when(crate::design::tile_theme()
+                        == monitter_lib::experimental_desktop::NativeTileTheme::Tern
+                        && crate::design::border_opacity() == 0, |this| this.border_b_0())
                     .bg(*cx.theme().tokens.tab_active)
                     .text_color(rgb(palette.muted))
-                    .child(Icon::new(IconName::Globe).with_size(px(16.)).flex_none())
+                    .child(browser_mark)
                     .child(
                         Button::new("browser-back")
                             .text()

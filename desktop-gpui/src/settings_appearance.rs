@@ -258,6 +258,24 @@ pub(super) fn render(
         palette,
     );
     if let Some(native) = native {
+        let tile_theme = desktop.preferences.as_ref()
+            .map(|preferences| preferences.data.appearance.tile_theme)
+            .unwrap_or_default();
+        let tile_layout = card(
+            "Tile layout",
+            "Monitter keeps the original workspace. Tern uses rounded, separated tiles with compact controls. Your light, dark and accent choices stay unchanged. Saved on this device.",
+            palette,
+        )
+        .child(div().flex().gap(px(crate::design::space::TIGHT)).children(
+            [(NativeTileTheme::Monitter, "Monitter"), (NativeTileTheme::Tern, "Tern")].map(|(choice, label)| {
+                Button::new(SharedString::from(format!("tile-theme-{label}")))
+                    .label(if tile_theme == choice { format!("✓ {label}") } else { label.to_owned() })
+                    .disabled(desktop.preferences_busy || desktop.preferences.is_none())
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.save_native_tile_theme(choice, cx)
+                    }))
+            }),
+        ));
         app_theme = app_theme
             .child("Light theme")
             .child(
@@ -418,6 +436,7 @@ pub(super) fn render(
         ));
         if category == "appearance" {
             content = content
+                .child(tile_layout)
                 .child(app_theme)
                 .child(contrast_card)
                 .child(accent_card)

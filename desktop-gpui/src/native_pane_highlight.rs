@@ -1,11 +1,11 @@
 //! A noninteractive AppKit outline above GPUI and native browser child views.
 //! The caller clears it once per frame, then paints the active tab-group bounds.
-use gpui_kit::{Bounds, Pixels, Point, Window};
+use gpui_kit::{Bounds, Pixels, Point, Rgba, Window};
 
 #[cfg(not(target_os = "macos"))]
 pub fn clear(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
-pub fn paint(_: Bounds<Pixels>, _: u32, _: &[Point<Pixels>], _: &Window) {}
+pub fn paint(_: Bounds<Pixels>, _: Rgba, _: &[Point<Pixels>], _: &Window) -> bool { false }
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -82,7 +82,7 @@ mod macos {
     struct Overlay {
         view: Weak<PaneHighlightView>,
         bounds: Option<Bounds<Pixels>>,
-        color: Option<u32>,
+        color: Option<Rgba>,
         contour: Vec<Point<Pixels>>,
     }
     thread_local! {
@@ -123,17 +123,17 @@ mod macos {
         });
     }
 
-    pub fn paint(bounds: Bounds<Pixels>, color: u32, contour: &[Point<Pixels>], window: &Window) {
+    pub fn paint(bounds: Bounds<Pixels>, color: Rgba, contour: &[Point<Pixels>], window: &Window) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
-            return;
+            return false;
         };
         let Some(host_ptr) = host(window) else {
-            return;
+            return false;
         };
         let width: f64 = bounds.size.width.into();
         let height: f64 = bounds.size.height.into();
         if width <= 0. || height <= 0. || contour.len() < 3 {
-            return;
+            return false;
         }
         // WindowHandle borrows this live GPUIView for the duration of the call.
         let host = unsafe { &*host_ptr };
@@ -174,7 +174,7 @@ mod macos {
                 }
             });
             let Some(view) = overlay.view.load() else {
-                return;
+                return false;
             };
             unsafe {
                 // QuartzCore is already linked by GPUI. Dynamic selectors keep
@@ -222,11 +222,10 @@ mod macos {
                         }
                     }
                     if overlay.color != Some(color) {
-                        let red = f64::from((color >> 16) & 255) / 255.;
-                        let green = f64::from((color >> 8) & 255) / 255.;
-                        let blue = f64::from(color & 255) / 255.;
                         let native_color: *mut AnyObject = msg_send![class!(NSColor),
-                            colorWithSRGBRed: red green: green blue: blue alpha: 1.0f64];
+                            colorWithSRGBRed: f64::from(color.r)
+                            green: f64::from(color.g) blue: f64::from(color.b)
+                            alpha: f64::from(color.a)];
                         let cg_color: *const NativeCGColor = msg_send![native_color, CGColor];
                         let _: () = msg_send![layer, setStrokeColor: cg_color];
                         overlay.color = Some(color);
@@ -243,7 +242,8 @@ mod macos {
                 view.setHidden(false);
                 let _: () = msg_send![class!(CATransaction), commit];
             }
-        });
+            true
+        })
     }
 }
 #[cfg(target_os = "macos")]

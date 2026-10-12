@@ -107,6 +107,8 @@ fn permission_capabilities(agent: &Value) -> (bool, bool, bool) {
         "codex"
     } else if provider == "hermes" || (provider == "acp" && launch.contains("hermes")) {
         "hermes"
+    } else if provider == "acp" && launch.rsplit(['/', '\\']).next() == Some("omp") {
+        "omp"
     } else if provider == "acp" && (launch.contains("gemini") || launch.contains("agy")) {
         "gemini"
     } else if provider == "acp" && (launch.contains("mcode") || launch.contains("minimax")) {
@@ -118,7 +120,7 @@ fn permission_capabilities(agent: &Value) -> (bool, bool, bool) {
     };
     // Keep these capabilities aligned with src/lib/agent-permissions.ts.
     match key {
-        "hermes" => (false, true, false),
+        "hermes" | "omp" => (false, true, false),
         "gemini" => (false, true, true),
         _ => (true, true, true),
     }

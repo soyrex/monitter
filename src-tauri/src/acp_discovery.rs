@@ -130,6 +130,15 @@ pub fn catalog() -> Vec<AcpCandidate> {
             vec![],
         ),
         (
+            "omp",
+            "OMP (Oh My Pi)",
+            "Native ACP server using your existing OMP models, authentication, and tool approval policy",
+            "https://github.com/can1357/oh-my-pi",
+            "native",
+            "omp",
+            vec!["acp"],
+        ),
+        (
             "claude-acp",
             "Claude Agent (ACP bridge)",
             "Requires claude-agent-acp, separate from the native Claude integration",

@@ -2,6 +2,50 @@
 
 The [UX style guide](UX_STYLE_GUIDE.md) defines the Tauri-inspired spacing, forms, menu/button/tab treatment, surfaces, typography, and review rules. Shared source tokens live in `src/design.rs`.
 
+## Tern tile layout
+
+Choose **Preferences → Appearance → Tile layout → Tern** for rounded,
+separated tiles, compact pill tabs and a quiet accent focus outline, based on
+[Stencil's Tern](https://stencil.so/tern). **Monitter** retains the original
+contiguous dock and the selected Classic/Modern tab style. Light/dark palettes,
+accent, fonts and interface scale remain independent.
+
+The choice applies immediately to retained panes and persists in the private,
+revision-guarded `native-ui.json` appearance store. Older stores default to
+Monitter. Use a paired GUI/server build: an older server's strict preference
+schema does not accept the new `tileTheme` field. Packaging does not install the
+build or restart an existing server.
+
+Native review used an isolated macOS preview: live switching in both directions,
+rounded WKWebView corners, split tiles, pill tabs, focus, terminal input/output,
+and saved selection after GUI restart. That initial review did not replace or
+restart the installed app or existing backend. Screenshot:
+[`tern-tiles-native.jpg`](../artifacts/gpui/visual/tern-tiles-native.jpg).
+Chat density variants and Linux rendering were not exercised. Focused regression
+checks cover legacy appearance defaults, strict theme serialization, corner
+geometry and retained-pane layout restoration.
+
+Tern's tile outlines and accent focus outlines now follow **Border and divider
+opacity**. Navigation and usage/resources have separate rounded sidebar bubbles,
+including the compact rail; their borders use the same control. Splitters retain
+their grab bands but show only a short hover/drag grip, not window-spanning rules.
+Preferences paint above tile chrome.
+
+The updated macOS preview was visually checked with live border-control values
+of 0%, 50% and 100%, retained terminal/browser tiles, both sidebar widths, layout
+switching and the provider-usage dialog. The sidebar checks passed 38 tests and
+the retained-pane layout checks passed two tests. Screenshot:
+[`tern-borders-sidebar-native.jpg`](../artifacts/gpui/visual/tern-borders-sidebar-native.jpg).
+
+This verified GUI build is installed at `/Applications/Monitter.app`; the previous
+bundle is retained under
+`/Applications/.monitter-desktop-backups/tern-borders-1791753636135/`.
+The installed signature and executable checksum match the packaged build.
+The existing GUI and backend processes were left running, and the backend bundle
+was not replaced. Installation is not a hot reload: the interface changes appear
+on the next GUI launch. Theme preference persistence still requires the paired
+server upgrade described above.
+
 ## Linux build checkpoint (2026-10-09)
 
 The source is available on `experiment/gpui-desktop`. For Omarchy / Arch Linux on
@@ -165,3 +209,15 @@ Native review checkpoint `build-1791023498148` (GUI PID 98838, retained server P
 Capture native UI through CUA with `emit:false`, save the returned bytes, and process that existing image with `python3 scripts/gpui-screenshot-share.py SOURCE OUTPUT.jpg`. Never emit the full-resolution PNG directly. The script preserves the original, resizes and JPEG-encodes the share copy, and checks both a 300 KiB image limit and a 450 KiB base64-plus-headroom limit below the transport ceiling. Optional `--crop LEFT TOP RIGHT BOTTOM` produces a focused view without changing the app. Metadata beside each JPEG records source/output dimensions and both byte counts. For delivery, read the encoded JPEG in CUA and call `nodeRepl.emitImage({bytes, mimeType:'image/jpeg'})`, one screenshot per tool result. Local-file Markdown links do not embed in the phone app; native MCP image result blocks enter Monitter's generated-image attachment path. Both resent preview images were verified as stored JPEG attachments with inline data URLs (41,383 and 234,975 bytes). The 2026-10-05 native preview share is 176,214 image bytes / 235,976 estimated inline bytes at `artifacts/gpui/visual/share/native-preview-20261005.jpg`. Phone-side display confirmation remains separate.
 
 The subsequent native reasoning disclosure review exposed structured empty reasoning rendered as raw JSON. The source now follows Tauri summary extraction, renders blank reasoning as Thinking, retains meaningful Markdown summaries and bounds activity labels in narrow panes. Both regression cases and icon coverage are present; only Rust syntax parsing has run for these follow-ups. No new build was started while a competing Rust build was active and free disk was approximately 0.36 GiB. Evidence: `artifacts/gpui/debug/reasoning-and-image-source-review-20261005.json`. The bundled phone owner workspace uses TaskTranscript/AttachmentList; legacy controller preview omissions do not establish an owner-mode defect. Two compact JPEGs were resent through direct native MCP image blocks; phone display remains unconfirmed.
+
+### Streaming reply display
+
+Preferences → Conversation → Streaming replies selects **As received** (default)
+or **Typing**, with Slow, Normal, and Fast speeds. Typing reveals one Unicode
+character at a time with a cursor; it drains an already-received reply before
+switching to its final Markdown. **Show full reply** skips a completed reply's
+remaining reveal. Loaded history, interrupted responses and hidden panes reveal
+immediately. This is GUI-only presentation metadata in
+`streaming-display.v1.json`; it never delays execution, alters the saved message,
+or changes mobile/shared rendering. Each live message owns its timer and only
+remeasures its own virtual transcript row.

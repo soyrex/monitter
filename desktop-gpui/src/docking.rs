@@ -5,6 +5,7 @@ use crate::empty_pane::{EmptyPane, EmptyPaneAction, EmptyPaneEvent};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, WindowExt as _};
 use gpui_kit::{component::dock::*, prelude::*, *};
+use monitter_lib::experimental_desktop::NativeTileTheme;
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
@@ -26,6 +27,9 @@ mod duplicate_add_tests;
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "pane_header_tests.rs"]
 mod pane_header_tests;
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "workspace_switch_tests.rs"]
+mod workspace_switch_tests;
 
 #[derive(Clone, Debug)]
 pub enum PaneLifecycle {
@@ -73,6 +77,7 @@ struct NativePanel {
     spec: PaneSpec,
     paint: Rc<RefCell<PaintState>>,
     removed: bool,
+    retaining_layout: Rc<Cell<bool>>,
     appearance: Rc<Cell<Option<crate::pane_appearance::PaneAppearance>>>,
     auto_hide_tabs: Rc<Cell<bool>>,
 }
@@ -95,9 +100,22 @@ impl BasePanel for NativePanel {
         }
     }
     fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.retaining_layout.get() {
+            if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
+                chat.update(cx, |chat, cx| chat.set_dock_group(None, cx));
+            }
+            if let Ok(browser) = self.spec.content.clone().downcast::<crate::browser::BrowserTab>() {
+                browser.update(cx, |browser, cx| browser.set_dock_group(None, cx));
+            }
+            if let Some(hook) = &self.spec.lifecycle { hook(PaneLifecycle::Visible(false), window, cx); }
+            return;
+        }
         self.removed = true;
         if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
             chat.update(cx, |chat, cx| chat.set_dock_group(None, cx));
+        }
+        if let Ok(browser) = self.spec.content.clone().downcast::<crate::browser::BrowserTab>() {
+            browser.update(cx, |browser, cx| browser.set_dock_group(None, cx));
         }
         let mut paint = self.paint.borrow_mut();
         paint.painted.remove(&self.spec.id);
@@ -112,7 +130,10 @@ impl BasePanel for NativePanel {
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, cx: &mut Context<Self>) {
         self.removed = false;
         if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
-            chat.update(cx, |chat, cx| chat.set_dock_group(Some(group), cx));
+            chat.update(cx, |chat, cx| chat.set_dock_group(Some(group.clone()), cx));
+        }
+        if let Ok(browser) = self.spec.content.clone().downcast::<crate::browser::BrowserTab>() {
+            browser.update(cx, |browser, cx| browser.set_dock_group(Some(group), cx));
         }
     }
     fn dump(&self, _: &App) -> PanelState {
@@ -149,16 +170,31 @@ impl Panel for NativePanel {
         } else { 0 }
     }
     fn inner_padding(&self, _: &App) -> bool { false }
-    fn toolbar_in_content(&self, _: &App) -> bool { self.spec.id.starts_with("chat:") }
+    fn toolbar_in_content(&self, _: &App) -> bool {
+        self.spec.id.starts_with("chat:") || self.spec.id.starts_with("draft:")
+    }
     fn pane_overlay(&mut self, tab: Rc<Cell<Option<gpui::Bounds<Pixels>>>>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let appearance = self.appearance.get()?;
         if !appearance.show_active_border || !pane_visual_active(&self.spec.focus, window, cx)
             || crate::preferences_modal::workspace_blocked(cx) { return None; }
         let color = appearance.active_border_color;
+        if appearance.tile_theme == NativeTileTheme::Tern {
+            let mut color = rgb(crate::pane_appearance::quiet_active_color(color, appearance.tile_backdrop_color));
+            color.a = appearance.border_opacity as f32 / 100.;
+            return Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
+                if crate::preferences_modal::workspace_blocked(cx) { return; }
+                let contour = crate::pane_appearance::rounded_contour(bounds, px(8.));
+                // Native and GPUI strokes must not stack their alpha.
+                if !crate::native_pane_highlight::paint(bounds, color, &contour, window) {
+                    window.paint_quad(gpui::outline(bounds, color, gpui::BorderStyle::Solid)
+                        .corner_radii(px(8.)));
+                }
+            }).absolute().inset_0().into_any_element());
+        }
         Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
             if crate::preferences_modal::workspace_blocked(cx) { return; }
             let contour = crate::pane_highlight_geometry::contour(bounds, tab.get());
-            crate::native_pane_highlight::paint(bounds, color, &contour, window);
+            crate::native_pane_highlight::paint(bounds, rgb(color), &contour, window);
             let mut path = gpui::PathBuilder::stroke(gpui::px(1.));
             if let Some(first) = contour.first() {
                 path.move_to(*first);
@@ -319,6 +355,7 @@ pub struct DockWorkspace {
     factory: PaneFactory,
     appearance: Rc<Cell<Option<crate::pane_appearance::PaneAppearance>>>,
     auto_hide_tabs: Rc<Cell<bool>>,
+    retaining_layout: Rc<Cell<bool>>,
     empty_panes: HashMap<String, Entity<EmptyPane>>,
     empty_subscriptions: HashMap<String, Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -380,6 +417,7 @@ impl DockWorkspace {
             factory,
             appearance: Rc::new(Cell::new(None)),
             auto_hide_tabs: Rc::new(Cell::new(false)),
+            retaining_layout: Rc::new(Cell::new(false)),
             empty_panes: HashMap::new(),
             empty_subscriptions: HashMap::new(),
             _subscriptions: vec![changed, released],
@@ -406,36 +444,60 @@ impl DockWorkspace {
         let next = Some(crate::pane_appearance::PaneAppearance::from_settings(
             settings, palette,
         ));
-        if self.appearance.replace(next) != next {
+        let appearance = next.expect("pane appearance constructed above");
+        self.skin.set_tile_style(match appearance.tile_theme {
+            NativeTileTheme::Monitter => DockTileStyle::Contiguous,
+            NativeTileTheme::Tern => DockTileStyle::Rounded {
+                gutter: px(6.),
+                radius: px(8.),
+                backdrop: crate::design::surface_color(appearance.tile_backdrop_color).into(),
+                border_color: crate::design::tile_border_color(palette).into(),
+            },
+        }, cx);
+        let previous = self.appearance.replace(next);
+        if previous != next {
+            let theme_changed = previous.is_none_or(|old| old.tile_theme != appearance.tile_theme);
             for panel in self.panels.borrow().values() {
-                panel.update(cx, |_, cx| cx.notify());
+                panel.update(cx, |panel, cx| {
+                    if theme_changed {
+                        // Retained content keeps its entity and layout, but its
+                        // cached header must repaint even when colors are unchanged.
+                        App::notify(cx, panel.spec.content.entity_id());
+                    }
+                    cx.notify();
+                });
             }
         }
     }
     pub fn set_tab_appearance(&self, settings: &Value, scale: u16, cx: &mut App) {
         let hidden = settings["autoHideTabs"].as_bool().unwrap_or(false);
-        if self.auto_hide_tabs.replace(hidden) != hidden {
-            self.skin.set_panel_style(
-                if hidden {
-                    PanelStyle::Auto
-                } else {
-                    PanelStyle::TabBar
-                },
-                cx,
-            );
-        }
+        let tern = crate::design::tile_theme() == NativeTileTheme::Tern;
+        self.auto_hide_tabs.set(hidden);
+        self.skin.set_panel_style(if tern {
+            PanelStyle::Hidden
+        } else if hidden {
+            PanelStyle::Auto
+        } else {
+            PanelStyle::TabBar
+        }, cx);
         let modern = settings["tabStyle"].as_str() == Some("modern");
         // Mirror Tauri's native tabbar CSS: compensate its native header height
         // for zoom, then reduce modern workspace strips by four design pixels.
-        let height = crate::design::workspace_tabbar_height_points(settings, scale);
+        let height = if tern {
+            f32::from(crate::design::ui_px(28., scale))
+        } else {
+            crate::design::workspace_tabbar_height_points(settings, scale)
+        };
         self.skin.set_tab_bar_style(
-            if modern {
+            if tern {
+                TabBarStyle::Pill
+            } else if modern {
                 TabBarStyle::Modern
             } else {
                 TabBarStyle::Classic
             },
             gpui_kit::px(height),
-            px(if modern { 9. } else { 12. }),
+            px(if tern || modern { 9. } else { 12. }),
             cx,
         );
         let interface_font_size = settings["interfaceFontSize"]
@@ -465,6 +527,7 @@ impl DockWorkspace {
             spec,
             paint,
             removed: false,
+            retaining_layout: self.retaining_layout.clone(),
             appearance: self.appearance.clone(),
             auto_hide_tabs: self.auto_hide_tabs.clone(),
         });
@@ -1224,6 +1287,33 @@ impl DockWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
+        if self.appearance.get().is_some_and(|appearance| appearance.tile_theme == NativeTileTheme::Tern) {
+            return self.add_empty_split(group, true, window, cx);
+        }
+        self.add_empty_at(InsertTarget::Tabs { node: group, ix: None, activate: true }, window, cx)
+    }
+
+    /// Open a blank retained pane beside the owning group, without creating a task.
+    pub fn add_empty_split(
+        &mut self,
+        group: NodeId,
+        vertical: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        self.add_empty_at(InsertTarget::Split {
+            node: group,
+            placement: if vertical { gpui_kit::component::Placement::Right } else { gpui_kit::component::Placement::Bottom },
+            size: None,
+        }, window, cx)
+    }
+
+    fn add_empty_at(
+        &mut self,
+        target: InsertTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
         let mut index = 1_u64;
         let id = loop {
             let candidate = format!("{EMPTY_TAB_PREFIX}{index}");
@@ -1234,16 +1324,15 @@ impl DockWorkspace {
         };
         let spec = self.empty_spec(&id, cx)?;
         self.add(spec, DockPlacement::Center, None, window, cx)?;
-        self.move_pane(
+        if !self.move_pane(
             &id,
-            InsertTarget::Tabs {
-                node: group,
-                ix: None,
-                activate: true,
-            },
+            target,
             window,
             cx,
-        );
+        ) {
+            self.remove(&id, window, cx);
+            return Err("The new pane could not be placed beside the focused pane.".into());
+        }
         self.focus(&id, window, cx);
         Ok(id)
     }
@@ -1381,6 +1470,13 @@ impl DockWorkspace {
     }
     pub fn serialize(&self, cx: &App) -> Result<Value, String> {
         serde_json::to_value(self.area.read(cx).dump(cx)).map_err(|error| error.to_string())
+    }
+    /// Layout switching changes visibility without closing retained pane content.
+    pub fn restore_retaining(&mut self, value: Value, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        self.retaining_layout.set(true);
+        let result = self.restore(value, window, cx);
+        self.retaining_layout.set(false);
+        result
     }
     pub fn restore(
         &mut self,

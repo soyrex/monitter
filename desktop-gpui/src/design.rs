@@ -10,6 +10,7 @@
 //! modules that pre-date the rename still resolve.
 use super::field;
 use gpui_kit::{Pixels, Rgba, WindowAppearance, px, rgba};
+use monitter_lib::experimental_desktop::NativeTileTheme;
 use serde_json::Value;
 use std::cell::Cell;
 
@@ -74,6 +75,32 @@ pub const INTERFACE_SCALE_DEFAULT: u16 = 125;
 thread_local! {
     static ACTIVE_INTERFACE_SCALE: Cell<u16> = const { Cell::new(INTERFACE_SCALE_DEFAULT) };
     static ACTIVE_SURFACE_ALPHA: Cell<f32> = const { Cell::new(1.0) };
+    static ACTIVE_TILE_THEME: Cell<NativeTileTheme> = const { Cell::new(NativeTileTheme::Monitter) };
+    static ACTIVE_BORDER_OPACITY: Cell<u16> = const { Cell::new(100) };
+}
+
+/// Native tile presentation is independent of the light/dark colour palette.
+pub fn set_tile_theme(theme: NativeTileTheme) {
+    ACTIVE_TILE_THEME.with(|value| value.set(theme));
+}
+
+pub fn tile_theme() -> NativeTileTheme {
+    ACTIVE_TILE_THEME.with(Cell::get)
+}
+
+pub fn set_border_opacity(opacity: u16) {
+    ACTIVE_BORDER_OPACITY.with(|value| value.set(opacity.min(100)));
+}
+
+pub fn border_opacity() -> u16 {
+    ACTIVE_BORDER_OPACITY.with(Cell::get)
+}
+
+/// Tern outlines retain their quiet base contrast and follow the native border control.
+pub fn tile_border_color(palette: Palette) -> Rgba {
+    let mut color = gpui_kit::rgb(palette.ink);
+    color.a = 0.20 * border_opacity() as f32 / 100.;
+    color
 }
 
 /// Set the native background alpha from the same settings as Tauri's

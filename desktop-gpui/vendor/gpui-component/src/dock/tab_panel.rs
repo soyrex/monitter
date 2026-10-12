@@ -28,10 +28,10 @@ use gpui_base::{
 use rust_i18n::t;
 
 use crate::{
-    ActiveTheme as _, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     dock::{
-        ClosePanel, PanelControl, PanelHandle, PanelStyle, SkinShared, TabBarStyle, ToggleZoom,
+        ClosePanel, DockTileStyle, PanelControl, PanelHandle, PanelStyle, SkinShared, TabBarStyle, ToggleZoom,
     },
     h_flex,
     menu::DropdownMenu as _,
@@ -204,6 +204,55 @@ fn tab_drag(group: &TabGroupContext, ix: usize, cx: &App) -> Option<DragPanel> {
         .is_draggable()
         .then(|| group.drag_panel(ix, cx))
         .flatten()
+}
+
+/// Make the noninteractive part of a pane header an ordinary native dock drag
+/// target. Callers keep buttons and editable fields outside this region.
+pub fn pane_drag_region(region: Div, group: &TabGroupContext, cx: &App) -> Stateful<Div> {
+    let panel = group.active_panel().cloned();
+    let drag = panel.as_ref().and_then(|panel| {
+        group.panels().iter().position(|candidate| candidate.panel_id(cx) == panel.panel_id(cx))
+            .and_then(|ix| tab_drag(group, ix, cx))
+    });
+    region.id("pane-header-drag-region")
+        .debug_selector(|| "dock-pane-header-drag-region".into())
+        .when_some(drag, |this, drag| this.cursor_grab().on_drag(drag, move |drag, offset, _, cx| {
+            cx.stop_propagation();
+            drag.set_drag_offset(offset);
+            drag.set_preview_size(DRAG_PREVIEW_SIZE);
+            cx.new(|_| DragPanelPreview { panel: panel.clone().expect("drag has a panel") })
+        }))
+}
+
+/// Move and close the owning active pane through the ordinary dock lifecycle.
+/// Reusable in a pane's own header and the skin's floating corner controls.
+pub fn pane_controls(group: &TabGroupContext, cx: &App) -> AnyElement {
+    let panel = group.active_panel().cloned();
+    let panel_id = panel.as_ref().map(|panel| panel.panel_id(cx));
+    let drag = panel.as_ref().and_then(|panel| {
+        group.panels().iter().position(|candidate| candidate.panel_id(cx) == panel.panel_id(cx))
+            .and_then(|ix| tab_drag(group, ix, cx))
+    });
+    let close_group = group.clone();
+    h_flex().gap(px(4.))
+        .child(div().id("pane-move-handle").cursor_grab()
+            .child(Button::new("pane-move").icon(crate::Icon::new(gpui_kit_assets::IconName::Move)).small().ghost()
+                .disabled(drag.is_none()).tooltip("Move pane").accessibility_label("Move pane")
+                .debug_selector(|| "dock-pane-move-control".into()))
+            .when_some(drag, |this, drag| this.on_drag(drag, move |drag, offset, _, cx| {
+                cx.stop_propagation();
+                drag.set_drag_offset(offset);
+                drag.set_preview_size(DRAG_PREVIEW_SIZE);
+                cx.new(|_| DragPanelPreview { panel: panel.clone().expect("drag has a panel") })
+            })))
+        .child(Button::new("pane-close").icon(IconName::Close).small().ghost()
+            .disabled(!group.is_closable()).tooltip("Close pane").accessibility_label("Close pane")
+            .debug_selector(|| "dock-pane-close-control".into())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                if let Some(panel_id) = panel_id { close_group.close(panel_id, window, cx); }
+            }))
+        .into_any_element()
 }
 
 /// The left-most, top-most tab group in a container — where a left dock's
@@ -481,16 +530,18 @@ impl TabGroupSkin {
         let has_leading = left_button.is_some() || bottom_button.is_some();
         let is_bottom_dock = bottom_button.is_some();
         let collapsed = group.is_collapsed();
-        let modern = self.shared.tab_bar_style() == TabBarStyle::Modern;
+        let pill = self.shared.tab_bar_style() == TabBarStyle::Pill;
+        let modern = matches!(self.shared.tab_bar_style(), TabBarStyle::Modern | TabBarStyle::Pill);
         let tab_height = self.shared.tab_bar_height();
+        let item_height = if pill { (tab_height - px(6.)).max(px(1.)) } else { tab_height };
         let tab_padding_x = self.shared.tab_padding_x();
         let tab_max_width = self.shared.tab_max_width();
         let tab_font_size = self.shared.tab_font_size();
         let zoom_factor = tab_padding_x / px(9.);
         let close_width = px(22. * zoom_factor);
-        let close_height = px(24. * zoom_factor);
+        let close_height = if pill { px(24. * zoom_factor).min(item_height) } else { px(24. * zoom_factor) };
         let close_right = px(3. * zoom_factor);
-        let close_top = (tab_height - close_height) / 2.;
+        let close_top = (item_height - close_height) / 2.;
         let tab_padding_right = px(31. * zoom_factor);
 
         let droppable = group.is_droppable();
@@ -531,7 +582,7 @@ impl TabGroupSkin {
             .separator_blend_mode(separator_mode)
             .when_some(strip_background, |bar, layer| bar.background_layer(layer))
             .when(modern, |this| {
-                this.with_variant(TabVariant::DockModern)
+                this.with_variant(if pill { TabVariant::DockPill } else { TabVariant::DockModern })
                     .h(tab_height)
                     .max_width(tab_max_width)
             })
@@ -548,6 +599,7 @@ impl TabGroupSkin {
                         .h_full()
                         .border_color(cx.theme().border)
                             .border_blend_mode(separator_mode)
+                        .when(pill, |this| this.border_0().right_0())
                         .when(!shared_background, |this| this.bg(surface_background(cx.theme().tokens.tab_bar.into(), blend_mode)))
                         .px_2()
                         .children(left_button)
@@ -594,8 +646,8 @@ impl TabGroupSkin {
                             })
                             .tab_bar_prefix(has_leading)
                             .when(modern, |this| {
-                                this.with_variant(TabVariant::DockModern)
-                                    .dock_geometry(tab_height, tab_padding_x, tab_padding_right)
+                                this.with_variant(if pill { TabVariant::DockPill } else { TabVariant::DockModern })
+                                    .dock_geometry(item_height, tab_padding_x, tab_padding_right)
                                     .dock_font_size(tab_font_size)
                                     .dock_close_geometry(
                                         close_width,
@@ -790,15 +842,15 @@ impl TabGroupSkin {
                     .h_full()
                     .flex_grow_1()
                     .min_w_16()
-                    .when(modern, |this| {
+                    .when(modern && !pill, |this| {
                         this.when(!shared_background, |this| this.bg(surface_background(cx.theme().tokens.tab_active.into(), blend_mode)))
                             .border_b_1()
                             .border_color(cx.theme().border)
                             .border_blend_mode(separator_mode)
                     })
-                    .child(div().absolute().inset_0().bg(surface_background(
+                    .when(!pill, |this| this.child(div().absolute().inset_0().bg(surface_background(
                         gpui::rgba(0x0000001a).into(), 2,
-                    )))
+                    ))))
                     // This is ONE full-width target. Native window movement
                     // yields to GPUI tab/item dragging instead of stealing half.
                     .when(modern && !cx.has_active_drag(), |this| {
@@ -858,6 +910,7 @@ impl TabGroupSkin {
                             .h_full()
                             .border_color(cx.theme().border)
                             .border_blend_mode(separator_mode)
+                            .when(pill, |this| this.border_0())
                             .when(!shared_background, |this| this.bg(surface_background(cx.theme().tokens.tab_bar.into(), blend_mode)))
                             .px_2()
                             .gap_1()
@@ -876,7 +929,90 @@ impl TabGroupSkin {
     }
 }
 
+/// Only Tern's pane content needs rounded clipping; chrome is painted outside
+/// this mask so the idle/focus outlines and transparent gutters stay independent.
+#[cfg(target_os = "macos")]
+struct RoundedTileContent {
+    content: Option<AnyElement>,
+    radius: Pixels,
+}
+
+#[cfg(target_os = "macos")]
+impl IntoElement for RoundedTileContent {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+#[cfg(target_os = "macos")]
+impl gpui::Element for RoundedTileContent {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+    fn id(&self) -> Option<gpui::ElementId> { None }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> { None }
+    fn request_layout(&mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>,
+        window: &mut Window, cx: &mut App) -> (gpui::LayoutId, AnyElement) {
+        let mut content = self.content.take().expect("rounded tile content rendered once");
+        (content.request_layout(window, cx), content)
+    }
+    fn prepaint(&mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>, content: &mut AnyElement, window: &mut Window, cx: &mut App) {
+        window.with_content_mask(Some(gpui::ContentMask::rounded(bounds, self.radius)), |window| {
+            content.prepaint(window, cx);
+        });
+    }
+    fn paint(&mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>, content: &mut AnyElement, _: &mut (), window: &mut Window, cx: &mut App) {
+        window.with_content_mask(Some(gpui::ContentMask::rounded(bounds, self.radius)), |window| {
+            content.paint(window, cx);
+        });
+    }
+}
+
+/// GPUI's overflow mask is rectangular. Cover the four outside corner wedges
+/// after all descendants paint so tab strips and pane headers share one curve.
+fn rounded_tile_mask(radius: Pixels, backdrop: gpui::Hsla, edge: gpui::Hsla) -> AnyElement {
+    gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let radius = radius.min(bounds.size.width / 2.).min(bounds.size.height / 2.);
+        let mut path = gpui::PathBuilder::fill();
+        for (corner, dx, dy) in [
+            (bounds.origin, 1., 1.),
+            (gpui::point(bounds.right(), bounds.top()), -1., 1.),
+            (gpui::point(bounds.right(), bounds.bottom()), -1., -1.),
+            (gpui::point(bounds.left(), bounds.bottom()), 1., -1.),
+        ] {
+            let p = |x: f32, y: f32| corner + gpui::point(radius * (x * dx), radius * (y * dy));
+            path.move_to(p(0., 0.));
+            path.line_to(p(1., 0.));
+            path.cubic_bezier_to(p(0., 1.), p(0.44771525, 0.), p(0., 0.44771525));
+            path.close();
+        }
+        if let Ok(path) = path.build() {
+            // Rounded content clipping leaves these wedges empty. Paint the
+            // same single alpha layer as the adjacent gutter, without making
+            // translucent dark themes' corners opaque black.
+            window.paint_path(path, backdrop);
+        }
+        window.paint_quad(gpui::outline(bounds, edge, gpui::BorderStyle::Solid).corner_radii(radius));
+    }).absolute().inset_0().into_any_element()
+}
+
 impl TabGroupRenderer for TabGroupSkin {
+    fn drop_placement(&self, placement: Option<crate::Placement>) -> Option<crate::Placement> {
+        if self.shared.panel_style() == PanelStyle::Hidden { placement.or(Some(crate::Placement::Right)) }
+        else { placement }
+    }
+    fn outer_frame(&self, _: &TabGroupContext, _: &mut Window, _: &mut App) -> Option<Div> {
+        match self.shared.tile_style() {
+            DockTileStyle::Contiguous => None,
+            DockTileStyle::Rounded { gutter, backdrop, .. } => {
+                let inset = gutter / 2.;
+                // Paint only the gutter, never another fill behind translucent panes.
+                Some(div().border_t(inset).border_b(inset).border_l(inset).border_r(inset)
+                    .border_color(backdrop).min_w_0().min_h_0())
+            },
+        }
+    }
+
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
         let control = zoom_control(group, cx);
         self.active_tab_bounds.set(None);
@@ -888,7 +1024,17 @@ impl TabGroupRenderer for TabGroupSkin {
         div()
             .id("tab-panel")
             .relative()
-            .children(overlay.map(|overlay| gpui::deferred(overlay).with_priority(1)))
+            .when_some(match self.shared.tile_style() {
+                DockTileStyle::Contiguous => None,
+                DockTileStyle::Rounded { radius, backdrop, border_color, .. } => Some((radius, backdrop, border_color)),
+            }, |this, (radius, backdrop, border_color)| {
+                this.rounded(radius).child(gpui::deferred(rounded_tile_mask(
+                    radius, backdrop, border_color,
+                )).with_priority(2))
+            })
+            .children(overlay.map(|overlay| gpui::deferred(overlay).with_priority(
+                if matches!(self.shared.tile_style(), DockTileStyle::Rounded { .. }) { 3 } else { 1 },
+            )))
             // Content owns its surface; do not stack a second translucent fill.
             // A collapsed group is a strip of tabs with no content, and the
             // actions act on content. The old dock gated them the same way.
@@ -943,6 +1089,9 @@ impl TabGroupRenderer for TabGroupSkin {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        if self.shared.panel_style() == PanelStyle::Hidden && !group.is_collapsed() {
+            return Empty.into_any_element();
+        }
         let visible: Vec<usize> = group
             .panels()
             .iter()
@@ -962,7 +1111,7 @@ impl TabGroupRenderer for TabGroupSkin {
                 // Monitter's modern workspace strip remains a tab strip even
                 // for one panel; retain its close/drag controls and tab label.
                 // Classic keeps the library's single-panel title treatment.
-                if self.shared.tab_bar_style() == TabBarStyle::Modern {
+                if matches!(self.shared.tab_bar_style(), TabBarStyle::Modern | TabBarStyle::Pill) {
                     return self.render_tabs(group, window, cx);
                 }
                 self.render_title(group, *ix, window, cx)
@@ -976,14 +1125,15 @@ impl TabGroupRenderer for TabGroupSkin {
         panel: AnyView,
         group: &TabGroupContext,
         _: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> AnyElement {
         if group.is_collapsed() {
             return Empty.into_any_element();
         }
 
-        div()
+        let content = div()
             .id("tab-content")
+            .relative()
             .overflow_y_scroll()
             .overflow_x_hidden()
             .flex_1()
@@ -991,7 +1141,24 @@ impl TabGroupRenderer for TabGroupSkin {
             // subtree. Render the retained view normally so tab reactivation
             // keeps controls visible to assistive technology on every frame.
             .child(div().absolute().size_full().child(panel))
-            .into_any_element()
+            .when(self.shared.panel_style() == PanelStyle::Hidden
+                && !group.active_panel().and_then(PanelHandle::of)
+                    .is_some_and(|handle| handle.toolbar_in_content(cx)), |this| {
+                let hover_group: SharedString = format!("pane-corner-{:?}", group.node()).into();
+                this.child(div().id("pane-corner-controls").absolute().top(px(6.)).right(px(6.))
+                    .debug_selector(|| "dock-pane-corner".into())
+                    .group(hover_group.clone()).p(px(4.))
+                    .child(div().invisible().group_hover(hover_group, |style| style.visible())
+                        .child(pane_controls(group, cx))))
+            })
+            .into_any_element();
+        #[cfg(target_os = "macos")]
+        if self.shared.panel_style() == PanelStyle::Hidden {
+            if let DockTileStyle::Rounded { radius, .. } = self.shared.tile_style() {
+                return RoundedTileContent { content: Some(content), radius }.into_any_element();
+            }
+        }
+        content
     }
 
     fn render_drop_indicator(

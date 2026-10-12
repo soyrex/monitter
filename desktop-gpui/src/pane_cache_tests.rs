@@ -68,6 +68,7 @@ fn native_panel_caches_content_but_repaints_visibility_each_frame(cx: &mut TestA
             },
             paint: paint_state,
             removed: false,
+            retaining_layout: Rc::new(Cell::new(false)),
             appearance: Rc::new(Cell::new(None)),
             auto_hide_tabs: Rc::new(Cell::new(false)),
         });
@@ -160,6 +161,7 @@ fn cached_native_panel_scrolls_repeatedly_after_parent_replay(cx: &mut TestAppCo
             },
             paint: Rc::new(RefCell::new(PaintState::default())),
             removed: false,
+            retaining_layout: Rc::new(Cell::new(false)),
             appearance: Rc::new(Cell::new(None)),
             auto_hide_tabs: Rc::new(Cell::new(false)),
         });

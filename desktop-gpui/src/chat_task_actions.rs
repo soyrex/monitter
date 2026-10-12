@@ -115,7 +115,7 @@ impl ChatTaskActionsPane {
     }
 
     pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.error.as_deref().and_then(crate::chat::connection_recovery::visible_error)
     }
 
     fn invoke(
@@ -198,12 +198,12 @@ impl Render for ChatTaskActionsPane {
 
             .text_color(rgb(palette.ink))
             .child(title);
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error() {
             dialog = dialog.child(
                 div()
                     .text_size(px(11.))
                     .text_color(rgb(0xdc2626))
-                    .child(error.clone()),
+                    .child(error.to_owned()),
             );
         }
         dialog.child(

@@ -1,5 +1,15 @@
 # Monitter agent guide
 
+## Desktop and mobile build boundary
+
+GPUI is the installed desktop, including `/Applications/Monitter.app`.
+Desktop changes, builds and installs use this checkout and `npm run build:gpui`.
+Tauri/Svelte is for mobile web and iOS/Android; never use the legacy `build:mac`
+or `install:mac` scripts to update the installed desktop. Preserve the live
+backend and its agent sessions when updating the GUI. Alex's explicit desktop
+reinstall authorization permits replacing the installed GPUI bundle with a
+verified build and a rollback copy, superseding the experimental restriction below.
+
 ## Experimental GPUI fork
 
 This checkout is the `experiment/gpui-desktop` fork from `557bb5e`. Alex has

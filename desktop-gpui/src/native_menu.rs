@@ -67,7 +67,12 @@ pub fn install(cx: &mut App) {
             MenuItem::action("Paste", input::Paste),
             MenuItem::action("Select All", input::SelectAll),
         ]),
-        Menu::new("View").items([MenuItem::action("Toggle Full Screen", Fullscreen)]),
+        Menu::new("View").items([
+            MenuItem::action("New Vertical Split", crate::native_navigation::OpenVerticalSplit),
+            MenuItem::action("New Horizontal Split", crate::native_navigation::OpenHorizontalSplit),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Full Screen", Fullscreen),
+        ]),
         Menu::new("Window").items([
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),

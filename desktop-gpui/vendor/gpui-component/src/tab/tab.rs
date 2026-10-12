@@ -22,6 +22,8 @@ pub enum TabVariant {
     /// Flat rectangular tab styling for a dock. Selected tabs use the main
     /// surface; inactive tabs are transparent and separated on the right.
     DockModern,
+    /// Compact, borderless dock tabs with a quiet rounded selected surface.
+    DockPill,
 }
 
 impl TabVariant {
@@ -53,25 +55,25 @@ impl TabVariant {
                 TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(18.),
                 TabVariant::Segmented => px(16.),
                 TabVariant::Underline => px(20.),
-                TabVariant::DockModern => px(18.),
+                TabVariant::DockModern | TabVariant::DockPill => px(18.),
             },
             Size::Small => match self {
                 TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(22.),
                 TabVariant::Segmented => px(18.),
-                TabVariant::Underline | TabVariant::DockModern => px(22.),
+                TabVariant::Underline | TabVariant::DockModern | TabVariant::DockPill => px(22.),
             },
             Size::Large => match self {
                 TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(36.),
                 TabVariant::Segmented => px(28.),
                 TabVariant::Underline => px(32.),
-                TabVariant::DockModern => px(36.),
+                TabVariant::DockModern | TabVariant::DockPill => px(36.),
             },
             _ => match self {
                 TabVariant::Tab => px(30.),
                 TabVariant::Outline | TabVariant::Pill => px(26.),
                 TabVariant::Segmented => px(24.),
                 TabVariant::Underline => px(26.),
-                TabVariant::DockModern => px(30.),
+                TabVariant::DockModern | TabVariant::DockPill => px(30.),
             },
         }
     }
@@ -185,6 +187,11 @@ impl TabVariant {
                 border_color: cx.theme().border,
                 ..Default::default()
             },
+            TabVariant::DockPill => TabStyle {
+                fg: cx.theme().tab_foreground,
+                bg: cx.theme().transparent.into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -249,6 +256,11 @@ impl TabVariant {
                 border_color: cx.theme().border,
                 ..Default::default()
             },
+            TabVariant::DockPill => TabStyle {
+                fg: cx.theme().tab_active_foreground,
+                bg: cx.theme().tokens.secondary_hover.into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -302,6 +314,11 @@ impl TabVariant {
                     ..Default::default()
                 },
                 border_color: cx.theme().border,
+                ..Default::default()
+            },
+            TabVariant::DockPill => TabStyle {
+                fg: cx.theme().tab_active_foreground,
+                bg: cx.theme().tokens.secondary.into(),
                 ..Default::default()
             },
         }
@@ -387,6 +404,11 @@ impl TabVariant {
                 border_color: cx.theme().border,
                 ..Default::default()
             },
+            TabVariant::DockPill => TabStyle {
+                fg: cx.theme().muted_foreground,
+                bg: cx.theme().transparent.into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -404,7 +426,7 @@ impl TabVariant {
 
     fn radius(&self, size: Size, cx: &App) -> Pixels {
         match self {
-            TabVariant::Outline | TabVariant::Pill => cx.theme().radius_full(),
+            TabVariant::Outline | TabVariant::Pill | TabVariant::DockPill => cx.theme().radius_full(),
             TabVariant::Segmented => match size {
                 Size::XSmall | Size::Small => cx.theme().radius,
                 Size::Large => cx.theme().radius_lg,
@@ -806,7 +828,7 @@ impl RenderOnce for Tab {
         let inner_height = self
             .dock_height
             .unwrap_or_else(|| self.variant.inner_height(self.size));
-        let modern_dock = self.variant == TabVariant::DockModern;
+        let modern_dock = matches!(self.variant, TabVariant::DockModern | TabVariant::DockPill);
         let modern_group = format!("dock-modern-tab-{}", self.ix);
         let aria_label = self.a11y_label();
         let hover_motion = crate::hover_motion::HoverMotion::new(
@@ -1089,13 +1111,14 @@ mod tests {
     use crate::tab::TabBar;
     use gpui::{Context, Render, TestAppContext, VisualTestContext};
 
-    const VARIANTS: [TabVariant; 6] = [
+    const VARIANTS: [TabVariant; 7] = [
         TabVariant::Tab,
         TabVariant::Outline,
         TabVariant::Pill,
         TabVariant::Segmented,
         TabVariant::Underline,
         TabVariant::DockModern,
+        TabVariant::DockPill,
     ];
 
     const LONG_LABEL: &str = "Account Settings & Preferences";

@@ -26,6 +26,38 @@ pub fn v_resizable(id: impl Into<gpui::ElementId>) -> ResizablePanelGroup {
 pub fn resize_handle_appearance() -> ResizeHandleRenderer {
     Rc::new(|handle, window, cx| Some(render_resize_handle(handle, window, cx)))
 }
+
+/// Rounded-tile divider appearance; the grab band remains unchanged.
+pub fn rounded_resize_handle_appearance() -> ResizeHandleRenderer {
+    Rc::new(|handle, window, cx| Some(render_rounded_resize_handle(handle, window, cx)))
+}
+
+pub(crate) fn render_rounded_resize_handle(
+    handle: &ResizeHandleContext,
+    _: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .map(|frame| match handle.axis() {
+            Axis::Horizontal => frame.w(px(1.)).h_full(),
+            Axis::Vertical => frame.h(px(1.)).w_full(),
+        })
+        .when(handle.state() != ResizeHandleState::Idle, |frame| {
+            frame.child(div()
+                .flex_none()
+                .rounded(px(1.5))
+                .bg(cx.theme().foreground.opacity(if handle.is_active() { 0.55 } else { 0.30 }))
+                .map(|grip| match handle.axis() {
+                    Axis::Horizontal => grip.w(px(3.)).h(px(24.)),
+                    Axis::Vertical => grip.h(px(3.)).w(px(24.)),
+                }))
+        })
+        .into_any_element()
+}
 pub(crate) fn render_resize_handle(
     handle: &ResizeHandleContext,
     _: &mut Window,

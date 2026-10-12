@@ -2,3 +2,7 @@
 pub mod fonts;
 pub mod native_state;
 pub mod terminal_model;
+pub mod streaming_reveal;
+pub mod streaming_display;
+
+pub mod workspace_store;

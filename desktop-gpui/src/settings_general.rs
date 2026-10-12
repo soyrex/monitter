@@ -239,7 +239,7 @@ pub(super) fn render_conversation(
             if voice_engine.is_empty() { "whisper" } else { &voice_engine },
             &[("whisper", "Whisper (local)"), ("apple", "Apple on-device")]))
         .child(settings_hint("Apple on-device transcription is available in the macOS app. Whisper remains the default. Voice recordings become editable draft text before you send them.", palette));
-    let mut content = stack().child(activity).child(messages).child(voice);
+    let mut content = stack().child(streaming_controls(cx, palette)).child(activity).child(messages).child(voice);
     if let Some(state) = desktop.native_settings.as_ref() {
         let guidance = state.board_guidance.clone();
         let length = guidance.read(cx).value().chars().count();
@@ -268,4 +268,32 @@ pub(super) fn render_conversation(
         content = content.child(boards);
     }
     content.into_any_element()
+}
+
+fn streaming_controls(cx: &mut Context<Desktop>, palette: Palette) -> Div {
+    use crate::streaming_display::{self, Mode, Options, Selection};
+    let selected = streaming_display::current(cx);
+    let mut card = settings_card("Streaming replies",
+        "Show replies as they arrive, or reveal text one character at a time with a cursor. Saved on this desktop; existing history appears immediately.", palette)
+        .child(div().flex().flex_wrap().gap(px(8.)).children(Mode::ALL.map(|mode| {
+            Button::new(SharedString::from(format!("streaming-display-{}", mode.id())))
+                .label(if selected.mode == mode { format!("✓ {}", mode.label()) } else { mode.label().to_owned() })
+                .accessibility_label(format!("Streaming display: {}", mode.label()))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    streaming_display::set(Options { mode, ..streaming_display::current(cx) }, cx); cx.notify();
+                }))
+        }))).child("Typing speed")
+        .child(div().flex().flex_wrap().gap(px(8.)).children([(120, "Slow"), (600, "Normal"), (1800, "Fast")].map(|(speed, label)| {
+            Button::new(SharedString::from(format!("streaming-speed-{speed}")))
+                .label(if selected.characters_per_second == speed { format!("✓ {label}") } else { label.to_owned() })
+                .accessibility_label(format!("Typing speed: {label}"))
+                .disabled(selected.mode != Mode::Typing)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    streaming_display::set(Options { characters_per_second: speed, ..streaming_display::current(cx) }, cx); cx.notify();
+                }))
+        })));
+    if let Some(error) = cx.try_global::<Selection>().and_then(|selection| selection.error.as_ref()) {
+        card = card.child(error.clone());
+    }
+    card
 }

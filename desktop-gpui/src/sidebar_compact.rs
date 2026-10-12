@@ -3,10 +3,10 @@ use gpui_kit::component::tooltip::ManagedTooltipExt as _;
 use super::*;
 use gpui_kit::{
     assets::__private as icons_assets,
-    component::{Icon, Sizable, tooltip::Tooltip, button::*},
+    component::{Icon, Sizable, hover_card::HoverCard, tooltip::Tooltip, button::*},
     Image,
 };
-use std::sync::Arc;
+use std::{sync::Arc, rc::Rc};
 
 pub(super) fn brand_mark() -> Arc<Image> { branding::mark() }
 
@@ -37,7 +37,10 @@ pub(super) fn render(
     window: &mut Window,
     cx: &mut Context<Desktop>,
 ) -> AnyElement {
-    let width = gpui_kit::px(design::COMPACT_SIDEBAR_WIDTH_POINTS);
+    let tern = design::tile_theme()
+        == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+    let rail_width = gpui_kit::px(design::COMPACT_SIDEBAR_WIDTH_POINTS);
+    let width = if tern { rail_width - gpui_kit::px(12.) } else { rail_width };
     let mut views = div().flex().flex_col().items_center().gap(px(5.));
     for tab in VIEWS {
         let next = tab.view;
@@ -53,70 +56,82 @@ pub(super) fn render(
         ));
     }
 
-    let mut ordered = tasks.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| {
-        let left = left.get("updatedAt").and_then(Value::as_i64).unwrap_or_default();
-        let right = right.get("updatedAt").and_then(Value::as_i64).unwrap_or_default();
-        right.cmp(&left)
-    });
+    let ordered = running_tasks(tasks);
     let chat_scroll = window.use_keyed_state("compact-chat-overflow", cx,
         |_, _| ScrollHandle::new()).read(cx).clone();
     let mut chat_icons = div().id("compact-chat-icons").flex_1().min_h_0().overflow_y_scroll().track_scroll(&chat_scroll).flex().flex_col().items_center().gap(px(4.));
-    for task in ordered {
-        let id = field(task, "id");
-        let title = field(task, "title");
-        let agent = agents.iter().find(|agent| field(agent, "id") == field(task, "agentId"));
-        let provider = field(task, "provider");
-        let model = field(task, "model");
-        let active = desktop.selected.as_ref() == Some(&id);
-        let hover_key = format!("compact-chat-{id}");
-        let (hover_state, background_opacity) =
-            sidebar_hover::state(&hover_key, active, window, cx);
-        let task_id = id.clone();
-        let icon = crate::branding::provider_for_ink(&provider, &model, palette.ink)
-            .map(|image| img(image).w(px(17.)).h(px(17.)).into_any_element())
-            .unwrap_or_else(|| Icon::default().data(icons_assets::MessageSquare.1)
-                .with_size(px(16.)).into_any_element());
-        let status = field(task, "status");
-        let avatar_color = agent.map(|agent| design::parse_color(&field(agent, "color"), palette.accent)).unwrap_or(palette.muted);
-        let tooltip_label = format!("{title} · {provider} · {status}");
-        // Managed tooltip owns an on_hover slot. Keep it on a separate
-        // full-size wrapper so the retained background animation has its own.
-        chat_icons = chat_icons.child(
-            div()
-                .id(SharedString::from(format!("{hover_key}-tooltip")))
-                .w(width - px(8.))
-                .h(px(34.))
-                .managed_tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
-                .child(div()
-                .id(SharedString::from(hover_key))
-                .w(width - px(8.))
-                .h(px(34.))
-                .rounded_md()
-                .cursor_pointer()
-                .flex()
-                .items_center()
-                .justify_center()
-                .relative()
-                .bg(crate::design::surface_color(palette.soft).opacity(background_opacity))
-                .overflow_hidden()
-                .children(crate::activity_effects::for_task(&task_id, "minibar", crate::activity_sparkles::SparkleLayout::Compact, false, cx))
-                .child(icon)
-                .child(div().absolute().right_1().bottom_1().w(px(6.)).h(px(6.)).rounded_full()
-                    .bg(rgb(if status == "running" { design::status_color(&status, palette) } else { avatar_color })))
-                .aria_label(format!("Open chat {}", field(task, "title")))
-                .on_click(cx.listener(move |view, _, window, cx| {
-                    view.switch_surface(Sidebar::Chats, window, cx);
-                    view.selected = Some(task_id.clone());
-                    cx.notify();
-                }))
-                .on_hover(cx.listener(move |_, hovered, _, cx| {
-                    sidebar_hover::set(&hover_state, *hovered, cx);
-                }))),
-        );
-    }
-    if tasks.is_empty() {
-        chat_icons = chat_icons.child(note_compact("No chats", palette));
+    if desktop.sidebar_view == SidebarView::Activity {
+        for task in &ordered {
+            let id = field(task, "id");
+            let title = field(task, "title");
+            let agent = agents.iter().find(|agent| field(agent, "id") == field(task, "agentId"));
+            let provider = field(task, "provider");
+            let model = field(task, "model");
+            let active = desktop.selected.as_ref() == Some(&id);
+            let hover_key = format!("compact-chat-{id}");
+            let (hover_state, background_opacity) =
+                sidebar_hover::state(&hover_key, active, window, cx);
+            let task_id = id.clone();
+            let icon = crate::branding::provider_for_ink(&provider, &model, palette.ink)
+                .map(|image| img(image).w(px(17.)).h(px(17.)).into_any_element())
+                .unwrap_or_else(|| Icon::default().data(icons_assets::MessageSquare.1)
+                    .with_size(px(16.)).into_any_element());
+            let status = field(task, "status");
+            let avatar_color = agent.map(|agent| design::parse_color(&field(agent, "color"), palette.accent)).unwrap_or(palette.muted);
+            let tooltip_label = format!("{title} · {provider} · {status}");
+            // Managed tooltip owns an on_hover slot. Keep it on a separate
+            // full-size wrapper so the retained background animation has its own.
+            chat_icons = chat_icons.child(
+                div()
+                    .id(SharedString::from(format!("{hover_key}-tooltip")))
+                    .w(width - px(8.))
+                    .h(px(34.))
+                    .managed_tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+                    .child(div()
+                    .id(SharedString::from(hover_key))
+                    .w(width - px(8.))
+                    .h(px(34.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .relative()
+                    .bg(crate::design::surface_color(palette.soft).opacity(background_opacity))
+                    .overflow_hidden()
+                    .children(crate::activity_effects::for_task(&task_id, "minibar", crate::activity_sparkles::SparkleLayout::Compact, false, cx))
+                    .child(icon)
+                    .child(div().absolute().right_1().bottom_1().w(px(6.)).h(px(6.)).rounded_full()
+                        .bg(rgb(if status == "running" { design::status_color(&status, palette) } else { avatar_color })))
+                    .aria_label(format!("Open chat {}", field(task, "title")))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.switch_surface(Sidebar::Chats, window, cx);
+                        view.selected = Some(task_id.clone());
+                        cx.notify();
+                    }))
+                    .on_hover(cx.listener(move |_, hovered, _, cx| {
+                        sidebar_hover::set(&hover_state, *hovered, cx);
+                    }))),
+            );
+        }
+        if ordered.is_empty() {
+            chat_icons = chat_icons.child(note_compact("No activity", palette));
+        }
+    } else {
+        let projects = rows(&desktop.snapshot, "projects");
+        let groups = compact_groups(desktop.sidebar_view, agents, &projects, tasks);
+        let owner = cx.weak_entity();
+        let select: SelectChat = Rc::new(move |id, window, cx| {
+            let _ = owner.update(cx, |view, cx| {
+                view.switch_surface(Sidebar::Chats, window, cx);
+                view.selected = Some(id.to_string());
+                cx.notify();
+            });
+        });
+        for group in groups {
+            let selected = group.tasks.iter().any(|task| desktop.selected.as_deref() == Some(field(task, "id").as_str()));
+            chat_icons = chat_icons.child(group_menu(group, selected, palette, select.clone()));
+        }
     }
 
     let footer_actions = [
@@ -140,6 +155,58 @@ pub(super) fn render(
             },
             cx,
         ));
+    }
+    if tern {
+        let interface_scale = design::interface_scale() as f32 / 100.;
+        let usage_width = (design::COMPACT_SIDEBAR_WIDTH_POINTS - 12.) / interface_scale;
+        let usage_stats = desktop.sidebar_usage.as_ref().map(|usage| {
+            usage.update(cx, |usage, cx| usage.set_composed_palette(palette, usage_width, cx));
+            usage.clone()
+        });
+        return div()
+            .id("sidebar-compact-rail")
+            .w(rail_width)
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .p(gpui_kit::px(6.))
+            .gap(gpui_kit::px(6.))
+            .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, crate::pane_appearance::tile_backdrop(palette)))
+            .child(div()
+                .id("compact-navigation-bubble")
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(7.))
+                .pb(px(7.))
+                // Preserve native traffic-light access above the controls.
+                .pt(gpui_kit::px(38.))
+                .rounded(gpui_kit::px(8.))
+                .border_1()
+                .border_color(design::tile_border_color(palette))
+                .bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar))
+                .child(icon_button("compact-sidebar-expand", "Expand sidebar", icons_assets::ChevronRight.1,
+                    false, palette, |view, window, cx| view.toggle_sidebar(window, cx), cx))
+                .child(div().id("compact-brand-mark").w(px(32.)).h(px(32.)).flex().items_center().justify_center()
+                    .managed_tooltip(|window, cx| Tooltip::new("Monitter").build(window, cx)).aria_label("Monitter")
+                    .child(img(brand_mark()).w(px(23.)).h(px(23.))))
+                .child(views)
+                .child(div().h(px(1.)).w(px(28.)).bg(rgb(palette.line)))
+                .child(ScrollEdgeFade::new(chat_icons, chat_scroll, Axis::Vertical, gpui_kit::px(20.)))
+                .child(div().h(px(1.)).w(px(28.)).bg(rgb(palette.line)))
+                .child(footer))
+            .child(div()
+                .id("compact-usage-footer")
+                .w_full()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .children(usage_stats))
+            .into_any_element();
     }
 
     let _ = window;
@@ -172,4 +239,228 @@ pub(super) fn render(
 
 fn note_compact(label: &'static str, palette: design::Palette) -> AnyElement {
     div().text_size(px(8.)).text_color(rgb(palette.muted)).child(label).into_any_element()
+}
+
+
+/// Menu contents use the same authoritative running status as expanded Activity.
+fn running_tasks(tasks: &[Value]) -> Vec<Value> {
+    let mut running: Vec<_> = tasks.iter().filter(|task| field(task, "status") == "running").cloned().collect();
+    running.sort_by_key(|task| std::cmp::Reverse(task["updatedAt"].as_i64().unwrap_or_default()));
+    running
+}
+
+struct CompactGroup {
+    key: String,
+    label: String,
+    record: Value,
+    project: bool,
+    tasks: Vec<Value>,
+}
+
+fn compact_groups(view: SidebarView, agents: &[Value], projects: &[Value], tasks: &[Value]) -> Vec<CompactGroup> {
+    let project = view == SidebarView::Projects;
+    let records = if project { projects } else { agents };
+    let owner_field = if project { "projectId" } else { "agentId" };
+    let running = running_tasks(tasks);
+    let mut groups: Vec<_> = records.iter().map(|record| {
+        let id = field(record, "id");
+        CompactGroup {
+            key: format!("compact-{}-{id}", if project { "project" } else { "agent" }),
+            label: field(record, "name"),
+            record: record.clone(),
+            project,
+            tasks: running.iter().filter(|task| field(task, owner_field) == id).cloned().collect(),
+        }
+    }).collect();
+    // Keep work without a current project/agent reachable through one group.
+    let unassigned: Vec<_> = running.iter().filter(|task| !records.iter().any(|record| field(record, "id") == field(task, owner_field))).cloned().collect();
+    if !unassigned.is_empty() {
+        groups.push(CompactGroup {
+            key: format!("compact-{}-unassigned", if project { "project" } else { "agent" }),
+            label: if project { "Unassigned" } else { "Other agents" }.into(),
+            record: Value::Null,
+            project,
+            tasks: unassigned,
+        });
+    }
+    groups
+}
+
+type SelectChat = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+fn group_menu(group: CompactGroup, selected: bool, palette: design::Palette, select: SelectChat) -> AnyElement {
+    let color = design::parse_color(&field(&group.record, "color"), palette.accent);
+    let icon = if group.project {
+        Icon::new(project_icon(&field(&group.record, "icon"))).size(px(17.)).into_any_element()
+    } else {
+        div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD)
+            .child(group.label.chars().next().unwrap_or('?').to_string()).into_any_element()
+    };
+    let trigger = Button::new(SharedString::from(group.key.clone()))
+        .text().compact().w(px(34.)).h(px(34.)).p_0()
+        .accessibility_label(format!("{} · {} running chats", group.label, group.tasks.len()))
+        .when(selected, |button| button.outline())
+        .child(div().debug_selector({ let key = group.key.clone(); move || key.clone() })
+            .w(px(30.)).h(px(30.)).rounded_md().relative()
+            .bg(crate::design::surface_color(color).opacity(0.16)).text_color(rgb(color))
+            .flex().items_center().justify_center().child(icon)
+            .when(!group.tasks.is_empty(), |tile| tile.child(div().absolute().right_0().bottom_0()
+                .w(px(6.)).h(px(6.)).rounded_full().bg(rgb(palette.accent)))));
+    let popup_id = format!("{}-menu", group.key);
+    HoverCard::new(SharedString::from(format!("{}-hover", group.key)))
+        .anchor(Anchor::LeftCenter)
+        .open_delay(std::time::Duration::from_millis(160))
+        .close_delay(std::time::Duration::from_millis(250))
+        .trigger(trigger)
+        .content(move |_, window, cx| {
+            let scroll = window.use_keyed_state(SharedString::from(format!("{popup_id}-scroll")), cx,
+                |_, _| ScrollHandle::new()).read(cx).clone();
+            let mut menu = div().id(SharedString::from(popup_id.clone()))
+                .debug_selector({ let key = popup_id.clone(); move || key.clone() })
+                .w(px(280.)).flex().flex_col().gap(px(4.)).p(px(6.))
+                .text_color(rgb(palette.ink)).text_size(px(13.))
+                .child(div().px(px(6.)).py(px(4.)).font_weight(FontWeight::SEMIBOLD).child(group.label.clone()));
+            let mut list = div().id(SharedString::from(format!("{popup_id}-list")))
+                .max_h(px(360.)).overflow_y_scroll().track_scroll(&scroll).flex().flex_col().gap(px(2.));
+            for task in &group.tasks {
+                let id = field(task, "id");
+                let select = select.clone();
+                let row_id = format!("{popup_id}-task-{id}");
+                list = list.child(Button::new(SharedString::from(row_id.clone()))
+                    .text().compact().w_full().justify_start()
+                    .icon(Icon::default().data(icons_assets::Activity.1).size(px(14.)).text_color(rgb(palette.accent)))
+                    .accessibility_label(format!("Open running chat {}", field(task, "title")))
+                    .child(div().debug_selector(move || row_id.clone()).min_w_0().truncate().child(field(task, "title")))
+                    .on_click(move |_, window, cx| select(&id, window, cx)));
+            }
+            if group.tasks.is_empty() {
+                list = list.child(div().p(px(6.)).text_color(rgb(palette.muted)).child("No running chats"));
+            }
+            menu = menu.child(ScrollEdgeFade::new(list, scroll, Axis::Vertical, gpui_kit::px(16.)));
+            menu
+        })
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compact_groups, running_tasks, SidebarView, field};
+    use serde_json::json;
+
+    #[test]
+    fn compact_sidebar_groups_only_running_work_under_top_level_icons() {
+        let agents = vec![json!({"id":"a","name":"Codex"}), json!({"id":"b","name":"Other"})];
+        let projects = vec![json!({"id":"p","name":"Monitter"})];
+        let tasks = vec![
+            json!({"id":"idle","agentId":"a","projectId":"p","status":"idle","updatedAt":100}),
+            json!({"id":"run1","agentId":"a","projectId":"p","status":"running","updatedAt":1}),
+            json!({"id":"run2","agentId":"a","projectId":"p","status":"running","updatedAt":2}),
+            json!({"id":"done","agentId":"b","status":"completed","updatedAt":200}),
+            json!({"id":"error","agentId":"b","status":"error","updatedAt":300}),
+        ];
+        let agent_groups = compact_groups(SidebarView::Agents, &agents, &projects, &tasks);
+        assert_eq!(agent_groups.len(), 2, "one icon per agent, regardless of chat count");
+        assert_eq!(agent_groups[0].tasks.len(), 2);
+        assert!(agent_groups[1].tasks.is_empty());
+        let project_groups = compact_groups(SidebarView::Projects, &agents, &projects, &tasks);
+        assert_eq!(project_groups.len(), 1, "one icon per project");
+        assert_eq!(project_groups[0].tasks.len(), 2);
+        let activity = running_tasks(&tasks);
+        assert_eq!(activity.iter().map(|task| field(task, "id")).collect::<Vec<_>>(), ["run2", "run1"]);
+        let mut stopped = tasks.clone();
+        stopped[1]["status"] = json!("completed");
+        stopped[2]["status"] = json!("idle");
+        assert!(running_tasks(&stopped).is_empty(), "finished work disappears on the next snapshot");
+    }
+
+    #[test]
+    fn compact_sidebar_keeps_unassigned_running_work_reachable() {
+        let tasks = vec![json!({"id":"run","agentId":"removed","status":"running"})];
+        let groups = compact_groups(SidebarView::Projects, &[], &[], &tasks);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "Unassigned");
+        assert_eq!(groups[0].tasks.len(), 1);
+        let groups = compact_groups(SidebarView::Agents, &[], &[], &tasks);
+        assert_eq!(groups[0].label, "Other agents");
+    }
+}
+
+
+#[cfg(all(test, feature = "visual-export"))]
+mod visual_tests {
+    use super::{compact_groups, group_menu, SelectChat, SidebarView, design, px};
+    use gpui_kit::{AppContext as _, ParentElement as _, Styled as _, InteractiveElement as _,
+        Context, Window, TestAppContext, VisualTestContext, Render, IntoElement, point, div};
+    use std::rc::Rc;
+    use std::{cell::RefCell, time::Duration};
+    use serde_json::json;
+
+    struct MenuFixture {
+        project: bool,
+        selected: Rc<RefCell<String>>,
+    }
+
+    impl Render for MenuFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let agents = vec![json!({"id":"a","name":"Codex"})];
+            let projects = vec![json!({"id":"p","name":"Monitter"})];
+            let tasks = vec![
+                json!({"id":"run","title":"Running work","agentId":"a","projectId":"p","status":"running"}),
+                json!({"id":"idle","title":"Idle work","agentId":"a","projectId":"p","status":"idle"}),
+            ];
+            let view = if self.project { SidebarView::Projects } else { SidebarView::Agents };
+            let group = compact_groups(view, &agents, &projects, &tasks).remove(0);
+            let selected = self.selected.clone();
+            let select: SelectChat = Rc::new(move |id, _, _| *selected.borrow_mut() = id.to_string());
+            div().w(gpui_kit::px(800.)).h(gpui_kit::px(600.)).flex().flex_col().items_start()
+                .child(group_menu(group, false, design::palette(&json!({}), gpui_kit::WindowAppearance::Dark), select))
+                .child(div().debug_selector(|| "outside-menu".into()).w(px(50.)).h(px(300.)))
+        }
+    }
+
+    fn tick(visual: &mut VisualTestContext, milliseconds: u64) {
+        visual.run_until_parked();
+        visual.executor().advance_clock(Duration::from_millis(milliseconds));
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn compact_sidebar_hover_menu_keeps_pointer_transfer_and_opens_running_chat(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        for project in [false, true] {
+            let selected = Rc::new(RefCell::new(String::new()));
+            let (_, visual) = cx.add_window_view({
+                let selected = selected.clone();
+                move |_, _| MenuFixture { project, selected }
+            });
+            visual.update(|window, _| window.activate_window());
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let (trigger, menu, row, idle) = if project {
+                ("compact-project-p", "compact-project-p-menu", "compact-project-p-menu-task-run", "compact-project-p-menu-task-idle")
+            } else {
+                ("compact-agent-a", "compact-agent-a-menu", "compact-agent-a-menu-task-run", "compact-agent-a-menu-task-idle")
+            };
+            assert!(visual.debug_bounds(menu).is_none());
+            let trigger_bounds = visual.debug_bounds(trigger).expect("top-level icon");
+            visual.simulate_mouse_move(trigger_bounds.center(), None, Default::default());
+            tick(visual, 180);
+            assert!(visual.debug_bounds(menu).is_some(), "hover opens running menu");
+            assert!(visual.debug_bounds(idle).is_none(), "idle work excluded");
+            let row_bounds = visual.debug_bounds(row).expect("running work row");
+            assert!(row_bounds.left() >= trigger_bounds.right(), "flyout opens beside the rail");
+            visual.simulate_mouse_move(row_bounds.center(), None, Default::default());
+            tick(visual, 300);
+            assert!(visual.debug_bounds(menu).is_some(), "menu survives pointer transfer");
+            visual.simulate_click(row_bounds.center(), Default::default());
+            assert_eq!(selected.borrow().as_str(), "run");
+            visual.simulate_mouse_move(point(px(600.), px(500.)), None, Default::default());
+            tick(visual, 300);
+            assert!(visual.debug_bounds(menu).is_none(), "leaving closes menu");
+        }
+    }
 }

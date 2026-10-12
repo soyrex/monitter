@@ -430,6 +430,9 @@ impl RenderOnce for TabBar {
                 // double the alpha beneath the active tab.
                 (cx.theme().transparent.into(), Edges::all(px(0.)), px(0.))
             }
+            TabVariant::DockPill => {
+                (cx.theme().tokens.tab_active.into(), Edges::all(px(3.)), px(4.))
+            }
         };
 
         let shared_background = self.background_layer.is_some();
@@ -467,7 +470,7 @@ impl RenderOnce for TabBar {
         // Modern docking keeps its trailing drag/drop and native window-move
         // region even when the active pane renders its menu in its own header.
         let has_empty_space =
-            self.suffix.is_some() || self.menu || self.variant == TabVariant::DockModern;
+            self.suffix.is_some() || self.menu || matches!(self.variant, TabVariant::DockModern | TabVariant::DockPill);
         let mut item_metas: Vec<(Option<SharedString>, Option<Icon>, bool)> = Vec::new();
         let selected_index = self.selected_index;
         let on_click = self.on_click.clone();
@@ -484,7 +487,7 @@ impl RenderOnce for TabBar {
                 .max_width(max_width)
                 .with_variant(self.variant)
                 .with_size(self.size);
-            tab.transparent_background = shared_background;
+            tab.transparent_background = shared_background && self.variant != TabVariant::DockPill;
             tab.indicator_active = has_indicator;
             tab.indicator_ready = indicator_ready;
             tab.indicator_epoch = indicator_epoch;

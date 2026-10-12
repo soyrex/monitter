@@ -526,6 +526,7 @@ impl TabGroup {
         }
 
         let placement = split_placement_at(bounds, drag.event.position);
+        let placement = self.renderer.drop_placement(placement);
         let dragged = drag.drag(cx);
         // The placeholder flies in from wherever the preview currently is.
         let source = DropPlaceholderBounds::new(
@@ -635,6 +636,7 @@ impl TabGroup {
             Some(_) => None,
             None => indicator.and_then(|indicator| indicator.placement()),
         };
+        let placement = self.renderer.drop_placement(placement);
 
         // Dropping a panel back onto its own group is a move only when it
         // splits out of a group holding more than itself, or when it lands on
@@ -688,7 +690,7 @@ impl Render for TabGroup {
         let droppable = context.droppable;
         let indicator = context.drop_indicator;
 
-        renderer
+        let frame = renderer
             .frame(&context, window, cx)
             .test_support()
             // Structure, applied around whatever the renderer returns.
@@ -753,6 +755,11 @@ impl Render for TabGroup {
                         this.children(renderer.render_drop_indicator(indicator, window, cx))
                     }),
             )
+            .into_any_element();
+        match renderer.outer_frame(&context, window, cx) {
+            Some(outer) => outer.size_full().flex().flex_col().child(frame).into_any_element(),
+            None => frame,
+        }
     }
 }
 
@@ -900,6 +907,14 @@ impl TabGroupContext {
 /// painted area on different elements.
 #[allow(unused_variables)]
 pub trait TabGroupRenderer: 'static {
+    /// A tabless skin may keep center drops as visible splits instead of stacking panes.
+    fn drop_placement(&self, placement: Option<Placement>) -> Option<Placement> { placement }
+    /// Optional presentation-only inset around the entire painted group.
+    /// Focus and drop geometry stay on the inner frame/content region.
+    fn outer_frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Option<Div> {
+        None
+    }
+
     /// The group's outer frame, which base tracks focus on.
     ///
     /// Identified rather than plain, so a skin can add a role, a tooltip, or

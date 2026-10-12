@@ -705,6 +705,7 @@ impl Render for AgentHostPane {
                 ("claude", "claude", "Claude Code", None, None),
                 ("opencode", "opencode", "OpenCode", None, None),
                 ("hermes", "acp", "Hermes Agent", Some("hermes"), Some("acp")),
+                ("omp", "acp", "OMP (Oh My Pi)", Some("omp"), Some("acp")),
                 ("mona", "acp", "Mona", Some("mona-acp"), Some("")),
                 ("minimax", "acp", "MiniMax", Some("mcode"), Some("acp")),
                 (
@@ -796,6 +797,7 @@ impl Render for AgentHostPane {
             let provider = text(&draft, "provider");
             let command = text(&draft["acp"], "command").to_lowercase();
             let hermes = provider == "hermes" || command.rsplit('/').next() == Some("hermes");
+            let omp = provider == "acp" && command.rsplit(['/', '\\']).next() == Some("omp");
             let gemini = command.contains("gemini")
                 || command.contains("monitter-agy-acp")
                 || command.contains("antigravity");
@@ -817,8 +819,8 @@ impl Render for AgentHostPane {
                 ("full-access", "Full access"),
             ] {
                 let supported = match level {
-                    "read-only" => !hermes && !gemini,
-                    "full-access" => !hermes,
+                    "read-only" => !hermes && !gemini && !omp,
+                    "full-access" => !hermes && !omp,
                     _ => true,
                 };
                 form = form.child(
@@ -849,6 +851,9 @@ impl Render for AgentHostPane {
             }
             if hermes {
                 form=form.child("Hermes uses its configured permission policy; read-only and full-access modes are unavailable.");
+            }
+            if omp {
+                form = form.child("OMP uses its configured tool approval policy. Configure approvals in OMP.");
             }
             if gemini {
                 form = form.child("Gemini's lowest supported permission level allows edits.");

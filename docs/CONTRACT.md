@@ -81,6 +81,18 @@ separate from domain snapshots: fixed isolated-profile `native-ui.json`, bounded
 layout/appearance/explicit composer drafts, atomic private writes and revision
 conflict rejection. No preference method is added to LAN or mobile dispatch;
 the native shell restores supported retained panes and debounces revision-guarded layout saves. The optional `chatPanes` map retains explicit secondary-sidebar visibility, selected lowercase `details|timeline|approvals|subagents` tab, and width in design pixels per task UUID. It admits at most 512 entries and finite widths 260–1600; the whole store remains bounded to 512 KiB. Empty maps are omitted for legacy readers; saving a nonempty map requires the updated experimental backend. Pane deletion removes its state, and preference reload merges pending local changes before restoring retained entities. Automatic compact-mode hiding and width constraints do not overwrite explicit saved visibility or width. These are native presentation preferences only. Normal window close waits for pending saves before pane cleanup; forced/platform quit during an in-flight save remains unverified.
+Named GPUI workspace presentation is stored in private device-local
+`named-workspaces.sqlite3`, using transactional revision guards and a 512 KiB
+payload limit. It stores the local `tileTheme` choice and a workspace set with `activeId` and 1–24 items with unique UUID IDs,
+nonblank names up to 80 characters without control characters, `#RRGGBB` colours,
+`folder|code|terminal|globe|sparkles` icons, and validated native dock layouts.
+Missing local data migrates the prior single layout (or legacy backend workspace
+metadata). The GUI sends only the active layout through existing native
+preference IPC; it omits `workspaces` and `appearance.tileTheme` so a running older backend stays compatible. Default Monitter DTOs omit the appearance field for older readers.
+Tasks, drafts and terminal sessions remain backend-owned and globally available.
+Failed saves remain visible; stale local writers must reload before retrying.
+No mobile/LAN command or backend restart is required for workspace presentation.
+
 The optional `attachmentDrafts` map stores task-keyed unsent registered attachment IDs, display metadata and captured host/workspace, never file bytes, previews or paths. Restoration requires the same task and exact destination, and cannot replace a locally edited draft. Send acknowledgement removes only sent references; failed sends retain them. Backend registry checks still govern whether an attachment can be sent.
 
 The optional owner-only `browserMetadata` stores at most 64 tabs, each with a nonzero local numeric `id`, accepted `requestedUrl`, optional `actualUrl`, and bounded `title`, plus `selectedId`. HTTP(S) URLs must have a host and no embedded credentials; `about:blank` is the only other accepted URL. URLs are limited to 8192 bytes, titles to 512 bytes, and aggregate metadata to 256 KiB within the existing 512 KiB preference limit. No body, cookies, page history, credentials or agent browser-control authority is included. URLs may themselves contain private data, so this remains private workspace metadata. GUI restoration creates unloaded tabs; only explicit navigation loads a saved page. User edits during asynchronous preference loading block late browser restoration. Local metadata changes survive a conflicting preference reload and are acknowledged only against the saved projection. These private DTOs add no mobile/LAN command and do not change the existing Tauri browser command contract.
@@ -95,6 +107,24 @@ interface scale (80–200 in steps of 5, default 125) are retained as typed
 preferences but have no native visual effect until the corresponding rendering
 support is available. These fields are private presentation state; no LAN or
 mobile command is added.
+The native-only tile theme selects `monitter` (default for older stores) or
+`tern`. The GUI stores this in the local workspace store and imports legacy
+`appearance.tileTheme` metadata when present. Unknown values are rejected. It changes dock geometry, tab
+treatment and pane chrome without changing palette IDs, accent, retained pane
+identity or the saved split tree. The Tern choice is revision-guarded private
+presentation state, not a mobile/LAN setting. Tern suppresses pane tab/title strips;
+chat headers expose owning-pane Move and Close after the secondary sidebar
+toggle, while other panes reveal these controls on corner hover. Move uses native
+dock drag/drop and Close runs the normal pane-removal lifecycle without cancelling
+backend work. Cmd-T adds a blank pane to the right of the focused pane (a vertical
+divider), including when a browser pane has focus. Monitter keeps its existing tab
+behavior. In standard shortcut mode, Cmd/Ctrl-D opens a blank vertical split and
+Cmd/Ctrl-Shift-D a blank horizontal split in either theme. These shortcuts respect
+the existing modal/lock/IME guards and do not start agent or terminal sessions.
+Tern retains the configured window transparency and pane blend modes; gutter
+chrome does not add a full-area background beneath pane content.
+The GUI omits this field from backend saves, so existing running backends remain
+compatible and do not need a restart for appearance changes.
 See `desktop-gpui/parity.json` for unfinished native UI and integration work.
 
 The private transport uses bounded length-prefixed JSON frames, request IDs,
@@ -2424,3 +2454,12 @@ Older event summaries used by the live UI are bounded. Paging, event-detail expa
 forking and import collision checks retrieve durable bodies on demand. Cache eviction
 never becomes a durable edit; metadata updates, deletion and reordering preserve stored
 bodies. Usage rendering remains observational and does not extend runtime lifetime.
+
+The GPUI desktop independently stores its streaming display preference in the
+private profile's `streaming-display.v1.json`, alongside other GUI presentation
+preferences. This adds no IPC, shared-client or mobile protocol fields. The
+backend's message text and `streamStatus` stay authoritative. Animated prefixes
+and their cursor are transient views only: copying, reply/fork actions and
+persistence continue using the complete authoritative text. A completed response
+may finish its visual reveal before switching to final Markdown; interruption,
+hiding the pane or selecting As received flushes the display immediately.

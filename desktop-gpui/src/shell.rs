@@ -302,6 +302,8 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let tern = design::tile_theme()
+            == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
         let tree_scroll = window.use_keyed_state("sidebar-tree-overflow", cx,
             |_, _| ScrollHandle::new()).read(cx).clone();
         let mut tree = div()
@@ -634,6 +636,7 @@ impl Desktop {
         logo_shade.blend_mode = 2;
         let brand_row = div()
             .bg(logo_shade)
+            .when(tern, |row| row.rounded_t(gpui_kit::px(8.)))
             .h(px(brand_row_height))
             .px(px(design::space::INSET))
             .gap_2()
@@ -657,6 +660,11 @@ impl Desktop {
             .map(|width| *width / design::ui_px(1., self.sidebar_scale))
             .filter(|width| width.is_finite() && *width > 0.)
             .unwrap_or_else(|| self.current_sidebar_width(cx));
+        let usage_width = if tern {
+            (usage_width - 12. / interface_scale).max(0.)
+        } else {
+            usage_width
+        };
         let usage_stats = self.sidebar_usage.as_ref().map(|usage| {
             usage.update(cx, |usage, cx| usage.set_composed_palette(palette, usage_width, cx));
             usage.clone()
@@ -707,19 +715,43 @@ impl Desktop {
             .border_color(rgb(palette.line))
             .border_blend_mode(crate::surface_blend::separator_mode())
             .bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar))
-            .child(brand_row)
-            .child(tabs)
-            .children(approval_block)
-            .child(ScrollEdgeFade::new(tree, tree_scroll, Axis::Vertical, gpui_kit::px(20.)))
-            .child(
-                div()
-                    .id("sidebar-footer")
-                    .flex_shrink_0()
+            .when(tern, |sidebar| sidebar.bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, crate::pane_appearance::tile_backdrop(palette))));
+        let footer = div()
+            .id("sidebar-footer")
+            .flex_shrink_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .children(usage_stats);
+        let tree = ScrollEdgeFade::new(tree, tree_scroll, Axis::Vertical, gpui_kit::px(20.));
+        let sidebar = if tern {
+            sidebar
+                .p(gpui_kit::px(6.))
+                .gap(gpui_kit::px(6.))
+                .child(div()
+                    .id("sidebar-navigation-bubble")
+                    .flex_1()
+                    .min_h_0()
                     .w_full()
                     .flex()
                     .flex_col()
-                    .children(usage_stats),
-            );
+                    .rounded(gpui_kit::px(8.))
+                    .border_1()
+                    .border_color(design::tile_border_color(palette))
+                    .bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar))
+                    .child(brand_row)
+                    .child(tabs)
+                    .children(approval_block)
+                    .child(tree))
+                .child(footer)
+        } else {
+            sidebar
+                .child(brand_row)
+                .child(tabs)
+                .children(approval_block)
+                .child(tree)
+                .child(footer)
+        };
         sidebar.into_any_element()
     }
 }

@@ -22,7 +22,7 @@ mod composer_format;
 #[path = "task_activity.rs"]
 pub(crate) mod task_activity;
 #[path = "connection_recovery.rs"]
-mod connection_recovery;
+pub(crate) mod connection_recovery;
 
 #[cfg(test)]
 #[path = "chat_column_fixture_tests.rs"]
@@ -106,9 +106,9 @@ fn current_reply_content(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct MessageStreamPresentation {
-    markdown_source: String,
-    status_label: Option<&'static str>,
+pub(crate) struct MessageStreamPresentation {
+    pub(crate) markdown_source: String,
+    pub(crate) status_label: Option<&'static str>,
 }
 
 fn escape_markdown_plain_text(text: &str) -> String {
@@ -125,7 +125,7 @@ fn escape_markdown_plain_text(text: &str) -> String {
     escaped
 }
 
-fn message_stream_presentation(message: &Value, visible_text: &str) -> MessageStreamPresentation {
+pub(crate) fn message_stream_presentation(message: &Value, visible_text: &str) -> MessageStreamPresentation {
     let status = field(message, "streamStatus");
     let streaming = field(message, "role") == "assistant" && status == "streaming";
     MessageStreamPresentation {
@@ -518,6 +518,8 @@ pub struct ChatPane {
     grouped_rows: HashMap<String, Entity<run_activity::RunActivityRow>>,
     message_attachment_rows: HashMap<String, Entity<message_attachments::MessageAttachments>>,
     message_action_focus: HashMap<String, FocusHandle>,
+    streaming_bodies: HashMap<String, Entity<crate::streaming_message::StreamingMessage>>,
+    streaming_bodies_initialized: bool,
     pub(crate) decoration_bounds: crate::activity_sparkles::ChatDecorationBounds,
     task_actions: Option<Entity<crate::chat_task_actions::ChatTaskActionsPane>>,
     task_actions_subscription: Option<Subscription>,
@@ -907,6 +909,8 @@ impl ChatPane {
             grouped_rows: HashMap::new(),
             message_attachment_rows: HashMap::new(),
             message_action_focus: HashMap::new(),
+            streaming_bodies: HashMap::new(),
+            streaming_bodies_initialized: false,
             task_actions: None,
             task_actions_subscription: None,
             fork_dialog: None,
@@ -1044,7 +1048,16 @@ impl ChatPane {
     pub fn task_id(&self) -> String {
         self.selected.clone().unwrap_or_default()
     }
+    pub(crate) fn set_dock_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.dock_visible = visible;
+        for body in self.streaming_bodies.values() {
+            body.update(cx, |body, cx| body.set_visible(visible, cx));
+        }
+    }
     pub fn sync(&mut self, snapshot: Rc<Value>, revision: Option<String>, cx: &mut Context<Self>) {
+        if self.error.as_deref().is_some_and(connection_recovery::transient) {
+            self.error = None;
+        }
         self.slash.update(cx, |slash, cx| {
             slash.set_context(
                 &snapshot,
@@ -1152,6 +1165,7 @@ impl ChatPane {
         self.grouped_rows.retain(|id, _| group_ids.contains(id));
         self.message_attachment_rows.retain(|id, _| message_ids.contains(id));
         self.message_action_focus.retain(|id, _| message_ids.contains(id));
+        self.streaming_bodies.retain(|id, _| message_ids.contains(id));
     }
     /// Authoritative cache integration: pass all known task messages, including
     /// loaded older pages. Never use this with a bounded compact snapshot tail.
@@ -1172,6 +1186,7 @@ impl ChatPane {
             footer.set_context_messages(known_messages, cx)
         });
         if reset {
+            if self.streaming_bodies.is_empty() { self.streaming_bodies_initialized = false; }
             self.activity_rows.clear();
             self.grouped_rows.clear();
             self.activity_projection_source = None;
@@ -1798,7 +1813,7 @@ impl Render for ChatPane {
                 canvas(move |bounds, _, _| geometry.set(Some(bounds)), |_, _, _, _| ())
                     .absolute().inset_0()
             });
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error.as_deref().and_then(connection_recovery::visible_error) {
             content = content.child(transcript_column(
                 div()
                     .p_3()
@@ -1877,7 +1892,7 @@ impl Render for ChatPane {
             );
             state.sync_projection(&approvals);
             let timeline_rows = state.projection.clone();
-            let history_error = state.error.clone();
+            let history_error = state.error.as_deref().and_then(connection_recovery::visible_error).map(str::to_owned);
             if let Some(error) = history_error {
                 transcript = transcript.child(
                     transcript_column(
@@ -2187,9 +2202,9 @@ impl Render for ChatPane {
             self.response_details_expanded.retain(|id| message_ids.contains(id));
             self.message_action_focus
                 .retain(|id, _| message_ids.contains(id));
-            for id in message_ids {
+            for id in &message_ids {
                 self.message_action_focus
-                    .entry(id)
+                    .entry(id.clone())
                     .or_insert_with(|| cx.focus_handle());
             }
             let attachment_ids: HashSet<String> = timeline_rows.iter().filter_map(|item| {
@@ -2212,6 +2227,27 @@ impl Render for ChatPane {
                 }
             }
             let message_attachment_rows = self.message_attachment_rows.clone();
+            // Each live body owns its reveal timer. Character ticks invalidate
+            // only its virtual row, never the full pane or backend snapshot.
+            self.streaming_bodies.retain(|id, _| message_ids.contains(id));
+            for (index, item) in timeline_rows.iter().enumerate() {
+                let transcript::ConversationItem::Message(message) = item else { continue; };
+                let id = field(message, "id");
+                if field(message, "role") != "assistant" ||
+                    (field(message, "streamStatus") != "streaming" && !self.streaming_bodies.contains_key(&id)) { continue; }
+                let animate = self.streaming_bodies_initialized && self.dock_visible;
+                let body = self.streaming_bodies.entry(id).or_insert_with(|| cx.new(|cx| {
+                    crate::streaming_message::StreamingMessage::new(message.clone(), animate, cx)
+                }));
+                body.update(cx, |body, cx| {
+                    body.set_list_item(list_state.clone(), index);
+                    body.set_visible(self.dock_visible, cx);
+                    body.set_message(message.clone(), cx);
+                    body.set_palette(palette);
+                });
+            }
+            self.streaming_bodies_initialized = true;
+            let streaming_bodies = self.streaming_bodies.clone();
             let message_action_focus = self.message_action_focus.clone();
             let response_details_expanded = self.response_details_expanded.clone();
             let activities = self.activity_rows.clone();
@@ -2338,6 +2374,7 @@ impl Render for ChatPane {
                         (None, field(message, "text"))
                     };
                     let stream_presentation = message_stream_presentation(message, &visible_text);
+                    let streaming_body = streaming_bodies.get(&field(message, "id")).cloned();
                     let participant_name = operator_name.as_deref().or_else(||
                         (user && !sharing_primary.is_empty()).then_some(sharing_primary.as_str()));
                     let participant_colour = participant_name.map(operator_colour);
@@ -2542,7 +2579,9 @@ impl Render for ChatPane {
                         .text_size(px(chat_size))
                         .line_height(px(chat_line_height))
                         .children(bubble_metadata)
-                        .child(
+                        .child(if let Some(streaming_body) = &streaming_body {
+                            streaming_body.clone().into_any_element()
+                        } else {
                             gpui_kit::component::text::TextView::markdown(
                                 SharedString::from(format!(
                                     "message-markdown-{}",
@@ -2554,9 +2593,9 @@ impl Render for ChatPane {
                             .scrollable(false)
                             .w_full()
                             .min_w_0()
-                            .max_w_full(),
-                        );
-                    if let Some(status_label) = stream_presentation.status_label {
+                            .max_w_full().into_any_element()
+                        });
+                    if let Some(status_label) = stream_presentation.status_label.filter(|_| streaming_body.is_none()) {
                         body = body.child(
                             div()
                                 .text_size(px(11.))
@@ -3083,7 +3122,7 @@ impl Render for ChatPane {
                     .shadow(vec![BoxShadow::new(px(0.), px(18.), rgba(0x00000066).into()).blur_radius(px(48.))])
                     .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
                     .child(prompt)
-                    .children(self.error.as_ref().map(|error| div().px_4().py_2().text_color(rgb(0xe2645a)).child(error.clone())))
+                    .children(self.error.as_deref().and_then(connection_recovery::visible_error).map(|error| div().px_4().py_2().text_color(rgb(0xe2645a)).child(error.to_owned())))
                     .child(div().flex().justify_end().p_2().child(Button::new("approval-review-later").text_size(cx.theme().font_size).label("Review later")
                         .on_click(cx.listener(|pane,_,_,cx| { pane.approval_popup_open = false; cx.notify(); }))))));
         }
@@ -3141,9 +3180,6 @@ impl Render for ChatPane {
                                 scale,
                             ))
                             .max_w_full()
-                            .border_l_1()
-                            .border_color(rgb(palette.line))
-                            .border_blend_mode(crate::surface_blend::separator_mode())
                             .bg(crate::surface_blend::background(
                                 crate::surface_blend::Area::Pane, palette.paper,
                             ))
@@ -3153,6 +3189,7 @@ impl Render for ChatPane {
             }
             container.into_any_element()
         } else if let Some(rail) = rail {
+            let resize_appearance = gpui_kit::component::resizable::resize_handle_appearance();
             div()
                 .flex_1()
                 .min_h_0()
@@ -3163,6 +3200,19 @@ impl Render for ChatPane {
                         self.task_id()
                     )))
                     .with_state(&self.companion_resize)
+                    // The sliding detail frame owns its left divider. Keep the
+                    // split's grab band, but only paint its resize feedback
+                    // when the sidebar is settled and the handle is engaged.
+                    .with_handle_appearance(Rc::new(move |handle, window, cx| {
+                        if detail_progress >= 1.
+                            && handle.state() != gpui_kit::base::ResizeHandleState::Idle
+                        {
+                            resize_appearance(handle, window, cx)
+                        } else {
+                            // None would restore the base handle's fixed line.
+                            Some(div().size_full().into_any_element())
+                        }
+                    }))
                     .child(
                         resizable_panel().size_range(px(0.)..Pixels::MAX).child(
                             div()
@@ -3508,15 +3558,20 @@ impl ChatPane {
         let provider_icon = task.and_then(|task| {
             branding::provider_for_ink(&field(task, "provider"), &field(task, "model"), palette.ink)
         });
-        let header_padding_y = match field(&self.snapshot["settings"], "interfaceDensity").as_str()
-        {
-            "tight" => space::TIGHT,
-            "spacious" => space::GROUP,
+        let tern_tiles = design::tile_theme()
+            == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+        let density = field(&self.snapshot["settings"], "interfaceDensity");
+        let header_padding_y = match (tern_tiles, density.as_str()) {
+            (true, "spacious") => 8.,
+            (true, _) => 6.,
+            (false, "tight") => space::TIGHT,
+            (false, "spacious") => space::GROUP,
             _ => space::INSET,
         };
-        let avatar_size = match field(&self.snapshot["settings"], "interfaceDensity").as_str() {
-            "tight" => 26.,
-            "spacious" => 34.,
+        let avatar_size = match (tern_tiles, density.as_str()) {
+            (true, _) => 24.,
+            (false, "tight") => 26.,
+            (false, "spacious") => 34.,
             _ => 30.,
         };
         let identity_mark = if let Some(image) = provider_icon {
@@ -3545,6 +3600,21 @@ impl ChatPane {
                 .child(name.chars().next().unwrap_or('m').to_string())
                 .into_any_element()
         };
+        let identity = div()
+            .flex_1().min_w_0().h_full().flex().items_center()
+            .gap(px(if tern_tiles { 8. } else { space::INSET }))
+            .child(identity_mark)
+            .child(div().flex_1().min_w_0().flex().flex_col().child(
+                div().text_size(px(13.2))
+                    .font_weight(if tern_tiles { FontWeight::MEDIUM } else { FontWeight::BOLD })
+                    .truncate().child(title),
+            ));
+        let identity = if tern_tiles {
+            if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
+                gpui_kit::component::dock::pane_drag_region(identity, &group.read(cx).context(cx), cx)
+                    .into_any_element()
+            } else { identity.into_any_element() }
+        } else { identity.into_any_element() };
         let mut header = div()
             // Keep avatar and row geometry aligned with the native density tokens.
             .h(px(avatar_size + 2. * header_padding_y))
@@ -3553,11 +3623,12 @@ impl ChatPane {
             .overflow_hidden()
             .flex()
             .items_center()
-            .gap(px(space::INSET))
-            .px(px(space::GROUP))
+            .gap(px(if tern_tiles { 8. } else { space::INSET }))
+            .px(px(if tern_tiles { 13. } else { space::GROUP }))
             .border_b_1()
             .border_color(rgb(palette.line))
             .border_blend_mode(crate::surface_blend::separator_mode())
+            .when(tern_tiles && design::border_opacity() == 0, |this| this.border_b_0())
             .child({
                 let geometry = self.decoration_bounds.header.clone();
                 canvas(move |bounds, _, _| geometry.set(Some(bounds)), |_, _, _, _| ())
@@ -3567,16 +3638,7 @@ impl ChatPane {
                 &self.task_id(), "header-wash", crate::activity_sparkles::SparkleLayout::HeaderWash,
                 true, window, cx,
             ))
-            .child(identity_mark)
-            .child(
-                div().flex_1().min_w_0().flex().flex_col().child(
-                    div()
-                        .text_size(px(13.2))
-                        .font_weight(FontWeight::BOLD)
-                        .truncate()
-                        .child(title),
-                ),
-            );
+            .child(identity);
         if let Some(group) = self.dock_group.clone() {
             use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
             let owner = cx.weak_entity();
@@ -3616,8 +3678,7 @@ impl ChatPane {
                     .anchor(Anchor::TopRight),
             );
         }
-        header
-            .child(
+        header = header.child(
                 Button::new("toggle-pane-secondary-sidebar")
                     .compact()
                     .text()
@@ -3632,7 +3693,12 @@ impl ChatPane {
                         "Show this pane's secondary sidebar"
                     })
                     .on_click(cx.listener(|pane, _, _, cx| pane.toggle_companion(cx))),
-            )
-            .into_any_element()
+            );
+        if tern_tiles {
+            if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
+                header = header.child(gpui_kit::component::dock::pane_controls(&group.read(cx).context(cx), cx));
+            }
+        }
+        header.into_any_element()
     }
 }

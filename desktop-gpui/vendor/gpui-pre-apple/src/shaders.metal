@@ -45,9 +45,19 @@ float vertical_fade_alpha(float y, float top, float bottom, float top_height, fl
   return top_alpha * bottom_alpha;
 }
 
+float rounded_mask_alpha(Bounds_ScaledPixels bounds, float radius, float2 position) {
+  if (radius <= 0.0) return 1.0;
+  float2 half_size = float2(bounds.size.width, bounds.size.height) * 0.5;
+  float2 center = float2(bounds.origin.x, bounds.origin.y) + half_size;
+  float2 q = abs(position - center) - half_size + radius;
+  float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+  return saturate(0.5 - distance);
+}
+
 float content_mask_alpha(ContentMask_ScaledPixels mask, float2 position) {
   return vertical_fade_alpha(position.y, mask.fade_top, mask.fade_bottom, mask.fade_height, mask.fade_bottom_height) *
-         vertical_fade_alpha(position.x, mask.fade_left, mask.fade_right, mask.fade_left_height, mask.fade_right_height);
+         vertical_fade_alpha(position.x, mask.fade_left, mask.fade_right, mask.fade_left_height, mask.fade_right_height) *
+         rounded_mask_alpha(mask.rounded_bounds, mask.rounded_radius, position);
 }
 
 float4 fade_color(float4 color, ContentMask_ScaledPixels mask, float2 position) {
@@ -935,6 +945,8 @@ struct SurfaceVertexOutput {
   float2 texture_position;
   float4 fade [[flat]];
   float4 horizontal_fade [[flat]];
+  float4 rounded_bounds [[flat]];
+  float rounded_radius [[flat]];
   float clip_distance [[clip_distance]][4];
 };
 
@@ -943,6 +955,8 @@ struct SurfaceFragmentInput {
   float2 texture_position;
   float4 fade [[flat]];
   float4 horizontal_fade [[flat]];
+  float4 rounded_bounds [[flat]];
+  float rounded_radius [[flat]];
 };
 
 vertex SurfaceVertexOutput surface_vertex(
@@ -967,6 +981,8 @@ vertex SurfaceVertexOutput surface_vertex(
       texture_position,
       float4(surface.content_mask.fade_top, surface.content_mask.fade_bottom, surface.content_mask.fade_height, surface.content_mask.fade_bottom_height),
       float4(surface.content_mask.fade_left, surface.content_mask.fade_right, surface.content_mask.fade_left_height, surface.content_mask.fade_right_height),
+      float4(surface.content_mask.rounded_bounds.origin.x, surface.content_mask.rounded_bounds.origin.y, surface.content_mask.rounded_bounds.size.width, surface.content_mask.rounded_bounds.size.height),
+      surface.content_mask.rounded_radius,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -988,6 +1004,12 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
   float4 color = ycbcrToRGBTransform * ycbcr;
   color.a *= vertical_fade_alpha(input.position.y, input.fade.x, input.fade.y, input.fade.z, input.fade.w) *
              vertical_fade_alpha(input.position.x, input.horizontal_fade.x, input.horizontal_fade.y, input.horizontal_fade.z, input.horizontal_fade.w);
+  Bounds_ScaledPixels rounded_bounds;
+  rounded_bounds.origin.x = input.rounded_bounds.x;
+  rounded_bounds.origin.y = input.rounded_bounds.y;
+  rounded_bounds.size.width = input.rounded_bounds.z;
+  rounded_bounds.size.height = input.rounded_bounds.w;
+  color.a *= rounded_mask_alpha(rounded_bounds, input.rounded_radius, input.position.xy);
   return color;
 }
 

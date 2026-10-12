@@ -152,14 +152,60 @@ be archived.
   tab drag, that entire region remains a tab drop target.
 - Close controls appear on hover/focus and remain keyboard accessible. Closing a
   GUI pane never implies stopping the underlying agent run.
-- Divider hover lights the full divider in Monitter blue. Maintain a forgiving
-  invisible hit area; do not add a pill handle. Release, missed release, and
-  window deactivation must cancel resizing reliably.
+- In Monitter, divider hover lights the full divider in Monitter blue. Maintain
+  a forgiving invisible hit area; do not add a pill handle in that layout.
+  Release, missed release, and window deactivation must cancel resizing reliably.
 - The compact sidebar follows the native traffic-light cluster width. Expanded
   sidebar resizing preserves the user's selected width, capped at 360 design
   pixels. Saved-width restoration must never interrupt a held divider gesture.
   Usage rings share one row and grow to at most 64 design pixels; further width
   enlarges the gaps. The clock remains four pixels larger than the rings.
+
+### Tile layout variants
+
+Preferences → Appearance → Tile layout selects the original **Monitter**
+workspace or **Tern**, independently of light/dark palettes and accent.
+The reference is [Stencil's Tern](https://stencil.so/tern).
+
+Tern uses 6 design-pixel gutters and outer workspace inset, 8px tile corners,
+a darker dock backdrop, a visible 1px idle outline with a 20% foreground-opacity
+baseline, and a subdued accent focus outline. Scale both outlines with the
+existing **Border and divider opacity** setting; 0% hides them. Paint focus
+above the idle outline and Preferences above all tile chrome. Round the complete
+tile, including native browser content, not only its header. Tern gutters use the
+same configured surface opacity as Monitter, without an extra background fill
+under pane bodies; pane area blend modes remain in effect.
+Tern panes have no tab or title strip. Chat headers place Move and Close
+immediately after the secondary sidebar toggle. Other panes reveal these two
+floating controls only while hovering their top-right corner. Move uses the
+native dock drag; Close removes the view without stopping its backend session.
+Cmd-T opens a new blank pane beside the focused pane, with a vertical divider.
+In standard shortcut mode, Cmd/Ctrl-D opens a vertical split and
+Cmd/Ctrl-Shift-D opens a horizontal split in either layout theme.
+Chat headers use 13px horizontal inset,
+6px vertical inset (8px for spacious density), a 24px avatar, medium-weight
+titles and a bottom divider controlled by divider opacity. The identity/title
+region drags the pane through native dock drag/drop, keeping action buttons
+independent. Scale these dimensions with the existing interface
+scale; preserve divider hit targets, keyboard focus, tab operations and content.
+
+The Tern sidebar uses two separate 8px-rounded, bordered bubbles: navigation
+(brand, view tabs, approvals and scrolling listing), and usage/resources
+(provider rings, clock, CPU and RAM). Both bubble borders follow the same border
+opacity setting as tiles. Keep 6 logical-pixel outer insets and a 6px gap, sharing
+the dock backdrop without stacking sidebar fills. Compact
+navigation keeps its original actions; its usage bubble stacks provider rings
+and compact real metrics to fit the narrow rail. Provider details and resource
+actions remain available.
+
+Tern splitters, including the sidebar boundary, retain their invisible grab
+bands but paint no full-length idle line. Hover/drag shows only a centered
+24px grip, so divisions cannot form hard rules across the workspace.
+
+Switching layouts must update retained tiles immediately without recreating
+panes, reloading browser pages or restarting terminal/agent sessions. Monitter
+restores the user's Classic/Modern tab choice. Save the layout variant in the
+private revisioned client-local workspace store; missing values retain Monitter.
 
 ## Activity and chat hierarchy
 
@@ -294,3 +340,20 @@ including inline-encoding overhead.
 - [`src/shell.rs`](src/shell.rs), [`src/chat.rs`](src/chat.rs),
   [`src/composer_popup.rs`](src/composer_popup.rs): native component implementation.
 - [`parity.json`](parity.json): implementation and verification boundaries.
+
+### Named workspaces
+
+A compact strip across the top switches between saved native pane layouts. In
+Tern, the tabs are rounded pills: a content icon, truncated name, and colour
+dot; the active pill uses the same colour for its outline and faint tint. The
+strip scrolls horizontally and reserves space for native window controls.
+Use + to create a workspace. Each pill reveals a pencil button on hover or
+keyboard focus; click it, double-click the pill, or press F2 on a focused pill
+to open its anchored dropdown for name, icon and colour. The menu overlays
+the panes rather than resizing them, and closes on outside click or Escape.
+The editor has named fields, colour presets,
+explicit Save/Cancel, Enter to save, and Escape to cancel. Names, appearance,
+active workspace and each layout survive relaunch through the private local
+workspace store; existing backend preference IPC carries only the active layout.
+Switching hides retained panes and never closes agent runs or server-owned PTYs.
+Tasks and drafts remain globally available from the sidebar.

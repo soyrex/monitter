@@ -25,7 +25,7 @@ mod test_support;
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    App, AppContext as _, Context, Entity, Pixels, SharedString, WeakEntity, Window, actions, px,
+    App, AppContext as _, Context, Entity, Hsla, Pixels, SharedString, WeakEntity, Window, actions, px,
 };
 
 /// The behavior half of the panel traits, which every panel implements
@@ -56,7 +56,7 @@ pub use gpui_base::dock::{
     register_panel,
 };
 pub use panel::*;
-pub use tab_panel::{DragPanelPreview, pane_menu};
+pub use tab_panel::{DragPanelPreview, pane_controls, pane_drag_region, pane_menu};
 
 actions!(dock, [ToggleZoom, ClosePanel]);
 
@@ -83,6 +83,7 @@ pub(crate) struct SkinShared {
     toggle_button_visible: Cell<bool>,
     close_button_visible: Cell<bool>,
     tab_bar_style: Cell<TabBarStyle>,
+    tile_style: Cell<DockTileStyle>,
     tab_bar_height: Cell<Pixels>,
     tab_padding_x: Cell<Pixels>,
     tab_max_width: Cell<Pixels>,
@@ -106,6 +107,10 @@ impl SkinShared {
 
     pub(crate) fn tab_bar_style(&self) -> TabBarStyle {
         self.tab_bar_style.get()
+    }
+
+    pub(crate) fn tile_style(&self) -> DockTileStyle {
+        self.tile_style.get()
     }
 
     pub(crate) fn tab_bar_height(&self) -> Pixels {
@@ -136,12 +141,22 @@ impl SkinShared {
 }
 
 /// Appearance of dock tab bars. Classic remains the default GPUI component
-/// rendering; Modern is the flat contiguous style used by Monitter.
+/// rendering; Modern is contiguous, and Pill is compact and borderless.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TabBarStyle {
     #[default]
     Classic,
     Modern,
+    Pill,
+}
+
+/// Geometry of the complete dock tile, independent of tab presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum DockTileStyle {
+    #[default]
+    Contiguous,
+    /// Inset each tile by half the gutter, including its tab strip and body.
+    Rounded { gutter: Pixels, radius: Pixels, backdrop: Hsla, border_color: Hsla },
 }
 
 /// The gpui-component appearance for a [`DockArea`], and the handle its
@@ -193,6 +208,7 @@ impl DockSkin {
                 toggle_button_visible: Cell::new(true),
                 close_button_visible: Cell::new(false),
                 tab_bar_style: Cell::new(TabBarStyle::Classic),
+                tile_style: Cell::new(DockTileStyle::Contiguous),
                 tab_bar_height: Cell::new(px(32.)),
                 tab_padding_x: Cell::new(px(12.)),
                 tab_max_width: Cell::new(px(210.)),
@@ -206,14 +222,22 @@ impl DockSkin {
         &self.shared
     }
 
+    /// Change presentation without rebuilding the retained dock tree.
+    pub fn set_tile_style(&self, style: DockTileStyle, cx: &mut App) {
+        if self.shared.tile_style.replace(style) != style {
+            self.shared.notify(cx);
+        }
+    }
+
     /// Whether a single-panel tab group draws a plain title or a full tab bar.
     pub fn panel_style(&self) -> PanelStyle {
         self.shared.panel_style()
     }
 
     pub fn set_panel_style(&self, style: PanelStyle, cx: &mut App) {
-        self.shared.panel_style.set(style);
-        self.shared.notify(cx);
+        if self.shared.panel_style.replace(style) != style {
+            self.shared.notify(cx);
+        }
     }
 
     /// Whether tab bars offer the affordance that collapses a neighbouring

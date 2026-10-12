@@ -5271,6 +5271,7 @@ dependencies = [
  "raw-window-handle",
  "rusqlite",
  "serde_json",
+ "unicode-segmentation",
  "url",
  "vt100",
  "wry",
