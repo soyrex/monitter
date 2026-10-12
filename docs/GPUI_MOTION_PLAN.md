@@ -1,6 +1,6 @@
 # GPUI animation plan
 
-Status: implemented; native validation in progress, 12 October 2026. Worktree: `/Users/alex/code/monitter-gpui-motion-plan`. Branch: `plan/gpui-motion-20261012`. Source snapshot: `7578bcbd91dd3689b138c88314d2eb9294e193f2`, including the main checkout's existing edits without changing its files or index.
+Status: implemented and isolated validation completed, 13 October 2026; remaining coverage limits are recorded below. Worktree: `/Users/alex/code/monitter-gpui-motion-plan`. Branch: `plan/gpui-motion-20261012`. Source snapshot: `7578bcbd91dd3689b138c88314d2eb9294e193f2`, including the main checkout's existing edits without changing its files or index.
 
 ## Recommended direction
 
