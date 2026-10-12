@@ -57,6 +57,48 @@ pub const SIDEBAR_TABS_ROW_PAD_X: f32 = 6.;
 pub const SIDEBAR_TABS_ROW_PAD_TOP: f32 = 6.;
 pub const SIDEBAR_TAB_HEIGHT: f32 = 25.;
 
+/// Tern layout tokens in design pixels. Apply interface scale at the boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TernSpacing {
+    pub gutter: f32,
+    pub outer_margin: f32,
+}
+impl TernSpacing {
+    /// Each tile owns half a gutter; the shell supplies only the extra perimeter.
+    pub fn outer_padding(self) -> f32 { self.outer_margin - self.gutter / 2. }
+}
+pub fn tern_spacing(settings: &Value) -> TernSpacing {
+    let gutter = match field(settings, "interfaceDensity").as_str() {
+        "tight" => 4., "spacious" => 8., _ => 6.,
+    };
+    TernSpacing { gutter, outer_margin: gutter + 2. }
+}
+pub fn workspace_route_needs_fill(tile_theme: NativeTileTheme, has_dock: bool) -> bool {
+    tile_theme != NativeTileTheme::Tern || !has_dock
+}
+
+#[cfg(test)]
+mod tern_spacing_tests {
+    use super::*;
+    #[test]
+    fn density_preserves_a_wider_perimeter_without_doubling_tile_insets() {
+        for (density, gutter, margin) in [("tight",4.,6.), ("normal",6.,8.), ("spacious",8.,10.)] {
+            let spacing = tern_spacing(&serde_json::json!({"interfaceDensity":density}));
+            assert_eq!(spacing.gutter, gutter);
+            assert_eq!(spacing.outer_margin, margin);
+            assert!(spacing.outer_margin > spacing.gutter);
+            assert_eq!(spacing.outer_padding() + spacing.gutter / 2., margin);
+            assert_eq!(spacing.gutter / 2. + spacing.gutter / 2., gutter);
+        }
+    }
+    #[test]
+    fn tern_dock_routes_keep_one_backdrop_while_empty_states_keep_their_fill() {
+        assert!(!workspace_route_needs_fill(NativeTileTheme::Tern, true));
+        assert!(workspace_route_needs_fill(NativeTileTheme::Tern, false));
+        assert!(workspace_route_needs_fill(NativeTileTheme::Monitter, true));
+    }
+}
+
 // Typography — font families come from `desktop-gpui/src/fonts.rs` and the
 // `--interface-font` / `--chat-font` / `--terminal-font` tokens in Tauri.
 pub const FONT_SANS: &str = "IBM Plex Sans";

@@ -225,6 +225,12 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let usage_width = if self.sidebar_collapsed {
+            design::compact_sidebar_width_design(design::interface_scale())
+        } else { self.current_sidebar_width(cx) };
+        if let Some(usage) = &self.sidebar_usage {
+            usage.update(cx, |usage, cx| usage.set_composed_palette(palette, usage_width, cx));
+        }
         let ready = self.workspace_ready();
         let tern =
             design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
@@ -277,13 +283,11 @@ impl Desktop {
                     .accessibility_label(format!("Edit {} workspace", item.name))
                     .tooltip("Edit workspace")
                     .disabled(!ready && !is_open)
-                    .opacity(
-                        if is_open || is_hovered || focus.is_focused(window) {
-                            1.
-                        } else {
-                            0.
-                        },
-                    )
+                    .opacity(if is_open || is_hovered || focus.is_focused(window) {
+                        1.
+                    } else {
+                        0.
+                    })
                     .focus(|style| style.opacity(1.))
                     .on_click(|_, _, cx| cx.stop_propagation());
                 let editor_focus = self
@@ -369,7 +373,9 @@ impl Desktop {
                             if active { ", selected" } else { "" }
                         ))
                         .child(Icon::new(icon(&item.icon)).with_size(px(16.)))
-                        .child(div().min_w_0().truncate().child(item.name.clone()))
+                        .child(div().min_w_0().truncate()
+                            .text_size((cx.theme().font_size - px(4.)).max(px(8.)))
+                            .child(item.name.clone()))
                         .child(menu)
                         .child(div().size(px(8.)).rounded_full().bg(color))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -397,12 +403,39 @@ impl Desktop {
                 );
             }
         }
+        tabs = tabs.child(
+            Button::new("add-workspace")
+                .ghost()
+                .compact()
+                .flex_shrink_0()
+                .label("+")
+                .accessibility_label("New workspace")
+                .tooltip("New workspace")
+                .disabled(
+                    !ready
+                        || self
+                            .named_workspaces
+                            .as_ref()
+                            .is_none_or(|set| set.items.len() >= 24),
+                )
+                .on_click(cx.listener(|view, _, window, cx| view.add_named_workspace(window, cx))),
+        );
         let bar = div()
             .w_full()
             .flex_shrink_0()
-            .pl(gpui_kit::px(if window.is_fullscreen() { 10. } else { 82. }))
+            .pl(gpui_kit::px(
+                if window.is_fullscreen() || (tern && !self.sidebar_is_hidden()) {
+                    10.
+                } else {
+                    82.
+                },
+            ))
             .pr(px(10.))
-            .py(px(5.))
+            // macOS controls are 14pt tall with a 22pt top inset: their
+            // centre is 29pt. Keep the whole row on that native centre line,
+            // including the usage rings, independently of interface scale.
+            .h(gpui_kit::px(58.))
+            .py_0()
             .flex()
             .items_center()
             .gap(px(5.))
@@ -413,24 +446,30 @@ impl Desktop {
                     window.start_window_move();
                 }
             })
+            .when(tern, |bar| {
+                let label = if self.sidebar_is_hidden() {
+                    "Show full sidebar"
+                } else if self.sidebar_collapsed {
+                    "Hide sidebar"
+                } else {
+                    "Use icon sidebar"
+                };
+                bar.child(
+                    Button::new("cycle-main-sidebar")
+                        .ghost()
+                        .compact()
+                        .flex_shrink_0()
+                        .icon(IconName::PanelLeft)
+                        .accessibility_label(label)
+                        .tooltip(label)
+                        .on_click(
+                            cx.listener(|view, _, window, cx| view.toggle_sidebar(window, cx)),
+                        ),
+                )
+            })
             .child(tabs)
-            .child(
-                Button::new("add-workspace")
-                    .compact()
-                    .label("+")
-                    .accessibility_label("New workspace")
-                    .tooltip("New workspace")
-                    .disabled(
-                        !ready
-                            || self
-                                .named_workspaces
-                                .as_ref()
-                                .is_none_or(|set| set.items.len() >= 24),
-                    )
-                    .on_click(
-                        cx.listener(|view, _, window, cx| view.add_named_workspace(window, cx)),
-                    ),
-            );
+            .children(self.workspace_usage_rings.clone());
+
         div()
             .flex_shrink_0()
             .w_full()
@@ -439,13 +478,6 @@ impl Desktop {
             .font_family(cx.theme().font_family.clone())
             .text_size(cx.theme().font_size)
             .text_color(rgb(palette.ink))
-            // Match the native tile gutters' color, alpha and normal blend;
-            // do not add another translucent fill behind the pane bodies.
-            .when(tern, |this| {
-                this.bg(design::surface_color(
-                    crate::pane_appearance::tile_backdrop(palette),
-                ))
-            })
             .child(bar)
     }
     fn render_workspace_editor(

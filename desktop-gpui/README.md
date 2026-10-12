@@ -221,3 +221,14 @@ immediately. This is GUI-only presentation metadata in
 `streaming-display.v1.json`; it never delays execution, alters the saved message,
 or changes mobile/shared rendering. Each live message owns its timer and only
 remeasures its own virtual transcript row.
+
+### Existing sessions in a new tab
+
+The new-tab landing screen keeps its New chat, Terminal and Browser actions,
+then offers **Open an existing chat** underneath. The list groups running chats
+first and other unarchived chats by newest activity. Search covers all visible,
+unarchived sessions across projects and workspaces using title, agent, project,
+model and working-folder metadata. Results are virtualized, with no recent-list
+cap before filtering. Arrow keys select a result and Enter opens it in the
+landing tab's own pane group, reusing an already-open chat rather than creating
+another conversation or restarting its agent.

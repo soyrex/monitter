@@ -293,7 +293,7 @@ fn tern_new_tab_creates_a_vertical_split_and_monitter_keeps_tabs(cx: &mut TestAp
                 let palette = crate::design::palette(&settings, gpui::WindowAppearance::Dark);
                 dock.set_pane_appearance(&settings, palette, cx);
                 dock.set_tab_appearance(&settings, 100, cx);
-                let first = dock.empty_spec("empty:start", cx).unwrap();
+                let first = dock.empty_spec("empty:start", window, cx).unwrap();
                 dock.add(first, DockPlacement::Center, None, window, cx).unwrap();
                 dock.focus("empty:start", window, cx);
                 let group = dock.focused_group_node(window, cx).unwrap();
@@ -326,7 +326,7 @@ fn tern_new_tab_creates_a_vertical_split_and_monitter_keeps_tabs(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
-fn tern_transparency_uses_the_configured_alpha_without_a_fill_under_panes(cx: &mut TestAppContext) {
+fn tern_transparency_exposes_native_backdrop_without_a_fill_under_panes(cx: &mut TestAppContext) {
     use super::{DockWorkspace, PaneFactory};
     use gpui_kit::component::dock::DockAreaRenderer;
     use serde_json::json;
@@ -348,8 +348,10 @@ fn tern_transparency_uses_the_configured_alpha_without_a_fill_under_panes(cx: &m
                 dock.set_pane_appearance(&settings, palette, cx);
                 let mut frame = dock.skin.frame(window, cx);
                 assert!(frame.style().background.is_none(), "Tern must not cover transparent pane bodies with a full-area background");
-                let expected = if surface == "opaque" { 1. } else { 77. / 255. };
-                assert!((frame.style().border_color.unwrap().a - expected).abs() < 0.002, "gutter/corner backdrop honors the chosen transparency");
+                // Tern exposes the native window finish in gutters/corners.
+                // The configured alpha belongs to painted pane surfaces;
+                // applying it here would add a second layer underneath them.
+                assert_eq!(frame.style().border_color.unwrap().a, 0., "gutter/corner backdrop stays clear for {surface} surfaces");
             });
         }
     });

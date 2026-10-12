@@ -20,6 +20,7 @@ fn icon_button(
     cx: &mut Context<Desktop>,
 ) -> AnyElement {
     Button::new(id.into())
+        .when(design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern, |button| button.ghost())
         .compact()
         .icon(Icon::default().data(icon).with_size(design::ui_scaled_px(16.)))
         .tooltip(label)
@@ -170,11 +171,10 @@ pub(super) fn render(
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .p(gpui_kit::px(6.))
-            .gap(gpui_kit::px(6.))
-            .bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, crate::pane_appearance::tile_backdrop(palette)))
+            .p(px(design::tern_spacing(&desktop.snapshot["settings"]).gutter / 2.))
+            .gap(px(design::tern_spacing(&desktop.snapshot["settings"]).gutter))
             .child(div()
-                .id("compact-navigation-bubble")
+                .id("compact-navigation")
                 .w_full()
                 .flex_1()
                 .min_h_0()
@@ -185,11 +185,7 @@ pub(super) fn render(
                 .pb(px(7.))
                 // Preserve native traffic-light access above the controls.
                 .pt(gpui_kit::px(38.))
-                .rounded(gpui_kit::px(8.))
-                .border_1()
-                .border_color(design::tile_border_color(palette))
-                .bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar))
-                .child(icon_button("compact-sidebar-expand", "Expand sidebar", icons_assets::ChevronRight.1,
+                .child(icon_button("compact-sidebar-hide", "Hide sidebar", icons_assets::ChevronLeft.1,
                     false, palette, |view, window, cx| view.toggle_sidebar(window, cx), cx))
                 .child(div().id("compact-brand-mark").w(px(32.)).h(px(32.)).flex().items_center().justify_center()
                     .managed_tooltip(|window, cx| Tooltip::new("Monitter").build(window, cx)).aria_label("Monitter")

@@ -635,8 +635,7 @@ impl Desktop {
         let mut logo_shade: Background = rgba(0x0000001a).into();
         logo_shade.blend_mode = 2;
         let brand_row = div()
-            .bg(logo_shade)
-            .when(tern, |row| row.rounded_t(gpui_kit::px(8.)))
+            .when(!tern, |row| row.bg(logo_shade))
             .h(px(brand_row_height))
             .px(px(design::space::INSET))
             .gap_2()
@@ -714,8 +713,7 @@ impl Desktop {
             .flex_col()
             .border_color(rgb(palette.line))
             .border_blend_mode(crate::surface_blend::separator_mode())
-            .bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar))
-            .when(tern, |sidebar| sidebar.bg(crate::surface_blend::background(crate::surface_blend::Area::Workspace, crate::pane_appearance::tile_backdrop(palette))));
+            .when(!tern, |sidebar| sidebar.bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar)));
         let footer = div()
             .id("sidebar-footer")
             .flex_shrink_0()
@@ -726,19 +724,17 @@ impl Desktop {
         let tree = ScrollEdgeFade::new(tree, tree_scroll, Axis::Vertical, gpui_kit::px(20.));
         let sidebar = if tern {
             sidebar
-                .p(gpui_kit::px(6.))
-                .gap(gpui_kit::px(6.))
+                .p(px(design::tern_spacing(&self.snapshot["settings"]).gutter / 2.))
+                .gap(px(design::tern_spacing(&self.snapshot["settings"]).gutter))
                 .child(div()
-                    .id("sidebar-navigation-bubble")
+                    .id("sidebar-navigation")
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .flex()
                     .flex_col()
-                    .rounded(gpui_kit::px(8.))
-                    .border_1()
-                    .border_color(design::tile_border_color(palette))
-                    .bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar))
+                    // Reserve native window controls in the full-height sidebar.
+                    .pt(gpui_kit::px(38.))
                     .child(brand_row)
                     .child(tabs)
                     .children(approval_block)

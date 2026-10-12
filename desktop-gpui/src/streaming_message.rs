@@ -72,6 +72,8 @@ impl StreamingMessage {
     }
     #[cfg(test)]
     pub(crate) fn source(&self) -> &Rc<Value> { &self.source }
+    #[cfg(test)]
+    pub(crate) fn has_pending_reveal(&self) -> bool { self.reveal.has_pending() }
 
     pub fn set_message(&mut self, source: Rc<Value>, cx: &mut Context<Self>) {
         if Rc::ptr_eq(&self.source, &source) {

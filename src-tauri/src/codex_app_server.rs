@@ -1604,6 +1604,9 @@ fn handle_server_request(
                     service.wait_for_input(&request.id, || !control.is_cancelled())
                 }
             }) {
+                Ok(response) if mcp_tool_consent(&params) => {
+                    mcp_tool_consent_wire_response(&response)
+                },
                 Ok(_response) if mode == "url" => {
                     json!({"action":"accept","content":null,"_meta":params.get("_meta").cloned().unwrap_or(Value::Null)})
                 }
@@ -1745,6 +1748,44 @@ fn handle_server_request(
             );
         }
     });
+}
+
+// Only fieldless, explicitly identified forms can be remembered as consent.
+// Unknown schema keywords may impose constraints on {}, so leave them interactive.
+pub(crate) fn mcp_tool_consent(params: &Value) -> bool {
+    if !matches!(params.get("mode").and_then(Value::as_str), Some("form" | "openai/form" | "openaiForm"))
+        || ["serverName", "message"].iter().any(|key| params.get(*key).and_then(Value::as_str).is_none_or(|text| text.trim().is_empty()))
+        || params.pointer("/_meta/codex_approval_kind").and_then(Value::as_str) != Some("mcp_tool_call")
+    {
+        return false;
+    }
+    let Some(schema) = params.get("requestedSchema").and_then(Value::as_object) else {
+        return false;
+    };
+    schema.get("type").and_then(Value::as_str) == Some("object")
+        && schema.get("properties").and_then(Value::as_object).is_some_and(|properties| properties.is_empty())
+        && schema.get("required").is_none_or(|required| required.as_array().is_some_and(|required| required.is_empty()))
+        && schema.get("$schema").is_none_or(|dialect| dialect.as_str().is_some_and(|dialect| matches!(dialect, "http://json-schema.org/draft-07/schema#" | "https://json-schema.org/draft/2020-12/schema")))
+        && schema.keys().all(|key| matches!(key.as_str(), "type" | "properties" | "required" | "$schema"))
+}
+
+pub(crate) fn mcp_tool_consent_allows(params: &Value, scope: &str) -> bool {
+    match params.pointer("/_meta/persist") {
+        Some(Value::String(value)) => value == scope,
+        Some(Value::Array(values)) => values.iter().any(|value| value.as_str() == Some(scope)),
+        _ => false,
+    }
+}
+
+fn mcp_tool_consent_wire_response(response: &Value) -> Value {
+    // The internal envelope is produced only by the validated MCP approval command.
+    // Ordinary form submission ({}) remains a one-shot approval.
+    let meta = response.get("monitterMcpApprovalPersist")
+        .and_then(Value::as_str)
+        .filter(|scope| matches!(*scope, "session" | "always"))
+        .map(|scope| json!({"persist":scope}))
+        .unwrap_or(Value::Null);
+    json!({"action":"accept","content":null,"_meta":meta})
 }
 
 fn thread_context_usage_detail(params: &Value, fallback_turn_id: &str) -> String {
@@ -2532,6 +2573,50 @@ fn thread_request(
 mod tests {
     use super::*;
     use std::{io::Cursor, path::PathBuf};
+
+    fn mcp_consent_fixture() -> Value {
+        json!({"mode":"form","serverName":"chrome-devtools","message":"Allow tool?",
+            "requestedSchema":{"type":"object","properties":{}},
+            "_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"]}})
+    }
+
+    #[test]
+    fn mcp_tool_consent_requires_explicit_fieldless_tool_metadata() {
+        let params = mcp_consent_fixture();
+        assert!(mcp_tool_consent(&params));
+        for key in ["serverName", "message", "_meta", "requestedSchema"] {
+            let mut changed = params.clone();
+            changed.as_object_mut().unwrap().remove(key);
+            assert!(!mcp_tool_consent(&changed), "missing {key}");
+        }
+        for schema in [json!({"type":"object","properties":{"name":{"type":"string"}}}),
+            json!({"type":"object","properties":{},"required":["name"]}),
+            json!({"type":"object","properties":{},"minProperties":1})] {
+            let mut changed = params.clone();
+            changed["requestedSchema"] = schema;
+            assert!(!mcp_tool_consent(&changed));
+        }
+        let mut url = params.clone();
+        url["mode"] = json!("url");
+        assert!(!mcp_tool_consent(&url));
+    }
+
+    #[test]
+    fn mcp_tool_consent_native_scope_and_wire_contract() {
+        let mut params = mcp_consent_fixture();
+        assert!(mcp_tool_consent_allows(&params, "session"));
+        assert!(mcp_tool_consent_allows(&params, "always"));
+        params["_meta"]["persist"] = json!("session");
+        assert!(mcp_tool_consent_allows(&params, "session"));
+        assert!(!mcp_tool_consent_allows(&params, "always"));
+        assert_eq!(mcp_tool_consent_wire_response(&json!({})),
+            json!({"action":"accept","content":null,"_meta":null}));
+        for scope in ["session", "always"] {
+            assert_eq!(mcp_tool_consent_wire_response(&json!({"monitterMcpApprovalPersist":scope})),
+                json!({"action":"accept","content":null,"_meta":{"persist":scope}}));
+        }
+        assert_eq!(mcp_tool_consent_wire_response(&json!({"monitterMcpApprovalPersist":"bad"}))["_meta"], Value::Null);
+    }
 
     #[test]
     fn mcp_readiness_paginates_and_waits_for_every_server() {

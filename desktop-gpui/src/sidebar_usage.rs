@@ -6,7 +6,8 @@
 //!
 //! - [`UsageRings.svelte`](../../src/lib/components/UsageRings.svelte) —
 //!   rendered in `iconOnly` / `expanded` / `showHeader={false}` mode so the
-//!   rings live below the sidebar listing and above the route footer.
+//!   rings live at the right of the workspace bar; their shared quota cache
+//!   also feeds the retained sidebar resource footer.
 //! - [`SidebarClock.svelte`](../../src/lib/components/SidebarClock.svelte) —
 //!   rendered with `expanded={true}` / `panel={true}` so the analog face and
 //!   the CPU / RAM sparklines stay visible without a toggle header.
@@ -1528,18 +1529,11 @@ impl SidebarUsageWidget {
             root
                 .min_w_0()
                 .flex_shrink_0()
-                .rounded(gpui_kit::px(8.))
-                .border_1()
-                .border_color(crate::design::tile_border_color(palette))
-                .bg(crate::surface_blend::background(
-                    crate::surface_blend::Area::Sidebar,
-                    palette.sidebar,
-                ))
         } else {
             root.border_t_1().border_color(rgb(palette.line))
         };
 
-        root = root.child(self.render_rings_row(&merged, ring_layout, palette, cx));
+        // Provider rings live in the workspace bar; resource readings stay here.
         root = root.child(self.render_clock_row(ring_layout.diameter + 4., palette, window, cx));
         if let Some(error) = &self.usage_error {
             root = root.child(
@@ -1567,11 +1561,28 @@ impl SidebarUsageWidget {
         root.into_any_element()
     }
 
+    fn build_workspace_rings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.composed_palette.unwrap_or_else(|| {
+            crate::design::palette(&self.snapshot["settings"], window.appearance())
+        });
+        let merged = project_sidebar_usage_map(self.overview_payload(), self.usage_busy,
+            self.usage_error.as_deref().unwrap_or(""), self.now_ms);
+        let account_controls = merged.get(&SidebarUsageProvider::Codex)
+            .is_some_and(|ring| ring.accounts.len() > 1);
+        let layout = RingRowLayout { diameter: 28., gap: 5., edge_padding: 0. };
+        let width = SidebarUsageProvider::ALL.len() as f32 * layout.diameter
+            + (SidebarUsageProvider::ALL.len() - 1) as f32 * layout.gap
+            + if account_controls { CODEX_ACCOUNT_ARROWS_WIDTH } else { 0. };
+        div().id("workspace-usage-rings").w(px(width)).flex_shrink_0()
+            .child(self.render_rings_row(&merged, layout, palette, true, cx)).into_any_element()
+    }
+
     fn render_rings_row(
         &mut self,
         map: &SidebarUsageMap,
         layout: RingRowLayout,
         palette: crate::design::Palette,
+        in_header: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Five providers share the available width, including the existing
@@ -1580,19 +1591,19 @@ impl SidebarUsageWidget {
         let mut strip = div()
             .id("sidebar-usage-rings")
             .w_full()
-            .py(px(crate::design::space::INSET))
+            .py(px(if in_header { 0. } else { crate::design::space::INSET }))
             .flex()
             .flex_row()
             .gap(px(layout.gap))
             .items_center()
             .justify_center()
             .px(px(layout.edge_padding));
-        if self.compact_tern() {
+        if !in_header && self.compact_tern() {
             strip = strip.flex_col().py(gpui_kit::px(4.));
         }
         for provider in SidebarUsageProvider::ALL {
             let ring = map.get(&provider).cloned().unwrap_or_default();
-            strip = strip.child(self.render_ring(provider, &ring, layout.diameter, palette, cx));
+            strip = strip.child(self.render_ring(provider, &ring, layout.diameter, palette, !in_header && self.compact_tern(), cx));
         }
         strip.into_any_element()
     }
@@ -1603,9 +1614,9 @@ impl SidebarUsageWidget {
         ring: &SidebarUsageRing,
         ring_size: f32,
         palette: crate::design::Palette,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let compact = self.compact_tern();
         let active = ring.active.as_ref();
         let weekly = ring.weekly.as_ref();
         let fallback = Rgb(
@@ -2898,6 +2909,24 @@ fn process_row_icon(process: &Value, is_root: bool) -> AnyElement {
         .data(asset)
         .with_size(px(14.))
         .into_any_element()
+}
+
+/// A retained header view shares the sidebar's quota cache and click handlers.
+/// Observing the source keeps account switches and background refreshes visible.
+pub struct WorkspaceUsageRings {
+    source: Entity<SidebarUsageWidget>,
+    _subscription: Subscription,
+}
+impl WorkspaceUsageRings {
+    pub fn new(source: Entity<SidebarUsageWidget>, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe(&source, |_, _, cx| cx.notify());
+        Self { source, _subscription: subscription }
+    }
+}
+impl Render for WorkspaceUsageRings {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.source.update(cx, |source, cx| source.build_workspace_rings(window, cx))
+    }
 }
 
 impl Render for SidebarUsageWidget {

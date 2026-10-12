@@ -574,6 +574,21 @@ pub enum ChatEvent {
         state: NativeChatPanePreferences,
     },
 }
+struct DeferredChatPublication {
+    task_id: String,
+    snapshot: Rc<Value>,
+    revision: Option<String>,
+    records: std::sync::Arc<Vec<Value>>,
+    child_transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts,
+    context_unchanged: bool,
+    history: Option<Vec<Value>>,
+    reset: bool,
+    boundary: Option<Option<String>>,
+}
+#[cfg(all(test, feature = "performance-profiling"))]
+#[path = "hidden_publication_tests.rs"]
+mod hidden_publication_tests;
+
 pub struct ChatPane {
     dock_group: Option<WeakEntity<gpui_kit::component::dock::TabGroup>>,
     #[cfg(feature = "performance-profiling")]
@@ -609,6 +624,7 @@ pub struct ChatPane {
     streaming_bodies: HashMap<String, Entity<crate::streaming_message::StreamingMessage>>,
     streaming_bodies_initialized: bool,
     transcript_context_unchanged: bool,
+    deferred_publication: Option<DeferredChatPublication>,
     activity_refresh_pending: bool,
     #[cfg(test)]
     activity_context_refreshes: usize,
@@ -662,9 +678,11 @@ pub struct ChatPane {
     details: Entity<crate::pane_details::PaneDetails>,
     approvals: Entity<crate::pane_approvals::PaneApprovals>,
     approval_popup_id: Option<String>,
+    pub(super) interaction_request_id: Option<String>,
+    pub(super) mcp_approval_supported: bool,
     approval_popup_open: bool,
     approval_focus: FocusHandle,
-    approval_details_expanded: bool,
+    pub(super) approval_details_expanded: bool,
     response_details_expanded: HashSet<String>,
     companion_context: (Option<String>, String),
     companion_width: f32,
@@ -688,6 +706,20 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // A GUI-only update can reconnect to an older resident backend.
+        // Probe capabilities without interrupting any resident agent.
+        let capability_service = service.clone();
+        let (capability_sender, capability_receiver) = futures::channel::oneshot::channel();
+        let _ = std::thread::Builder::new().name("monitter-approval-capabilities".into())
+            .stack_size(8 * 1024 * 1024).spawn(move || {
+                let supported = capability_service.invoke("read_mcp_approval_support", json!({}))
+                    .is_ok_and(|value| value["nativeScopes"] == true);
+                let _ = capability_sender.send(supported);
+            });
+        cx.spawn(async move |pane, cx| {
+            let supported = capability_receiver.await.unwrap_or(false);
+            let _ = pane.update(cx, |pane, cx| { pane.mcp_approval_supported = supported; cx.notify(); });
+        }).detach();
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 12)
@@ -1019,6 +1051,7 @@ impl ChatPane {
             streaming_bodies: HashMap::new(),
             streaming_bodies_initialized: false,
             transcript_context_unchanged: false,
+            deferred_publication: None,
             activity_refresh_pending: false,
             #[cfg(test)]
             activity_context_refreshes: 0,
@@ -1071,6 +1104,8 @@ impl ChatPane {
             details,
             approvals,
             approval_popup_id: None,
+            interaction_request_id: None,
+            mcp_approval_supported: false,
             approval_popup_open: false,
             approval_focus: cx.focus_handle(),
             approval_details_expanded: false,
@@ -1116,6 +1151,11 @@ impl ChatPane {
     /// Keep native history requests current without invalidating an unchanged
     /// task context when another task publishes a backend revision.
     pub(super) fn advance_revision(&mut self, snapshot: Rc<Value>, revision: Option<String>, cx: &mut Context<Self>) {
+        if let Some(pending) = &mut self.deferred_publication {
+            let retired = std::mem::replace(&mut pending.snapshot, snapshot.clone());
+            crate::retire_snapshot(retired, cx);
+            pending.revision = revision.clone();
+        }
         if let Some(key) = &mut self.transcript_preparation_key {
             key.advance_unaffected_snapshot(&self.snapshot, &snapshot);
         }
@@ -1222,10 +1262,123 @@ impl ChatPane {
         self.selected.clone().unwrap_or_default()
     }
     pub(crate) fn set_dock_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if visible && !self.dock_visible {
+            self.apply_deferred_publication(cx);
+            // Install sources while the reveal effect is still hidden. Normal
+            // reconciliation (including completion) updates rows before render,
+            // so existing body entities may otherwise still hold old text.
+            if let Some(state) = self.transcripts.get(&self.task_id()) {
+                for message in state.messages.iter() {
+                    if let Some(body) = self.streaming_bodies.get(&field(message, "id")) {
+                        body.update(cx, |body, cx| body.set_message(message.clone(), cx));
+                    }
+                }
+            }
+            // Bodies first created by the reveal render must also start from
+            // their full current source instead of animating the hidden backlog.
+            self.streaming_bodies_initialized = false;
+        }
         self.dock_visible = visible;
         for body in self.streaming_bodies.values() {
             body.update(cx, |body, cx| body.set_visible(visible, cx));
         }
+    }
+    /// Keep one latest prepared update while hidden. Backend collection and
+    /// the shared canonical snapshot continue; no hidden list/body work runs.
+    pub(super) fn publish_prepared(
+        &mut self, snapshot: Rc<Value>, revision: Option<String>,
+        records: Arc<Vec<Value>>,
+        child_transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts,
+        context_unchanged: bool, history: Option<Vec<Value>>, reset: bool,
+        boundary: Option<Option<String>>, cx: &mut Context<Self>,
+    ) {
+        let update = DeferredChatPublication {
+            task_id: self.task_id(),
+            snapshot, revision, records, child_transcripts, context_unchanged,
+            history, reset, boundary,
+        };
+        if self.dock_visible {
+            self.install_publication(update, cx);
+            return;
+        }
+        // Rebind source owners without refreshing hidden children. A metadata
+        // change must leave preparation invalidated through later body updates.
+        if reset || !context_unchanged {
+            self.transcript_preparation_key = None;
+        } else if let Some(key) = &mut self.transcript_preparation_key {
+            key.advance_unaffected_snapshot(&self.snapshot, &update.snapshot);
+        }
+        self.companion.update(cx, |pane, _| pane.advance_unaffected_snapshot(update.snapshot.clone()));
+        let retired = std::mem::replace(&mut self.snapshot, update.snapshot.clone());
+        crate::retire_snapshot(retired, cx);
+        self.revision = update.revision.clone();
+        self.slash.update(cx, |slash, _| slash.advance_revision(self.revision.as_deref().unwrap_or("")));
+        self.activity_refresh_pending = false;
+        self.transcript_context_unchanged = false;
+        if self.deferred_publication.as_ref().is_some_and(|pending| pending.task_id != update.task_id) {
+            if let Some(retired) = self.deferred_publication.take() {
+                crate::retire_snapshot(retired.snapshot, cx);
+                cx.background_executor().spawn(async move { drop(retired.history) }).detach();
+            }
+        }
+        if let Some(pending) = &mut self.deferred_publication {
+            let retired = std::mem::replace(&mut pending.snapshot, update.snapshot);
+            crate::retire_snapshot(retired, cx);
+            pending.revision = update.revision;
+            pending.records = update.records;
+            pending.child_transcripts = update.child_transcripts;
+            pending.context_unchanged &= update.context_unchanged;
+            pending.reset |= update.reset;
+            if update.reset {
+                pending.boundary = None;
+                if let Some(retired) = pending.history.take() {
+                    cx.background_executor().spawn(async move { drop(retired) }).detach();
+                }
+            }
+            if update.boundary.is_some() { pending.boundary = update.boundary; }
+            if let Some(history) = update.history {
+                if let Some(retired) = pending.history.replace(history) {
+                    cx.background_executor().spawn(async move { drop(retired) }).detach();
+                }
+            }
+        } else {
+            self.deferred_publication = Some(update);
+            // Invalidate the retained view once so its first revealed draw
+            // executes the drain rather than replaying an older cached scene.
+            // Subsequent hidden chunks only replace the pending payload.
+            cx.notify();
+        }
+    }
+    pub(super) fn apply_deferred_publication(&mut self, cx: &mut Context<Self>) {
+        if let Some(update) = self.deferred_publication.take() {
+            self.install_publication(update, cx);
+        }
+    }
+    fn install_publication(&mut self, update: DeferredChatPublication, cx: &mut Context<Self>) {
+        let DeferredChatPublication { task_id: source_task, snapshot, revision, records, child_transcripts,
+            context_unchanged, history, reset, boundary } = update;
+        let task_id = self.task_id();
+        if source_task != task_id {
+            crate::retire_snapshot(snapshot, cx);
+            cx.background_executor().spawn(async move { drop(history) }).detach();
+            return;
+        }
+        // Production resets always include prepared history. Keep the helper
+        // safe for a sync-only reset by deriving this task's authoritative rows.
+        let history = history.or_else(|| reset.then(|| {
+            snapshot["messages"].as_array().into_iter().flatten()
+                .filter(|row| row["taskId"].as_str() == Some(task_id.as_str())).cloned().collect()
+        }));
+        // A later reset clears accepted page boundaries. A later removal also
+        // prevents an old cursor being restored after authoritative history.
+        let boundary = boundary.filter(|before| before.as_ref().is_none_or(|id| {
+            snapshot["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| {
+                row["id"].as_str() == Some(id) && row["taskId"].as_str() == Some(task_id.as_str())
+            }))
+        }));
+        self.sync_prepared(snapshot, revision, records, child_transcripts, context_unchanged, cx);
+        if let Some(history) = history { self.reconcile_history(history, reset, cx); }
+        if let Some(boundary) = boundary { self.restore_history_boundary(boundary, cx); }
     }
     pub fn sync_prepared(
         &mut self, snapshot: Rc<Value>, revision: Option<String>,
@@ -1653,7 +1806,7 @@ impl ChatPane {
         let Some(service) = self.service.clone() else {
             return;
         };
-        let resolved_request = matches!(command, "resolve_input" | "resolve_approval")
+        let resolved_request = matches!(command, "resolve_input" | "resolve_approval" | "resolve_mcp_approval")
             .then(|| field(&args, "approvalId"));
         self.busy = true;
         self.composer_footer
@@ -1997,6 +2150,10 @@ impl Render for StableTranscriptList {
 
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Painting is the earliest authoritative reveal observation; the dock
+        // visibility callback follows this draw. Install latest content now so
+        // even the first revealed frame cannot display an old hidden snapshot.
+        if !self.dock_visible { self.apply_deferred_publication(cx); }
         let button_flight = self.bottom_button_exit.as_ref().map(|exit| exit.sample(std::time::Instant::now()));
         if button_flight.is_some_and(|(_, finished)| finished) { self.bottom_button_exit = None; }
         let button_flight = button_flight.filter(|(_, finished)| !finished).map_or(0., |(progress, _)| progress);
@@ -3010,6 +3167,7 @@ impl Render for ChatPane {
                 self, palette, cx.theme().font_family.clone(), window.appearance(),
             ));
         }
+        self.streaming_bodies_initialized = true;
         let transcript = self.transcript_viewport.as_ref().unwrap().clone()
             .cached(StyleRefinement::default().flex_1().min_h_0());
         let task_running = selected.is_some_and(|task| field(task, "status") == "running");
@@ -3344,7 +3502,8 @@ impl Render for ChatPane {
         let pending_approval = self.pending_tool_approval();
         let next_approval_id = pending_approval.as_ref().map(|r| field(r, "id"));
         if next_approval_id != self.approval_popup_id {
-            self.approval_popup_open = next_approval_id.is_some();
+            // Pending requests stay in the approval dock above the composer.
+            self.approval_popup_open = false;
             if self.approval_popup_open && self.focus.contains_focused(window,cx) { window.focus(&self.approval_focus,cx); }
             self.approval_details_expanded = false;
             self.approval_popup_id = next_approval_id;
@@ -3360,7 +3519,7 @@ impl Render for ChatPane {
                 let _ = owner.update(cx, |pane, cx| { pane.approval_details_expanded = !pane.approval_details_expanded; cx.notify(); });
             });
             let task = rows(&self.snapshot, "tasks").into_iter().find(|t| field(t,"id") == self.task_id()).unwrap_or(Value::Null);
-            let prompt = crate::approval_prompt::render_approval_prompt(&request, &task, &self.snapshot, palette, cx.theme().font_family.clone(), cx.theme().font_size, self.busy, self.approval_details_expanded, decision, toggle);
+            let prompt = crate::approval_prompt::render_approval_prompt(&request, &task, &self.snapshot, palette, cx.theme().font_family.clone(), cx.theme().font_size, self.busy, self.approval_details_expanded, self.mcp_approval_supported, decision, toggle);
             content = content.child(div().absolute().inset_0().occlude().flex().items_center().justify_center().p_3()
                 .child(div().absolute().inset_0()
                     .bg(Background::from(rgba(0x00000055)).backdrop_blur(20.))
@@ -3429,9 +3588,7 @@ impl Render for ChatPane {
                                 scale,
                             ))
                             .max_w_full()
-                            .bg(crate::surface_blend::background(
-                                crate::surface_blend::Area::Pane, palette.paper,
-                            ))
+                            .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15))
                             .overflow_hidden()
                             .child(rail),
                     );
@@ -3705,9 +3862,7 @@ impl Render for ChatPane {
             .relative()
             .flex()
             .flex_col()
-            .bg(crate::surface_blend::background(
-                                crate::surface_blend::Area::Pane, palette.paper,
-                            ))
+            .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15))
             .text_color(rgb(palette.ink))
             .child(measurement)
             .child(upper_workspace)
@@ -3884,6 +4039,10 @@ impl ChatPane {
             .border_b_1()
             .border_color(rgb(palette.line))
             .border_blend_mode(crate::surface_blend::separator_mode())
+            .when(tern_tiles, |this| {
+                this.border_color(design::tile_border_color(palette))
+                    .border_blend_mode(0)
+            })
             .when(tern_tiles && design::border_opacity() == 0, |this| this.border_b_0())
             .child({
                 let geometry = self.decoration_bounds.header.clone();

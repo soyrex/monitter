@@ -44,7 +44,7 @@ pub fn confirmed(command: &str, args: &Value, before: &Value, after: &Value) -> 
             row["id"] == args["id"] && row["text"] == args["text"]),
         // A missing queued item may have been delivered, so absence alone does
         // not confirm cancellation.
-        "resolve_input" | "resolve_approval" => rows(after, "approvalRequests").any(|row|
+        "resolve_input" | "resolve_approval" | "resolve_mcp_approval" => rows(after, "approvalRequests").any(|row|
             row["id"] == args["approvalId"] && matches!(row["status"].as_str(), Some("approved" | "denied"))
                 && if command == "resolve_input" { row["response"] == args["response"] }
                    else { row["decision"] == args["decision"] }),
