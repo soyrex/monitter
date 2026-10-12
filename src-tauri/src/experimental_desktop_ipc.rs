@@ -532,6 +532,15 @@ mod unix {
     #[derive(Clone)]
     pub(crate) struct Client(Arc<ClientState>);
     impl Client {
+        #[cfg(feature = "gpui-ui-fixtures")]
+        pub(crate) fn disconnected_for_ui_fixture() -> Self {
+            Self(Arc::new(ClientState {
+                profile: PathBuf::new(),
+                socket: PathBuf::new(),
+                instance: "synthetic-ui-fixture".into(),
+                disconnected: AtomicBool::new(true),
+            }))
+        }
         pub(crate) fn connect(profile: &Path) -> Result<Self, String> {
             let profile = secure_profile(profile, false)?;
             let socket = socket_path(&profile, false)?;
@@ -1093,6 +1102,10 @@ impl DesktopServer {
 pub(crate) struct Client;
 #[cfg(not(unix))]
 impl Client {
+    #[cfg(feature = "gpui-ui-fixtures")]
+    pub(crate) fn disconnected_for_ui_fixture() -> Self {
+        Self
+    }
     pub(crate) fn connect(_: &std::path::Path) -> Result<Self, String> {
         Err("Experimental backend IPC currently supports macOS/Unix only.".into())
     }
@@ -1111,6 +1124,18 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(unix, feature = "gpui-ui-fixtures"))]
+    #[test]
+    fn ui_fixture_client_rejects_reads_writes_and_subscriptions_without_a_profile() {
+        let client = Client::disconnected_for_ui_fixture();
+        assert_eq!(client.instance_id(), "synthetic-ui-fixture");
+        for method in ["read_ui_changes", "invoke"] {
+            let error = client.call::<Value>(method, serde_json::json!({})).unwrap_err();
+            assert_eq!(error, "The experimental GUI client is disconnected.");
+        }
+        let error = client.subscribe().unwrap_err();
+        assert_eq!(error, "The experimental GUI client is disconnected.");
+    }
     #[test]
     fn successful_void_responses_survive_json_null_roundtrip() {
         let mut wire = Vec::new();

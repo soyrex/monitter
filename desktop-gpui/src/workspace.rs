@@ -12,6 +12,7 @@ use gpui_kit::{
 use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::rc::Rc;
 static REQUEST: AtomicU64 = AtomicU64::new(0);
 fn text(v: &Value, k: &str) -> String {
     v[k].as_str().unwrap_or_default().to_owned()
@@ -22,7 +23,7 @@ fn items(v: &Value, k: &str) -> Vec<Value> {
 
 pub struct WorkspacePane {
     service: DesktopService,
-    snapshot: Value,
+    snapshot: Rc<Value>,
     selected: Option<String>,
     name: Entity<InputState>,
     description: Entity<InputState>,
@@ -37,7 +38,7 @@ pub struct WorkspacePane {
 impl WorkspacePane {
     pub fn new(
         service: DesktopService,
-        snapshot: Value,
+        snapshot: Rc<Value>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -71,7 +72,7 @@ impl WorkspacePane {
             posted_note: None,
         }
     }
-    pub fn sync(&mut self, snapshot: Value, cx: &mut Context<Self>) {
+    pub fn sync(&mut self, snapshot: Rc<Value>, cx: &mut Context<Self>) {
         self.snapshot = snapshot;
         cx.notify();
     }
@@ -115,7 +116,7 @@ impl WorkspacePane {
                 view.busy = false;
                 match result {
                     Ok(snapshot) => {
-                        view.snapshot = snapshot;
+                        view.snapshot = Rc::new(snapshot);
                         if command == "post_project_board_note" {
                             view.posted_note =
                                 view.pending_note.take().map(|(id, body, _)| (id, body));

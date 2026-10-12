@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ChangeSet {
     pub changed_message_ids: Vec<String>,
+    /// Task scopes whose authoritative message cache changed, including removals.
+    pub changed_task_message_ids: Vec<String>,
     pub removed_message_ids: Vec<String>,
     pub removed_task_ids: Vec<String>,
     pub changed_channel_ids: Vec<String>,
@@ -26,7 +28,7 @@ pub enum ApplyResult {
     Unchanged,
     Gap,
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NativeState {
     snapshot: Option<Snapshot>,
     revision: Option<String>,
@@ -79,15 +81,25 @@ impl NativeState {
     /// UI-only page eviction. SQLite remains authoritative and this does not
     /// change the journal revision or report authoritative message removals.
     pub fn trim_task_messages(&mut self, task_id: &str, keep: usize) -> bool {
-        let Some(snapshot) = self.snapshot.as_mut() else { return false; };
-        let count = snapshot.messages.iter().filter(|row| row.task_id == task_id).count();
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return false;
+        };
+        let count = snapshot
+            .messages
+            .iter()
+            .filter(|row| row.task_id == task_id)
+            .count();
         let mut drop = count.saturating_sub(keep);
-        if drop == 0 { return false; }
+        if drop == 0 {
+            return false;
+        }
         snapshot.messages.retain(|row| {
             if row.task_id == task_id && drop > 0 {
                 drop -= 1;
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         true
     }
@@ -106,6 +118,8 @@ impl NativeState {
         }
         if let Some(snapshot) = snapshot {
             let mut changes = ChangeSet::default();
+            changes.changed_task_message_ids =
+                unique(snapshot.messages.iter().map(|row| row.task_id.clone()));
             changes.changed_message_ids =
                 unique(snapshot.messages.iter().map(|row| row.id.clone()));
             changes.changed_channel_ids =
@@ -114,10 +128,15 @@ impl NativeState {
             changes.changed_subagent_transcript_ids =
                 unique(snapshot.subagent_transcripts.keys().cloned());
             if let Some(old) = &self.snapshot {
+                let next_message_ids: BTreeSet<_> = snapshot
+                    .messages
+                    .iter()
+                    .map(|row| row.id.as_str())
+                    .collect();
                 changes.removed_message_ids = unique(
                     old.messages
                         .iter()
-                        .filter(|row| !snapshot.messages.iter().any(|next| next.id == row.id))
+                        .filter(|row| !next_message_ids.contains(row.id.as_str()))
                         .map(|row| row.id.clone()),
                 );
                 changes.removed_task_ids = unique(
@@ -168,7 +187,20 @@ impl NativeState {
         }) {
             return ApplyResult::Gap;
         }
+        let removed_message_ids: BTreeSet<_> = delta
+            .removed_message_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
         let mut changes = ChangeSet {
+            changed_task_message_ids: unique(
+                delta.messages.iter().map(|row| row.task_id.clone()).chain(
+                    old.messages
+                        .iter()
+                        .filter(|row| removed_message_ids.contains(row.id.as_str()))
+                        .map(|row| row.task_id.clone()),
+                ),
+            ),
             changed_message_ids: unique(delta.messages.iter().map(|row| row.id.clone())),
             removed_message_ids: unique(delta.removed_message_ids.iter().cloned()),
             removed_task_ids: unique(
@@ -275,6 +307,7 @@ impl NativeState {
             return Err("Task history page contains an ID from another task.".into());
         }
         let changes = ChangeSet {
+            changed_task_message_ids: vec![task_id.to_owned()],
             changed_message_ids: unique(page.messages.iter().map(|row| row.id.clone())),
             ..ChangeSet::default()
         };
@@ -436,22 +469,35 @@ mod tests {
     #[::core::prelude::v1::test]
     fn ui_page_eviction_keeps_other_scopes_revision_and_reloadability() {
         let mut state = state();
-        state.merge_task_page("t", TaskMessagesPage {
-            revision: "e:1".into(),
-            messages: vec![message("older", "t", 1, "older")],
-            next_before_id: None,
-        }).unwrap();
+        state
+            .merge_task_page(
+                "t",
+                TaskMessagesPage {
+                    revision: "e:1".into(),
+                    messages: vec![message("older", "t", 1, "older")],
+                    next_before_id: None,
+                },
+            )
+            .unwrap();
         let revision = state.revision().unwrap().to_owned();
         assert!(state.trim_task_messages("t", 1));
         assert_eq!(state.snapshot().unwrap().messages.len(), 1);
         assert_eq!(state.snapshot().unwrap().messages[0].id, "tail");
-        assert_eq!(state.snapshot().unwrap().channels[0].messages[0].id, "ctail");
+        assert_eq!(
+            state.snapshot().unwrap().channels[0].messages[0].id,
+            "ctail"
+        );
         assert_eq!(state.revision(), Some(revision.as_str()));
-        state.merge_task_page("t", TaskMessagesPage {
-            revision,
-            messages: vec![message("older", "t", 1, "older")],
-            next_before_id: None,
-        }).unwrap();
+        state
+            .merge_task_page(
+                "t",
+                TaskMessagesPage {
+                    revision,
+                    messages: vec![message("older", "t", 1, "older")],
+                    next_before_id: None,
+                },
+            )
+            .unwrap();
         assert_eq!(state.snapshot().unwrap().messages.len(), 2);
     }
 
@@ -669,6 +715,30 @@ mod tests {
         }];
         assert_eq!(state.apply(response(edit)), ApplyResult::Gap);
         assert_eq!(state.snapshot().unwrap(), &before);
+        assert_eq!(state.revision(), Some("e:1"));
+    }
+    #[test]
+    fn removed_message_reports_original_task_for_targeted_publication() {
+        let mut state = state();
+        let mut edit = delta(&state);
+        edit.removed_message_ids = vec!["tail".into()];
+        let ApplyResult::Delta(changes) = state.apply(response(edit)) else {
+            panic!("expected delta");
+        };
+        assert_eq!(changes.changed_task_message_ids, vec!["t"]);
+        assert!(state.snapshot().unwrap().messages.is_empty());
+    }
+    #[test]
+    fn independent_candidate_does_not_mutate_retained_cache_on_gap() {
+        let state = state();
+        let before = state.snapshot().unwrap().clone();
+        let mut candidate = state.clone();
+        let mut edit = delta(&candidate);
+        edit.from_revision = "wrong:0".into();
+        edit.messages = vec![message("new", "t", 99, "late")];
+        assert_eq!(candidate.apply(response(edit)), ApplyResult::Gap);
+        assert_eq!(state.snapshot().unwrap(), &before);
+        assert_eq!(candidate.snapshot().unwrap(), &before);
         assert_eq!(state.revision(), Some("e:1"));
     }
 }

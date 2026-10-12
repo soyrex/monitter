@@ -162,6 +162,16 @@ pub fn initialize(cx: &mut App) {
     cx.set_global(MotionSelection(mode));
 }
 
+/// Deterministic, in-memory motion policy for the isolated native fixture.
+#[cfg(feature = "performance-profiling")]
+pub(crate) fn initialize_for_ui_fixture(cx: &mut App) {
+    let mode = MotionPreference::On;
+    let _ = CURRENT.set(AtomicU8::new(mode as u8));
+    let _ = SYSTEM_REDUCED.set(false);
+    apply_gpui_policy(mode, cx);
+    cx.set_global(MotionSelection(mode));
+}
+
 /// Select a preference, apply it to GPUI immediately, and queue an atomic
 /// write to the experimental profile. No backend settings or snapshots change.
 pub fn set_preference(mode: MotionPreference, cx: &mut App) {

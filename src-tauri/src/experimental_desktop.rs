@@ -1367,6 +1367,12 @@ pub enum BackendAvailability {
 pub struct DesktopService(ipc::Client);
 
 impl DesktopService {
+    /// A permanently disconnected facade for explicitly enabled UI fixtures.
+    /// It never resolves the user's profile or opens a backend connection.
+    #[cfg(feature = "gpui-ui-fixtures")]
+    pub fn disconnected_for_ui_fixture() -> Self {
+        Self(ipc::Client::disconnected_for_ui_fixture())
+    }
     pub fn open() -> Result<Self, String> {
         Self::connect()
     }

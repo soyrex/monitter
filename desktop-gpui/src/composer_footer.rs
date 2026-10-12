@@ -77,6 +77,9 @@ pub struct ComposerFooterPane {
     save_generation: u64,
     last_usage_refresh: Option<Instant>,
     observed_task_marker: Option<(String, String)>,
+    composed_palette: Option<crate::design::Palette>,
+    available_width_design: Option<f32>,
+    retained_height: Option<Pixels>,
 }
 
 impl EventEmitter<ComposerFooterEvent> for ComposerFooterPane {}
@@ -109,6 +112,9 @@ impl ComposerFooterPane {
             save_generation: 0,
             last_usage_refresh: None,
             observed_task_marker: None,
+            composed_palette: None,
+            available_width_design: None,
+            retained_height: None,
         };
         pane.observed_task_marker = pane.task_marker();
         pane.refresh_catalog(false, cx);
@@ -521,6 +527,27 @@ impl ComposerFooterPane {
         render_context_bar(&self.context_usage(self.selected_task().as_ref()), palette)
     }
 
+    /// Retain the measured toolbar height: GPUI cached view roots need an
+    /// explicit layout size because their child tree is replayed in prepaint.
+    pub fn cached_style(&self) -> StyleRefinement {
+        StyleRefinement::default().w_full().h(
+            self.retained_height.unwrap_or(px(32.)),
+        )
+    }
+
+    pub fn set_appearance(
+        &mut self,
+        palette: crate::design::Palette,
+        width: Option<f32>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.composed_palette != Some(palette) || self.available_width_design != width {
+            self.composed_palette = Some(palette);
+            self.available_width_design = width;
+            cx.notify();
+        }
+    }
+
     pub fn render_footer(
         &self,
         palette: Option<crate::design::Palette>,
@@ -849,9 +876,60 @@ impl ComposerFooterPane {
 
 impl Render for ComposerFooterPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_footer(None, window, cx)
+        let owner = cx.weak_entity();
+        let toolbar = self.render_footer_for_width(
+            self.composed_palette, self.available_width_design, window, cx,
+        );
+        div().relative().w_full().child(toolbar).child(
+            canvas(move |bounds, window, cx| {
+                let owner = owner.clone();
+                window.defer(cx, move |_, cx| {
+                    let _ = owner.update(cx, |footer, cx| {
+                        if footer.retained_height.is_none_or(|height| (height - bounds.size.height).abs() > gpui_kit::px(0.25)) {
+                            footer.retained_height = Some(bounds.size.height);
+                            cx.notify();
+                        }
+                    });
+                });
+            }, |_, _, _, _| ()).absolute().size_full(),
+        )
     }
 }
+
+/// The context bar and toolbar are composer siblings with distinct layout.
+/// Both retain the same authoritative footer state without eagerly rebuilding
+/// model menus and usage metadata on every native input event.
+pub struct ComposerContextBar {
+    footer: Entity<ComposerFooterPane>,
+    palette: crate::design::Palette,
+    _footer_change: Subscription,
+}
+impl ComposerContextBar {
+    pub fn new(
+        footer: Entity<ComposerFooterPane>,
+        palette: crate::design::Palette,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let change = cx.observe(&footer, |_, _, cx| cx.notify());
+        Self {
+            footer,
+            palette,
+            _footer_change: change,
+        }
+    }
+    pub fn set_appearance(&mut self, palette: crate::design::Palette, cx: &mut Context<Self>) {
+        if self.palette != palette {
+            self.palette = palette;
+            cx.notify();
+        }
+    }
+}
+impl Render for ComposerContextBar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.footer.read(cx).render_context_bar(self.palette)
+    }
+}
+
 
 #[derive(Clone, Debug)]
 enum ContextUsage {

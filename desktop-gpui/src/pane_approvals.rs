@@ -31,6 +31,104 @@ fn rows(value: &Value, key: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Keep only fields consumed by approval matching, cards, and revocation.
+/// Message/event/transcript payloads are never visited or copied. Generation
+/// checks use this projection plus the canonical task/revision identity.
+fn approval_snapshot(snapshot: &Value, task_id: &str) -> Value {
+    fn fields(row: &Value, keys: &[&str]) -> Value {
+        Value::Object(
+            keys.iter()
+                .filter_map(|key| {
+                    row.get(*key)
+                        .map(|value| ((*key).to_owned(), value.clone()))
+                })
+                .collect(),
+        )
+    }
+    fn source_rows<'a>(snapshot: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+        snapshot[key].as_array().into_iter().flatten()
+    }
+    let task = source_rows(snapshot, "tasks").find(|task| task["id"].as_str() == Some(task_id));
+    let agent_id = task.and_then(|task| task["agentId"].as_str());
+    let host_id = task.and_then(|task| task["hostId"].as_str());
+    let tasks: Vec<_> = task
+        .into_iter()
+        .map(|task| fields(task, &["id", "agentId", "hostId", "cwd", "provider"]))
+        .collect();
+    let agents: Vec<_> = source_rows(snapshot, "agents")
+        .filter(|agent| agent_id.is_some() && agent["id"].as_str() == agent_id)
+        .map(|agent| fields(agent, &["id", "name"]))
+        .collect();
+    let hosts: Vec<_> = source_rows(snapshot, "hosts")
+        .filter(|host| host_id.is_some() && host["id"].as_str() == host_id)
+        .map(|host| fields(host, &["id", "name"]))
+        .collect();
+    let rules: Vec<_> = source_rows(snapshot, "approvalRules")
+        .filter(|rule| {
+            task.is_some_and(|task| {
+                ["agentId", "hostId", "cwd", "provider"].iter().all(|key| {
+                    task[*key].as_str().is_some_and(|scope| {
+                        !scope.is_empty() && rule[*key].as_str() == Some(scope)
+                    })
+                })
+            })
+        })
+        .map(|rule| {
+            fields(
+                rule,
+                &[
+                    "id",
+                    "agentId",
+                    "hostId",
+                    "cwd",
+                    "provider",
+                    "summary",
+                    "tool",
+                    "lastUsedAt",
+                    "useCount",
+                    "scopeDescription",
+                    "detail",
+                ],
+            )
+        })
+        .collect();
+    let approvals: Vec<_> = source_rows(snapshot, "approvalRequests")
+        .filter(|approval| approval["taskId"].as_str() == Some(task_id))
+        .map(|approval| {
+            fields(
+                approval,
+                &[
+                    "id",
+                    "taskId",
+                    "status",
+                    "createdAt",
+                    "resolvedAt",
+                    "ruleId",
+                    "summary",
+                    "tool",
+                    "decision",
+                    "provider",
+                ],
+            )
+        })
+        .collect();
+    json!({
+        "settings": fields(&snapshot["settings"], &["interfaceFontSize"]),
+        "tasks": tasks, "agents": agents, "hosts": hosts,
+        "approvalRules": rules, "approvalRequests": approvals,
+    })
+}
+fn approval_context_changed(
+    current_task: &str,
+    current_revision: Option<&str>,
+    current_snapshot: &Value,
+    task: &str,
+    revision: Option<&str>,
+    snapshot: &Value,
+) -> bool {
+    current_task != task || current_revision != revision || current_snapshot != snapshot
+}
+
 fn matching_rules(snapshot: &Value, task_id: &str) -> Vec<Value> {
     let Some(task) = rows(snapshot, "tasks")
         .into_iter()
@@ -117,11 +215,12 @@ impl PaneApprovals {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Self {
+        let task_id = task_id.into();
         Self {
             service,
-            snapshot: snapshot.clone(),
+            snapshot: approval_snapshot(snapshot, &task_id),
             revision: None,
-            task_id: task_id.into(),
+            task_id,
             generation: 0,
             revoking_rule: None,
             failed_rule: None,
@@ -137,16 +236,21 @@ impl PaneApprovals {
         cx: &mut Context<Self>,
     ) {
         let task_id = task_id.into();
-        if self.task_id != task_id
-            || self.revision.as_deref() != revision
-            || self.snapshot != *snapshot
-        {
+        let snapshot = approval_snapshot(snapshot, &task_id);
+        if approval_context_changed(
+            &self.task_id,
+            self.revision.as_deref(),
+            &self.snapshot,
+            &task_id,
+            revision,
+            &snapshot,
+        ) {
             self.generation = self.generation.wrapping_add(1);
             self.revoking_rule = None;
             self.failed_rule = None;
             self.error = None;
         }
-        self.snapshot = snapshot.clone();
+        self.snapshot = snapshot;
         self.revision = revision.map(str::to_owned);
         self.task_id = task_id;
         cx.notify();
@@ -168,12 +272,15 @@ impl PaneApprovals {
         let revision = self.revision.clone();
         let service = self.service.clone();
         let failed_rule_id = rule_id.clone();
+        let worker_task_id = task_id.clone();
         let (sender, receiver) = oneshot::channel();
         let spawned = thread::Builder::new()
             .name("monitter-approvals-revoke".into())
             .stack_size(WORKER_STACK_SIZE)
             .spawn(move || {
-                let result = service.invoke("revoke_approval_rule", json!({"ruleId": rule_id}));
+                let result = service
+                    .invoke("revoke_approval_rule", json!({"ruleId": rule_id}))
+                    .map(|snapshot| approval_snapshot(&snapshot, &worker_task_id));
                 let _ = sender.send(result);
             });
         if let Err(error) = spawned {
@@ -466,7 +573,7 @@ impl PaneApprovals {
 
 #[cfg(test)]
 mod tests {
-    use super::{matching_rules, resolved_approvals};
+    use super::{approval_context_changed, approval_snapshot, matching_rules, resolved_approvals};
     use serde_json::json;
 
     fn scoped_snapshot() -> serde_json::Value {
@@ -517,5 +624,90 @@ mod tests {
             "approvalRules": [{"id":"empty","agentId":"","hostId":"","cwd":"","provider":""}]
         });
         assert!(matching_rules(&snapshot, "task-a").is_empty());
+    }
+    #[::core::prelude::v1::test]
+    fn large_transcripts_are_excluded_without_changing_approval_results_or_fences() {
+        let mut source = scoped_snapshot();
+        source["settings"] =
+            json!({"interfaceFontSize":16,"largeUnusedAppearanceData":"x".repeat(1024)});
+        source["agents"] = json!([{"id":"agent-a","name":"Agent A","description":"unused"}]);
+        source["hosts"] = json!([{"id":"host-a","name":"Host A","sshPrivatePayload":"unused"}]);
+        source["approvalRules"][0]["summary"] = json!("Read source files");
+        source["approvalRules"][0]["detail"] = json!("Allowed within /work/a");
+        source["approvalRequests"][2]["decision"] = json!("approve_always");
+        let baseline = approval_snapshot(&source, "task-a");
+        let expected_rules = matching_rules(&source, "task-a");
+        let expected_approvals: Vec<_> = resolved_approvals(&source, "task-a")
+            .into_iter()
+            .map(|(row, _)| {
+                let at = row.at();
+                (row.id, row.status, row.rule_id, at)
+            })
+            .collect();
+        let payload = "history payload ".repeat(128);
+        source["messages"] = json!(
+            (0..10_000)
+                .map(|index| json!({"id":index,"taskId":"task-a","text":payload}))
+                .collect::<Vec<_>>()
+        );
+        source["events"] = json!([{"taskId":"task-a","detail":payload}]);
+        source["subagentTranscripts"] = json!({"child":[{"text":payload}]});
+        source["tasks"][0]["modelSettings"] = json!({"unused":payload});
+        let projected = approval_snapshot(&source, "task-a");
+        assert_eq!(projected, baseline);
+        assert!(serde_json::to_vec(&projected).unwrap().len() < 4096);
+        assert_eq!(matching_rules(&projected, "task-a"), expected_rules);
+        let actual_approvals: Vec<_> = resolved_approvals(&projected, "task-a")
+            .into_iter()
+            .map(|(row, _)| {
+                let at = row.at();
+                (row.id, row.status, row.rule_id, at)
+            })
+            .collect();
+        assert_eq!(actual_approvals, expected_approvals);
+        assert!(!approval_context_changed(
+            "task-a",
+            Some("e:1"),
+            &baseline,
+            "task-a",
+            Some("e:1"),
+            &projected
+        ));
+        assert!(approval_context_changed(
+            "task-a",
+            Some("e:1"),
+            &baseline,
+            "task-a",
+            Some("e:2"),
+            &projected
+        ));
+        assert!(approval_context_changed(
+            "task-a",
+            Some("e:1"),
+            &baseline,
+            "task-b",
+            Some("e:1"),
+            &projected
+        ));
+        source["approvalRequests"][2]["decision"] = json!("approve_session");
+        assert!(approval_context_changed(
+            "task-a",
+            Some("e:1"),
+            &baseline,
+            "task-a",
+            Some("e:1"),
+            &approval_snapshot(&source, "task-a")
+        ));
+        source["tasks"][0]["cwd"] = json!("/work/changed");
+        let moved = approval_snapshot(&source, "task-a");
+        assert!(matching_rules(&moved, "task-a").is_empty());
+        assert!(approval_context_changed(
+            "task-a",
+            Some("e:1"),
+            &baseline,
+            "task-a",
+            Some("e:1"),
+            &moved
+        ));
     }
 }

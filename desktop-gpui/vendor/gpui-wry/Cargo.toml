@@ -9,6 +9,7 @@ repository = "https://github.com/longbridge/gpui-kit/tree/main/crates/webview"
 
 [features]
 inspector = ["wry/devtools"]
+performance-profiling = []
 
 [dependencies]
 anyhow = "1"

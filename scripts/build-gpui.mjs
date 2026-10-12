@@ -1,4 +1,5 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,7 @@ if (!['darwin', 'linux'].includes(process.platform)) {
 
 let release = false;
 let visualExport = false;
+let performanceProfiling = false;
 let jobs = 2;
 for (let i = 2; i < process.argv.length; i += 1) {
   const arg = process.argv[i];
@@ -19,6 +21,8 @@ for (let i = 2; i < process.argv.length; i += 1) {
     release = true;
   } else if (arg === '--visual-export') {
     visualExport = true;
+  } else if (arg === '--performance-profiling') {
+    performanceProfiling = true;
   } else if (arg === '--jobs') {
     const value = process.argv[++i];
     if (!value || !/^\d+$/.test(value) || Number(value) < 1) {
@@ -50,7 +54,14 @@ process.on('exit', () => {
 
 const cargoArgs = ['build', '--manifest-path', manifest, '--locked', '--bins', '--jobs', String(jobs)];
 if (release) cargoArgs.push('--release');
-if (visualExport) cargoArgs.push('--features', 'visual-export');
+const features = [visualExport && 'visual-export', performanceProfiling && 'performance-profiling'].filter(Boolean);
+if (features.length) cargoArgs.push('--features', features.join(','));
+let sourceCommit = null;
+let sourceDirty = null;
+try {
+  sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+  sourceDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' }).trim().length > 0;
+} catch { /* Source archives can be built without Git metadata. */ }
 console.log(`Building experimental GPUI desktop (${profile}, ${jobs} jobs).`);
 console.log('This is separate from the Tauri build:mac artifact and will not install or launch either app.');
 const cargoStatus = runCargo(cargoArgs, { cwd: root });
@@ -61,7 +72,7 @@ if (!existsSync(serverBinary)) throw new Error(`Cargo succeeded but the GPUI ser
 if (process.platform === 'linux') {
   const artifacts = join(root, 'artifacts', 'gpui', profile);
   mkdirSync(artifacts, { recursive: true });
-  writeFileSync(join(artifacts, 'latest.json'), `${JSON.stringify({ app: binary, serverApp: serverBinary, profile, platform: 'linux', visualExport, builtAt: new Date().toISOString() }, null, 2)}\n`);
+  writeFileSync(join(artifacts, 'latest.json'), `${JSON.stringify({ app: binary, serverApp: serverBinary, profile, platform: 'linux', visualExport, performanceProfiling, sourceCommit, sourceDirty, builtAt: new Date().toISOString() }, null, 2)}\n`);
   console.log(`Built Linux GUI: ${binary}`);
   console.log(`Built independent Linux backend: ${serverBinary}`);
   process.exit(0);
@@ -159,7 +170,13 @@ renameSync(serverApp, serverOutput);
 rmSync(staging, { recursive: true, force: true });
 const latestPath = join(artifacts, 'latest.json');
 const latestTemporaryPath = join(artifacts, `.latest-${process.pid}-${Date.now()}.json`);
-writeFileSync(latestTemporaryPath, `${JSON.stringify({ app: output, serverApp: serverOutput, profile, visualExport, lanAssets, builtAt: new Date().toISOString() }, null, 2)}\n`, { flag: 'wx' });
+const buildMetadata = {
+  app: output, serverApp: serverOutput, profile, visualExport, performanceProfiling, lanAssets, sourceCommit, sourceDirty,
+  desktopSha256: createHash('sha256').update(readFileSync(join(output, 'Contents', 'MacOS', 'monitter-gpui-desktop'))).digest('hex'),
+  builtAt: new Date().toISOString(),
+};
+writeFileSync(join(buildDir, 'build.json'), `${JSON.stringify(buildMetadata, null, 2)}\n`, { flag: 'wx' });
+writeFileSync(latestTemporaryPath, `${JSON.stringify(buildMetadata, null, 2)}\n`, { flag: 'wx' });
 renameSync(latestTemporaryPath, latestPath);
 console.log(`Packaged experimental GPUI app: ${output}`);
 console.log(`Packaged persistent GPUI server: ${serverOutput}`);

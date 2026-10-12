@@ -12,6 +12,28 @@ use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
 };
+#[cfg(feature = "performance-profiling")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(feature = "performance-profiling")]
+static PAINTED_PANE_OBSERVATIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static MISSING_VISIBLE_PANE_OBSERVATIONS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "performance-profiling")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct VisibilityPerformanceCounts {
+    pub painted_pane_observations: u64,
+    pub missing_visible_pane_observations: u64,
+}
+
+#[cfg(feature = "performance-profiling")]
+pub(crate) fn visibility_performance_counts() -> VisibilityPerformanceCounts {
+    VisibilityPerformanceCounts {
+        painted_pane_observations: PAINTED_PANE_OBSERVATIONS.load(Ordering::Relaxed),
+        missing_visible_pane_observations: MISSING_VISIBLE_PANE_OBSERVATIONS.load(Ordering::Relaxed),
+    }
+}
 
 const PANEL_NAME: &str = "MonitterNativePane";
 const VERSION: usize = 1;
@@ -27,6 +49,9 @@ mod duplicate_add_tests;
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "pane_header_tests.rs"]
 mod pane_header_tests;
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "docking_frame_coalesce_tests.rs"]
+mod docking_frame_coalesce_tests;
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "workspace_switch_tests.rs"]
 mod workspace_switch_tests;
@@ -71,6 +96,7 @@ struct PaintState {
     painted: HashSet<String>,
     visible: HashSet<String>,
     shown: bool,
+    frame_callback_pending: bool,
     removed: Vec<(String, bool)>,
 }
 struct NativePanel {
@@ -174,9 +200,12 @@ impl Panel for NativePanel {
         self.spec.id.starts_with("chat:") || self.spec.id.starts_with("draft:")
     }
     fn pane_overlay(&mut self, tab: Rc<Cell<Option<gpui::Bounds<Pixels>>>>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let appearance = self.appearance.get()?;
-        if !appearance.show_active_border || !pane_visual_active(&self.spec.focus, window, cx)
-            || crate::preferences_modal::workspace_blocked(cx) { return None; }
+        let appearance = self.appearance.get();
+        let candidate = appearance.as_ref().is_some_and(|appearance| appearance.show_active_border)
+            && pane_visual_active(&self.spec.focus, window, cx)
+            && !crate::preferences_modal::workspace_blocked(cx);
+        crate::native_pane_highlight::observe_candidate(candidate, window);
+        let appearance = appearance.filter(|_| candidate)?;
         let color = appearance.active_border_color;
         if appearance.tile_theme == NativeTileTheme::Tern {
             let mut color = rgb(crate::pane_appearance::quiet_active_color(color, appearance.tile_backdrop_color));
@@ -1612,6 +1641,9 @@ impl DockWorkspace {
     /// views here; before window removal the host must close and blank-draw them.
     pub fn set_shown(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
         let shown = shown && !crate::session_lock::locked(cx);
+        if !shown {
+            crate::native_pane_highlight::clear(window);
+        }
         let changed = self.paint.borrow().shown != shown;
         self.paint.borrow_mut().shown = shown;
         if !shown || window.has_active_dialog(cx) {
@@ -1643,47 +1675,70 @@ impl DockWorkspace {
 }
 impl Render for DockWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A rendered workspace is an authoritative observation point even if
+        // it currently has no active panel. A focused NativePanel may promote
+        // this to `true` while its TabGroupRenderer builds the deferred outline.
+        crate::native_pane_highlight::observe_candidate(false, window);
         // WKWebViews are native children above the GPU surface. Park them
         // before drawing a native dialog while retaining the desired route.
         if window.has_active_dialog(cx) {
             self.apply_visibility(HashSet::new(), window, cx);
         }
-        self.paint.borrow_mut().painted.clear();
-        let weak = cx.weak_entity();
-        window.on_next_frame(move |window, cx| {
-            let _ = weak.update(cx, |workspace, cx| {
-                let next = {
-                    let mut paint = workspace.paint.borrow_mut();
-                    if paint.shown && !window.has_active_dialog(cx) {
-                        std::mem::take(&mut paint.painted)
-                    } else {
-                        HashSet::new()
+        let schedule_callback = {
+            let mut paint = self.paint.borrow_mut();
+            paint.painted.clear();
+            if paint.frame_callback_pending {
+                false
+            } else {
+                paint.frame_callback_pending = true;
+                true
+            }
+        };
+        if schedule_callback {
+            let weak = cx.weak_entity();
+            window.on_next_frame(move |window, cx| {
+                let _ = weak.update(cx, |workspace, cx| {
+                    let next = {
+                        let mut paint = workspace.paint.borrow_mut();
+                        paint.frame_callback_pending = false;
+                        if paint.shown && !window.has_active_dialog(cx) {
+                            let next = std::mem::take(&mut paint.painted);
+                            #[cfg(feature = "performance-profiling")]
+                            {
+                                PAINTED_PANE_OBSERVATIONS.fetch_add(next.len() as u64, Ordering::Relaxed);
+                                let missing = paint.visible.difference(&next).count() as u64;
+                                MISSING_VISIBLE_PANE_OBSERVATIONS.fetch_add(missing, Ordering::Relaxed);
+                            }
+                            next
+                        } else {
+                            HashSet::new()
+                        }
+                    };
+                    workspace.apply_visibility(next, window, cx);
+                    let removed = std::mem::take(&mut workspace.paint.borrow_mut().removed);
+                    for (id, was_visible) in removed {
+                        let still_present = workspace
+                            .panels
+                            .borrow()
+                            .get(&id)
+                            .is_some_and(|panel| !panel.read(cx).removed);
+                        if still_present {
+                            continue;
+                        }
+                        workspace.panels.borrow_mut().remove(&id);
+                        workspace.empty_subscriptions.remove(&id);
+                        workspace.empty_panes.remove(&id);
+                        if was_visible {
+                            cx.emit(WorkspaceEvent::VisibilityChanged {
+                                id: id.clone(),
+                                visible: false,
+                            });
+                        }
+                        cx.emit(WorkspaceEvent::Removed { id });
                     }
-                };
-                workspace.apply_visibility(next, window, cx);
-                let removed = std::mem::take(&mut workspace.paint.borrow_mut().removed);
-                for (id, was_visible) in removed {
-                    let still_present = workspace
-                        .panels
-                        .borrow()
-                        .get(&id)
-                        .is_some_and(|panel| !panel.read(cx).removed);
-                    if still_present {
-                        continue;
-                    }
-                    workspace.panels.borrow_mut().remove(&id);
-                    workspace.empty_subscriptions.remove(&id);
-                    workspace.empty_panes.remove(&id);
-                    if was_visible {
-                        cx.emit(WorkspaceEvent::VisibilityChanged {
-                            id: id.clone(),
-                            visible: false,
-                        });
-                    }
-                    cx.emit(WorkspaceEvent::Removed { id });
-                }
+                });
             });
-        });
+        }
         div().size_full().child(self.area.clone())
     }
 }

@@ -74,8 +74,13 @@ impl Mode {
     }
 }
 const FILE: &str = "surface-blend.json";
+static STATE: OnceLock<Mutex<Value>> = OnceLock::new();
+/// Install fixture defaults before any surface is rendered, without profile IO.
+#[cfg(feature = "performance-profiling")]
+pub(crate) fn initialize_for_ui_fixture() {
+    let _ = STATE.set(Mutex::new(json!({})));
+}
 fn preferences() -> &'static Mutex<Value> {
-    static STATE: OnceLock<Mutex<Value>> = OnceLock::new();
     STATE.get_or_init(|| {
         Mutex::new(
             monitter_lib::experimental_desktop::profile_dir()

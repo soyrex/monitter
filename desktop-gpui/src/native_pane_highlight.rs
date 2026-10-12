@@ -1,11 +1,67 @@
 //! A noninteractive AppKit outline above GPUI and native browser child views.
-//! The caller clears it once per frame, then paints the active tab-group bounds.
+//! Active-pane painting keeps the view visible; a frame finalizer hides it only
+//! after a rendered workspace observes that no active pane owns it.
 use gpui_kit::{Bounds, Pixels, Point, Rgba, Window};
+#[cfg(any(test, feature = "performance-profiling"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[path = "pane_highlight_state.rs"]
+mod pane_highlight_state;
+#[cfg(target_os = "macos")]
+use pane_highlight_state::OverlayFrameState;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HighlightPerformanceCounts {
+    pub shows: u64,
+    pub hides: u64,
+    pub geometry_paints: u64,
+}
+
+#[cfg(any(test, feature = "performance-profiling"))]
+static SHOWS: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, feature = "performance-profiling"))]
+static HIDES: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, feature = "performance-profiling"))]
+static GEOMETRY_PAINTS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(any(test, feature = "performance-profiling"))]
+pub(crate) fn performance_counts() -> HighlightPerformanceCounts {
+    HighlightPerformanceCounts {
+        shows: SHOWS.load(Ordering::Relaxed),
+        hides: HIDES.load(Ordering::Relaxed),
+        geometry_paints: GEOMETRY_PAINTS.load(Ordering::Relaxed),
+    }
+}
+
+#[inline]
+fn record_show() {
+    #[cfg(any(test, feature = "performance-profiling"))]
+    SHOWS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+fn record_hide() {
+    #[cfg(any(test, feature = "performance-profiling"))]
+    HIDES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+fn record_geometry_paint() {
+    #[cfg(any(test, feature = "performance-profiling"))]
+    GEOMETRY_PAINTS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn begin_frame(_: &Window) {}
+#[cfg(not(target_os = "macos"))]
+pub fn observe_candidate(_: bool, _: &Window) {}
+#[cfg(not(target_os = "macos"))]
+pub fn finish_frame(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
 pub fn clear(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
-pub fn paint(_: Bounds<Pixels>, _: Rgba, _: &[Point<Pixels>], _: &Window) -> bool { false }
+pub fn paint(_: Bounds<Pixels>, _: Rgba, _: &[Point<Pixels>], _: &Window) -> bool {
+    false
+}
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -84,6 +140,7 @@ mod macos {
         bounds: Option<Bounds<Pixels>>,
         color: Option<Rgba>,
         contour: Vec<Point<Pixels>>,
+        frame: OverlayFrameState,
     }
     thread_local! {
         static OVERLAYS: RefCell<HashMap<usize, Overlay>> = RefCell::new(HashMap::new());
@@ -97,7 +154,7 @@ mod macos {
         }
     }
 
-    pub fn clear(window: &Window) {
+    pub fn begin_frame(window: &Window) {
         if MainThreadMarker::new().is_none() {
             return;
         }
@@ -109,21 +166,100 @@ mod macos {
             // The view does not retain its parent. Release detached overlays
             // left behind by closed windows on the next live frame.
             state.retain(|_, overlay| overlay.view.load().is_some());
-            if let Some(view) = state
-                .get(&(host as usize))
-                .and_then(|overlay| overlay.view.load())
-            {
-                unsafe {
-                    let _: () = msg_send![class!(CATransaction), begin];
-                    let _: () = msg_send![class!(CATransaction), setDisableActions: true];
-                    view.setHidden(true);
-                    let _: () = msg_send![class!(CATransaction), commit];
-                }
+            if let Some(overlay) = state.get_mut(&(host as usize)) {
+                overlay.frame.begin_frame();
             }
         });
     }
 
-    pub fn paint(bounds: Bounds<Pixels>, color: Rgba, contour: &[Point<Pixels>], window: &Window) -> bool {
+    /// Records whether a native pane in a rendered DockArea should own the
+    /// active outline. Called during render, before GPUI's deferred paint pass.
+    /// A candidate survives a replayed deferred Canvas even when its callback
+    /// is not invoked on that frame.
+    pub fn observe_candidate(candidate: bool, window: &Window) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        let Some(host) = host(window) else {
+            return;
+        };
+        OVERLAYS.with(|state| {
+            if let Some(overlay) = state.borrow_mut().get_mut(&(host as usize)) {
+                overlay.frame.observe_candidate(candidate);
+            }
+        });
+    }
+
+    /// Hides an existing outline only when a rendered workspace observed no
+    /// active pane during this frame. The caller runs after deferred pane
+    /// overlays; an unobserved cached replay preserves the current view.
+    pub fn finish_frame(window: &Window) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        let Some(host) = host(window) else {
+            return;
+        };
+        OVERLAYS.with(|state| {
+            let mut state = state.borrow_mut();
+            state.retain(|_, overlay| overlay.view.load().is_some());
+            let Some(overlay) = state.get_mut(&(host as usize)) else {
+                return;
+            };
+            let should_hide = overlay.frame.finish_frame();
+            if !should_hide {
+                return;
+            }
+            let Some(view) = overlay.view.load() else {
+                return;
+            };
+            unsafe {
+                let _: () = msg_send![class!(CATransaction), begin];
+                let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+                view.setHidden(true);
+                let _: () = msg_send![class!(CATransaction), commit];
+            }
+            record_hide();
+        });
+    }
+
+    /// Explicitly hides the native highlight for lock and other state
+    /// transitions that must take effect immediately.
+    pub fn clear(window: &Window) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        let Some(host) = host(window) else {
+            return;
+        };
+        OVERLAYS.with(|state| {
+            let mut state = state.borrow_mut();
+            state.retain(|_, overlay| overlay.view.load().is_some());
+            let Some(overlay) = state.get_mut(&(host as usize)) else {
+                return;
+            };
+            if !overlay.frame.clear() {
+                return;
+            }
+            let Some(view) = overlay.view.load() else {
+                return;
+            };
+            unsafe {
+                let _: () = msg_send![class!(CATransaction), begin];
+                let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+                view.setHidden(true);
+                let _: () = msg_send![class!(CATransaction), commit];
+            }
+            record_hide();
+        });
+    }
+
+    pub fn paint(
+        bounds: Bounds<Pixels>,
+        color: Rgba,
+        contour: &[Point<Pixels>],
+        window: &Window,
+    ) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
@@ -171,11 +307,17 @@ mod macos {
                     bounds: None,
                     color: None,
                     contour: Vec::new(),
+                    frame: OverlayFrameState::default(),
                 }
             });
             let Some(view) = overlay.view.load() else {
                 return false;
             };
+            let should_show = overlay.frame.mark_painted();
+            record_geometry_paint();
+            if should_show {
+                record_show();
+            }
             unsafe {
                 // QuartzCore is already linked by GPUI. Dynamic selectors keep
                 // this helper within the existing AppKit/objc2 dependencies.
@@ -239,7 +381,9 @@ mod macos {
                     let _: () = msg_send![host, addSubview: &*view
                         positioned: 1isize relativeTo: ptr::null::<NSView>()];
                 }
-                view.setHidden(false);
+                if should_show {
+                    view.setHidden(false);
+                }
                 let _: () = msg_send![class!(CATransaction), commit];
             }
             true
@@ -247,4 +391,8 @@ mod macos {
     }
 }
 #[cfg(target_os = "macos")]
-pub use macos::{clear, paint};
+pub use macos::{begin_frame, clear, finish_frame, observe_candidate, paint};
+
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "pane_highlight_tests.rs"]
+mod regression_tests;

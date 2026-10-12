@@ -1,4 +1,6 @@
 use std::{ops::Deref, rc::Rc};
+#[cfg(feature = "performance-profiling")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use wry::{
     Rect,
@@ -10,6 +12,30 @@ use gpui::{
     Focusable, GlobalElementId, Hitbox, InteractiveElement, IntoElement, LayoutId, MouseDownEvent,
     ParentElement as _, Pixels, Render, Size, Style, Styled as _, Window, canvas, div,
 };
+
+#[cfg(feature = "performance-profiling")]
+static BOUNDS_WRITES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static SHOW_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static HIDE_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "performance-profiling")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PerformanceCounts {
+    pub bounds_writes: u64,
+    pub show_transitions: u64,
+    pub hide_transitions: u64,
+}
+
+#[cfg(feature = "performance-profiling")]
+pub fn performance_counts() -> PerformanceCounts {
+    PerformanceCounts {
+        bounds_writes: BOUNDS_WRITES.load(Ordering::Relaxed),
+        show_transitions: SHOW_TRANSITIONS.load(Ordering::Relaxed),
+        hide_transitions: HIDE_TRANSITIONS.load(Ordering::Relaxed),
+    }
+}
 
 /// An owned, UI-thread-local handle to the raw wry webview.
 ///
@@ -63,6 +89,8 @@ impl WebView {
             return;
         }
         let _ = self.webview.set_visible(true);
+        #[cfg(feature = "performance-profiling")]
+        SHOW_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
         self.visible = true;
     }
 
@@ -73,6 +101,8 @@ impl WebView {
         }
         _ = self.webview.focus_parent();
         _ = self.webview.set_visible(false);
+        #[cfg(feature = "performance-profiling")]
+        HIDE_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
         self.visible = false;
     }
 
@@ -221,6 +251,8 @@ impl Element for WebViewElement {
         // until layout actually moves or resizes it. Cache only successful
         // writes, allowing a failed platform operation to be retried.
         if self.parent.read(cx).applied_native_bounds != Some(bounds) {
+            #[cfg(feature = "performance-profiling")]
+            BOUNDS_WRITES.fetch_add(1, Ordering::Relaxed);
             let result = self.view.set_bounds(Rect {
                 size: dpi::Size::Logical(LogicalSize {
                     width: bounds.size.width.into(),

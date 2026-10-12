@@ -20,7 +20,37 @@ pub(crate) use monitter_lib::experimental_desktop::{
     NativeBrowserMetadata as BrowserMetadataSnapshot, NativeBrowserTab as BrowserTabMetadata,
 };
 use std::{collections::HashSet, sync::mpsc, time::Duration};
+#[cfg(feature = "performance-profiling")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use url::Url;
+
+#[cfg(feature = "performance-profiling")]
+static SHOW_REQUESTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static HIDE_REQUESTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static SUCCESSFUL_SHOW_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "performance-profiling")]
+static SUCCESSFUL_HIDE_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "performance-profiling")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BrowserPerformanceCounts {
+    pub show_requests: u64,
+    pub hide_requests: u64,
+    pub successful_show_transitions: u64,
+    pub successful_hide_transitions: u64,
+}
+
+#[cfg(feature = "performance-profiling")]
+pub(crate) fn performance_counts() -> BrowserPerformanceCounts {
+    BrowserPerformanceCounts {
+        show_requests: SHOW_REQUESTS.load(Ordering::Relaxed),
+        hide_requests: HIDE_REQUESTS.load(Ordering::Relaxed),
+        successful_show_transitions: SUCCESSFUL_SHOW_TRANSITIONS.load(Ordering::Relaxed),
+        successful_hide_transitions: SUCCESSFUL_HIDE_TRANSITIONS.load(Ordering::Relaxed),
+    }
+}
 
 #[cfg(target_os = "macos")]
 use wry::{WebViewBuilderExtDarwin, WebViewExtMacOS};
@@ -258,6 +288,27 @@ fn create_native(
     }
 }
 
+#[cfg(feature = "performance-profiling")]
+fn create_performance_native(window: &Window) -> Result<wry::WebView, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        Err("The native browser performance fixture requires macOS.".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // In-memory/private WKWebView with static content; it never touches
+        // Monitter's browser datastore or requests a network resource.
+        wry::WebViewBuilder::new()
+            .with_html("<!doctype html><meta charset=utf-8><title>Fixture</title><body>Static browser fixture</body>")
+            .with_incognito(true)
+            .with_visible(false)
+            .with_focused(false)
+            .build_as_child(window)
+            .map_err(|error| format!("Cannot create private performance browser: {error}"))
+    }
+}
+
 pub(crate) struct BrowserTab {
     focus: FocusHandle,
     address: Entity<InputState>,
@@ -270,6 +321,8 @@ pub(crate) struct BrowserTab {
     title: String,
     error: Option<String>,
     visible: bool,
+    #[cfg(feature = "performance-profiling")]
+    native_visible: bool,
     pending_address: Option<String>,
     dirty_address: bool,
     unloaded: bool,
@@ -294,6 +347,19 @@ impl Focusable for BrowserTab {
 }
 
 impl BrowserTab {
+    #[cfg(feature = "performance-profiling")]
+    fn record_native_visibility(&mut self, visible: bool, succeeded: bool) {
+        if !succeeded || self.native_visible == visible {
+            return;
+        }
+        self.native_visible = visible;
+        if visible {
+            SUCCESSFUL_SHOW_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            SUCCESSFUL_HIDE_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn set_dock_group(
         &mut self,
         group: Option<WeakEntity<gpui_kit::component::dock::TabGroup>>,
@@ -356,10 +422,30 @@ impl BrowserTab {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (events, receiver) = mpsc::channel();
+        let native = create_native(window, events);
+        Self::new_with_native(window, cx, native, Some(receiver))
+    }
+
+    #[cfg(feature = "performance-profiling")]
+    pub(crate) fn performance_fixture(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let native = create_performance_native(window);
+        let mut tab = Self::new_with_native(window, cx, native, None);
+        tab.unloaded = false;
+        tab.title = "Static browser fixture".into();
+        tab.docked_mode = true;
+        tab
+    }
+
+    fn new_with_native(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        native: Result<wry::WebView, String>,
+        receiver: Option<mpsc::Receiver<BrowserEvent>>,
+    ) -> Self {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("https://example.com"));
         let focus = cx.focus_handle();
-        let (events, receiver) = mpsc::channel();
-        let (webview, error) = match create_native(window, events) {
+        let (webview, error) = match native {
             Ok(raw) => (Some(cx.new(|cx| WebView::new(raw, window, cx))), None),
             Err(error) => (None, Some(error)),
         };
@@ -382,65 +468,69 @@ impl BrowserTab {
             this.close(cx);
             async {}
         });
-        let event_task = cx.spawn(async move |pane, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
-                let pending: Vec<_> = receiver.try_iter().collect();
-                if pane
-                    .update(cx, |this, cx| {
-                        if !pending.is_empty() {
-                            for event in pending {
-                                match event {
-                                    BrowserEvent::Location(value) => {
-                                        if !this.unloaded {
-                                            if let Ok(url) = validated_url(&value) {
-                                                let location = url.to_string();
-                                                if !is_stale_initial_blank(
-                                                    this.ignore_initial_blank_event,
-                                                    &location,
-                                                    this.actual_url.as_deref(),
-                                                ) && location.len() <= MAX_BROWSER_URL_BYTES
-                                                    && this.actual_url.as_deref() != Some(&location)
-                                                {
-                                                    if location != "about:blank" {
-                                                        this.ignore_initial_blank_event = false;
+        let event_task = if let Some(receiver) = receiver {
+            cx.spawn(async move |pane, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(200))
+                        .await;
+                    let pending: Vec<_> = receiver.try_iter().collect();
+                    if pane
+                        .update(cx, |this, cx| {
+                            if !pending.is_empty() {
+                                for event in pending {
+                                    match event {
+                                        BrowserEvent::Location(value) => {
+                                            if !this.unloaded {
+                                                if let Ok(url) = validated_url(&value) {
+                                                    let location = url.to_string();
+                                                    if !is_stale_initial_blank(
+                                                        this.ignore_initial_blank_event,
+                                                        &location,
+                                                        this.actual_url.as_deref(),
+                                                    ) && location.len() <= MAX_BROWSER_URL_BYTES
+                                                        && this.actual_url.as_deref() != Some(&location)
+                                                    {
+                                                        if location != "about:blank" {
+                                                            this.ignore_initial_blank_event = false;
+                                                        }
+                                                        this.actual_url = Some(location.clone());
+                                                        this.pending_address = Some(location.clone());
+                                                        this.location = location;
+                                                        cx.emit(BrowserTabEvent::MetadataChanged);
                                                     }
-                                                    this.actual_url = Some(location.clone());
-                                                    this.pending_address = Some(location.clone());
-                                                    this.location = location;
+                                                }
+                                            }
+                                        }
+                                        BrowserEvent::Title(value) => {
+                                            if !this.unloaded
+                                                && !is_stale_initial_title(
+                                                    this.ignore_initial_blank_event,
+                                                    this.actual_url.as_deref(),
+                                                )
+                                            {
+                                                let title = bounded_title(&value);
+                                                if this.title != title {
+                                                    this.title = title;
                                                     cx.emit(BrowserTabEvent::MetadataChanged);
                                                 }
                                             }
                                         }
+                                        BrowserEvent::Error(value) => this.error = Some(value),
                                     }
-                                    BrowserEvent::Title(value) => {
-                                        if !this.unloaded
-                                            && !is_stale_initial_title(
-                                                this.ignore_initial_blank_event,
-                                                this.actual_url.as_deref(),
-                                            )
-                                        {
-                                            let title = bounded_title(&value);
-                                            if this.title != title {
-                                                this.title = title;
-                                                cx.emit(BrowserTabEvent::MetadataChanged);
-                                            }
-                                        }
-                                    }
-                                    BrowserEvent::Error(value) => this.error = Some(value),
                                 }
+                                cx.notify();
                             }
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-            }
-        });
+            })
+        } else {
+            cx.spawn(async move |_, _| {})
+        };
         Self {
             focus,
             address,
@@ -453,6 +543,8 @@ impl BrowserTab {
             title: String::new(),
             error,
             visible: false,
+            #[cfg(feature = "performance-profiling")]
+            native_visible: false,
             pending_address: None,
             dirty_address: false,
             unloaded: true,
@@ -495,13 +587,16 @@ impl BrowserTab {
                 self.error = None;
                 if self.visible && !crate::session_lock::locked(cx) {
                     if let Some(view) = self.webview.clone() {
-                        match view.update(cx, |view, _| {
+                        let shown = view.update(cx, |view, _| {
                             view.raw()
                                 .set_visible(true)
                                 .map_err(|error| error.to_string())?;
                             view.show();
                             Ok::<(), String>(())
-                        }) {
+                        });
+                        #[cfg(feature = "performance-profiling")]
+                        self.record_native_visibility(true, shown.is_ok());
+                        match shown {
                             Ok(()) => {}
                             Err(error) => {
                                 self.error = Some(format!("Cannot show native browser: {error}"));
@@ -579,36 +674,49 @@ impl BrowserTab {
 
     /// Call before removing the pane from the render tree; preserves session.
     pub fn hide(&mut self, cx: &mut App) {
+        #[cfg(feature = "performance-profiling")]
+        HIDE_REQUESTS.fetch_add(1, Ordering::Relaxed);
         self.visible = false;
-        if let Some(view) = &self.webview {
-            view.update(cx, |view, _| {
+        if let Some(view) = self.webview.clone() {
+            let (focus_error, visibility_error) = view.update(cx, |view, _| {
                 let focus_error = view.raw().focus_parent().err();
                 let visibility_error = view.raw().set_visible(false).err();
                 view.hide();
-                if let Some(error) = visibility_error.or(focus_error) {
-                    self.error = Some(format!("Cannot hide native browser: {error}"));
-                }
+                (focus_error, visibility_error)
             });
+            #[cfg(feature = "performance-profiling")]
+            self.record_native_visibility(false, visibility_error.is_none());
+            if let Some(error) = visibility_error.or(focus_error) {
+                self.error = Some(format!("Cannot hide native browser: {error}"));
+            }
         }
     }
 
     /// Restore a retained pane when returning to its native browser surface.
     pub fn show(&mut self, cx: &mut App) {
+        #[cfg(feature = "performance-profiling")]
+        SHOW_REQUESTS.fetch_add(1, Ordering::Relaxed);
         if crate::session_lock::locked(cx) {self.hide(cx);return;}
         self.visible = true;
-        if let Some(view) = &self.webview {
+        if let Some(view) = self.webview.clone() {
             if self.unloaded {
-                view.update(cx, |view, _| match view.raw().set_visible(false) {
-                    Ok(()) => view.hide(),
-                    Err(error) => {
-                        self.error = Some(format!("Cannot hide unloaded browser view: {error}"));
-                    }
-                });
+                let result = view.update(cx, |view, _| view.raw().set_visible(false));
+                #[cfg(feature = "performance-profiling")]
+                self.record_native_visibility(false, result.is_ok());
+                if let Err(error) = result {
+                    self.error = Some(format!("Cannot hide unloaded browser view: {error}"));
+                } else {
+                    view.update(cx, |view, _| view.hide());
+                }
             } else {
-                view.update(cx, |view, _| match view.raw().set_visible(true) {
-                    Ok(()) => view.show(),
-                    Err(error) => self.error = Some(format!("Cannot show native browser: {error}")),
-                });
+                let result = view.update(cx, |view, _| view.raw().set_visible(true));
+                #[cfg(feature = "performance-profiling")]
+                self.record_native_visibility(true, result.is_ok());
+                if let Err(error) = result {
+                    self.error = Some(format!("Cannot show native browser: {error}"));
+                } else {
+                    view.update(cx, |view, _| view.show());
+                }
             }
         }
     }

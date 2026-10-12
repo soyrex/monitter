@@ -17,6 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 experimental-gpui = ["dep:async-channel"]
+gpui-ui-fixtures = ["experimental-gpui"]
 
 [build-dependencies]
 cc = "1"

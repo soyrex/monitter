@@ -12,6 +12,8 @@ use gpui_kit::{
     *,
 };
 use monitter_gpui_desktop::native_state::{ApplyResult, NativeState};
+use monitter_gpui_desktop::native_publication::{self, PublicationChanges, PublicationIndex, PublicationQueue, PreparedPublication};
+use std::sync::Arc;
 use monitter_lib::experimental_desktop::{
     ChannelMessagesPage, DesktopService, NativeAttachmentDraft, NativeBrowserMetadata,
     NativeChatPanePreferences, NativeDetailTab, NativePreferences, TaskMessagesPage,
@@ -120,6 +122,10 @@ mod transcript;
 mod transcript_edge_fade;
 #[cfg(feature = "visual-export")]
 mod visual_export;
+#[cfg(feature = "performance-profiling")]
+mod performance_metrics;
+#[cfg(feature = "performance-profiling")]
+mod performance_scenario;
 mod workspace;
 use transcript::TranscriptState;
 use workspace::WorkspacePane;
@@ -290,6 +296,12 @@ struct Desktop {
     snapshot: Rc<Value>,
     revision: Option<String>,
     native_state: NativeState,
+    publication: PublicationQueue,
+    publication_index: Option<Arc<PublicationIndex>>,
+    publication_error: Option<String>,
+    collaboration_records: HashMap<String, Arc<Vec<Value>>>,
+    collaboration_transcripts: HashMap<String, native_publication::PreparedChildTranscripts>,
+    full_reset_requested: bool,
     startup_splash: Entity<startup_splash::NativeStartupSplash>,
     wallpaper_accent: Entity<wallpaper_accent::WallpaperAccent>,
     wallpaper_backdrop: Entity<wallpaper_backdrop::WallpaperBackdrop>,
@@ -415,9 +427,10 @@ impl Desktop {
                         view.selected = None;
                         view.dock_current = None;
                     }
-                    if view.native_state.trim_task_messages(task_id, 256) {
-                        view.publish_native(false, vec![], vec![], cx);
-                    }
+                    view.queue_native_publication(PublicationChanges {
+                        trim_tasks: HashSet::from([task_id.to_owned()]),
+                        ..Default::default()
+                    }, cx);
                 }
             }
             if let docking::WorkspaceEvent::EmptyAction { pane_id, action } = event {
@@ -579,6 +592,12 @@ impl Desktop {
             snapshot: Rc::new(json!({})),
             revision: None,
             native_state: NativeState::default(),
+            publication: PublicationQueue::default(),
+            publication_index: None,
+            publication_error: None,
+            collaboration_records: HashMap::new(),
+            collaboration_transcripts: HashMap::new(),
+            full_reset_requested: false,
             startup_splash: cx.new(startup_splash::NativeStartupSplash::new),
             wallpaper_accent,
             wallpaper_backdrop,
@@ -1297,148 +1316,188 @@ impl Desktop {
         });
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.refreshing {
+        // Backpressure is one read/apply followed by one publication. Continuous
+        // backend events coalesce into one next read rather than starving draws.
+        if self.refreshing || self.publication.busy {
             self.refresh_requested = true;
             return;
         }
-        let Some(service) = self.service.clone() else {
-            return;
-        };
+        let Some(service) = self.service.clone() else { return; };
         self.refreshing = true;
-        let revision = self.native_state.revision().map(str::to_owned);
-        let task = cx
-            .background_executor()
-            .spawn(async move {
-                let mut result = service.read_ui_changes(revision.as_deref());
-                for wait_ms in [150, 450] {
-                    if !result.as_ref().err().is_some_and(|error| chat::connection_recovery::transient(error)) { break; }
-                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                    result = service.read_ui_changes(revision.as_deref());
-                }
-                result
-            });
+        let force_reset = std::mem::take(&mut self.full_reset_requested);
+        let mut state = self.native_state.clone();
+        let generation = self.publication.generation;
+        let revision = if force_reset { None } else { state.revision().map(str::to_owned) };
+        let task = cx.background_executor().spawn(async move {
+            let mut result = service.read_ui_changes(revision.as_deref());
+            for wait_ms in [150, 450] {
+                if !result.as_ref().err().is_some_and(|error| chat::connection_recovery::transient(error)) { break; }
+                std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                result = service.read_ui_changes(revision.as_deref());
+            }
+            result.map(|response| {
+                let applied = state.apply(response);
+                (state, applied)
+            })
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.refreshing = false;
-                if result.is_ok() && view.error.as_deref().is_some_and(|error|
-                    chat::connection_recovery::transient(error)
-                        || error == "Could not reconnect to Monitter. Your agents may still be running; try again shortly.") {
-                    view.error = None;
-                    cx.notify();
-                }
-                match result {
-                    Ok(response) => match view.native_state.apply(response) {
-                        ApplyResult::Unchanged => {}
-                        ApplyResult::Gap => {
-                            // Request a full reset next; do not publish an incompatible delta.
-                            view.revision = None;
-                            view.request_full_reset(cx);
-                        }
-                        ApplyResult::FullReset(changes) => view.publish_native(
-                            true,
-                            changes.removed_task_ids,
-                            changes.reset_channel_ids,
-                            cx,
-                        ),
-                        ApplyResult::Delta(changes) => view.publish_native(
-                            false,
-                            changes.removed_task_ids,
-                            changes.reset_channel_ids,
-                            cx,
-                        ),
-                    },
-                    Err(error) => {
-                        if !chat::connection_recovery::transient(&error) {
-                            view.error = Some(error);
-                        }
+                if generation != view.publication.generation {
+                    // A history merge/eviction changed the cache while the read
+                    // was running. Rebase the next delta on that current cache.
+                    view.full_reset_requested |= force_reset;
+                    view.refresh_requested = true;
+                } else {
+                    if result.is_ok() && view.error.as_deref().is_some_and(|error|
+                        chat::connection_recovery::transient(error)
+                            || error == "Could not reconnect to Monitter. Your agents may still be running; try again shortly.") {
+                        view.error = None;
                         cx.notify();
                     }
-                }
-                if std::mem::take(&mut view.refresh_requested) {
-                    view.refresh(cx);
-                }
-            });
-        })
-        .detach();
-    }
-    fn request_full_reset(&mut self, cx: &mut Context<Self>) {
-        let Some(service) = self.service.clone() else {
-            return;
-        };
-        if self.refreshing {
-            self.refresh_requested = true;
-            return;
-        }
-        self.refreshing = true;
-        let task = cx
-            .background_executor()
-            .spawn(async move { service.read_ui_changes(None) });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.refreshing = false;
-                match result {
-                    Ok(response) => match view.native_state.apply(response) {
-                        ApplyResult::FullReset(changes) => view.publish_native(
-                            true,
-                            changes.removed_task_ids,
-                            changes.reset_channel_ids,
-                            cx,
-                        ),
-                        _ => {
-                            view.error = Some(
-                                "Backend did not provide the requested native state reset.".into(),
-                            );
+                    match result {
+                        Ok((state, applied)) => match applied {
+                            ApplyResult::Unchanged => {
+                                if view.publication.resume_failed() { view.start_native_publication(cx); }
+                                if force_reset {
+                                    view.error = Some("Backend did not provide the requested native state reset.".into());
+                                    cx.notify();
+                                }
+                            }
+                            ApplyResult::Gap => {
+                                if force_reset {
+                                    view.error = Some("Backend did not provide the requested native state reset.".into());
+                                    cx.notify();
+                                } else {
+                                    view.request_full_reset(cx);
+                                }
+                            }
+                            ApplyResult::FullReset(changes) => {
+                                view.native_state = state;
+                                view.queue_native_publication(PublicationChanges::from_changes(true, changes), cx);
+                            }
+                            ApplyResult::Delta(changes) => {
+                                if force_reset {
+                                    view.error = Some("Backend did not provide the requested native state reset.".into());
+                                    cx.notify();
+                                } else {
+                                    view.native_state = state;
+                                    view.queue_native_publication(PublicationChanges::from_changes(false, changes), cx);
+                                }
+                            }
+                        },
+                        Err(error) => {
+                            if !chat::connection_recovery::transient(&error) { view.error = Some(error); }
                             cx.notify();
                         }
-                    },
-                    Err(error) => {
-                        view.error = Some(error);
-                        cx.notify();
                     }
                 }
-                if std::mem::take(&mut view.refresh_requested) {
+                if std::mem::take(&mut view.refresh_requested) { view.refresh(cx); }
+            });
+        }).detach();
+    }
+    fn request_full_reset(&mut self, cx: &mut Context<Self>) {
+        self.full_reset_requested = true;
+        self.refresh(cx);
+    }
+    fn queue_native_publication(&mut self, changes: PublicationChanges, cx: &mut Context<Self>) {
+        self.publication.enqueue(changes);
+        self.start_native_publication(cx);
+    }
+    fn start_native_publication(&mut self, cx: &mut Context<Self>) {
+        if self.native_state.snapshot().is_none() { return; }
+        let Some((generation, mut changes)) = self.publication.start() else { return; };
+        let mut state = self.native_state.clone();
+        changes.trim_tasks.extend(self.chat_panes.borrow().iter()
+            .filter(|(_, pane)| pane.read(cx).can_trim_hidden_history())
+            .map(|(id, _)| id.clone()));
+        let revision = self.native_state.revision().map(str::to_owned);
+        let mut panes: HashSet<_> = self.chat_panes.borrow().keys().cloned().collect();
+        if let Some(selected) = &self.selected { panes.insert(selected.clone()); }
+        let previous_records = self.collaboration_records.clone();
+        let previous_transcripts = self.collaboration_transcripts.clone();
+        let previous = self.publication_index.clone();
+        let mut worker_changes = changes.clone();
+        let worker = cx.background_executor().spawn(async move {
+            let mut evicted = Vec::new();
+            for id in &worker_changes.trim_tasks {
+                if state.trim_task_messages(id, 256) {
+                    worker_changes.message_tasks.insert(id.clone());
+                    evicted.push(id.clone());
+                }
+            }
+            let panes_for_records = panes.clone();
+            native_publication::prepare(state.snapshot().unwrap().clone(), panes, &worker_changes, previous)
+                .map(|mut prepared| {
+                    for id in &panes_for_records {
+                        let items = if prepared.sync_tasks.contains(id) || !previous_records.contains_key(id) {
+                            Arc::new(collaboration::records(&prepared.snapshot, id))
+                        } else { previous_records[id].clone() };
+                        let transcripts = if prepared.sync_tasks.contains(id) || !previous_transcripts.contains_key(id) {
+                            collaboration::prepare_child_transcripts(&prepared.snapshot, &items, previous_transcripts.get(id))
+                        } else { previous_transcripts[id].clone() };
+                        prepared.collaboration_records.insert(id.clone(), items);
+                        prepared.collaboration_transcripts.insert(id.clone(), transcripts);
+                    }
+                    (state, prepared, evicted)
+                })
+        });
+        cx.spawn(async move |view, cx| {
+            let prepared = worker.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.publication.finish(generation, changes.clone()) {
+                    match prepared {
+                        Ok((state, prepared, evicted)) => {
+                            if view.publication_error.is_some() && view.error.as_ref() == view.publication_error.as_ref() { view.error = None; }
+                            view.publication_error = None;
+                            view.native_state = state;
+                            let mut changes = changes;
+                            for id in evicted {
+                                // A page can be accepted while its pane is hidden;
+                                // eviction makes its older boundary unknown again.
+                                changes.task_page_boundaries.remove(&id);
+                                if let Some(pane) = view.chat_panes.borrow().get(&id) {
+                                    pane.update(cx, |pane, _| pane.mark_hidden_page_eviction());
+                                }
+                            }
+                            view.commit_native_publication(prepared, revision, changes, cx);
+                        },
+                        Err(error) => {
+                            view.publication.fail(changes);
+                            view.publication_error = Some(error.clone());
+                            view.error = Some(error);
+                            cx.notify();
+                            // Retain pending refresh intent, but do not turn a
+                            // serialization failure into a self-retrying loop.
+                            return;
+                        }
+                    }
+                }
+                view.start_native_publication(cx);
+                if !view.publication.busy && std::mem::take(&mut view.refresh_requested) {
                     view.refresh(cx);
                 }
             });
-        })
-        .detach();
+        }).detach();
     }
-    fn publish_native(
+    fn commit_native_publication(
         &mut self,
-        reset: bool,
-        removed_tasks: Vec<String>,
-        reset_channels: Vec<String>,
+        mut prepared: PreparedPublication,
+        revision: Option<String>,
+        changes: PublicationChanges,
         cx: &mut Context<Self>,
     ) {
-        // Compact hidden tail-followers on every committed delta as well as
-        // tab switches. An inactive running task must not grow between visits.
-        let evictable: Vec<_> = self.chat_panes.borrow().iter().filter(|(_, pane)| pane.read(cx).can_trim_hidden_history()).map(|(id, pane)| (id.clone(), pane.clone())).collect();
-        for (id, pane) in evictable {
-            if self.native_state.trim_task_messages(&id, 256) {
-                pane.update(cx, |pane, _| pane.mark_hidden_page_eviction());
-            }
-        }
-        let Some(snapshot) = self.native_state.snapshot() else {
-            return;
-        };
-        let value = match serde_json::to_value(snapshot) {
-            Ok(value) => value,
-            Err(error) => {
-                self.error = Some(error.to_string());
-                cx.notify();
-                return;
-            }
-        };
-        let hidden_task_ids = workspace_visibility::internal_task_ids(&value);
-        let newly_hidden: Vec<String> = hidden_task_ids
-            .difference(&self.hidden_task_ids)
-            .cloned()
-            .collect();
-        self.hidden_task_ids = hidden_task_ids;
-        self.snapshot = Rc::new(workspace_visibility::project_snapshot(value));
-        self.revision = self.native_state.revision().map(str::to_owned);
+        let reset = changes.reset;
+        let reset_channels: Vec<_> = changes.reset_channels.iter().cloned().collect();
+        let removed_tasks: Vec<_> = changes.removed_tasks.iter().cloned().collect();
+        let newly_hidden: Vec<_> = prepared.hidden_tasks.difference(&self.hidden_task_ids).cloned().collect();
+        self.hidden_task_ids = prepared.hidden_tasks;
+        self.publication_index = Some(prepared.index);
+        self.collaboration_records = prepared.collaboration_records;
+        self.collaboration_transcripts = prepared.collaboration_transcripts;
+        self.snapshot = Rc::new(prepared.snapshot);
+        self.revision = revision;
         for pane in self.terminal_panes.values() {
             pane.update(cx, |pane, cx| pane.set_context(&self.snapshot, None, cx));
         }
@@ -1506,6 +1565,13 @@ impl Desktop {
             reset,
             &reset_channels,
         );
+        // A page accepted after the coalesced reset carries a newer valid
+        // boundary. Earlier pages and later backend resets remain invalidated.
+        for id in changes.channel_page_boundaries.keys() {
+            if let Some(boundary) = changes.channel_boundary(id, self.revision.as_deref(), &self.snapshot) {
+                self.channel_cursors.insert(id.clone(), boundary.next_before_id.clone());
+            }
+        }
         if let Some(channels) = &self.channels {
             channels.update(cx, |channels, cx| {
                 channels.sync(
@@ -1535,6 +1601,9 @@ impl Desktop {
             }
         }
         for id in removed_tasks {
+            // A coalesced reset may remove then recreate an ID. The current
+            // projected task list decides whether its pane is still removed.
+            if self.snapshot["tasks"].as_array().is_some_and(|tasks| tasks.iter().any(|task| task["id"].as_str() == Some(id.as_str()))) { continue; }
             if self.native_chat_panes.remove(&id).is_some() {
                 self.dirty_chat_pane_ids.insert(id.clone());
                 self.queue_preferences_save(cx);
@@ -1555,27 +1624,19 @@ impl Desktop {
                 self.dock_current = None;
             }
         }
-        // Group once per committed change; do not clone every task's history
-        // separately for each open pane.
         {
             let panes = self.chat_panes.borrow();
-            let mut messages_by_task: HashMap<String, Vec<Value>> = HashMap::new();
-            if let Some(messages) = self.snapshot["messages"].as_array() {
-                for message in messages {
-                    let task_id = field(message, "taskId");
-                    if panes.contains_key(&task_id) {
-                        messages_by_task
-                            .entry(task_id)
-                            .or_default()
-                            .push(message.clone());
-                    }
-                }
-            }
             for (id, pane) in panes.iter() {
-                let messages = messages_by_task.remove(id).unwrap_or_default();
+                if !prepared.sync_tasks.contains(id) {
+                    pane.update(cx, |pane, cx| pane.advance_revision(self.snapshot.clone(), self.revision.clone(), cx));
+                    continue;
+                }
+                let history = prepared.histories.remove(id);
+                let boundary = changes.task_boundary(id, self.revision.as_deref(), &self.snapshot);
                 pane.update(cx, |pane, cx| {
-                    pane.sync(self.snapshot.clone(), self.revision.clone(), cx);
-                    pane.reconcile_history(messages, reset, cx);
+                    pane.sync_prepared(self.snapshot.clone(), self.revision.clone(), self.collaboration_records[id].clone(), self.collaboration_transcripts[id].clone(), cx);
+                    if let Some(messages) = history { pane.reconcile_history(messages, reset, cx); }
+                    if let Some(boundary) = boundary { pane.restore_history_boundary(boundary.next_before_id.clone(), cx); }
                 });
             }
         }
@@ -1587,7 +1648,7 @@ impl Desktop {
         }
         if let Some(workspace) = &self.workspace {
             workspace.update(cx, |workspace, cx| {
-                workspace.sync((*self.snapshot).clone(), cx)
+                workspace.sync(self.snapshot.clone(), cx)
             });
         }
         if let Some(mail) = &self.mail {
@@ -1604,9 +1665,10 @@ impl Desktop {
         let Some(pane) = pane else { return; };
         if !pane.read(cx).can_trim_hidden_history() { return; }
         pane.update(cx, |pane, _| pane.trim_hidden_history(INACTIVE_MESSAGE_LIMIT));
-        if self.native_state.trim_task_messages(task_id, INACTIVE_MESSAGE_LIMIT) {
-            self.publish_native(false, vec![], vec![], cx);
-        }
+        self.queue_native_publication(PublicationChanges {
+            trim_tasks: HashSet::from([task_id.to_owned()]),
+            ..Default::default()
+        }, cx);
     }
     fn accept_history_page(
         &mut self,
@@ -1614,17 +1676,52 @@ impl Desktop {
         page: Result<TaskMessagesPage, String>,
         cx: &mut Context<Self>,
     ) {
-        let result = page.and_then(|page| {
-            let value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
-            self.native_state.merge_task_page(task_id, page)?;
-            self.publish_native(false, vec![], vec![], cx);
-            Ok(value)
+        self.accept_history_page_attempt(task_id.to_owned(), Arc::new(page), 0, cx);
+    }
+    fn accept_history_page_attempt(
+        &mut self, task_id: String, page: Arc<Result<TaskMessagesPage, String>>,
+        attempt: u8, cx: &mut Context<Self>,
+    ) {
+        let mut state = self.native_state.clone();
+        let generation = self.publication.generation;
+        let worker_id = task_id.clone();
+        let worker_page = page.clone();
+        let worker = cx.background_executor().spawn(async move {
+            worker_page.as_ref().clone().and_then(|page| {
+                let value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
+                let changes = state.merge_task_page(&worker_id, page)?;
+                Ok((state, value, changes))
+            })
         });
-        let pane = self.chat_panes.borrow().get(task_id).cloned();
-        if let Some(pane) = pane {
-            pane.update(cx, |pane, cx| pane.accept_history_page(result, cx));
-            self.compact_inactive_task(task_id, cx);
-        }
+        cx.spawn(async move |view, cx| {
+            let result = worker.await;
+            let _ = view.update(cx, |view, cx| {
+                if result.is_ok() && native_publication::rebase_history_once(
+                    generation, view.publication.generation,
+                    page.as_ref().as_ref().ok().map(|page| page.revision.as_str()),
+                    view.native_state.revision(), attempt,
+                ) {
+                    view.accept_history_page_attempt(task_id, page, attempt + 1, cx);
+                    return;
+                }
+                let result = result.and_then(|(state, value, changes)| {
+                    if generation != view.publication.generation {
+                        return Err("Task history page is stale; retry at the current revision.".into());
+                    }
+                    view.native_state = state;
+                    let mut changes = PublicationChanges::from_changes(false, changes);
+                    let accepted_page = page.as_ref().as_ref().unwrap();
+                    changes.task_page_boundaries.insert(task_id.clone(), native_publication::PageBoundary::new(accepted_page.revision.clone(), accepted_page.next_before_id.clone()));
+                    view.queue_native_publication(changes, cx);
+                    Ok(value)
+                });
+                let pane = view.chat_panes.borrow().get(&task_id).cloned();
+                if let Some(pane) = pane {
+                    pane.update(cx, |pane, cx| pane.accept_history_page(result, cx));
+                    view.compact_inactive_task(&task_id, cx);
+                }
+            });
+        }).detach();
     }
     fn accept_channel_page(
         &mut self,
@@ -1633,26 +1730,56 @@ impl Desktop {
         page: Result<ChannelMessagesPage, String>,
         cx: &mut Context<Self>,
     ) {
-        let result = page.and_then(|page| {
-            if page.next_before_id.as_deref().is_some() && page.next_before_id.as_deref() == before
-            {
-                return Err(
-                    "Channel history returned a non-advancing cursor; refresh before retrying."
-                        .into(),
-                );
-            }
-            let next = page.next_before_id.clone();
-            let value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
-            self.native_state.merge_channel_page(channel, page)?;
-            self.channel_cursors.insert(channel.into(), next);
-            self.publish_native(false, vec![], vec![], cx);
-            Ok(value)
+        self.accept_channel_page_attempt(channel.to_owned(), before.map(str::to_owned), Arc::new(page), 0, cx);
+    }
+    fn accept_channel_page_attempt(
+        &mut self, channel: String, before: Option<String>,
+        page: Arc<Result<ChannelMessagesPage, String>>, attempt: u8, cx: &mut Context<Self>,
+    ) {
+        let mut state = self.native_state.clone();
+        let generation = self.publication.generation;
+        let worker_channel = channel.clone();
+        let worker_page = page.clone();
+        let worker_before = before.clone();
+        let worker = cx.background_executor().spawn(async move {
+            worker_page.as_ref().clone().and_then(|page| {
+                if page.next_before_id.is_some() && page.next_before_id == worker_before {
+                    return Err("Channel history returned a non-advancing cursor; refresh before retrying.".into());
+                }
+                let next = page.next_before_id.clone();
+                let value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
+                let changes = state.merge_channel_page(&worker_channel, page)?;
+                Ok((state, value, changes, next))
+            })
         });
-        if let Some(channels) = &self.channels {
-            channels.update(cx, |channels, cx| {
-                channels.accept_history_page(channel, result, cx)
+        cx.spawn(async move |view, cx| {
+            let result = worker.await;
+            let _ = view.update(cx, |view, cx| {
+                if result.is_ok() && native_publication::rebase_history_once(
+                    generation, view.publication.generation,
+                    page.as_ref().as_ref().ok().map(|page| page.revision.as_str()),
+                    view.native_state.revision(), attempt,
+                ) {
+                    view.accept_channel_page_attempt(channel, before, page, attempt + 1, cx);
+                    return;
+                }
+                let result = result.and_then(|(state, value, changes, next)| {
+                    if generation != view.publication.generation {
+                        return Err("Channel history page is stale; retry at the current revision.".into());
+                    }
+                    view.native_state = state;
+                    view.channel_cursors.insert(channel.clone(), next.clone());
+                    let mut changes = PublicationChanges::from_changes(false, changes);
+                    let accepted_page = page.as_ref().as_ref().unwrap();
+                    changes.channel_page_boundaries.insert(channel.clone(), native_publication::PageBoundary::new(accepted_page.revision.clone(), next));
+                    view.queue_native_publication(changes, cx);
+                    Ok(value)
+                });
+                if let Some(channels) = &view.channels {
+                    channels.update(cx, |channels, cx| channels.accept_history_page(&channel, result, cx));
+                }
             });
-        }
+        }).detach();
     }
     fn command(&mut self, command: &'static str, args: Value, cx: &mut Context<Self>) {
         if self.busy {
@@ -2736,7 +2863,7 @@ impl Desktop {
                             self.subagents = Some(cx.new(|cx| {
                                 collaboration::SubagentPane::new(
                                     service.clone(),
-                                    &self.snapshot,
+                                    self.snapshot.clone(),
                                     window,
                                     cx,
                                 )
@@ -2832,7 +2959,7 @@ impl Desktop {
                             self.workspace = Some(cx.new(|cx| {
                                 WorkspacePane::new(
                                     service.clone(),
-                                    (*self.snapshot).clone(),
+                                    self.snapshot.clone(),
                                     window,
                                     cx,
                                 )
@@ -3198,6 +3325,12 @@ impl Desktop {
             self.chat_panes
                 .borrow_mut()
                 .insert(task_id.to_owned(), pane.clone());
+            if self.publication.busy {
+                self.queue_native_publication(PublicationChanges {
+                    message_tasks: HashSet::from([task_id.to_owned()]),
+                    ..Default::default()
+                }, cx);
+            }
             pane
         });
         pane
@@ -3413,12 +3546,11 @@ impl Desktop {
         }
         if let Some(pane) = &self.subagents {
             if self.subagents_context.as_ref() != Some(&context) {
+                let task = self.selected.as_deref().unwrap_or_default();
                 pane.update(cx, |pane, cx| {
-                    pane.set_context(
-                        &self.snapshot,
-                        self.selected.as_deref().unwrap_or_default(),
-                        cx,
-                    )
+                    if let Some(items) = self.collaboration_records.get(task) {
+                        pane.set_prepared_context(self.snapshot.clone(), task, items.clone(), self.collaboration_transcripts[task].clone(), cx);
+                    } else { pane.set_context(self.snapshot.clone(), task, cx); }
                 });
                 self.subagents_context = Some(context.clone());
             }
@@ -3581,7 +3713,7 @@ impl Desktop {
             if self.subagents.is_none() {
                 if let Some(service) = self.service.clone() {
                     self.subagents = Some(cx.new(|cx| {
-                        collaboration::SubagentPane::new(service, &self.snapshot, window, cx)
+                        collaboration::SubagentPane::new(service, self.snapshot.clone(), window, cx)
                     }));
                 }
             }
@@ -3590,11 +3722,10 @@ impl Desktop {
                 let context = (self.revision.clone(), self.selected.clone());
                 if self.subagents_context.as_ref() != Some(&context) {
                     pane.update(cx, |pane, cx| {
-                        pane.set_context(
-                            &self.snapshot,
-                            self.selected.as_deref().unwrap_or_default(),
-                            cx,
-                        )
+                        let task = self.selected.as_deref().unwrap_or_default();
+                        if let Some(items) = self.collaboration_records.get(task) {
+                            pane.set_prepared_context(self.snapshot.clone(), task, items.clone(), self.collaboration_transcripts[task].clone(), cx);
+                        } else { pane.set_context(self.snapshot.clone(), task, cx); }
                     });
                     self.subagents_context = Some(context);
                 }
@@ -3896,7 +4027,7 @@ impl Desktop {
             if self.workspace.is_none() {
                 if let Some(service) = self.service.clone() {
                     self.workspace = Some(cx.new(|cx| {
-                        WorkspacePane::new(service, self.snapshot.as_ref().clone(), window, cx)
+                        WorkspacePane::new(service, self.snapshot.clone(), window, cx)
                     }));
                 }
             }
@@ -3982,7 +4113,11 @@ impl Desktop {
 }
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Begin before any child renders: NativePanel records highlight
+        // candidates during render, before deferred paint callbacks run.
+        native_pane_highlight::begin_frame(window);
         if self.session_lock.read(cx).is_locked() {
+            native_pane_highlight::clear(window);
             let palette=self.apply_native_theme(window,cx);
             self.session_lock.update(cx,|lock,_|lock.set_palette(palette));
             self.dock.update(cx,|dock,cx|dock.set_shown(false,window,cx));
@@ -4044,6 +4179,9 @@ impl Render for Desktop {
                 .palette
                 .as_ref()
                 .is_some_and(|pane| pane.read(cx).is_open());
+        if self.preferences_open || open {
+            native_pane_highlight::clear(window);
+        }
         // Hidden native children must not enter the frame arena behind a modal.
         // Their entities and workspace layout remain retained for dismissal.
         let mut root = div()
@@ -4051,8 +4189,6 @@ impl Render for Desktop {
             .relative()
             .key_context(if self.snapshot["settings"]["shortcutMode"] == "vim" { "MonitterDesktop shortcutMode=vim" } else { "MonitterDesktop shortcutMode=standard" })
             .child(pointer_guard::PointerReleaseGuard)
-            .child(canvas(|_, _, _| (), |_, _, window, _| native_pane_highlight::clear(window))
-                .absolute().inset_0())
             .capture_key_down(|event, window, cx| {
                 if event.keystroke.key == "escape" && cx.stop_active_drag(window) {
                     cx.stop_propagation();
@@ -4136,6 +4272,12 @@ impl Render for Desktop {
             && !self.preferences_restoring;
         self.startup_splash.update(cx, |splash, cx| splash.set_ready(interface_ready, cx));
         root.child(self.startup_splash.clone())
+            // Pane highlights are deferred (priorities 1 and 3). Finalize
+            // native overlay visibility after those candidates have painted.
+            .child(gpui_kit::deferred(canvas(
+                |_, _, _| (),
+                |_, _, window, _| native_pane_highlight::finish_frame(window),
+            ).absolute().inset_0()).with_priority(5))
     }
 }
 
@@ -4481,6 +4623,8 @@ fn main() {
         .with_assets(native_icons::DesktopIcons)
         .run(|cx| {
             gpui_kit::init(cx);
+            #[cfg(feature = "performance-profiling")]
+            if performance_scenario::open_if_requested(cx) { return; }
             gpui_kit::component::resizable::set_separator_blend_mode(crate::surface_blend::separator_mode());
             native_motion::initialize(cx);
             streaming_display::initialize(cx);
@@ -4529,6 +4673,8 @@ fn main() {
             let _ = window_handle.update(cx, |_, window, cx| dialog_backdrop::install(window, cx));
             #[cfg(feature = "visual-export")]
             visual_export::schedule(window_handle, cx);
+            #[cfg(feature = "performance-profiling")]
+            performance_metrics::schedule(window_handle, cx);
             // Cmd/Ctrl+T/W/1..9: bind the three actions and key chords. The
             // module owns the action types and keymap; this is the only
             // wiring site.

@@ -200,9 +200,9 @@ impl SlashPalette {
         }
 
         self.snapshot = serde_json::json!({
-                "settings": snapshot["settings"],
-                "tasks": snapshot["tasks"],
-            });
+            "settings": snapshot["settings"],
+            "tasks": snapshot["tasks"],
+        });
         self.revision = revision;
         self.task_id = task_id;
         self.generation = self.generation.wrapping_add(1);
@@ -218,6 +218,16 @@ impl SlashPalette {
             self.refilter(cx);
         } else {
             cx.notify();
+        }
+    }
+
+    /// A publication outside this task advances the canonical revision without
+    /// changing its command scope. Keep an existing lookup valid; substantive
+    /// task/context updates still invalidate it through `generation`.
+    pub fn advance_revision(&mut self, revision: &str) {
+        self.revision = revision.to_owned();
+        if let Some(key) = self.lookup_key.as_mut() {
+            key.revision = self.revision.clone();
         }
     }
 
@@ -667,10 +677,7 @@ impl SlashPalette {
                 .map_err(|_| "Command lookup worker ended without a result.".to_owned())
                 .and_then(|result| result);
             let _ = entity.update(cx, |palette, cx| {
-                if palette.generation != key.generation
-                    || palette.task_id != key.task_id
-                    || palette.revision != key.revision
-                {
+                if palette.generation != key.generation || palette.task_id != key.task_id {
                     return;
                 }
                 palette.loading = false;

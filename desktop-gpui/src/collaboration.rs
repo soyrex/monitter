@@ -16,6 +16,7 @@ use gpui_kit::{
 use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::{rc::Rc, sync::Arc};
 
 const TRANSCRIPT_WORKER_STACK: usize = 8 * 1024 * 1024;
 
@@ -159,13 +160,19 @@ fn rows(v: &Value, key: &str) -> Vec<Value> {
         .cloned()
         .unwrap_or_default()
 }
-fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
-    let sessions = rows(snapshot, "subagentSessions");
-    let collaborations = rows(snapshot, "collaborations");
-    let collab_by_id: HashMap<String, Value> = collaborations
+fn rows_ref<'a>(v: &'a Value, key: &str) -> &'a [Value] {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+pub(crate) fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
+    let sessions = rows_ref(snapshot, "subagentSessions");
+    let collaborations = rows_ref(snapshot, "collaborations");
+    let collab_by_id: HashMap<String, &Value> = collaborations
         .iter()
         .filter(|item| field(item, "kind") == "delegation")
-        .map(|item| (field(item, "id"), item.clone()))
+        .map(|item| (field(item, "id"), item))
         .collect();
     let mut result = Vec::new();
     let mut visited_parents = std::collections::HashSet::from([parent.to_owned()]);
@@ -216,7 +223,7 @@ fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
             }
             result.push(item);
         }
-        for collaboration in &collaborations {
+        for collaboration in collaborations {
             if field(collaboration, "kind") != "delegation"
                 || field(collaboration, "fromTaskId") != parent_id
                 || represented.contains(&field(collaboration, "id"))
@@ -240,11 +247,11 @@ fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
         }
     }
 
-    let tasks = rows(snapshot, "tasks");
-    let agents = rows(snapshot, "agents");
-    let projects = rows(snapshot, "projects");
-    let events = rows(snapshot, "events");
-    let messages = rows(snapshot, "messages");
+    let tasks = rows_ref(snapshot, "tasks");
+    let agents = rows_ref(snapshot, "agents");
+    let projects = rows_ref(snapshot, "projects");
+    let events = rows_ref(snapshot, "events");
+    let messages = rows_ref(snapshot, "messages");
     for item in &mut result {
         let task = tasks
             .iter()
@@ -429,6 +436,42 @@ fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
     result
 }
 
+pub(crate) fn prepare_child_transcripts(
+    snapshot: &Value, items: &[Value],
+    previous: Option<&monitter_gpui_desktop::native_publication::PreparedChildTranscripts>,
+) -> monitter_gpui_desktop::native_publication::PreparedChildTranscripts {
+    let mut transcripts = HashMap::new();
+    for item in items {
+        let id = field(item, "id");
+        let entries = if let Some(task_id) = item["taskId"].as_str() {
+            let mut entries: Vec<Value> = rows_ref(snapshot,"messages").iter()
+                .filter(|m| field(m,"taskId") == task_id && matches!(field(m,"role").as_str(),"user"|"assistant"))
+                .map(|m| json!({"id":m["id"],"role":m["role"],"text":m["text"],"createdAt":m["createdAt"]})).collect();
+            entries.extend(rows_ref(snapshot, "events").iter().filter_map(|event| {
+                if field(&event, "taskId") != task_id { return None; }
+                match field(&event, "kind").as_str() {
+                    "reasoning" => {
+                        let summary = crate::transcript::reasoning_summary(event);
+                        (!summary.is_empty()).then(|| json!({"id":event["id"],"role":"reasoning","text":summary,"createdAt":event["createdAt"]}))
+                    }
+                    "tool" => {
+                        let title = event["title"].as_str().filter(|value| !value.is_empty()).unwrap_or("Tool activity");
+                        Some(json!({"id":event["id"],"role":"activity","text":title,"createdAt":event["createdAt"]}))
+                    }
+                    _ => None,
+                }
+            }));
+            entries.sort_by(|a, b| a["createdAt"].as_i64().cmp(&b["createdAt"].as_i64()));
+            entries
+        } else if let Some(entries) = snapshot["subagentTranscripts"].get(&id).and_then(Value::as_array) {
+            entries.clone()
+        } else { continue; };
+        let retained = previous.and_then(|old| old.get(&id)).filter(|old| old.as_ref() == &entries);
+        transcripts.insert(id, retained.cloned().unwrap_or_else(|| Arc::new(entries)));
+    }
+    Arc::new(transcripts)
+}
+
 /// Layout animation shared by the real visor and its native regression fixture.
 pub(crate) fn visor_slide<T: 'static>(
     key: SharedString,
@@ -489,11 +532,12 @@ pub(crate) fn clipped_visor_body(height: f32, body: impl IntoElement) -> AnyElem
 
 pub struct SubagentPane {
     service: DesktopService,
-    snapshot: Value,
+    snapshot: Rc<Value>,
     parent_task: Option<String>,
-    items: Vec<Value>,
+    items: Arc<Vec<Value>>,
     selected: Option<String>,
-    transcript: Vec<Value>,
+    transcript: Arc<Vec<Value>>,
+    prepared_transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts,
     transcript_list: ListState,
     generation: u64,
     transcript_loading: bool,
@@ -509,9 +553,7 @@ impl SubagentPane {
     /// Count only authoritative records for this pane's current parent task.
     /// The badge performs no transcript read or backend request.
     pub fn record_count(&self) -> usize {
-        self.parent_task
-            .as_deref()
-            .map_or(0, |parent| records(&self.snapshot, parent).len())
+        self.items.len()
     }
 
     /// The parent chat uses this to decide whether to mount the child visor below its composer.
@@ -521,17 +563,18 @@ impl SubagentPane {
 
     pub fn new(
         service: DesktopService,
-        snapshot: &Value,
+        snapshot: Rc<Value>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
             service,
-            snapshot: snapshot.clone(),
+            snapshot,
             parent_task: None,
-            items: vec![],
+            items: Arc::new(vec![]),
             selected: None,
-            transcript: vec![],
+            transcript: Arc::new(vec![]),
+            prepared_transcripts: Arc::new(HashMap::new()),
             transcript_list: ListState::new(0, ListAlignment::Bottom, px(220.)),
             generation: 0,
             transcript_loading: false,
@@ -579,11 +622,28 @@ impl SubagentPane {
         }
     }
 
-    pub fn set_context(&mut self, snapshot: &Value, task_id: &str, cx: &mut Context<Self>) {
+    /// User-driven context switches use the legacy immediate preparation;
+    /// routine state publication supplies records prepared on its worker.
+    pub fn set_context(&mut self, snapshot: Rc<Value>, task_id: &str, cx: &mut Context<Self>) {
+        let items = Arc::new(records(&snapshot, task_id));
+        let transcripts = prepare_child_transcripts(&snapshot, &items, Some(&self.prepared_transcripts));
+        self.set_prepared_context(snapshot, task_id, items, transcripts, cx);
+    }
+    /// Publication dependency comparison proved this parent's prepared child
+    /// records/transcripts unchanged. Release the older global source without
+    /// rebuilding records, fencing native reads, or notifying the visor.
+    pub(crate) fn advance_unaffected_snapshot(&mut self, snapshot: Rc<Value>) {
+        self.snapshot = snapshot;
+    }
+    pub fn set_prepared_context(
+        &mut self, snapshot: Rc<Value>, task_id: &str, items: Arc<Vec<Value>>,
+        transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts, cx: &mut Context<Self>,
+    ) {
         let changed = self.parent_task.as_deref() != Some(task_id);
-        self.snapshot = snapshot.clone();
+        self.snapshot = snapshot;
         self.parent_task = Some(task_id.to_owned());
-        self.items = records(snapshot, task_id);
+        self.items = items;
+        self.prepared_transcripts = transcripts;
         if changed
             || (self.selected.is_none() && !self.items.is_empty())
             || self
@@ -595,7 +655,7 @@ impl SubagentPane {
             self.visor_open = should_open_initial_visor(&self.items);
             self.transcript_loading = false;
             self.transcript_load_key = None;
-            self.replace_transcript(vec![]);
+            self.replace_transcript(Arc::new(vec![]));
             self.generation += 1;
             self.load_transcript(cx);
         } else if self
@@ -627,14 +687,14 @@ impl SubagentPane {
         self.visor_open = true;
         self.transcript_loading = false;
         self.transcript_load_key = None;
-        self.replace_transcript(vec![]);
+        self.replace_transcript(Arc::new(vec![]));
         self.generation += 1;
         self.load_transcript(cx);
         cx.notify();
     }
 
-    fn replace_transcript(&mut self, entries: Vec<Value>) {
-        if self.transcript == entries {
+    fn replace_transcript(&mut self, entries: Arc<Vec<Value>>) {
+        if Arc::ptr_eq(&self.transcript, &entries) {
             return;
         }
         self.transcript_list.reset(entries.len());
@@ -662,37 +722,10 @@ impl SubagentPane {
         // Task-backed delegations already have transcript messages/events in
         // the snapshot. Codex native subagent threads are queried by the
         // existing backend command; ACP inline transcripts are snapshot data.
-        if let Some(task_id) = item["taskId"].as_str() {
+        if let Some(entries) = self.prepared_transcripts.get(&id).cloned() {
             self.transcript_loading = false;
             self.transcript_load_key = None;
-            let mut entries: Vec<Value> = rows(&self.snapshot,"messages").into_iter()
-                .filter(|m| field(m,"taskId") == task_id && matches!(field(m,"role").as_str(),"user"|"assistant"))
-                .map(|m| json!({"id":m["id"],"role":m["role"],"text":m["text"],"createdAt":m["createdAt"]})).collect();
-            entries.extend(rows(&self.snapshot, "events").into_iter().filter_map(|event| {
-                if field(&event, "taskId") != task_id { return None; }
-                match field(&event, "kind").as_str() {
-                    "reasoning" => {
-                        let summary = crate::transcript::reasoning_summary(&event);
-                        (!summary.is_empty()).then(|| json!({"id":event["id"],"role":"reasoning","text":summary,"createdAt":event["createdAt"]}))
-                    }
-                    "tool" => {
-                        let title = event["title"].as_str().filter(|value| !value.is_empty()).unwrap_or("Tool activity");
-                        Some(json!({"id":event["id"],"role":"activity","text":title,"createdAt":event["createdAt"]}))
-                    }
-                    _ => None,
-                }
-            }));
-            entries.sort_by(|a, b| a["createdAt"].as_i64().cmp(&b["createdAt"].as_i64()));
             self.replace_transcript(entries);
-            return;
-        }
-        if let Some(entries) = self.snapshot["subagentTranscripts"]
-            .get(&id)
-            .and_then(Value::as_array)
-        {
-            self.transcript_loading = false;
-            self.replace_transcript(entries.clone());
-            self.transcript_load_key = None;
             return;
         }
         if field(&item, "source") != "codex" {
@@ -729,7 +762,7 @@ impl SubagentPane {
                     "get_subagent_transcript",
                     json!({"taskId":worker_task_id,"subagentId":worker_subagent_id}),
                 );
-                let _ = sender.send(result);
+                let _ = sender.send(result.map(|entries| Arc::new(entries.as_array().cloned().unwrap_or_default())));
             });
         if let Err(error) = spawned {
             self.transcript_loading = false;
@@ -765,7 +798,7 @@ impl SubagentPane {
                 }
                 match result {
                     Ok(entries) => {
-                        pane.replace_transcript(entries.as_array().cloned().unwrap_or_default())
+                        pane.replace_transcript(entries)
                     }
                     Err(error) => {
                         pane.transcript_load_key = None;
@@ -818,7 +851,7 @@ impl SubagentPane {
             .px(px(10.))
             .py(px(5.))
             .bg(crate::surface_blend::background(crate::surface_blend::Area::Pane, palette.paper));
-        for (index, item) in self.items.clone().into_iter().enumerate() {
+        for (index, item) in self.items.iter().cloned().enumerate() {
             let id = field(&item, "id");
             let active_tab = selected.as_deref() == Some(id.as_str());
             let title = item["title"]
@@ -1487,6 +1520,34 @@ mod tests {
         assert_eq!(items[1]["agentName"], "Writer");
         assert!(should_open_initial_visor(&items));
     }
+    #[::core::prelude::v1::test]
+    fn prepared_child_transcripts_scope_sort_and_retain_unchanged_rows() {
+        let items = vec![json!({"id":"child-record","taskId":"child"})];
+        let mut snapshot = json!({
+            "messages":[
+                {"id":"unrelated","taskId":"other","role":"assistant","text":"ignore","createdAt":0},
+                {"id":"reply","taskId":"child","role":"assistant","text":"reply","createdAt":20},
+                {"id":"tool-message","taskId":"child","role":"tool","text":"ignore role","createdAt":5}
+            ],
+            "events":[{"id":"tool","taskId":"child","kind":"tool","title":"Read file","createdAt":10}],
+            "subagentTranscripts":{}
+        });
+        let first = prepare_child_transcripts(&snapshot, &items, None);
+        assert_eq!(first["child-record"].len(), 2);
+        assert_eq!(first["child-record"][0]["id"], "tool");
+        assert_eq!(first["child-record"][1]["id"], "reply");
+        let same = prepare_child_transcripts(&snapshot, &items, Some(&first));
+        assert!(Arc::ptr_eq(&first["child-record"], &same["child-record"]));
+        snapshot["messages"][1]["text"] = json!("new reply");
+        let changed = prepare_child_transcripts(&snapshot, &items, Some(&same));
+        assert!(!Arc::ptr_eq(&same["child-record"], &changed["child-record"]));
+        assert_eq!(changed["child-record"][1]["text"], "new reply");
+        snapshot["messages"] = json!([]);
+        snapshot["events"] = json!([]);
+        let empty = prepare_child_transcripts(&snapshot, &items, Some(&changed));
+        assert!(empty["child-record"].is_empty());
+    }
+
 }
 
 #[cfg(test)]
