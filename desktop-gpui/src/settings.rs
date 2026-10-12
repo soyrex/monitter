@@ -1146,7 +1146,7 @@ impl Desktop {
         let mut previous_group = "";
         for item in settings_navigation::CATEGORIES {
             if item.group != previous_group {
-                rows.push(div().mt(design::ui_scaled_px(if previous_group.is_empty() { 0. } else { 14. }))
+                rows.push(div().mt(design::ui_scaled_px(if previous_group.is_empty() { 0. } else { 10. }))
                     .when(!compact, |this| this.px(design::ui_scaled_px(9.)).pb(design::ui_scaled_px(6.))
                         .text_size(settings_text_size(0.71)).font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(palette.muted)).child(item.group))
@@ -1158,7 +1158,7 @@ impl Desktop {
             let selected = destination.id == id;
             rows.push(Button::new(SharedString::from(format!("settings-category-{id}"))).ghost()
                 .selected(selected)
-                .w_full().h_auto().compact().justify_start().py(design::ui_scaled_px(8.)).px(design::ui_scaled_px(8.))
+                .w_full().h_auto().compact().justify_start().py(design::ui_scaled_px(5.)).px(design::ui_scaled_px(8.))
                 .bg(if selected { rgba((palette.accent << 8) | 0x21) } else { rgba(0) })
                 .text_color(rgb(if selected { palette.accent } else { palette.ink }))
                 .accessibility_label(item.label).tooltip(format!("{} — {}", item.label, item.description))
@@ -1176,7 +1176,7 @@ impl Desktop {
         }
         let navigation = div().id("preferences-navigation").min_h_0().overflow_y_scroll()
             .w(design::ui_scaled_px(if compact { 58. } else { 224. })).flex_shrink_0().h_full()
-            .flex().flex_col().gap(design::ui_scaled_px(2.)).py(design::ui_scaled_px(18.)).px(design::ui_scaled_px(if compact { 8. } else { 12. }))
+            .flex().flex_col().gap(design::ui_scaled_px(2.)).py(design::ui_scaled_px(14.)).px(design::ui_scaled_px(if compact { 8. } else { 12. }))
             .border_r_1().border_color(rgb(palette.line)).bg(design::surface_color(palette.paper))
             .children(rows);
         let status = if self.preferences_busy {
