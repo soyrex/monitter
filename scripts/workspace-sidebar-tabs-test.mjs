@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { collectWorkspaceSidebarTabs, settingsTabTitle, terminalTabTitle } from '../src/lib/workspace-sidebar-tabs.ts';
+import { findPaneTabOwner, paneTabMatches } from '../src/lib/pane-controller.ts';
+
+// Resolve the browser module's extensionless catalog import for this Node harness.
+const tabsSource = readFileSync(new URL('../src/lib/workspace-sidebar-tabs.ts', import.meta.url), 'utf8')
+  .replace("'./settings-navigation'", JSON.stringify(new URL('../src/lib/settings-navigation.ts', import.meta.url).href));
+const tabsModule = ts.transpileModule(tabsSource, { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext } }).outputText;
+const { collectWorkspaceSidebarTabs, settingsTabTitle, terminalTabTitle } = await import(`data:text/javascript;base64,${Buffer.from(tabsModule).toString('base64')}`);
 
 const terminal = (id, title) => ({ id, title, hostId: 'host', cwd: `/tmp/${id}`, status: 'running', exitCode: null });
 const terminals = { one: terminal('one', 'Build shell'), two: terminal('two', 'Server logs') };
@@ -48,7 +54,7 @@ assert.deepEqual(collectWorkspaceSidebarTabs(input, terminals), [
 assert.deepEqual(input, before, 'collector must not mutate persisted pane state');
 assert.deepEqual(collectWorkspaceSidebarTabs([], terminals), []);
 console.log('workspace sidebar tab collector assertions passed');
-for (const [category, label] of Object.entries({ profile: 'Profile', appearance: 'Appearance', typography: 'Typography', behaviour: 'Permissions & behaviour', conversation: 'Conversation', agents: 'Agents', directory: 'Agent directory', lan: 'LAN access', remote: 'Remote control' })) {
+for (const [category, label] of Object.entries({ profile: 'Profile', appearance: 'Appearance', interface: 'Layout & panes', typography: 'Fonts & text', behaviour: 'Keyboard & focus', conversation: 'Conversation', collaboration: 'Collaboration', agents: 'Agents', directory: 'Agents', extensions: 'MCP & plugins', approvals: 'Approval rules', environment: 'Environment & secrets', secrets: 'Environment & secrets', connection: 'Connection', lan: 'LAN access', remote: 'Remote control' })) {
   assert.equal(settingsTabTitle(category), `Setting: ${label}`);
   assert.equal(collectWorkspaceSidebarTabs([{ settingsOpen: true, settingsCategory: category }], {})[0].title, `Setting: ${label}`);
 }
@@ -79,6 +85,9 @@ function createContext({ activeWorkspaceKey = 'agent:alex', owners = {}, switchR
   const calls = [];
   const context = {
     activeWorkspaceKey,
+    activePaneId: 'main',
+    findPaneTabOwner,
+    paneTabMatches,
     layout: { owners },
     paneRefs: {},
     expandedPaneId,

@@ -1,18 +1,23 @@
 <script lang="ts">
+  import UserRound from '@lucide/svelte/icons/user-round';
+  import Palette from '@lucide/svelte/icons/palette';
+  import PanelsTopLeft from '@lucide/svelte/icons/panels-top-left';
+  import Type from '@lucide/svelte/icons/type';
+  import Keyboard from '@lucide/svelte/icons/keyboard';
+  import MessageSquare from '@lucide/svelte/icons/message-square';
+  import Bot from '@lucide/svelte/icons/bot';
+  import Users from '@lucide/svelte/icons/users';
+  import Blocks from '@lucide/svelte/icons/blocks';
+  import BadgeCheck from '@lucide/svelte/icons/badge-check';
+  import KeyRound from '@lucide/svelte/icons/key-round';
+  import Wifi from '@lucide/svelte/icons/wifi';
+  import Smartphone from '@lucide/svelte/icons/smartphone';
+  import ScanLine from '@lucide/svelte/icons/scan-line';
   import { onMount } from 'svelte';
   import { rangeFill } from '$lib/range-fill';
-  import Bot from "@lucide/svelte/icons/bot";
   import Check from "@lucide/svelte/icons/check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
-  import KeyRound from "@lucide/svelte/icons/key-round";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
-  import MessageSquare from "@lucide/svelte/icons/message-square";
-  import Palette from "@lucide/svelte/icons/palette";
-  import ShieldCheck from "@lucide/svelte/icons/shield-check";
-  import Smartphone from "@lucide/svelte/icons/smartphone";
-  import Type from "@lucide/svelte/icons/type";
-  import UserRound from "@lucide/svelte/icons/user-round";
-  import Blocks from "@lucide/svelte/icons/blocks";
   import type { Agent, ApprovalRule, Host, Settings, SystemFontFamily } from "$lib/types";
   import { getBridge } from '$lib/bridge';
   import { surfaceTint, setSurfaceTint, DEFAULT_SURFACE_TINT } from '$lib/surface-tint';
@@ -28,11 +33,12 @@
   import ExtensionsSettings from './ExtensionsSettings.svelte';
   import EnvironmentSecretsSettings from './EnvironmentSecretsSettings.svelte';
 
+  import { SETTINGS_CATEGORIES, SETTINGS_GROUPS, normalizeSettingsCategory } from '$lib/settings-navigation';
+
   // The agent directory and the agent editor are merged into a single
   // "Agents" category. The in-pane route inside AppSurface decides whether
   // the directory or the edit view is shown, so this component only
   // owns the sidebar slot.
-  type Category = "profile" | "connection" | "appearance" | "typography" | "behaviour" | "conversation" | "approvals" | "agents" | "lan" | "remote" | "extensions" | "environment";
   type FontKey = "interfaceFont" | "chatFont" | "terminalFont";
   type FontSizeKey = "interfaceFontSize" | "chatFontSize" | "terminalFontSize";
   type FontWeightKey = "interfaceFontWeight" | "chatFontWeight" | "terminalFontWeight";
@@ -85,20 +91,12 @@
     mobileNativeSpeechAvailable = platform !== null && isOwnerRelayBrowser();
     mobileSpeechDevice = platform === 'ios' ? 'iPhone' : platform === 'android' ? 'Android phone' : 'phone';
   });
-  const categories = $derived<{ id: Category; label: string; detail: string; icon: typeof Palette }[]>([
-    { id: "profile", label: "Profile", detail: "Your name for new chats", icon: UserRound },
-    ...(iosConnectionAvailable || androidConnectionAvailable ? [{ id: "connection" as const, label: "Connection", detail: iosConnectionAvailable ? "Choose LAN or relay workspace" : "Manage paired workspace", icon: Smartphone }] : []),
-    { id: "lan", label: "LAN access", detail: "Open Monitter in a browser", icon: ShieldCheck },
-    ...(remoteControlAvailable ? [{ id: "remote" as const, label: "Remote control", detail: "Pair this desktop with your phone", icon: Smartphone }] : []),
-    { id: "agents", label: "Agents", detail: "Browse and configure your agents", icon: Bot },
-    { id: "extensions", label: "MCP & Plugins", detail: "Servers, skills and safety", icon: Blocks },
-    { id: "environment", label: "Environment & Secrets", detail: "Shared keys for local agents", icon: KeyRound },
-    { id: "appearance", label: "Appearance", detail: "Theme, accent and panes", icon: Palette },
-    { id: "typography", label: "Typography", detail: "Fonts and base sizes", icon: Type },
-    { id: "behaviour", label: "Permissions & behaviour", detail: "Focus and busy messages", icon: ShieldCheck },
-    { id: "approvals", label: "Approvals", detail: "Saved always-approve rules", icon: ShieldCheck },
-    { id: "conversation", label: "Conversation", detail: "Messages and activity", icon: MessageSquare },
-  ]);
+  let categoryMenuOpen = $state(false);
+  let categoryTrigger = $state<HTMLButtonElement | null>(null);
+  const categoryIcons = { profile: UserRound, appearance: Palette, interface: PanelsTopLeft, typography: Type, behaviour: Keyboard, conversation: MessageSquare, agents: Bot, collaboration: Users, extensions: Blocks, approvals: BadgeCheck, environment: KeyRound, lan: Wifi, connection: Smartphone, remote: ScanLine };
+  const categories = $derived(SETTINGS_CATEGORIES.filter(item =>
+    item.id === 'connection' ? iosConnectionAvailable || androidConnectionAvailable :
+    item.id === 'remote' ? remoteControlAvailable : true).map(item => ({ ...item, icon: categoryIcons[item.id] })));
   const fonts: { key: FontKey; sizeKey: FontSizeKey; weightKey: FontWeightKey; size: number; label: string; fallback: string }[] = [
     { key: "interfaceFont", sizeKey: "interfaceFontSize", weightKey: "interfaceFontWeight", size: 14, label: "Interface font", fallback: "IBM Plex Sans" },
     { key: "chatFont", sizeKey: "chatFontSize", weightKey: "chatFontWeight", size: 13, label: "Chat font", fallback: "IBM Plex Sans" },
@@ -106,7 +104,8 @@
   ];
   const defaultTextFonts = ["IBM Plex Sans", "Arial", "Helvetica Neue", "Avenir Next", "Georgia", "Verdana", "IBM Plex Mono", "Menlo"];
   const defaultTerminalFonts = ["IBM Plex Mono", "Menlo", "Monaco", "Courier New", "SF Mono", "JetBrains Mono", "Fira Code"];
-  const activeCategory = $derived(categories.some((item) => item.id === category) ? category as Category : "appearance");
+  const currentCategory = $derived(categories.find(item => item.id === normalizeSettingsCategory(category)));
+  const activeCategory = $derived(categories.some((item) => item.id === normalizeSettingsCategory(category)) ? normalizeSettingsCategory(category) : "appearance");
   const densities = ['tight', 'normal', 'spacious'] as const;
   const windowSurfaces = ['opaque', 'translucent', 'glass'] as const;
   const density = $derived(settings.interfaceDensity ?? 'normal');
@@ -144,6 +143,7 @@
   let userNameError = $state("");
   let savedAt = $state(0);
   let boardGuidanceDraft = $state("");
+  let syncedBoardGuidance: string | undefined;
   let remoteControlHost = $state<HTMLDivElement | null>(null);
   const systemFontsByMonospace = $derived([...systemFonts].sort((left, right) => Number(right.monospace) - Number(left.monospace) || left.family.localeCompare(right.family)));
   const textFontChoices = $derived(uniqueFontChoices(defaultTextFonts, systemFonts));
@@ -158,7 +158,13 @@
       .catch((reason) => { systemFontError = reason instanceof Error ? reason.message : String(reason); });
   });
 
-  $effect(() => { boardGuidanceDraft = settings.boardGuidanceText ?? ""; });
+  $effect(() => {
+    const savedGuidance = settings.boardGuidanceText ?? "";
+    if (savedGuidance !== syncedBoardGuidance) {
+      syncedBoardGuidance = savedGuidance;
+      boardGuidanceDraft = savedGuidance;
+    }
+  });
 
   // Register only the visible Remote-control category. The route-root controller
   // remains mounted when this target changes, so remembered phones keep reconnecting.
@@ -256,22 +262,36 @@
   function manageAndroidPairing() { window.location.assign('/mobile?owner=1'); }
 </script>
 
+<svelte:window onkeydown={event => { if (categoryMenuOpen && event.key === "Escape") { categoryMenuOpen = false; categoryTrigger?.focus(); event.stopPropagation(); } }} />
+
 <section class="settings-pane" aria-label="Settings">
   <nav class="settings-nav" aria-label="Settings categories">
-    <div class="nav-heading">Settings</div>
-    {#each categories as item}
-      <button
-        type="button"
-        class:active={activeCategory === item.id}
-        aria-current={activeCategory === item.id ? "page" : undefined}
-        aria-label={item.label}
-        title={item.label}
-        onclick={() => (category = item.id)}
-      >
-        <item.icon size={16} />
-        <span><strong>{item.label}</strong><small>{item.detail}</small></span>
+    <div class="category-picker">
+      <span>Preferences category</span>
+      <button bind:this={categoryTrigger} class="category-trigger" type="button" aria-label="Preferences category" aria-expanded={categoryMenuOpen} aria-controls="phone-preferences-categories" onclick={() => categoryMenuOpen = !categoryMenuOpen}>
+        {#if currentCategory}<currentCategory.icon size={18} aria-hidden="true" /><strong>{currentCategory.label}</strong>{/if}<ChevronDown size={18} aria-hidden="true" />
       </button>
-    {/each}
+      {#if categoryMenuOpen}
+        <div id="phone-preferences-categories" class="phone-category-list" role="group" aria-label="Preferences categories">
+          {#each SETTINGS_GROUPS as group}
+            <div class="nav-heading">{group}</div>
+            {#each categories.filter(item => item.group === group) as item}
+              <button type="button" class:active={activeCategory === item.id} aria-current={activeCategory === item.id ? 'page' : undefined} onclick={() => { category = item.id; categoryMenuOpen = false; }}><item.icon size={18} aria-hidden="true" /><strong>{item.label}</strong></button>
+            {/each}
+          {/each}
+        </div>
+      {/if}
+    </div>
+    <div class="category-list">
+      {#each SETTINGS_GROUPS as group}
+        <div class="nav-heading">{group}</div>
+        {#each categories.filter(item => item.group === group) as item}
+          <button type="button" class:active={activeCategory === item.id} aria-current={activeCategory === item.id ? "page" : undefined} aria-label={item.label} title={item.detail} onclick={() => category = item.id}>
+            <item.icon size={18} aria-hidden="true" /><span><strong>{item.label}</strong></span>
+          </button>
+        {/each}
+      {/each}
+    </div>
   </nav>
 
   <div class="settings-content">
@@ -289,7 +309,7 @@
         {:else if activeCategory === "approvals"}<span>Rules update immediately</span>
         {:else if pending > 0}<LoaderCircle class="spin" size={14} /> Saving…
         {:else if saveError}<span class="save-error">Could not save</span>
-        {:else if savedAt}<Check size={14} /> Saved{:else}Changes save automatically{/if}
+        {:else if savedAt}<Check size={14} /> Saved{:else}Controls apply on change; guidance uses Save{/if}
       </div>
       {#if headerActions}{@render headerActions()}{/if}
     </header>
@@ -315,7 +335,12 @@
         </section>
       </div>
     {:else if activeCategory === "agents"}
-      <div class="section-stack">{#if agentEditor}{@render agentEditor()}{/if}</div>
+      <div class="section-stack">
+        {#if agentEditor}{@render agentEditor()}{/if}
+        <section class="setting-card" aria-labelledby="permissions-heading">
+          <div class="card-heading"><h2 id="permissions-heading">Agent permissions</h2><p>Permission modes are configured per agent. Each task keeps the permission mode captured when it was created, so changing an agent affects future tasks.</p></div>
+        </section>
+      </div>
     {:else if activeCategory === "extensions"}
       <ExtensionsSettings {agents} {hosts}/>
     {:else if activeCategory === "environment"}
@@ -331,7 +356,7 @@
       <div class="section-stack">
         <section class="setting-card" aria-labelledby="your-name-heading">
           <div class="card-heading"><h2 id="your-name-heading">Your name</h2><p>Used by agents in new chats.</p></div>
-          <label class="profile-name">Your name<input aria-label="Your name" autocomplete="name" value={settings.userName ?? ""} aria-invalid={userNameError ? "true" : undefined} oninput={editUserName} onchange={saveUserName} /></label>
+          <label class="profile-name"><span class="sr-only">Your name</span><input aria-label="Your name" autocomplete="name" value={settings.userName ?? ""} aria-invalid={userNameError ? "true" : undefined} oninput={editUserName} onchange={saveUserName} /></label>
           {#if userNameError}<p class="error" role="alert">{userNameError}</p>{/if}
         </section>
       </div>
@@ -347,16 +372,7 @@
           </div>
         </section>
 
-        <section class="setting-card" aria-labelledby="window-surface-heading">
-          <div class="card-heading"><h2 id="window-surface-heading">Window surface</h2><p>Choose how much of Monitter’s native macOS window lets the desktop show through.</p></div>
-          <div class="segmented" aria-label="Window surface">
-            {#each [{id:'opaque',label:'Opaque'},{id:'translucent',label:'Translucent'},{id:'glass',label:'Glass'}] as option}
-              <button type="button" class:chosen={(settings.windowSurface ?? 'opaque') === option.id} aria-pressed={(settings.windowSurface ?? 'opaque') === option.id}
-                onclick={() => void save({ windowSurface: option.id as NonNullable<Settings['windowSurface']> })}>{option.label}</button>
-            {/each}
-          </div>
-          <p class="hint">Opaque keeps the current solid surfaces. Translucent softens panels. Glass makes transparent gaps reveal the macOS desktop and other windows; blur and contrast may vary with wallpaper.</p>
-        </section>
+
 
         <section class="setting-card" aria-labelledby="app-theme-heading">
           <div class="card-heading"><h2 id="app-theme-heading">App theme</h2><p>Choose the palette Monitter uses in light and dark mode. System appearance switches between them automatically.</p></div>
@@ -387,7 +403,7 @@
         </section>
 
         <section class="setting-card" aria-labelledby="window-surface-heading">
-          <div class="card-heading"><h2 id="window-surface-heading">Primary window surface</h2><p>Choose how much of the desktop shows through the Monitter background.</p></div>
+          <div class="card-heading"><h2 id="window-surface-heading">Window surface</h2><p>Choose how much shows through the connected desktop’s native Monitter window. This does not make your phone or browser transparent.</p></div>
           <div class="segmented" aria-label="Primary window surface">
             {#each windowSurfaces as surface}
               <button type="button" class:chosen={windowSurface === surface} aria-pressed={windowSurface === surface}
@@ -452,16 +468,7 @@
           <p class="hint">Saved on this device/browser.</p>
         </section>
 
-        <section class="setting-card" aria-labelledby="motion-heading">
-          <div class="card-heading"><h2 id="motion-heading">Motion</h2><p>System follows your device. On keeps Monitter animated even when Reduce Motion is enabled.</p></div>
-          <div class="segmented" aria-label="Motion">
-            {#each ['system', 'subtle', 'on', 'off'] as preference}
-              <button type="button" class:chosen={$motionPreference === preference} aria-pressed={$motionPreference === preference}
-                onclick={() => setMotionPreference(preference as MotionPreference)}>{preference[0].toUpperCase() + preference.slice(1)}</button>
-            {/each}
-          </div>
-          <p class="hint">Saved on this device/browser.</p>
-        </section>
+
 
         <section class="setting-card" aria-labelledby="activity-animation-heading">
           <div class="card-heading"><h2 id="activity-animation-heading">Working animation</h2><p>Choose the accent effect shown while an agent is working.</p></div>
@@ -471,24 +478,31 @@
                 onclick={() => void save({ activityAnimation: option.id as NonNullable<Settings['activityAnimation']> })}>{option.label}</button>
             {/each}
           </div>
-          <p class="hint">Letter stream uses changing glyphs in a Matrix-style cascade. The Motion setting above can still reduce or turn off all movement.</p>
+          <p class="hint">Letter stream uses changing glyphs in a Matrix-style cascade. The Motion setting in Layout & panes can still reduce or turn off all movement.</p>
         </section>
 
+
+
+
+
+
+
+      </div>
+    {:else if activeCategory === "interface"}
+      <div class="section-stack">
         <section class="setting-card" aria-labelledby="scale-heading">
           <div class="card-heading inline-heading"><div><h2 id="scale-heading">Interface scale</h2><p>Resize text and controls for this {interfaceScale === undefined ? 'connection' : 'viewer type'}.</p></div><strong>{displayedInterfaceScale}%</strong></div>
           <input class="range" type="range" use:rangeFill={displayedInterfaceScale} aria-label="Interface scale" min="80" max="200" step="5" value={displayedInterfaceScale} onchange={(event) => void saveInterfaceScale(Number(event.currentTarget.value))} />
           <div class="range-footer"><span>80%</span><button type="button" onclick={() => void saveInterfaceScale(125)}>Reset to default · 125%</button><span>200%</span></div>
           {#if interfaceScale !== undefined}<p class="hint">Saved on this device/browser for {interfaceScaleViewer ?? 'desktop'} viewers, independent of the connected workspace.</p>{/if}
         </section>
-
         <section class="setting-card" aria-labelledby="density-heading">
           <div class="card-heading"><h2 id="density-heading">Interface density</h2><p>Adjust the height and spacing of tabs, sidebars and pane controls.</p></div>
           <input class="range density-range" type="range" use:rangeFill={densities.indexOf(density)} aria-label="Interface density" aria-valuetext={density} min="0" max="2" step="1" value={densities.indexOf(density)} onchange={(event) => void save({ interfaceDensity: densities[Number(event.currentTarget.value)] ?? 'normal' })} />
-          <div class="density-labels" aria-hidden="true">
+          <div class="density-labels">
             {#each densities as option}<button type="button" class:chosen={density === option} onclick={() => void save({ interfaceDensity: option })}>{option}</button>{/each}
           </div>
         </section>
-
         <section class="setting-card" aria-labelledby="tabs-heading">
           <div class="card-heading"><h2 id="tabs-heading">Tabs</h2><p>Choose a classic rounded strip or a modern full-height straight-edge strip.</p></div>
           <div class="segmented" aria-label="Tab style">
@@ -504,6 +518,16 @@
           <label class="switch-row"><span><strong>Highlight active pane</strong><small>Draw an accent-colour border around the active pane.</small></span><input type="checkbox" role="switch" aria-label="Highlight active pane" checked={settings.showActivePaneBorder ?? true} onchange={(event) => void save({ showActivePaneBorder: event.currentTarget.checked })} /></label>
           <label class="switch-row"><span><strong>Dim inactive panes</strong><small>Reduce visual weight for panes that are not active.</small></span><input type="checkbox" role="switch" aria-label="Dim inactive panes" checked={settings.dimInactivePanes ?? true} onchange={(event) => void save({ dimInactivePanes: event.currentTarget.checked })} /></label>
           <label class:disabled={settings.dimInactivePanes === false} class="range-setting">Inactive pane opacity <strong>{Math.round((settings.inactivePaneOpacity ?? 0.6) * 100)}%</strong><input class="range" type="range" use:rangeFill={(settings.inactivePaneOpacity ?? 0.6) * 100} aria-label="Inactive pane opacity" min="10" max="90" step="5" disabled={settings.dimInactivePanes === false} value={(settings.inactivePaneOpacity ?? 0.6) * 100} onchange={(event) => void save({ inactivePaneOpacity: Number(event.currentTarget.value) / 100 })} /></label>
+        </section>
+        <section class="setting-card" aria-labelledby="motion-heading">
+          <div class="card-heading"><h2 id="motion-heading">Motion</h2><p>System follows your device. On keeps Monitter animated even when Reduce Motion is enabled.</p></div>
+          <div class="segmented" aria-label="Motion">
+            {#each ['system', 'subtle', 'on', 'off'] as preference}
+              <button type="button" class:chosen={$motionPreference === preference} aria-pressed={$motionPreference === preference}
+                onclick={() => setMotionPreference(preference as MotionPreference)}>{preference[0].toUpperCase() + preference.slice(1)}</button>
+            {/each}
+          </div>
+          <p class="hint">Saved on this device/browser.</p>
         </section>
       </div>
     {:else if activeCategory === "typography"}
@@ -541,27 +565,29 @@
           <div class="card-heading"><h2 id="focus-heading">Workspace focus</h2><p>Set how split panes respond as you move through them.</p></div>
           <label class="switch-row"><span><strong>Focus follows mouse</strong><small>Activate a pane when the pointer enters it.</small></span><input type="checkbox" role="switch" aria-label="Focus follows mouse" checked={settings.focusFollowsMouse ?? false} onchange={(event) => void save({ focusFollowsMouse: event.currentTarget.checked })} /></label>
         </section>
+
+
+      </div>
+    {:else if activeCategory === "collaboration"}
+      <div class="section-stack">
+        <section class="setting-card" aria-labelledby="project-board-heading">
+          <div class="card-heading"><h2 id="project-board-heading">Project boards</h2><p>Private coordination notes shown as #channels for each project.</p></div>
+          <label class="switch-row"><span><strong>Enable project boards</strong><small>Agents working in a project receive recent notes at turn start and can check for newer notes at meaningful checkpoints. Posting never wakes another agent. Turning this off hides boards but preserves their notes.</small></span><input type="checkbox" role="switch" aria-label="Enable project boards" checked={settings.projectBoardEnabled === true} onchange={(event) => void save({ projectBoardEnabled: event.currentTarget.checked })} /></label>
+          <label class="board-guidance-field"><strong>Default agent guidance</strong><textarea bind:value={boardGuidanceDraft} maxlength="8000" rows="6" aria-label="Default project-board guidance" placeholder="Use the board when work could affect coordination with other agents…"></textarea><small>{Array.from(boardGuidanceDraft).length}/8000 characters. Project-specific guidance overrides this; blank uses Monitter's built-in wording. Guidance is context and does not grant permission.</small></label>
+          <div class="setting-actions"><button class="secondary" type="button" disabled={pending > 0} onclick={() => { boardGuidanceDraft = ""; void save({ boardGuidanceText: null }); }}>Reset to built-in wording</button><button class="primary" type="button" disabled={pending > 0 || Array.from(boardGuidanceDraft).length > 8000} onclick={() => void save({ boardGuidanceText: boardGuidanceDraft.trim() ? boardGuidanceDraft : null })}>Save guidance</button></div>
+        </section>
+      </div>
+    {:else if activeCategory === "conversation"}
+      <div class="section-stack">
+
+        <section class="setting-card" aria-labelledby="messages-heading">
+          <div class="card-heading"><h2 id="messages-heading">Messages</h2><p>Choose the keyboard shortcut that sends a task or channel message.</p></div>
+          <label class="switch-row"><span><strong>Enter to send</strong><small>{settings.sendWithEnter ? "Enter sends. Shift+Enter adds a new line." : "Cmd/Ctrl+Enter sends. Enter adds a new line."}</small></span><input type="checkbox" role="switch" aria-label="Enter to send" checked={settings.sendWithEnter ?? false} onchange={(event) => void save({ sendWithEnter: event.currentTarget.checked })} /></label>
+        </section>
         <section class="setting-card" aria-labelledby="busy-heading">
           <div class="card-heading"><h2 id="busy-heading">Busy agents</h2><p>Choose what happens when you send another message during a running turn.</p></div>
           <label class="switch-row"><span><strong>Default to steering busy agents</strong><small>Off queues a message for the next turn. On steers a live Codex turn or an ACP agent that explicitly supports it; other harnesses queue safely.</small></span><input type="checkbox" role="switch" aria-label="Default to steering busy agents" checked={settings.busyMessageMode === "steer"} onchange={(event) => void save({ busyMessageMode: event.currentTarget.checked ? "steer" : "queue" })} /></label>
           <p class="hint">Follow-ups stay queued until the active harness confirms the steer. Queued messages appear above the input box.</p>
-        </section>
-        <section class="setting-card" aria-labelledby="permissions-heading">
-          <div class="card-heading"><h2 id="permissions-heading">Agent permissions</h2><p>Permission modes are configured per agent. Each task keeps the permission mode captured when it was created, so changing an agent affects future tasks.</p></div>
-        </section>
-      </div>
-    {:else}
-      <div class="section-stack">
-        <section class="setting-card" aria-labelledby="activity-heading">
-          <div class="card-heading"><h2 id="activity-heading">Conversation activity</h2><p>Control supporting information shown alongside messages.</p></div>
-          <label class="switch-row"><span><strong>Show tool activity</strong><small>Show collapsible blocks for activity supplied by the harness.</small></span><input type="checkbox" role="switch" aria-label="Show tool activity" checked={settings.showToolActivity !== false} onchange={(event) => void save({ showToolActivity: event.currentTarget.checked })} /></label>
-          <label class="switch-row"><span><strong>Compress tool calls</strong><small>Combine calls of the same kind across thinking time within each turn. Open the summary to see every call.</small></span><input type="checkbox" role="switch" aria-label="Compress tool calls" checked={settings.compressToolCalls === true} onchange={(event) => void save({ compressToolCalls: event.currentTarget.checked })} /></label>
-          <label class="switch-row"><span><strong>Tint my messages</strong><small>Use the accent colour for your message bubbles.</small></span><input type="checkbox" role="switch" aria-label="Tint my messages" checked={settings.tintUserMessages ?? false} onchange={event=>void save({tintUserMessages:event.currentTarget.checked})}/></label>
-          <label class="switch-row"><span><strong>Show reasoning summaries</strong><small>Show summaries supplied by the harness.</small></span><input type="checkbox" role="switch" aria-label="Show reasoning summaries" checked={settings.showReasoningSummaries !== false} onchange={(event) => void save({ showReasoningSummaries: event.currentTarget.checked })} /></label>
-        </section>
-        <section class="setting-card" aria-labelledby="messages-heading">
-          <div class="card-heading"><h2 id="messages-heading">Messages</h2><p>Choose the keyboard shortcut that sends a task or channel message.</p></div>
-          <label class="switch-row"><span><strong>Enter to send</strong><small>{settings.sendWithEnter ? "Enter sends. Shift+Enter adds a new line." : "Cmd/Ctrl+Enter sends. Enter adds a new line."}</small></span><input type="checkbox" role="switch" aria-label="Enter to send" checked={settings.sendWithEnter ?? false} onchange={(event) => void save({ sendWithEnter: event.currentTarget.checked })} /></label>
         </section>
         {#if !isLanBrowser() && getBridge().available && typeof navigator !== 'undefined' && /Mac/.test(navigator.platform)}
           <section class="setting-card" aria-labelledby="voice-transcription-heading">
@@ -577,11 +603,13 @@
             <label class="speech-choice"><input type="radio" name="mobile-speech-mode" value="on-device" checked={$mobileSpeechMode === 'on-device'} onchange={() => setMobileSpeechMode('on-device')}/><span><strong>On this {mobileSpeechDevice}</strong><small>Recognize speech on the phone and send only the text. Availability depends on the phone and language.</small></span></label>
           </section>
         {/if}
-        <section class="setting-card" aria-labelledby="project-board-heading">
-          <div class="card-heading"><h2 id="project-board-heading">Project boards</h2><p>Private coordination notes shown as #channels for each project.</p></div>
-          <label class="switch-row"><span><strong>Enable project boards</strong><small>Agents working in a project receive recent notes at turn start and can check for newer notes at meaningful checkpoints. Posting never wakes another agent. Turning this off hides boards but preserves their notes.</small></span><input type="checkbox" role="switch" aria-label="Enable project boards" checked={settings.projectBoardEnabled === true} onchange={(event) => void save({ projectBoardEnabled: event.currentTarget.checked })} /></label>
-          <label class="board-guidance-field"><strong>Default agent guidance</strong><textarea bind:value={boardGuidanceDraft} maxlength="8000" rows="6" aria-label="Default project-board guidance" placeholder="Use the board when work could affect coordination with other agents…"></textarea><small>{Array.from(boardGuidanceDraft).length}/8000 characters. Project-specific guidance overrides this; blank uses Monitter's built-in wording. Guidance is context and does not grant permission.</small></label>
-          <div class="setting-actions"><button class="secondary" type="button" disabled={pending > 0} onclick={() => { boardGuidanceDraft = ""; void save({ boardGuidanceText: null }); }}>Reset to built-in wording</button><button class="primary" type="button" disabled={pending > 0 || Array.from(boardGuidanceDraft).length > 8000} onclick={() => void save({ boardGuidanceText: boardGuidanceDraft.trim() ? boardGuidanceDraft : null })}>Save guidance</button></div>
+
+        <section class="setting-card" aria-labelledby="activity-heading">
+          <div class="card-heading"><h2 id="activity-heading">Conversation activity</h2><p>Control supporting information shown alongside messages.</p></div>
+          <label class="switch-row"><span><strong>Show tool activity</strong><small>Show collapsible blocks for activity supplied by the harness.</small></span><input type="checkbox" role="switch" aria-label="Show tool activity" checked={settings.showToolActivity !== false} onchange={(event) => void save({ showToolActivity: event.currentTarget.checked })} /></label>
+          <label class="switch-row"><span><strong>Compress tool calls</strong><small>Combine calls of the same kind across thinking time within each turn. Open the summary to see every call.</small></span><input type="checkbox" role="switch" aria-label="Compress tool calls" checked={settings.compressToolCalls === true} onchange={(event) => void save({ compressToolCalls: event.currentTarget.checked })} /></label>
+          <label class="switch-row"><span><strong>Tint my messages</strong><small>Use the accent colour for your message bubbles.</small></span><input type="checkbox" role="switch" aria-label="Tint my messages" checked={settings.tintUserMessages ?? false} onchange={event=>void save({tintUserMessages:event.currentTarget.checked})}/></label>
+          <label class="switch-row"><span><strong>Show reasoning summaries</strong><small>Show summaries supplied by the harness.</small></span><input type="checkbox" role="switch" aria-label="Show reasoning summaries" checked={settings.showReasoningSummaries !== false} onchange={(event) => void save({ showReasoningSummaries: event.currentTarget.checked })} /></label>
         </section>
       </div>
     {/if}
@@ -596,7 +624,7 @@
   .settings-nav button { display:flex; width:100%; align-items:flex-start; gap:9px; padding:10px 9px; border:0; border-radius:7px; color:var(--muted); background:transparent; text-align:left; font-family:inherit; cursor:pointer; }
   .settings-nav button:hover { color:var(--ink); background:color-mix(in srgb, var(--accent) 7%, transparent); }
   .settings-nav button.active { color:var(--accent-ink, var(--accent)); background:color-mix(in srgb, var(--accent) 13%, transparent); }
-  .settings-nav span { display:grid; gap:2px; min-width:0; }.settings-nav strong { font-size:calc(12px * var(--interface-font-ratio, 1)); font-weight:600; }.settings-nav small { overflow:hidden; color:var(--muted); font-size:calc(10px * var(--interface-font-ratio, 1)); text-overflow:ellipsis; white-space:nowrap; }
+  .settings-nav span { display:grid; gap:2px; min-width:0; }.settings-nav strong { font-size:calc(12px * var(--interface-font-ratio, 1)); font-weight:600; }
   .settings-content { --scroll-fade:20px; -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); mask-image:linear-gradient(to bottom,transparent 0,#000 var(--scroll-fade),#000 calc(100% - var(--scroll-fade)),transparent 100%); min-width:0; min-height:0; overflow:auto; padding:clamp(18px, 4cqi, 38px); }
   .settings-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; max-width:760px; margin:0 auto 24px; }.settings-header p { margin:0 0 4px; color:var(--muted); font:600 calc(10px * var(--interface-font-ratio, 1)) var(--mono, monospace); letter-spacing:.09em; text-transform:uppercase; }.settings-header h1 { margin:0; font-size:calc(24px * var(--interface-font-ratio, 1)); letter-spacing:-.03em; }.save-state { display:flex; flex:none; align-items:center; gap:5px; margin-top:4px; color:var(--muted); font-size:calc(11px * var(--interface-font-ratio, 1)); white-space:nowrap; }.save-error { color:#b84c44; }.save-state :global(svg.spin) { animation:spin .85s linear infinite; }
   .settings-category { min-width:0; }.section-stack { display:grid; gap:14px; max-width:760px; margin:0 auto; }.setting-card { display:grid; gap:16px; padding:18px; border:1px solid var(--line); border-radius:10px; background:var(--panel); box-shadow:0 1px 2px rgba(0,0,0,.025); }.card-heading h2 { margin:0 0 4px; font-size:calc(14px * var(--interface-font-ratio, 1)); }.card-heading p,.hint { margin:0; color:var(--muted); font-size:calc(11.5px * var(--interface-font-ratio, 1)); line-height:1.5; }.inline-heading { display:flex; align-items:start; justify-content:space-between; gap:12px; }.inline-heading > strong { color:var(--accent-ink, var(--accent)); font:600 calc(13px * var(--interface-font-ratio, 1)) var(--mono, monospace); }
@@ -624,8 +652,19 @@
   .font-setting .font-weight-row input[type="range"]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
   .font-weight-row small { color:var(--muted); font-size:calc(10px * var(--interface-font-ratio,1)); }
   @keyframes spin { to { transform:rotate(360deg); } }
-  @container (max-width:620px) { .settings-pane { grid-template-columns:150px minmax(0,1fr); }.settings-nav { padding:14px 7px; }.settings-nav button { padding:9px 7px; }.settings-nav small { display:none; }.settings-content { padding:18px 14px; }.settings-header { margin-bottom:18px; }.settings-header h1 { font-size:calc(20px * var(--interface-font-ratio, 1)); }.save-state { font-size:calc(10px * var(--interface-font-ratio, 1)); }.font-setting { grid-template-columns:1fr; gap:10px; } }
-  @container (max-width:430px) { .settings-pane { grid-template-columns:52px minmax(0,1fr); }.settings-nav { padding:12px 8px; }.nav-heading,.settings-nav span { display:none; }.settings-nav button { justify-content:center; padding:10px; }.settings-content { padding:16px 12px; }.setting-card { padding:14px; }.settings-header { align-items:center; }.save-state { font-size:0; }.save-state :global(svg) { width:14px; height:14px; }.swatches { gap:7px; }.colour-picker { margin-left:0; }.app-theme-selectors { grid-template-columns:1fr; }.theme-default-row { align-items:flex-start; flex-direction:column; } }
+  @container (max-width:620px) { .settings-pane { grid-template-columns:150px minmax(0,1fr); }.settings-nav { padding:14px 7px; }.settings-nav button { padding:9px 7px; }.settings-content { padding:18px 14px; }.settings-header { margin-bottom:18px; }.settings-header h1 { font-size:calc(20px * var(--interface-font-ratio, 1)); }.save-state { font-size:calc(10px * var(--interface-font-ratio, 1)); }.font-setting { grid-template-columns:1fr; gap:10px; } }
+  @container (max-width:620px) {
+    .settings-pane { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(0,1fr); }
+    .settings-nav { overflow:visible; padding:12px 14px; border-right:0; border-bottom:1px solid var(--line); }
+    .category-list { display:none; }.category-picker { display:grid; }
+    .settings-content { padding:18px 12px; }.setting-card { padding:14px; }
+    .settings-header { flex-wrap:wrap; gap:8px; }.save-state { flex-basis:100%; white-space:normal; }
+    .app-theme-selectors,.font-setting { grid-template-columns:minmax(0,1fr); }
+    .theme-default-row { align-items:flex-start; flex-direction:column; }
+    .segmented { flex-wrap:wrap; }.segmented button { flex:1 1 80px; }
+    .range-footer { flex-wrap:wrap; }.range-footer button { order:3; flex-basis:100%; text-align:center; }
+    .setting-actions { flex-direction:column; }.setting-actions button { width:100%; }
+  }
   .speech-choice { display:flex; align-items:flex-start; gap:10px; padding:11px 12px; border:1px solid var(--line); border-radius:9px; cursor:pointer; }
   .speech-choice:has(input:checked) { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 8%,var(--panel)); }
   .speech-choice input { flex:none; margin:2px 0 0; accent-color:var(--accent); }
@@ -633,4 +672,31 @@
   .speech-choice strong { font-size:calc(12px * var(--interface-font-ratio,1)); }
   .speech-choice small { color:var(--muted); font-size:calc(11px * var(--interface-font-ratio,1)); line-height:1.45; }
   @media (prefers-reduced-motion: reduce) { :global(:root:not([data-motion="on"])) .save-state :global(svg.spin) { animation:none; }:global(:root:not([data-motion="on"])) .switch-row input,:global(:root:not([data-motion="on"])) .switch-row input::after { transition:none; } }
+  .category-picker { display:none; gap:6px; font-size:12px; color:var(--muted); }
+  .category-trigger { display:flex; align-items:center; gap:10px; text-align:left; }
+  .category-trigger strong { flex:1; }
+  .phone-category-list { max-height:min(50vh,400px); overflow:auto; padding:8px 0; }
+  .category-trigger { width:100%; min-width:0; padding:10px; color:var(--ink); background:var(--panel); border:1px solid var(--line); border-radius:7px; font:inherit; }
+  .category-list .nav-heading { margin-top:18px; padding-bottom:6px; letter-spacing:.04em; }
+  .category-list .nav-heading:first-child { margin-top:0; }
+  .settings-nav button { align-items:center; min-height:44px; }
+  .settings-pane :is(button,select,summary,input:not([type="checkbox"]):not([type="radio"])) { min-height:44px; }
+  .settings-header > div { min-width:0; }
+  .save-state { white-space:normal; flex-shrink:1; }
+  .segmented button { min-width:0; overflow-wrap:anywhere; }
+  .settings-pane :is(input,select,textarea) { box-sizing:border-box; max-width:100%; min-width:0; }
+  .inline-heading > strong { flex:none; white-space:nowrap; }
+  .inline-heading > div { min-width:0; }
+  .setting-card { min-width:0; overflow-wrap:anywhere; }
+  .setting-card > label:not(.switch-row):not(.speech-choice) { display:grid; gap:7px; }
+  .setting-card select { width:100%; padding:8px; color:var(--ink); background:var(--paper); border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .switch-row { min-height:44px; }.switch-row span { min-width:0; }
+  .switch-row input { width:44px; height:26px; }.switch-row input::after { top:4px; left:4px; width:16px; height:16px; }.switch-row input:checked::after { left:22px; }
+  .swatches > button { width:44px; height:44px; }.colour-picker input { width:44px; height:44px; }
+  .setting-actions { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+  .setting-actions button { padding:8px 12px; border:1px solid var(--line); border-radius:6px; color:var(--ink); background:var(--paper); font:inherit; }
+  .setting-actions .primary { color:var(--on-accent); background:var(--accent); }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; }
+  .settings-pane :is(button,select,input,textarea,summary):focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  @container (max-width:620px) { .category-picker { display:grid; } }
 </style>

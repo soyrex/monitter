@@ -1,14 +1,14 @@
-import {chromium,expect} from '@playwright/test';
+import {chromium,webkit,expect} from '@playwright/test';
 import {existsSync,writeFileSync} from 'node:fs';
 const chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const browser=await chromium.launch({headless:true,...(existsSync(chrome)?{executablePath:chrome}:{})});
+const browser=await (process.env.MONITTER_TEST_BROWSER === 'webkit' ? webkit : chromium).launch({headless:true,...(process.env.MONITTER_TEST_BROWSER !== 'webkit' && existsSync(chrome)?{executablePath:chrome}:{})});
 const page=await browser.newPage({viewport:{width:1440,height:1000}});
 try {
  await page.addInitScript({path:'scripts/ui-fixture.js'});
  await page.goto(process.env.MONITTER_TEST_URL || 'http://127.0.0.1:18433');
- await expect(page.getByRole('button',{name:'Preferences',exact:true})).toBeVisible({timeout:60000});
- await page.getByRole('button',{name:'Preferences',exact:true}).click();
- await page.getByRole('navigation',{name:'Settings categories'}).getByRole('button',{name:'Typography',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Open global overview',exact:true})).toBeVisible({timeout:60000});
+ await page.keyboard.press('Meta+,');
+ await page.getByRole('navigation',{name:'Settings categories'}).getByRole('button',{name:'Fonts & text',exact:true}).click();
  await expect.poll(()=>page.locator('#text-font-choices option[value="Fixture Sans"]').count()).toBe(1);
  await expect.poll(()=>page.locator('#terminal-font-choices option[value="Fixture Mono"]').count()).toBe(1);
  for (const [label,value] of [['Interface font','Avenir Next'],['Chat font','Georgia'],['Terminal font','Menlo'],['Interface font base size','18'],['Chat font base size','20'],['Terminal font base size','16']]) {

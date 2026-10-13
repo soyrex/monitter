@@ -255,7 +255,13 @@ try {
   assert.equal(ownerSentMessages.length, 2, 'reconnect replayed an unsent draft');
   await phone.getByRole('button', { name: 'Open chats menu' }).click();
   await phone.getByRole('button', { name: 'Open Settings' }).click();
-  await phone.getByRole('button', { name: 'Conversation', exact: true }).click();
+  const preferenceNavigation = phone.getByRole('navigation', { name: 'Settings categories' });
+  await preferenceNavigation.getByRole('button', { name: 'Preferences category', exact: true }).click();
+  const preferenceMenu = preferenceNavigation.getByRole('group', { name: 'Preferences categories', exact: true });
+  await expect(preferenceMenu.getByText('Security & access', { exact: true })).toBeVisible();
+  assert.ok(await preferenceMenu.locator('button svg').count() >= 12, 'phone preference destinations need icons');
+  await preferenceMenu.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await expect(preferenceMenu).toHaveCount(0);
   await expect(phone.getByRole('radio', { name: /Desktop Whisper/ })).toBeVisible();
   await expect(phone.getByRole('radio', { name: /On this (iPhone|Android phone)/ })).toBeChecked();
   console.log(`${android ? 'Android-origin Chromium' : 'WebKit'} owner relay: desktop and on-device transcript-only voice, approval, foreground recovery, quiet readable outage, and explicit send feedback passed.`);

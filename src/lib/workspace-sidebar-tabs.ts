@@ -1,4 +1,5 @@
 import type { Host, TerminalSession } from '$lib/types';
+import { normalizeSettingsCategory, SETTINGS_CATEGORY_LABELS } from './settings-navigation';
 
 type WorkspacePaneTabs = {
   openTerminalIds?: unknown;
@@ -20,15 +21,7 @@ export type SidebarWorkspaceTab = {
 type TabOrderItem = { kind?: unknown; id?: unknown };
 
 export function settingsTabTitle(category: unknown): string {
-  const labels: Record<string, string> = {
-    profile: 'Profile',
-    extensions: 'MCP & Plugins',
-    appearance: 'Appearance', typography: 'Typography',
-    behaviour: 'Permissions & behaviour', conversation: 'Conversation',
-    agents: 'Agents', directory: 'Agent directory', lan: 'LAN access', remote: 'Remote control',
-  };
-  const label = typeof category === 'string' && Object.hasOwn(labels, category)
-    ? labels[category] : labels.appearance;
+  const label = SETTINGS_CATEGORY_LABELS[normalizeSettingsCategory(typeof category === 'string' ? category : '')];
   return `Setting: ${label}`;
 }
 

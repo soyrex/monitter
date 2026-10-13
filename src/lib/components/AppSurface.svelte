@@ -11,6 +11,7 @@
   import { outgoingVisual, conversationMotion } from '$lib/navigation-motion';
   import { tabStripFade } from '$lib/tab-strip-fade';
   import { collectWorkspaceSidebarTabs, settingsTabTitle, terminalTabTitle, type SidebarWorkspaceTab } from '$lib/workspace-sidebar-tabs';
+  import { normalizeSettingsCategory } from '$lib/settings-navigation';
   import { loadSidebarViewPreference, saveSidebarViewPreference, type SidebarViewClient } from '$lib/sidebar-view-preference';
   import { interfaceScaleStore, seedViewerInterfaceScale, setViewerInterfaceScale, watchViewerInterfaceScales, type ViewerType } from '$lib/interface-scale';
   import "../../app.css";
@@ -1613,14 +1614,8 @@
       ...fallback, ...saved,
       overviewOpen: saved.overviewOpen !== false,
       settingsOpen: saved.settingsOpen === true,
-      // 'directory' was folded into 'agents' when the Agent Setup area was
-      // redesigned; remap any stored legacy value to the new category.
-      // 'environment' was missing from the validator list before; include
-      // it so its sidebar entry survives a layout reload.
-      settingsCategory: (() => {
-        const raw = saved.settingsCategory === 'directory' ? 'agents' : saved.settingsCategory;
-        return ['profile','connection','extensions','appearance','typography','behaviour','conversation','approvals','agents','lan','remote','environment'].includes(raw ?? '') ? raw! : 'appearance';
-      })(),
+      // Keep saved panes and legacy links aligned with the preferences menu.
+      settingsCategory: normalizeSettingsCategory(saved.settingsCategory ?? ''),
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openBrowserIds: Array.isArray(saved.openBrowserIds) ? saved.openBrowserIds.filter(id => typeof id === 'string') : [],
       selectedBrowserId: typeof saved.selectedBrowserId === 'string' ? saved.selectedBrowserId : null,
@@ -4760,11 +4755,13 @@
     {id:"new-channel",label:"New channel",group:"Create"},
     {id:"new-project",label:"New project",group:"Create"},
     ...(['standard','activity','projects'] as SidebarView[]).map(view=>({id:`sidebar:${view}`,label:`${view[0].toUpperCase()+view.slice(1)} sidebar view`,group:'Sidebar',checked:sidebarView===view})),
-    {id:"appearance",label:"Appearance settings",detail:"Themes, accent, scale, density and panes",group:"Settings"},
-    {id:"typography-settings",label:"Typography settings",detail:"Fonts, sizes and line heights",group:"Settings"},
-    {id:"behaviour-settings",label:"Behaviour settings",detail:"Shortcuts, focus and busy-agent behavior",group:"Settings"},
+    {id:"appearance",label:"Appearance settings",detail:"Themes, colours and window surfaces",group:"Settings"},
+    {id:"interface-settings",label:"Layout & panes",detail:"Interface scale, density, tabs, panes and motion",group:"Settings"},
+    {id:"typography-settings",label:"Fonts & text",detail:"Fonts, sizes and line heights",keywords:"typography",group:"Settings"},
+    {id:"behaviour-settings",label:"Keyboard & focus",detail:"Shortcuts and pane focus",keywords:"behaviour behavior",group:"Settings"},
     {id:"conversation-settings",label:"Conversation settings",detail:"Messages and activity display",group:"Settings"},
-    {id:"environment-secrets",label:"Environment & Secrets",detail:"Shared API keys for local agents",keywords:"credentials environment variables tokens",group:"Settings"},
+    {id:"collaboration-settings",label:"Collaboration settings",detail:"Project boards and shared guidance",group:"Settings"},
+    {id:"environment-secrets",label:"Environment & secrets",detail:"Shared API keys for local agents",keywords:"credentials environment variables tokens",group:"Settings"},
     {id:"hosts",label:"Manage hosts",detail:"Local and SSH connections",group:"Settings"},
     {id:"archived",label:"Archived chats",detail:"Restore or permanently delete archived chats",group:"Workspace"},
     {id:"tools",label:"Show tool activity",checked:snapshot?.settings.showToolActivity !== false,group:"Toggles"},
@@ -4914,11 +4911,12 @@
     closeCommandPalette();
     if (id === "vim-command") { palette=null; openVimCommand(); }
     else if (id === "appearance" || id === "appearance-detail-settings") { palette=null; routeSettings('appearance'); }
+    else if (id === "interface-settings" || id === "pane-appearance-settings") { palette=null; routeSettings('interface'); }
     else if (id === "typography-settings") { palette=null; routeSettings('typography'); }
     else if (id === "behaviour-settings") { palette=null; routeSettings('behaviour'); }
     else if (id === "conversation-settings") { palette=null; routeSettings('conversation'); }
+    else if (id === "collaboration-settings") { palette=null; routeSettings('collaboration'); }
     else if (id === "environment-secrets") { palette=null; routeSettings('environment'); }
-    else if (id === "pane-appearance-settings") { palette=null; routeSettings('appearance'); }
     else if (id === "new-terminal") {palette=null;await newTerminal();}
     else if (id === "autoname") { palette=null; await autonameCurrentPane(); }
     else if (id.startsWith('layout:')) {palette=null;setLayout(id.slice(7) as PaneLayoutPreset);}

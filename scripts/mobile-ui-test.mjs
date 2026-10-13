@@ -110,6 +110,10 @@ try {
   await expect.poll(()=>host.evaluate(()=>window.testSends)).toBe(1);
   await phone.getByRole('button',{name:'Open chats menu'}).click();
   await phone.getByRole('button',{name:'Preferences',exact:true}).click();
+  const preferenceCategories = phone.getByRole('navigation',{name:'Preference categories'});
+  await expect(preferenceCategories.getByRole('heading',{name:'Workspace',exact:true})).toBeVisible();
+  await expect(preferenceCategories.locator('button svg').first()).toBeVisible();
+  await preferenceCategories.getByRole('button',{name:/Layout & panes/}).click();
   const mobileScale=phone.getByRole('slider',{name:'Mobile interface scale',exact:true});
   await expect(mobileScale).toHaveValue('125');
   await mobileScale.fill('175');
@@ -119,6 +123,12 @@ try {
   const mobileBounds=await phone.locator('.mobile').evaluate(element=>{const box=element.getBoundingClientRect();return {width:box.width,height:box.height};});
   expect(Math.abs(mobileBounds.width-390)).toBeLessThan(1);
   expect(Math.abs(mobileBounds.height-844)).toBeLessThan(1);
+  await expect(phone.getByText('Read-only · change on desktop',{exact:true})).toBeVisible();
+  expect(await phone.locator('.preferences').evaluate(element=>element.scrollWidth<=element.clientWidth+1)).toBe(true);
+  await phone.getByRole('button',{name:'All preferences',exact:true}).click();
+  await preferenceCategories.getByRole('button',{name:/Conversation/}).click();
+  await expect(phone.getByRole('heading',{name:'Sending messages',exact:true})).toBeVisible();
+  await expect(phone.getByRole('switch')).toHaveCount(0);
   await phone.screenshot({path:'verification/mobile-chat-test.png'});
   await phone.getByRole('button',{name:'Workspace',exact:true}).click();
   await phone.getByRole('button',{name:'Controller test'}).click();
