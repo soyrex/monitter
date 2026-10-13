@@ -105,9 +105,6 @@ pub(super) fn palette_choices(dark: bool) -> Vec<PaletteChoice> {
         })
         .collect()
 }
-fn card(title: &str, description: &str, palette: Palette) -> Div {
-    settings_card(title, description, palette)
-}
 fn range_footer(left: &str, right: &str, palette: Palette) -> Div {
     div()
         .flex()
@@ -152,6 +149,8 @@ pub(super) fn render(
     let Some(state) = desktop.native_settings.as_ref() else {
         return div().child("Preferences are loading…").into_any_element();
     };
+    let presentation = SearchCardPresentation::new(desktop);
+    let card = |title: &str, description: &str, palette: Palette| presentation.card(title, description, palette);
     let settings = desktop.snapshot["settings"].clone();
     let mut content = div()
         .w_full()

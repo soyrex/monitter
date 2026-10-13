@@ -63,8 +63,8 @@ impl Desktop {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && !window.has_active_dialog(cx) {
-                    view.close_preferences(window, cx); cx.stop_propagation();
+                if event.keystroke.key == "escape" && !window.has_active_dialog(cx) && !view.preferences_search_composing(window, cx) {
+                    if !view.clear_preferences_search(window, cx) { view.close_preferences(window, cx); } cx.stop_propagation();
                 }
             }))
             .flex().items_center().justify_center()

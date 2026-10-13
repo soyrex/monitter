@@ -77,6 +77,8 @@ pub(super) fn render_profile(
     cx: &mut Context<Desktop>,
     palette: Palette,
 ) -> AnyElement {
+    let presentation = SearchCardPresentation::new(desktop);
+    let settings_card = |title: &str, description: &str, palette: Palette| presentation.card(title, description, palette);
     let Some(state) = desktop.native_settings.as_ref() else {
         return settings_hint("Preferences are loading…", palette).into_any_element();
     };
@@ -149,6 +151,8 @@ pub(super) fn render_behavior(
     cx: &mut Context<Desktop>,
     palette: Palette,
 ) -> AnyElement {
+    let presentation = SearchCardPresentation::new(desktop);
+    let settings_card = |title: &str, description: &str, palette: Palette| presentation.card(title, description, palette);
     let settings = desktop.snapshot["settings"].clone();
     let shortcut = field(&settings, "shortcutMode");
     let shortcut = if shortcut.is_empty() {
@@ -203,6 +207,8 @@ pub(super) fn render_conversation(
     cx: &mut Context<Desktop>,
     palette: Palette,
 ) -> AnyElement {
+    let presentation = SearchCardPresentation::new(desktop);
+    let settings_card = |title: &str, description: &str, palette: Palette| presentation.card(title, description, palette);
     let settings = desktop.snapshot["settings"].clone();
     let mut activity = settings_card(
         "Conversation activity",
@@ -275,7 +281,7 @@ pub(super) fn render_conversation(
         .child(messages)
         .child(voice)
         .child(busy)
-        .child(streaming_controls(cx, palette))
+        .child(streaming_controls(&presentation, cx, palette))
         .child(activity)
         .into_any_element()
 }
@@ -285,6 +291,8 @@ pub(super) fn render_boards(
     cx: &mut Context<Desktop>,
     palette: Palette,
 ) -> AnyElement {
+    let presentation = SearchCardPresentation::new(desktop);
+    let settings_card = |title: &str, description: &str, palette: Palette| presentation.card(title, description, palette);
     let settings = desktop.snapshot["settings"].clone();
     if let Some(state) = desktop.native_settings.as_ref() {
         let guidance = state.board_guidance.clone();
@@ -318,7 +326,8 @@ pub(super) fn render_boards(
         .into_any_element()
 }
 
-fn streaming_controls(cx: &mut Context<Desktop>, palette: Palette) -> Div {
+fn streaming_controls(presentation: &SearchCardPresentation, cx: &mut Context<Desktop>, palette: Palette) -> Stateful<Div> {
+    let settings_card = |title: &str, description: &str, palette: Palette| presentation.card(title, description, palette);
     use crate::streaming_display::{self, Mode, Options, Selection};
     let selected = streaming_display::current(cx);
     let mut card = settings_card("Streaming replies",

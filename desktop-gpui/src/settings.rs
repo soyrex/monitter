@@ -10,6 +10,7 @@ use gpui_kit::component::{
 };
 use monitter_lib::experimental_desktop::{NativeAppearance, NativeTileTheme};
 use std::collections::HashSet;
+use gpui_kit::{ScrollAnchor, ScrollHandle};
 #[path = "native_appearance.rs"]
 pub(super) mod native_appearance;
 #[path = "settings_appearance.rs"]
@@ -20,6 +21,8 @@ mod settings_general;
 mod settings_services;
 #[path = "settings_navigation.rs"]
 mod settings_navigation;
+#[path = "settings_search.rs"]
+mod settings_search;
 
 static SETTINGS_FONT_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(14_f32.to_bits());
 /// Settings use the interface font size, independent of the workspace's 16px rem grid.
@@ -154,8 +157,32 @@ fn blend_line(paper: u32, line: u32, opacity: u16) -> u32 {
     };
     (component(16) << 16) | (component(8) << 8) | component(0)
 }
+pub(super) struct SearchCardPresentation {
+    target: Option<&'static str>,
+    anchor: Option<ScrollAnchor>,
+}
+impl SearchCardPresentation {
+    pub(super) fn new(desktop: &Desktop) -> Self {
+        Self {
+            target: desktop.native_settings.as_ref().and_then(|state| state.search_target).map(settings_search::card_title),
+            anchor: desktop.native_settings.as_ref().map(|state| state.target_anchor.clone()),
+        }
+    }
+    pub(super) fn card(&self, title: &str, description: &str, palette: Palette) -> Stateful<Div> {
+        settings_card(title, description, palette)
+            .id(SharedString::from(format!("preferences-setting-card-{title}")))
+            .when(self.target == Some(title), |card| card.border_color(rgb(palette.accent)).anchor_scroll(self.anchor.clone()))
+    }
+}
 pub(super) struct NativeSettings {
     category: String,
+    search: Entity<InputState>,
+    search_selected: usize,
+    search_results: Vec<&'static settings_search::Entry>,
+    search_target: Option<&'static str>,
+    page_scroll: ScrollHandle,
+    search_scroll: ScrollHandle,
+    target_anchor: ScrollAnchor,
     appearance_advanced: bool,
     lan: Option<Entity<lan_settings::LanSettingsPane>>,
     services: Option<Entity<settings_services::ServicePreferencesPane>>,
@@ -178,9 +205,9 @@ pub(super) struct NativeSettings {
     errors: HashMap<String, String>,
 }
 impl NativeSettings {
-    pub(super) fn select_category(&mut self, category: &str) { self.category = settings_navigation::category(category).id.into(); }
+    pub(super) fn select_category(&mut self, category: &str) { self.category = settings_navigation::category(category).id.into(); self.page_scroll.set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.))); }
     // The native Lock Session action calls this when no PIN is configured.
-    pub(super) fn select_security(&mut self) {self.category="security".into();}
+    pub(super) fn select_security(&mut self) { self.select_category("security"); }
     pub fn new(settings: &Value, window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let mut families = cx.text_system().all_font_names();
         families.sort();
@@ -219,8 +246,17 @@ impl NativeSettings {
                 }
             })
             .collect();
+        let page_scroll = ScrollHandle::new();
+        let target_anchor = ScrollAnchor::for_handle(page_scroll.clone());
         let mut state = Self {
             category: "profile".into(),
+            search: cx.new(|cx| InputState::new(window, cx).placeholder("Search preferences…")),
+            search_selected: 0,
+            search_results: Vec::new(),
+            search_target: None,
+            page_scroll,
+            search_scroll: ScrollHandle::new(),
+            target_anchor,
             appearance_advanced: false,
             lan: None,
             services: None,
@@ -289,6 +325,22 @@ impl NativeSettings {
             loading: HashSet::new(),
             errors: HashMap::new(),
         };
+        state._slider_subscriptions.push(cx.subscribe_in(&state.search, window, |view, input, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::Change => {
+                    if let Some(state) = &mut view.native_settings {
+                        let query = input.read(cx).value();
+                        state.search_selected = 0;
+                        if !query.trim().is_empty() { state.search_target = None; state.page_scroll.set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.))); }
+                        state.search_results = settings_search::search(&query);
+                        state.search_scroll.set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
+                    }
+                    cx.notify();
+                }
+                InputEvent::PressEnter { secondary: false, shift: false } => view.open_preferences_search_result(window, cx),
+                _ => {}
+            }
+        }));
         for slider in state
             .fonts
             .iter()
@@ -1140,6 +1192,33 @@ impl Desktop {
                         }))))
                 .child(body).into_any_element();
         }
+        let state = self.native_settings.as_ref().unwrap();
+        let search = state.search.clone();
+        let query = search.read(cx).value().to_string();
+        let searching = !query.trim().is_empty();
+        let results = state.search_results.clone();
+        let search_selected = state.search_selected;
+        let search_target = state.search_target;
+        let page_scroll = state.page_scroll.clone();
+        let search_scroll = state.search_scroll.clone();
+        if searching {
+            let mut list = div().id("preferences-search-results").max_h(window.viewport_size().height * 0.55).overflow_y_scroll().track_scroll(&search_scroll).debug_selector(|| "preferences-search-results".into()).flex().flex_col().gap(design::ui_scaled_px(6.));
+            if results.is_empty() { list = list.child(settings_hint("No preferences found. Try a setting name or another keyword.", palette)); }
+            for (index, entry) in results.iter().enumerate() {
+                let entry = *entry;
+                list = list.child(Button::new(SharedString::from(format!("preferences-search-result-{index}"))).ghost().selected(index == search_selected)
+                    .w_full().h_auto().justify_start().py(design::ui_scaled_px(10.))
+                    .accessibility_label(format!("{} — {}", entry.label, settings_navigation::category(entry.category).label))
+                    .child(div().debug_selector(move || format!("preferences-search-result-{index}")).min_w_0().flex().flex_col().gap(design::ui_scaled_px(3.))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(entry.label))
+                        .child(settings_hint(format!("{} · {}", settings_navigation::category(entry.category).label, entry.description), palette)))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if let Some(state) = &mut view.native_settings { state.search_selected = index; }
+                        view.open_preferences_search_result(window, cx);
+                    })));
+            }
+            body = list.into_any_element();
+        }
         // At large interface scales, the icon rail also preserves room for forms.
         let compact = window.viewport_size().width * 0.9 < design::ui_scaled_px(740.);
         let mut rows = Vec::<AnyElement>::new();
@@ -1168,8 +1247,9 @@ impl Desktop {
                     .when(!compact, |this| this.child(div().flex_1().min_w_0().whitespace_normal()
                         .text_size(settings_text_size(0.86)).font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                         .child(item.label))))
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    if let Some(state) = &mut view.native_settings { state.select_category(id); }
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.clear_preferences_search(window, cx);
+                    if let Some(state) = &mut view.native_settings { state.select_category(id); state.search_target = None; }
                     view.error = None;
                     cx.notify();
                 })).into_any_element());
@@ -1190,10 +1270,23 @@ impl Desktop {
             .id("native-preferences-content")
             .size_full()
             .flex()
-            .flex_row()
+            .flex_col()
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                let Some(state) = &mut view.native_settings else { return; };
+                if !state.search.read(cx).focus_handle(cx).contains_focused(window, cx) { return; }
+                if state.search.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()) { return; }
+                let count = state.search_results.len();
+                if count > 0 && matches!(event.keystroke.key.as_str(), "up" | "down") {
+                    state.search_selected = if event.keystroke.key == "down" { (state.search_selected + 1) % count } else { (state.search_selected + count - 1) % count };
+                    state.search_scroll.scroll_to_item(state.search_selected);
+                    cx.stop_propagation(); cx.notify();
+                }
+            }))
             .bg(crate::design::surface_color(palette.paper))
             .font_family(cx.theme().font_family.clone()).text_size(crate::settings::settings_text_size(0.86)).text_color(rgb(palette.ink))
-            .child(navigation)
+            .child(div().flex_shrink_0().p(design::ui_scaled_px(12.)).border_b_1().border_color(rgb(palette.line))
+                .child(Input::new(&search).cleanable(true).aria_label("Search preferences").text_size(settings_text_size(0.86))))
+            .child(div().flex_1().min_h_0().flex().flex_row().child(navigation)
             .child(
                 div()
                     .id(SharedString::from(format!("native-preferences-page-scroll-{}", destination.id)))
@@ -1204,12 +1297,13 @@ impl Desktop {
                     .flex_col()
                     .gap(px(design::space::SECTION))
                     .p(design::ui_scaled_px(if compact { 16. } else { 28. }))
-                    .overflow_y_scroll()
+                    .overflow_y_scroll().track_scroll(&page_scroll)
                     .child(div().w_full().flex_shrink_0().max_w(design::ui_scaled_px(760.)).mx_auto().flex().flex_col().gap(design::ui_scaled_px(8.))
                         .child(div().flex().items_center().flex_wrap().justify_between().gap(design::ui_scaled_px(8.))
-                            .child(div().text_size(settings_text_size(1.5)).font_weight(FontWeight::SEMIBOLD).child(title))
+                            .child(div().text_size(settings_text_size(1.5)).font_weight(FontWeight::SEMIBOLD).child(if searching { "Search results" } else { title }))
                             .when(!status.is_empty(), |this| this.child(settings_hint(status, palette))))
-                        .child(settings_hint(destination.description, palette)))
+                        .child(settings_hint(if searching { "Select a setting to open its category." } else { destination.description }, palette))
+                        .when(!searching, |this| this.when_some(search_target, |this, target| this.child(settings_hint(format!("Selected setting: {target}"), palette)))))
                     .child(div().w_full().min_w_0().flex_shrink_0().max_w(design::ui_scaled_px(760.)).mx_auto().child(body))
                     .when_some(self.error.clone(), |this, error| {
                         this.child(
@@ -1260,9 +1354,40 @@ impl Desktop {
                         },
                     ),
             )
+            )
             .into_any_element()
     }
 
+    pub(super) fn preferences_search_composing(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.native_settings.as_ref().is_some_and(|state| state.search.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()))
+    }
+    pub(super) fn clear_preferences_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(state) = &mut self.native_settings else { return false; };
+        if state.search.read(cx).value().is_empty() { return false; }
+        state.search.update(cx, |input, cx| input.set_value("", window, cx));
+        state.search_selected = 0;
+        state.search_results.clear();
+        cx.notify();
+        true
+    }
+    fn open_preferences_search_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preferences_search_composing(window, cx) { return; }
+        let Some(state) = &mut self.native_settings else { return; };
+        if state.search.read(cx).value().trim().is_empty() { return; }
+        let Some(entry) = state.search_results.get(state.search_selected).copied() else { return; };
+        state.search_results.clear();
+        state.select_category(entry.category);
+        state.appearance_advanced = true;
+        state.search.update(cx, |input, cx| input.set_value("", window, cx));
+        state.search_target = Some(entry.label);
+        let anchor = state.target_anchor.clone();
+        // Lay out the destination card before requesting its nested anchor.
+        if entry.label != "Agent delegation" && matches!(entry.category, "profile" | "appearance" | "interface" | "typography" | "behaviour" | "conversation" | "collaboration") {
+            window.on_next_frame(move |window, cx| anchor.scroll_to(window, cx));
+        }
+        window.focus(&self.preferences_focus, cx);
+        cx.notify();
+    }
     pub(super) fn render_settings(
         &mut self,
         window: &mut Window,
@@ -1283,6 +1408,91 @@ mod modal_layout_tests {
             self.desktop.update(cx, |desktop, cx| desktop.render_preferences_modal(window, cx))
         }
     }
+    #[gpui_kit::test]
+    fn preferences_search_is_local_and_preserves_drafts(cx: &mut TestAppContext) {
+        cx.update(|cx| gpui_kit::init(cx));
+        let mut desktop_entity = None;
+        let (_, mut visual) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| {
+                let mut desktop = Desktop::new(window, cx);
+                desktop.snapshot = Rc::new(json!({"settings":{"theme":"dark","userName":"Preview"},"agents":[],"projects":[],"tasks":[]}));
+                desktop.preferences = Some(NativePreferences::default());
+                desktop.preferences_open = true;
+                desktop
+            });
+            desktop_entity = Some(desktop.clone());
+            let harness = cx.new(|_| SettingsHarness { desktop });
+            gpui_kit::component::Root::new(harness, window, cx)
+        });
+        let desktop = desktop_entity.unwrap();
+        visual.simulate_resize(size(gpui_kit::px(1200.), gpui_kit::px(800.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| desktop.update(cx, |desktop, cx| {
+            let state = desktop.native_settings.as_ref().unwrap();
+            state.board_guidance.update(cx, |input, cx| input.set_value("Unsaved private draft", window, cx));
+            window.focus(&state.search.read(cx).focus_handle(cx), cx);
+        }));
+        visual.simulate_input("transparncy");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let result = visual.debug_bounds("preferences-search-result-0").expect("typo has a visible result");
+        visual.simulate_click(result.center(), Default::default());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let card = visual.debug_bounds("settings-card-Primary window surface").expect("target card renders");
+        let dialog = visual.debug_bounds("preferences-card").unwrap();
+        assert!(card.top() >= dialog.top() && card.top() < dialog.bottom(), "target card scrolled into dialog");
+        assert!(card.size.height > gpui_kit::px(150.), "target card contains its controls as well as the header");
+        visual.read(|cx| {
+            let desktop = desktop.read(cx);
+            let state = desktop.native_settings.as_ref().unwrap();
+            assert_eq!(state.category, "appearance");
+            assert_eq!(state.search_target, Some("Window transparency"));
+            assert_eq!(state.board_guidance.read(cx).value().as_str(), "Unsaved private draft");
+            assert!(!desktop.busy && desktop.service.is_none());
+        });
+        visual.update(|window, cx| desktop.update(cx, |desktop, cx| {
+            let state = desktop.native_settings.as_ref().unwrap();
+            window.focus(&state.search.read(cx).focus_handle(cx), cx);
+        }));
+        visual.simulate_input("zzqx nonexistent");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("preferences-search-results").is_some());
+        assert!(visual.debug_bounds("preferences-search-result-0").is_none());
+        visual.simulate_keystrokes("escape");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.read(|cx| {
+            assert!(desktop.read(cx).preferences_open);
+            assert!(desktop.read(cx).native_settings.as_ref().unwrap().search.read(cx).value().is_empty());
+        });
+        // Marked text belongs to the native input method, including Enter,
+        // Escape and arrows; it must not choose a result or close Preferences.
+        for key in ["down", "enter", "escape"] {
+            visual.update(|window, cx| desktop.update(cx, |desktop, cx| {
+                let state = desktop.native_settings.as_ref().unwrap();
+                state.search.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.replace_and_mark_text_in_range(None, "font", Some(4..4), window, cx);
+                });
+            }));
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            visual.simulate_keystrokes(key);
+            visual.update(|window, cx| desktop.update(cx, |desktop, cx| {
+                assert!(desktop.preferences_open);
+                let state = desktop.native_settings.as_ref().unwrap();
+                assert_eq!(state.category, "appearance");
+                assert_eq!(state.search_selected, 0);
+                state.search.update(cx, |input, cx| { input.unmark_text(window, cx); input.set_value("", window, cx); });
+            }));
+        }
+        visual.simulate_input("font size");
+        visual.simulate_keystrokes("enter");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.read(|cx| assert_eq!(desktop.read(cx).native_settings.as_ref().unwrap().category, "typography"));
+        visual.simulate_keystrokes("escape");
+        visual.read(|cx| assert!(!desktop.read(cx).preferences_open));
+    }
+
     #[gpui_kit::test]
     fn settings_modal_navigation_renders_rich_controls_and_stays_in_dialog(cx: &mut TestAppContext) {
         cx.update(|cx| gpui_kit::init(cx));
