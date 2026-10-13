@@ -1229,11 +1229,13 @@ impl BackendService {
         }
         let service = &self.0.service;
         match command {
+            name if crate::neovim::COMMANDS.contains(&name) => crate::neovim::invoke(name, args),
             "get_command_capabilities" => {
                 let mut capabilities = command_capabilities("lan")?;
                 capabilities
                     .commands
                     .extend(LOCAL.iter().map(|name| name.to_string()));
+                capabilities.commands.extend(crate::neovim::COMMANDS.iter().map(|name| name.to_string()));
                 capabilities.commands.sort();
                 capabilities.commands.dedup();
                 encode(capabilities)
@@ -1342,6 +1344,13 @@ pub use ipc::DesktopServer;
 /// Only the menu-bar server calls this before acquiring its private IPC lease.
 /// GUI callers may inspect the path but must never open its database themselves.
 pub fn profile_dir() -> Result<PathBuf, String> {
+    if let Some(value) = std::env::var_os("MONITTER_GPUI_PROFILE_DIR") {
+        let path = PathBuf::from(value);
+        if path.as_os_str().is_empty() || !path.is_absolute() {
+            return Err("MONITTER_GPUI_PROFILE_DIR must be a nonempty absolute directory.".into());
+        }
+        return Ok(path);
+    }
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME").ok_or("Cannot resolve home directory.")?;

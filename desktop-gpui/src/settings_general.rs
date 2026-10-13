@@ -161,9 +161,9 @@ pub(super) fn render_behavior(
         &shortcut
     };
     let keyboard = settings_card("Keyboard shortcuts", "Choose how workspace commands and pane navigation behave.", palette)
-        .child(div().font_weight(FontWeight::MEDIUM).child("Shortcut mode"))
-        .child(choices(desktop, cx, palette, "shortcutMode", "Shortcut mode", shortcut,
-            &[("standard", "Standard"), ("vim", "Vim")]))
+        .child(div().font_weight(FontWeight::MEDIUM).child("Pane navigation shortcuts"))
+        .child(choices(desktop, cx, palette, "shortcutMode", "Pane navigation shortcuts", shortcut,
+            &[("standard", "Standard"), ("vim", "Standard + Vim alternates")]))
         .child(settings_hint(if cfg!(target_os = "macos") { "Use Command (⌘) and Option (⌥) on macOS." } else { "Use Ctrl and Alt on this platform." }, palette))
         .children({
             let command = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
@@ -173,17 +173,15 @@ pub(super) fn render_behavior(
                 (format!("{command}+{option}+Up / Down"), "Focus the pane above or below"),
             ];
             if shortcut == "vim" {
-                rows.insert(0, ("Escape, then :".to_owned(), "Open workspace commands"));
-                rows.insert(1, (format!("Ctrl / {command}+W, then arrow or h/j/k/l"), "Focus another pane"));
-                rows.insert(2, (":q".to_owned(), "Close the current tab"));
-            } else {
-                rows.insert(0, (format!("{command}+W"), "Close the current tab"));
+                rows.insert(0, ("Ctrl+W, then arrow or h/j/k/l".to_owned(), "Focus any Monitter pane"));
+                rows.insert(1, ("Ctrl+W, then s / v".to_owned(), "Split the current pane"));
             }
+            rows.insert(0, (format!("{command}+W"), "Close the current tab"));
             rows.into_iter().map(|(keys, action)| div().w_full().min_w_0().flex().flex_wrap().gap(px(12.))
                 .child(div().w(px(240.)).flex_shrink_0().font_weight(FontWeight::MEDIUM).child(keys))
                 .child(div().flex_1().min_w(px(140.)).whitespace_normal().text_color(rgb(palette.muted)).child(action)))
         })
-        .child(settings_hint("Terminal keystrokes stay with the terminal. Preferences and the command palette keep their standard shortcuts.", palette));
+        .child(settings_hint("Vim alternates reserve Ctrl+W as a pane-command prefix across the workspace. Native Neovim keeps Ctrl+W for editing in insert, command-line and terminal modes. Standard shortcuts remain available.", palette));
     let focus = settings_card(
         "Workspace focus",
         "Set how split panes respond as you move through them.",

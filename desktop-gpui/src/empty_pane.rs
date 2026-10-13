@@ -24,6 +24,7 @@ const DEFAULT_FONT_RATIO: f32 = 1.0;
 pub enum EmptyPaneAction {
     Chat,
     Terminal,
+    Neovim,
     Browser,
 }
 
@@ -419,6 +420,18 @@ impl Render for EmptyPane {
                                 font_size,
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(EmptyPaneEvent::Action(EmptyPaneAction::Terminal));
+                                }),
+                            ))
+                            .child(action_card(
+                                format!("{}-new-neovim", self.id),
+                                "Neovim",
+                                IconName::SquareTerminal,
+                                busy,
+                                palette,
+                                card_style,
+                                font_size,
+                                cx.listener(|_, _, _, cx| {
+                                    cx.emit(EmptyPaneEvent::Action(EmptyPaneAction::Neovim));
                                 }),
                             ))
                             .child(action_card(

@@ -2485,3 +2485,9 @@ internal-task visibility projection. Choosing a result revalidates the current
 record and moves/reuses its retained `chat:<taskId>` pane into the landing tab's
 group. It does not create a task, send a prompt, change archiving, or attach to
 an unrelated native session. This adds no desktop/mobile/shared protocol fields.
+
+Native Neovim panes use private GPUI same-user backend IPC documented in
+[NEOVIM.md](NEOVIM.md). The backend owns embedded Neovim processes, files and
+redraw replay; native clients own presentation and dock navigation. These
+commands are not exposed through the Tauri/LAN/mobile/shared-client bridge and
+add no fields to the shared TypeScript task/agent contract.

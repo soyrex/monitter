@@ -637,7 +637,10 @@ impl DockWorkspace {
     /// Find the tab group containing the dock pane that owns keyboard focus.
     pub fn focused_group_node(&self, window: &Window, cx: &App) -> Option<NodeId> {
         let focused_id = self.focused_pane_id(window, cx)?;
-        let focused_key = self.panel_key(&focused_id)?;
+        self.group_for_pane(&focused_id, cx)
+    }
+    pub fn group_for_pane(&self, id: &str, cx: &App) -> Option<NodeId> {
+        let focused_key = self.panel_key(id)?;
         let area = self.area().read(cx);
         for placement in [
             DockPlacement::Center,

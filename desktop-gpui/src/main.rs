@@ -74,6 +74,8 @@ mod native_voice_capture;
 mod slash_palette;
 mod task_project_picker;
 mod terminal;
+mod neovim;
+mod neovim_workspace;
 mod terminal_workspace;
 mod terminal_theme;
 mod timestamps;
@@ -370,6 +372,12 @@ struct Desktop {
     terminal: Option<Entity<terminal::TerminalPane>>,
     terminal_context: Option<(Option<String>, Option<String>)>,
     terminal_panes: HashMap<String, Entity<terminal::TerminalPane>>,
+    neovim_sessions: HashMap<String, Entity<neovim::NeovimSession>>,
+    neovim_panes: HashMap<String, Entity<neovim::NeovimPane>>,
+    neovim_layouts: HashMap<String, Value>,
+    neovim_origins: HashMap<String, String>,
+    neovim_focus_windows: HashMap<String, i64>,
+    neovim_pending: bool,
     usage: Option<Entity<usage::UsagePane>>,
     usage_revision: Option<String>,
     app_resources: Option<Entity<usage::AppResourcePane>>,
@@ -694,6 +702,12 @@ impl Desktop {
             terminal: None,
             terminal_context: None,
             terminal_panes: HashMap::new(),
+            neovim_sessions: HashMap::new(),
+            neovim_panes: HashMap::new(),
+            neovim_layouts: HashMap::new(),
+            neovim_origins: HashMap::new(),
+            neovim_focus_windows: HashMap::new(),
+            neovim_pending: false,
             usage: None,
             usage_revision: None,
             app_resources: None,
@@ -1065,6 +1079,9 @@ impl Desktop {
             dock.focus(pane_id, window, cx);
         });
         match action {
+            empty_pane::EmptyPaneAction::Neovim => {
+                self.open_neovim_pane(Some(pane_id.to_owned()), window, cx)?;
+            }
             empty_pane::EmptyPaneAction::Chat => {
                 if rows(&self.snapshot, "agents").is_empty() {
                     self.switch_surface(Sidebar::Agents, window, cx);
@@ -2830,6 +2847,9 @@ impl Desktop {
                         ));
                     }
                 }
+            } else if neovim_workspace::parse_id(id).is_some() {
+                // The retained session reconnects through the private backend.
+                // A missing process stays visible as an editor error.
             } else if id.starts_with("empty:") {
                 // DockWorkspace restores these local, unsent overview panes.
             } else if let Some(browser_id) = browser_workspace::parse_browser_pane_id(id) {
@@ -2874,7 +2894,9 @@ impl Desktop {
             if self.dock.read(cx).contains(&id) {
                 continue;
             }
-            let spec = if id.starts_with("terminal:") {
+            let spec = if let Some((session,win)) = neovim_workspace::parse_id(&id) {
+                self.neovim_spec(session,win,window,cx)?
+            } else if id.starts_with("terminal:") {
                 let session = match terminal_workspace::lookup_terminal_session(&id, sessions) {
                     terminal_workspace::TerminalSessionLookup::Running(session)
                     | terminal_workspace::TerminalSessionLookup::Exited(session) => session.clone(),
@@ -3448,7 +3470,8 @@ impl Desktop {
         if let (Some(task_id), Some(service)) = (self.selected.clone(), self.service.clone()) {
             let pane = self.ensure_chat_pane(&task_id, service, window, cx);
             let stable_id = format!("chat:{task_id}");
-            if self.dock_current.as_ref() != Some(&stable_id) {
+            if self.dock_current.as_ref() != Some(&stable_id)
+                && !self.dock_current.as_deref().is_some_and(|id| neovim_workspace::parse_id(id).is_some()) {
                 let weak = cx.weak_entity();
                 let selected_id = task_id.clone();
                 let voice_pane = pane.downgrade();
@@ -4493,6 +4516,7 @@ impl Desktop {
         if self.closing {
             return Err("Desktop is closing.".into());
         }
+        if self.neovim_close_focused(window, cx) { return Ok(()); }
         self.dock
             .update(cx, |dock, cx| dock.close_focused_tab(window, cx))
     }

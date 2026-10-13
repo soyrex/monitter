@@ -101,8 +101,7 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
         let navigation = navigation.clone();
         move |_: &OpenVerticalSplit, cx| {
             navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") { return Ok(()); }
-                desktop.open_focused_empty_split(true, window, cx)
+                if desktop.neovim_split_focused(true, window, cx) { Ok(()) } else { desktop.open_focused_empty_split(true, window, cx) }
             });
         }
     });
@@ -110,8 +109,7 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
         let navigation = navigation.clone();
         move |_: &OpenHorizontalSplit, cx| {
             navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") { return Ok(()); }
-                desktop.open_focused_empty_split(false, window, cx)
+                if desktop.neovim_split_focused(false, window, cx) { Ok(()) } else { desktop.open_focused_empty_split(false, window, cx) }
             });
         }
     });
@@ -119,9 +117,6 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
         let navigation = navigation.clone();
         move |_: &OpenNewTab, cx| {
             navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") {
-                    return Ok(());
-                }
                 desktop.open_focused_empty_tab(window, cx)
             });
         }
@@ -130,9 +125,6 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
         let navigation = navigation.clone();
         move |_: &CloseActiveTab, cx| {
             navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") {
-                    return Ok(());
-                }
                 // On non-macOS the primary modifier maps to Control; preserve
                 // Ctrl+W inside a terminal, where it belongs to the shell.
                 if !cfg!(target_os = "macos")

@@ -90,11 +90,11 @@ const SETTINGS: &[(&str, &str, &str)] = &[
 const CREATION_COMMANDS: &[(&str, &str)] = &[
     ("new-task", "New chat"),
     ("new-terminal", "New terminal"),
+    ("new-neovim", "New Neovim pane"),
     ("new-agent", "New agent"),
     ("new-channel", "New channel"),
     ("new-project", "New project"),
     ("new-browser", "New browser tab"),
-    ("vim-command", "Vim command"),
     ("balance-panes", "Balance panes"),
     ("archived", "Archived chats"),
 ];
@@ -801,6 +801,11 @@ impl Desktop {
                 }
             }
             "new-task" => self.open_chat_draft(None, window, cx),
+            "new-neovim" => {
+                if let Err(error) = self.open_neovim_pane(None, window, cx) {
+                    self.error = Some(error);
+                }
+            }
             "new-terminal" => {
                 let pane = self.dock.update(cx, |dock, cx| {
                     let group = dock
@@ -860,11 +865,6 @@ impl Desktop {
                 self.palette_channels(window, cx);
                 if let Some(pane) = &self.channels {
                     pane.update(cx, |pane, cx| pane.create(window, cx));
-                }
-            }
-            "vim-command" => {
-                if !vim_command::open(cx, window) {
-                    self.error = Some("Vim command line is not initialized.".into());
                 }
             }
             "balance-panes" => {
@@ -933,7 +933,7 @@ mod tests {
             "new-channel",
             "new-project",
             "new-browser",
-            "vim-command",
+            "new-neovim",
             "balance-panes",
             "archived",
             "layout:single",

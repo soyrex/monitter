@@ -6,6 +6,8 @@ pub mod terminal_model;
 pub mod streaming_reveal;
 pub mod streaming_display;
 pub mod session_picker;
+pub mod neovim_model;
+pub mod neovim_keys;
 
 pub mod workspace_store;
 pub mod workspace_order;

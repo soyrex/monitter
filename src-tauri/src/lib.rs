@@ -59,6 +59,8 @@ mod extensions_runtime;
 #[cfg(feature = "experimental-gpui")]
 pub mod experimental_desktop;
 #[cfg(feature = "experimental-gpui")]
+mod neovim;
+#[cfg(feature = "experimental-gpui")]
 mod gpui_history_import;
 mod git;
 mod goals;

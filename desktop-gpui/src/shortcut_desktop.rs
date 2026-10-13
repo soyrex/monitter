@@ -78,9 +78,6 @@ pub struct OpenSwitcher;
 pub struct OpenCommands;
 #[derive(gpui_kit::Action, Clone, PartialEq, Default, Debug)]
 #[action(namespace = monitter_desktop)]
-pub struct OpenVimCommand;
-#[derive(gpui_kit::Action, Clone, PartialEq, Default, Debug)]
-#[action(namespace = monitter_desktop)]
 pub struct TerminalOpenSwitcher;
 #[derive(gpui_kit::Action, Clone, PartialEq, Default, Debug)]
 #[action(namespace = monitter_desktop)]
@@ -173,9 +170,6 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         let shortcuts = shortcuts.clone();
         move |_: &OpenTaskDraft, cx| {
             shortcuts.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") {
-                    return;
-                }
                 desktop.open_chat_draft(None, window, cx);
             });
         }
@@ -184,9 +178,6 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         let shortcuts = shortcuts.clone();
         move |_: &OpenFocusedTerminal, cx| {
             shortcuts.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") {
-                    return;
-                }
                 // Shift+Cmd+T is specifically the terminal command, even when
                 // focus currently belongs to a browser tab. Do not route it
                 // through Cmd+T's browser-aware new-tab policy.
@@ -218,9 +209,6 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         let shortcuts = shortcuts.clone();
         move |_: &ToggleFocusedDetail, cx| {
             shortcuts.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") {
-                    return;
-                }
                 desktop.switch_surface(crate::Sidebar::Subagents, window, cx);
             });
         }
@@ -229,9 +217,6 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         let shortcuts = shortcuts.clone();
         move |_: &ToggleWorkspaceSidebar, cx| {
             shortcuts.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.snapshot["settings"]["shortcutMode"].as_str() == Some("vim") {
-                    return;
-                }
                 desktop.toggle_sidebar(window, cx);
             });
         }
@@ -282,16 +267,6 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         move |_: &OpenCommands, cx| {
             shortcuts.dispatch(&window_handle, cx, |desktop, window, _cx| {
                 desktop.open_palette(crate::command_palette::PaletteMode::Commands, window, _cx);
-            });
-        }
-    });
-    cx.on_action({
-        let shortcuts = shortcuts.clone();
-        move |_: &OpenVimCommand, cx| {
-            shortcuts.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if !crate::vim_command::open(cx, window) {
-                    desktop.error = Some("Vim command line is not initialized.".into());
-                }
             });
         }
     });
@@ -416,7 +391,7 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
                         dock.move_focused_group(&operation, window, cx)
                     }),
                     "split-down" | "split-right" | "split-up" | "split-left" => {
-                        desktop.dock.update(cx, |dock, cx| {
+                        if desktop.neovim_split_focused(matches!(operation.as_str(), "split-right" | "split-left"), window, cx) { true } else { desktop.dock.update(cx, |dock, cx| {
                             dock.split_focused_group(
                                 operation.trim_start_matches("split-"),
                                 None,
@@ -424,11 +399,9 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
                                 cx,
                             )
                             .unwrap_or(false)
-                        })
+                        }) }
                     }
-                    "close" => desktop
-                        .dock
-                        .update(cx, |dock, cx| dock.close_focused_group(None, window, cx)),
+                    "close" => match desktop.close_focused_pane(window, cx) { Ok(()) => true, Err(error) => { desktop.error = Some(error); true } },
                     "only" => desktop
                         .dock
                         .update(cx, |dock, cx| dock.keep_focused_group(window, cx)),
@@ -531,228 +504,223 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         ),
         KeyBinding::new("cmd-alt-=", EqualizeWorkspace, None),
         KeyBinding::new(
-            "secondary-w t",
+            "ctrl-w t",
             VimWorkspaceShortcut {
                 operation: "first".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w b",
+            "ctrl-w b",
             VimWorkspaceShortcut {
                 operation: "last".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w w",
+            "ctrl-w w",
             VimWorkspaceShortcut {
                 operation: "next".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w W",
+            "ctrl-w W",
             VimWorkspaceShortcut {
                 operation: "previous".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w H",
+            "ctrl-w H",
             VimWorkspaceShortcut {
                 operation: "left".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w J",
+            "ctrl-w J",
             VimWorkspaceShortcut {
                 operation: "down".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w K",
+            "ctrl-w K",
             VimWorkspaceShortcut {
                 operation: "up".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w L",
+            "ctrl-w L",
             VimWorkspaceShortcut {
                 operation: "right".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w s",
+            "ctrl-w s",
             VimWorkspaceShortcut {
                 operation: "split-down".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w v",
+            "ctrl-w v",
             VimWorkspaceShortcut {
                 operation: "split-right".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w c",
+            "ctrl-w c",
             VimWorkspaceShortcut {
                 operation: "close".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w o",
+            "ctrl-w o",
             VimWorkspaceShortcut {
                 operation: "only".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w r",
+            "ctrl-w r",
             VimWorkspaceShortcut {
                 operation: "rotate".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w R",
+            "ctrl-w R",
             VimWorkspaceShortcut {
                 operation: "rotate-reverse".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w x",
+            "ctrl-w x",
             VimWorkspaceShortcut {
                 operation: "exchange".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w =",
+            "ctrl-w =",
             VimWorkspaceShortcut {
                 operation: "equalize".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w _",
+            "ctrl-w _",
             VimWorkspaceShortcut {
                 operation: "resize-max-vertical".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w |",
+            "ctrl-w |",
             VimWorkspaceShortcut {
                 operation: "resize-max-horizontal".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w +",
+            "ctrl-w +",
             VimWorkspaceShortcut {
                 operation: "resize-horizontal-plus".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w -",
+            "ctrl-w -",
             VimWorkspaceShortcut {
                 operation: "resize-horizontal-minus".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w >",
+            "ctrl-w >",
             VimWorkspaceShortcut {
                 operation: "resize-vertical-plus".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w <",
+            "ctrl-w <",
             VimWorkspaceShortcut {
                 operation: "resize-vertical-minus".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new("cmd-0", ScaleReset, None),
         KeyBinding::new("cmd-=", ScaleUp, None),
         KeyBinding::new("cmd-shift-=", ScaleUp, None),
         KeyBinding::new("cmd--", ScaleDown, None),
         KeyBinding::new(
-            "escape :",
-            OpenVimCommand,
-            Some("MonitterDesktop && shortcutMode==vim"),
-        ),
-        KeyBinding::new(
-            "secondary-w",
+            "ctrl-w",
             NoAction {},
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w h",
+            "ctrl-w h",
             VimFocusDirection {
                 direction: "left".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w j",
+            "ctrl-w j",
             VimFocusDirection {
                 direction: "down".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w k",
+            "ctrl-w k",
             VimFocusDirection {
                 direction: "up".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w l",
+            "ctrl-w l",
             VimFocusDirection {
                 direction: "right".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w left",
+            "ctrl-w left",
             VimFocusDirection {
                 direction: "left".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w down",
+            "ctrl-w down",
             VimFocusDirection {
                 direction: "down".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w up",
+            "ctrl-w up",
             VimFocusDirection {
                 direction: "up".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
         KeyBinding::new(
-            "secondary-w right",
+            "ctrl-w right",
             VimFocusDirection {
                 direction: "right".into(),
             },
-            Some("MonitterDesktop && shortcutMode==vim"),
+            Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
     ]);
 }
