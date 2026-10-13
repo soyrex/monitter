@@ -264,6 +264,14 @@ try {
   await expect(preferenceMenu).toHaveCount(0);
   await expect(phone.getByRole('radio', { name: /Desktop Whisper/ })).toBeVisible();
   await expect(phone.getByRole('radio', { name: /On this (iPhone|Android phone)/ })).toBeChecked();
+  const preferencesSearch = phone.getByRole('combobox', { name: 'Search preferences', exact: true });
+  await preferencesSearch.fill('transparncy');
+  const preferenceResults = phone.getByRole('listbox', { name: 'Preference search results', exact: true });
+  await expect(preferenceResults.getByRole('option').first()).toContainText('Window transparency');
+  await preferencesSearch.press('Enter');
+  await expect(phone.locator('.settings-header h1')).toHaveText('Appearance');
+  await expect(phone.locator('#window-surface-heading')).toBeFocused();
+  await expect(preferencesSearch).toHaveValue('');
   console.log(`${android ? 'Android-origin Chromium' : 'WebKit'} owner relay: desktop and on-device transcript-only voice, approval, foreground recovery, quiet readable outage, and explicit send feedback passed.`);
 } finally {
   desktop?.close();

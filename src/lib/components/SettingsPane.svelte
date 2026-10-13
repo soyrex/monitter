@@ -13,7 +13,7 @@
   import Wifi from '@lucide/svelte/icons/wifi';
   import Smartphone from '@lucide/svelte/icons/smartphone';
   import ScanLine from '@lucide/svelte/icons/scan-line';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { rangeFill } from '$lib/range-fill';
   import Check from "@lucide/svelte/icons/check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
@@ -34,6 +34,9 @@
   import EnvironmentSecretsSettings from './EnvironmentSecretsSettings.svelte';
 
   import { SETTINGS_CATEGORIES, SETTINGS_GROUPS, normalizeSettingsCategory } from '$lib/settings-navigation';
+
+  import { SETTINGS_SEARCH_ENTRIES, searchSettings, type SettingsSearchEntry } from '$lib/settings-search';
+  import { SETTINGS_CATEGORY_LABELS, type SettingsCategoryId } from '$lib/settings-navigation';
 
   // The agent directory and the agent editor are merged into a single
   // "Agents" category. The in-pane route inside AppSurface decides whether
@@ -97,6 +100,53 @@
   const categories = $derived(SETTINGS_CATEGORIES.filter(item =>
     item.id === 'connection' ? iosConnectionAvailable || androidConnectionAvailable :
     item.id === 'remote' ? remoteControlAvailable : true).map(item => ({ ...item, icon: categoryIcons[item.id] })));
+  const searchId = $props.id();
+  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => { clearTimeout(highlightTimer); highlightedCard?.classList.remove('search-highlight'); });
+  let searchQuery = $state('');
+  let searchOpen = $state(false);
+  let searchIndex = $state(0);
+  let searchInput = $state<HTMLInputElement | null>(null);
+  let pane = $state<HTMLElement | null>(null);
+  let highlightedCard: HTMLElement | null = null;
+  const searchEntries = $derived(SETTINGS_SEARCH_ENTRIES.filter(entry => categories.some(item => item.id === entry.category) && (entry.id !== 'speech' || mobileNativeSpeechAvailable) && (entry.id !== 'voice-transcription' || (!isLanBrowser() && getBridge().available && typeof navigator !== 'undefined' && /Mac/.test(navigator.platform)))));
+  const searchResults = $derived(searchSettings(searchQuery, searchEntries));
+  function clearSearch() { searchQuery = ''; searchOpen = false; searchIndex = 0; searchInput?.focus(); }
+  async function selectSearchResult(entry: SettingsSearchEntry) {
+    category = entry.category;
+    categoryMenuOpen = false;
+    searchOpen = false;
+    searchQuery = '';
+    await tick();
+    highlightedCard?.classList.remove('search-highlight');
+    const heading = entry.target ? pane?.querySelector<HTMLElement>(`[id="${entry.target}"]`) : null;
+    const details = heading?.closest('details');
+    if (details) details.open = true;
+    const card = heading?.closest<HTMLElement>('.setting-card') ?? heading;
+    if (card) {
+      highlightedCard = card;
+      card.classList.add('search-highlight');
+      clearTimeout(highlightTimer);
+      highlightTimer = setTimeout(() => card.classList.remove('search-highlight'), 1800);
+      card.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      heading?.setAttribute('tabindex', '-1');
+      heading?.focus({ preventScroll: true });
+    } else {
+      const header = pane?.querySelector<HTMLElement>('.settings-header h1');
+      header?.setAttribute('tabindex', '-1');
+      header?.focus({ preventScroll: true });
+      pane?.querySelector('.settings-content')?.scrollTo({ top: 0 });
+    }
+  }
+  function searchKeydown(event: KeyboardEvent) {
+    if (event.isComposing) return;
+    if (event.key === 'Escape' && searchQuery.trim()) { event.preventDefault(); event.stopPropagation(); clearSearch(); }
+    else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault(); searchOpen = true;
+      searchIndex = searchResults.length ? (searchIndex + (event.key === 'ArrowDown' ? 1 : -1) + searchResults.length) % searchResults.length : 0;
+      void tick().then(() => pane?.querySelector(`[id="${searchId}-preference-result-${searchIndex}"]`)?.scrollIntoView({ block: 'nearest' }));
+    } else if (event.key === 'Enter' && searchOpen && searchQuery.trim() && searchResults[searchIndex]) { event.preventDefault(); void selectSearchResult(searchResults[searchIndex]); }
+  }
   const fonts: { key: FontKey; sizeKey: FontSizeKey; weightKey: FontWeightKey; size: number; label: string; fallback: string }[] = [
     { key: "interfaceFont", sizeKey: "interfaceFontSize", weightKey: "interfaceFontWeight", size: 14, label: "Interface font", fallback: "IBM Plex Sans" },
     { key: "chatFont", sizeKey: "chatFontSize", weightKey: "chatFontWeight", size: 13, label: "Chat font", fallback: "IBM Plex Sans" },
@@ -264,7 +314,21 @@
 
 <svelte:window onkeydown={event => { if (categoryMenuOpen && event.key === "Escape") { categoryMenuOpen = false; categoryTrigger?.focus(); event.stopPropagation(); } }} />
 
-<section class="settings-pane" aria-label="Settings">
+<section class="settings-pane" aria-label="Settings" bind:this={pane}>
+  <div class="preferences-search">
+    <label for={`${searchId}-preferences-search-input`}>Search preferences</label>
+    <div class="search-input-row">
+      <input id={`${searchId}-preferences-search-input`} bind:this={searchInput} type="search" placeholder="Find a setting…" autocomplete="off" role="combobox" aria-expanded={searchOpen && !!searchQuery.trim()} aria-controls={`${searchId}-preference-search-results`} aria-autocomplete="list" aria-activedescendant={searchOpen && searchResults[searchIndex] ? `${searchId}-preference-result-${searchIndex}` : undefined} bind:value={searchQuery} oninput={() => { searchOpen = true; searchIndex = 0; }} onfocus={() => searchOpen = true} onkeydown={searchKeydown} />
+      {#if searchQuery}<button type="button" aria-label="Clear preferences search" onclick={clearSearch}>Clear</button>{/if}
+    </div>
+    {#if searchOpen && searchQuery.trim()}
+      <div id={`${searchId}-preference-search-results`} class="search-results" role="listbox" aria-label="Preference search results">
+        {#each searchResults as entry, index}
+          <button id={`${searchId}-preference-result-${index}`} type="button" role="option" aria-selected={index === searchIndex} class:selected={index === searchIndex} onclick={() => void selectSearchResult(entry)}><strong>{entry.label}</strong><span>{SETTINGS_CATEGORY_LABELS[entry.category as SettingsCategoryId] ?? entry.category}</span><small>{entry.description}</small></button>
+        {:else}<p role="status">No preferences found. Try a setting name or category.</p>{/each}
+      </div>
+    {/if}
+  </div>
   <nav class="settings-nav" aria-label="Settings categories">
     <div class="category-picker">
       <span>Preferences category</span>
@@ -618,7 +682,22 @@
 </section>
 
 <style>
-  .settings-pane { display:grid; flex:1; width:100%; min-width:0; grid-template-columns:220px minmax(0, 1fr); height:100%; min-height:0; color:var(--ink); background:var(--paper); font-family:var(--interface-font, "IBM Plex Sans", system-ui, sans-serif); }
+  .preferences-search { grid-column:1 / -1; position:relative; padding:12px 16px; border-bottom:1px solid var(--line); z-index:3; }
+  .preferences-search > label { display:block; margin-bottom:5px; color:var(--muted); font-size:11px; }
+  .search-input-row { display:flex; gap:8px; }
+  .search-input-row input { min-width:0; width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:7px; background:var(--paper); color:var(--ink); font:inherit; font-size:13px; }
+  .search-input-row input::-webkit-search-cancel-button { display:none; }
+  .search-input-row button { border:1px solid var(--line); border-radius:7px; background:var(--soft); color:var(--ink); cursor:pointer; }
+  .search-results { position:absolute; left:16px; right:16px; top:calc(100% - 6px); max-height:min(360px,50vh); overflow:auto; padding:5px; border:1px solid var(--line); border-radius:8px; background:var(--paper); box-shadow:0 8px 24px #0002; }
+  .search-results button { display:grid; grid-template-columns:1fr auto; gap:4px 10px; width:100%; padding:10px; border:0; border-radius:5px; text-align:left; font:inherit; background:transparent; color:var(--ink); cursor:pointer; }
+  .search-results button.selected,.search-results button:hover { background:var(--soft); }
+  .search-results span,.search-results small { color:var(--muted); font-size:11px; }
+  .search-results small { grid-column:1 / -1; }
+  .search-results p { padding:10px; color:var(--muted); font-size:12px; }
+  .preferences-search input:focus-visible,.preferences-search button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .settings-pane :global(.search-highlight) { outline:2px solid var(--accent); outline-offset:3px; }
+
+  .settings-pane { display:grid; flex:1; width:100%; min-width:0; grid-template-columns:220px minmax(0, 1fr); grid-template-rows:auto minmax(0,1fr); height:100%; min-height:0; color:var(--ink); background:var(--paper); font-family:var(--interface-font, "IBM Plex Sans", system-ui, sans-serif); }
   .settings-nav { min-height:0; overflow:auto; padding:20px 12px; border-right:1px solid var(--line); background:var(--paper); }
   .nav-heading { padding:0 9px 11px; color:var(--muted); font:600 calc(10px * var(--interface-font-ratio, 1)) var(--mono, monospace); letter-spacing:.09em; text-transform:uppercase; }
   .settings-nav button { display:flex; width:100%; align-items:flex-start; gap:9px; padding:10px 9px; border:0; border-radius:7px; color:var(--muted); background:transparent; text-align:left; font-family:inherit; cursor:pointer; }
@@ -654,7 +733,7 @@
   @keyframes spin { to { transform:rotate(360deg); } }
   @container (max-width:620px) { .settings-pane { grid-template-columns:150px minmax(0,1fr); }.settings-nav { padding:14px 7px; }.settings-nav button { padding:9px 7px; }.settings-content { padding:18px 14px; }.settings-header { margin-bottom:18px; }.settings-header h1 { font-size:calc(20px * var(--interface-font-ratio, 1)); }.save-state { font-size:calc(10px * var(--interface-font-ratio, 1)); }.font-setting { grid-template-columns:1fr; gap:10px; } }
   @container (max-width:620px) {
-    .settings-pane { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(0,1fr); }
+    .settings-pane { grid-template-columns:minmax(0,1fr); grid-template-rows:auto auto minmax(0,1fr); }
     .settings-nav { overflow:visible; padding:12px 14px; border-right:0; border-bottom:1px solid var(--line); }
     .category-list { display:none; }.category-picker { display:grid; }
     .settings-content { padding:18px 12px; }.setting-card { padding:14px; }
