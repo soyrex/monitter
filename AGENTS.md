@@ -1,5 +1,15 @@
 # Monitter agent guide
 
+## Desktop and mobile build boundary
+
+The installed macOS desktop is GPUI. Desktop changes, builds and installs use
+`/Users/alex/code/monitter-gpui`, its `AGENTS.md`, and `npm run build:gpui`.
+Tauri/Svelte in this checkout serves mobile web and the iOS/Android apps.
+Do not use `build:mac` or `install:mac` here to update `/Applications/Monitter.app`.
+When adding a harness, implement its desktop picker in the GPUI checkout as well
+as any applicable mobile client changes here. Verify the installed executable
+and bundle identity before building or replacing the desktop app.
+
 Monitter is a Tauri desktop workspace for real CLI and ACP agents. The desktop runs the agents locally or over SSH; mobile and shared browser clients connect to that desktop. macOS is the primary tested desktop platform. Do not edit the unrelated CME checkout.
 
 ## Project map

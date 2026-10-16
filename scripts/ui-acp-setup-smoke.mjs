@@ -33,6 +33,7 @@ for (const [engine, viewport] of engines) {
           {id:'agy-headless',name:'AGY CLI (Monitter bridge)',description:'Local AGY headless chats; collaboration unavailable',integration:'bridge',sourceUrl:'https://antigravity.google/docs/cli/headless/',detected:hostId==='local',launch:{command:'monitter-agy-acp',args:[]}},
           {id:'antigravity-acp',name:'Google Antigravity',description:'Official AGY ACP server',integration:'native',sourceUrl:'https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json',detected:true,launch:{command:hostId==='local'?'/test/local/agy_acp_server.par':'/test/remote/agy_acp_server.par',args:[]}},
           {id:'pi',name:'Pi (ACP bridge)',description:'Requires pi-acp; Pi native RPC is not ACP',integration:'bridge',sourceUrl:'https://github.com/victor-software-house/pi-acp',detected:false,launch:{command:'pi-acp',args:[]}},
+          {id:'omp',name:'OMP (Oh My Pi)',description:'Native ACP server',integration:'native',sourceUrl:'https://github.com/can1357/oh-my-pi',detected:true,launch:{command:hostId==='local'?'/test/local/omp':'/test/remote/omp',args:['acp']}},
         ];
       };
     });
@@ -50,6 +51,16 @@ for (const [engine, viewport] of engines) {
     await expect(providerCard.getByRole('heading',{name:'Mona',exact:true})).toBeVisible();
     const picker = settings.getByRole('region',{name:'Launch behaviour'});
     await expect(picker.getByLabel('Executable',{exact:true})).toHaveValue('mona-acp');
+    await activate(providerCard.getByRole('button',{name:'Change',exact:true}));
+    await activate(settings.getByRole('region',{name:'Choose a provider'}).getByRole('button',{name:'OMP Oh My Pi',exact:true}));
+    await expect(providerCard.getByRole('heading',{name:'OMP',exact:true})).toBeVisible();
+    await expect(picker.getByLabel('Executable',{exact:true})).toHaveValue('omp');
+    await expect(picker.getByLabel('Argument 1',{exact:true})).toHaveValue('acp');
+    await expect(settings.getByRole('radio',{name:'Read only',exact:true})).toHaveAttribute('aria-disabled','true');
+    await expect(settings.getByRole('radio',{name:'Full access',exact:true})).toHaveAttribute('aria-disabled','true');
+    await activate(picker.getByRole('button',{name:/OMP \(Oh My Pi\) Detected/}));
+    await expect(picker.getByLabel('Executable',{exact:true})).toHaveValue('/test/local/omp');
+    await expect(providerCard.getByRole('heading',{name:'OMP',exact:true})).toBeVisible();
     await activate(providerCard.getByRole('button',{name:'Change',exact:true}));
     await activate(settings.getByRole('region',{name:'Choose a provider'}).getByRole('button',{name:/Gemini/}));
     await expect(picker.getByLabel('Executable',{exact:true})).toHaveValue('monitter-agy-acp');

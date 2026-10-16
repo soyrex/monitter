@@ -35,7 +35,7 @@ export const NORMALIZED_PERMISSIONS: readonly NormalizedPermission[] = [
  * from the stored `Provider` enum because Mona, MiniMax and Gemini are stored as
  * `provider: 'acp'` and disambiguated by the configured executable name.
  */
-export type ProviderKey = 'claude-code' | 'codex' | 'opencode' | 'hermes' | 'mona' | 'minimax' | 'gemini';
+export type ProviderKey = 'claude-code' | 'codex' | 'opencode' | 'hermes' | 'omp' | 'mona' | 'minimax' | 'gemini';
 
 export interface UiProviderOption {
   /** Logical UI key. Drives the capability table and friendly name lookup. */
@@ -105,6 +105,15 @@ export const UI_PROVIDER_CATALOG: readonly UiProviderOption[] = [
     searchTerms: ['hermes', 'nous', 'hermes agent', 'acp'],
   },
   {
+    key: 'omp',
+    friendlyName: 'OMP',
+    subtitle: 'Oh My Pi',
+    storedProvider: 'acp',
+    acpCommand: 'omp',
+    acpArgs: ['acp'],
+    searchTerms: ['omp', 'oh my pi', 'oh-my-pi'],
+  },
+  {
     key: 'mona',
     friendlyName: 'Mona',
     subtitle: 'Monitter harness',
@@ -162,6 +171,7 @@ export function deriveProviderKey(agent: Pick<Agent, 'provider' | 'acp'>): Provi
 export function detectProviderFromLaunch(launch: AcpLaunch | null | undefined): ProviderKey {
   const command = (launch?.command ?? '').toLowerCase();
   if (!command) return 'opencode';
+  if (/(?:^|[/\\])omp(?:\.exe)?$/.test(command)) return 'omp';
   if (/(?:^|[\W_])mona-acp(?:$|[\W_])/.test(command)) return 'mona';
   if (/(?:^|[\W_])(?:mcode|minimax)(?:$|[\W_])/.test(command)) return 'minimax';
   if (/(?:^|[\W_])(?:gemini|agy_acp_server|antigravity-acp|monitter-agy-acp)(?:\.par)?(?:$|[\W_])/.test(command)) return 'gemini';
@@ -229,6 +239,15 @@ export const PERMISSION_CAPABILITIES: Record<ProviderKey, PermissionCapability> 
     fullAccess: false,
     defaultLevel: 'auto-approve-edits',
     hint: 'Hermes Agent currently uses its configured ACP permission policy.',
+  },
+  omp: {
+    // OMP's plan mode writes a plan file, and its default mode follows its
+    // own approval settings. Neither is a Monitter read-only sandbox.
+    readOnly: false,
+    autoApproveEdits: true,
+    fullAccess: false,
+    defaultLevel: 'auto-approve-edits',
+    hint: 'OMP uses its configured tool approval policy. Configure approvals in OMP.',
   },
   mona: {
     readOnly: true,

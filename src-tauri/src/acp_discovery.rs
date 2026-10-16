@@ -121,6 +121,15 @@ pub fn catalog() -> Vec<AcpCandidate> {
             vec!["--acp"],
         ),
         (
+            "omp",
+            "OMP (Oh My Pi)",
+            "Native ACP server using your existing OMP models, authentication, and tool approval policy",
+            "https://github.com/can1357/oh-my-pi",
+            "native",
+            "omp",
+            vec!["acp"],
+        ),
+        (
             "pi",
             "Pi (ACP bridge)",
             "Requires pi-acp; Pi's native RPC is a different protocol",
@@ -542,6 +551,10 @@ mod tests {
                 .unwrap()
                 .launch,
             AcpLaunch { command: "agy_acp_server.par".into(), args: vec![] }
+        );
+        assert_eq!(
+            candidates.iter().find(|c| c.id == "omp").unwrap().launch,
+            AcpLaunch { command: "omp".into(), args: vec!["acp".into()] }
         );
         assert_eq!(
             candidates

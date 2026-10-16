@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071316">
+  <title>Monitter — a new chapter</title>
+  <style>
+    :root { color-scheme: dark; --bg:#071316; --panel:#0c1b1f; --line:rgba(194,222,224,.13); --muted:#91a5a8; --cyan:#00b9dc; --white:#f1f5f5; }
+    * { box-sizing:border-box }
+    body { margin:0; min-height:100vh; background:radial-gradient(ellipse at 50% 44%,#102529 0%,var(--bg) 58%); color:var(--white); font:16px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    .wrap { width:min(1180px, calc(100% - 56px)); margin:auto; }
+    header { height:88px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
+    .brand { width:132px; height:auto; display:block; }
+    .eyebrow,.status { font:500 11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.16em; text-transform:uppercase; }
+    .eyebrow { color:#92a5a8; }
+    main { padding:78px 0 70px; }
+    .intro { display:grid; grid-template-columns:1fr; gap:42px; align-items:start; }
+    .status { display:flex; gap:12px; align-items:center; color:var(--cyan); margin:0 0 26px; }
+    .status:before { content:""; width:24px; height:1px; background:var(--cyan); }
+    h1 { max-width:480px; margin:0; font-weight:430; letter-spacing:-.055em; line-height:1.08; font-size:clamp(46px,6.2vw,76px); }
+    h1 span { color:var(--cyan); }
+    .lede { max-width:420px; color:#a6b5b7; margin:25px 0 0; font-size:17px; }
+    .preview { position:relative; width:100vw; margin:0 0 0 calc(50% - 50vw); padding:0; background:none; border:0; border-radius:0; box-shadow:none; }
+    .preview img { display:block; width:100%; height:auto; border-radius:0; }
+    .caption { display:flex; justify-content:space-between; gap:16px; width:min(1180px,calc(100% - 56px)); margin:0 auto; padding:13px 4px 2px; color:#8ea3a6; font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.07em; text-transform:uppercase; }
+    .caption span:last-child { color:#60777b; }
+    .features { padding:8px 0 4px; }
+    .section-head { display:flex; justify-content:space-between; align-items:end; gap:28px; margin-bottom:28px; }
+    .section-head h2 { margin:0; font-size:clamp(30px,4vw,46px); line-height:1.1; font-weight:450; letter-spacing:-.04em; }
+    .section-head p { max-width:330px; margin:0; color:var(--muted); font-size:14px; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+    .card { overflow:hidden; border:1px solid var(--line); border-radius:11px; background:linear-gradient(150deg,rgba(18,39,43,.92),rgba(9,23,26,.92)); }
+    .card.wide { grid-column:span 2; }
+    .card.tall { grid-row:span 2; display:flex; min-height:0; flex-direction:column; }
+    .card.tall img { flex:1 1 0; min-height:0; height:0; aspect-ratio:auto; object-fit:cover; }
+    .card.fill-image { display:flex; min-height:0; flex-direction:column; }
+    .card.fill-image img { flex:1 1 0; min-height:0; height:0; aspect-ratio:auto; object-fit:cover; object-position:top; }
+    .card img { display:block; width:100%; aspect-ratio:16/9; object-fit:cover; object-position:top; border-bottom:1px solid var(--line); background:#091619; }
+    .card.subagents img { object-position:bottom; }
+    .card.copy-only { display:flex; flex-direction:column; justify-content:space-between; min-height:220px; padding:22px; }
+    .card-copy { padding:17px 18px 20px; }
+    .layout-preview { display:grid; grid-template-columns:.56fr 1.35fr .82fr 1fr; grid-template-rows:1fr 1fr; gap:5px; aspect-ratio:16/9; padding:8px; overflow:hidden; border-bottom:1px solid var(--line); background:#081316; }
+    .layout-pane { min-width:0; overflow:hidden; border:1px solid rgba(138,181,185,.18); border-radius:4px; background:#102024; padding:7px; color:#91a5a8; font:8px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .layout-pane strong { display:block; overflow:hidden; margin-bottom:6px; color:#d9e4e5; font-size:8px; font-weight:500; text-overflow:ellipsis; white-space:nowrap; }
+    .layout-pane.sidebar { grid-column:1; grid-row:1 / span 2; background:#0b191c; }
+    .layout-pane.conversation { grid-column:2; grid-row:1 / span 2; }
+    .layout-pane.inspector { grid-column:3; grid-row:1; }
+    .layout-pane.subagents { grid-column:3; grid-row:2; }
+    .layout-pane.browser { grid-column:4; grid-row:1 / span 2; display:grid; place-items:center; background:#0b171a; color:#6f8589; }
+    .pane-line { height:4px; margin:5px 0; border-radius:3px; background:rgba(174,204,207,.17); }
+    .pane-line.short { width:58%; }.pane-line.accent { width:74%; background:rgba(0,185,220,.55); }
+    .card h3 { margin:0 0 7px; font-size:18px; font-weight:560; letter-spacing:-.02em; }
+    .card p { margin:0; color:#91a5a8; font-size:13px; line-height:1.55; }
+    .tag { display:block; margin-bottom:10px; color:var(--cyan); font:10px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.15em; text-transform:uppercase; }
+    .swatches { display:flex; gap:8px; margin-top:28px; }
+    .swatches i { width:27px; height:27px; border-radius:50%; border:1px solid rgba(255,255,255,.22); background:#00b9dc; }
+    .swatches i:nth-child(2){background:#3f9d6a}.swatches i:nth-child(3){background:#8755c7}.swatches i:nth-child(4){background:#c44c79}.swatches i:nth-child(5){background:#c27524}
+    .rule { margin:82px 0 24px; height:1px; background:var(--line); }
+    footer { display:flex; justify-content:space-between; gap:24px; color:#829598; font-size:12px; }
+    footer .note { max-width:240px; }
+    @media(max-width:850px) { .grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card.wide{grid-column:span 2} }
+    @media(max-width:760px) { .wrap{width:min(100% - 36px,560px)} header{height:72px}.brand{width:116px}main{padding:50px 0 36px}.intro{grid-template-columns:1fr;gap:30px}h1{font-size:clamp(48px,13vw,68px)}.lede{font-size:15px}.caption{width:calc(100% - 36px)}.section-head{align-items:flex-start;flex-direction:column;gap:12px}.grid{grid-template-columns:1fr}.card.wide{grid-column:auto}.card.copy-only{min-height:185px}.rule{margin:54px 0 20px}footer{align-items:flex-start} }
+    @media(prefers-reduced-motion:no-preference) { .intro > * { animation:arrive .7s both } .preview { animation-delay:.12s } @keyframes arrive { from {opacity:0;transform:translateY(12px)} to {opacity:1;transform:none} } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header><img class="brand" src="../static/monitter-wordmark.webp" alt="Monitter"><span class="eyebrow">A new chapter&nbsp; / &nbsp;coming soon</span></header>
+    <main>
+      <section class="intro" aria-labelledby="headline">
+        <div>
+          <p class="status">Originally 2008. Reimagined.</p>
+          <h1 id="headline">After years,<br><span>something new</span><br>is coming.</h1>
+          <p class="lede">A familiar name. A different kind of company.</p>
+        </div>
+        <figure class="preview">
+          <img src="monitter-workspace-screenshot.png" alt="Monitter workspace showing multiple live agent conversations beside the Monitter coming soon page">
+          <figcaption class="caption"><span>Monitter, in progress</span><span>01 / A new beginning</span></figcaption>
+        </figure>
+      </section>
+      <div class="rule"></div>
+      <section class="features" aria-labelledby="features-title">
+        <div class="section-head"><h2 id="features-title">A closer look at Monitter</h2><p>One workspace for your agents, conversations, and the work that connects them.</p></div>
+        <div class="grid">
+          <article class="card wide"><img src="work-plan.png" alt="A native work plan with progress, completed steps, and a pending item"><div class="card-copy"><span class="tag">Plan and track</span><h3>Native work plans</h3><p>Keep the objective, steps, and progress visible alongside the work.</p></div></article>
+          <article class="card fill-image"><img src="multi-agent-setup.png" alt="A list of configured agents and providers"><div class="card-copy"><span class="tag">Choose your team</span><h3>Multi-agent setup</h3><p>Bring different agents and harnesses into one workspace.</p></div></article>
+          <article class="card fill-image"><img src="model-usage.png" alt="Provider usage meters and reset information"><div class="card-copy"><span class="tag">Know where you stand</span><h3>Model usage</h3><p>See provider usage and reset windows at a glance.</p></div></article>
+          <article class="card wide"><img src="resource-management.png" alt="Live CPU and memory charts with a process list"><div class="card-copy"><span class="tag">See the whole system</span><h3>Detailed resource management</h3><p>Inspect live CPU and memory use, history, and the processes behind it.</p></div></article>
+          <article class="card"><div class="layout-preview" role="img" aria-label="A grid layout arranging agents, conversation, task details, subagents, and browser panes"><div class="layout-pane sidebar"><strong>MONITTER</strong><div class="pane-line accent"></div><div class="pane-line"></div><div class="pane-line short"></div><div class="pane-line"></div><div class="pane-line short"></div></div><div class="layout-pane conversation"><strong>UX &amp; FRONTEND</strong><div class="pane-line short"></div><div class="pane-line"></div><div class="pane-line accent"></div><div class="pane-line"></div><div class="pane-line short"></div><div class="pane-line"></div></div><div class="layout-pane inspector"><strong>TASK DETAILS</strong><div class="pane-line"></div><div class="pane-line short"></div><div class="pane-line"></div></div><div class="layout-pane subagents"><strong>SUBAGENTS</strong><div class="pane-line accent"></div><div class="pane-line short"></div></div><div class="layout-pane browser"><strong>Browser preview</strong></div></div><div class="card-copy"><span class="tag">Make it yours</span><h3>Flexible layout controls</h3><p>Arrange conversations, task details, subagents, and browser panes to fit your work.</p></div></article>
+          <article class="card copy-only"><div><span class="tag">Tune the interface</span><h3>Themes, down to the details</h3><p>Choose a look and fine-tune the accent and theme settings to suit your workspace.</p></div><div class="swatches" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div></article>
+          <article class="card tall"><img src="full-space-composer.png" alt="An expanded composer displaying a formatted Markdown brief"><div class="card-copy"><span class="tag">Write without friction</span><h3>Full-space Markdown composer</h3><p>Expand the composer and shape longer prompts with native Markdown formatting.</p></div></article>
+          <article class="card"><img src="fork-chat.png" alt="Fork chat dialog for continuing with another agent and model"><div class="card-copy"><span class="tag">Continue elsewhere</span><h3>Fork and hand off</h3><p>Fork a conversation to another agent when you want a different path or model.</p></div></article>
+          <article class="card subagents"><img src="subagents.png" alt="A subagent panel showing active and completed delegated tasks"><div class="card-copy"><span class="tag">Coordinate in context</span><h3>Native subagent support</h3><p>Follow delegated work in a clear GUI, with active tasks and results close at hand.</p></div></article>
+        </div>
+      </section>
+      <div class="rule"></div>
+      <footer><span class="note">First seen in 2008.<br>Back with a new purpose.</span><span>✳ &nbsp; Coming soon</span></footer>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "monitter-coming-soon",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-17",
+  "account_id": "dcd4e18763e736678737420e8d1a2d7d",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "monitter.com", "custom_domain": true },
+    { "pattern": "www.monitter.com", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "../../drafts/landing",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "run_worker_first": false
+  }
+}

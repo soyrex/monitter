@@ -20,6 +20,13 @@ allowlist of agents the transport accepts.
   that an agent package is installed.
 - Pi's native RPC is not ACP. Offer an installed Pi ACP bridge, clearly labelled,
   rather than sending ACP messages to `pi --mode rpc`.
+- OMP (Oh My Pi) has its own named provider and native `omp acp` preset. It
+  remains separate from Pi's bridge and uses OMP's existing authentication and
+  tool approval settings. OMP 18.9.2 advertises model and thinking configuration,
+  session loading/resuming, image/context inputs and HTTP/SSE MCP. Monitter's
+  current UI exposes the supported model controls; arbitrary configuration
+  selectors remain subject to the limits below. Its plan mode can write a plan
+  file, so it is not offered as Monitter's read-only permission level.
 
 ## State and compatibility
 

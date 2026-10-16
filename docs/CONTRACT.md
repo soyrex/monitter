@@ -889,8 +889,15 @@ bundled bridge, AGY, and Node.js are available, clears their old model
 selection, and disables unsupported MCP opt-ins. Existing chats retain their
 pinned launcher and native session; start a new chat for AGY. Custom launchers
 and SSH agent profiles are not rewritten.
-Pi's native `--mode rpc` must never be treated as ACP. Existing OpenCode tasks
-remain on their prior adapter; OpenCode ACP is selected explicitly for new chats.
+Pi's native `--mode rpc` must never be treated as ACP.
+OMP (Oh My Pi) is a named provider preset stored as `provider: "acp"` with
+`{ command: "omp", args: ["acp"] }`. It uses OMP's native ACP server, separately
+from Pi's bridge. Authentication and tool approval settings remain owned by OMP;
+the UI does not promise read-only or full-access modes that OMP does not advertise.
+Model selection, session recovery and HTTP MCP use advertised ACP capabilities.
+Existing profiles and chats are not migrated to OMP.
+Existing OpenCode tasks remain on their prior adapter; OpenCode ACP is selected
+explicitly for new chats.
 Launcher paths/arguments remain owner-only and are omitted from shared-visitor
 agent and task projections.
 
