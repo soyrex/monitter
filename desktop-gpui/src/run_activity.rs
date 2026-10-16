@@ -205,7 +205,7 @@ fn process_tool_preview(events: &[Value]) -> Option<String> {
     let event = events
         .iter()
         .rev()
-        .find(|event| matches!(field(event, "kind").as_str(), "tool" | "subagent"))?;
+        .find(|event| is_tool_event(event))?;
     let detail = parsed_event_detail(event);
     let update = detail.get("update").unwrap_or(&detail);
     let arguments = detail
@@ -276,6 +276,7 @@ fn process_tool_preview(events: &[Value]) -> Option<String> {
 
 fn is_tool_event(event: &Value) -> bool {
     matches!(field(event, "kind").as_str(), "tool" | "subagent")
+        && !crate::transcript::is_context_compaction(event)
 }
 
 fn tool_count(events: &[Value]) -> usize {
@@ -435,6 +436,45 @@ fn thinking_row(
         );
     }
     row.into_any_element()
+}
+
+fn context_compaction_label(compaction: &crate::transcript::ContextCompaction) -> String {
+    if compaction.active { return "Compacting context…".into(); }
+    if !compaction.completed { return "Context compaction".into(); }
+    match compaction.duration_ms {
+        Some(ms) if ms < 1_000 => "Context compacted · <1s".into(),
+        Some(ms) if ms < 60_000 => format!("Context compacted · {}s", ms / 1_000),
+        Some(ms) => format!("Context compacted · {}m {}s", ms / 60_000, ms / 1_000 % 60),
+        None => "Context compacted".into(),
+    }
+}
+
+fn context_compaction_row(
+    events: &[Value],
+    running: bool,
+    cx: &Context<RunActivityRow>,
+) -> Option<AnyElement> {
+    let compaction = crate::transcript::context_compaction(events, running)?;
+    let label = context_compaction_label(&compaction);
+    let state = if compaction.active { "running" } else if compaction.completed { "completed" } else { "unknown" };
+    let icon = if compaction.active {
+        Spinner::new().with_size(px(13.)).into_any_element()
+    } else {
+        Icon::new(if compaction.completed { IconName::Check } else { IconName::BookOpen }).size(px(13.)).into_any_element()
+    };
+    let id = events.first().map(|event| field(event, "id")).unwrap_or_default();
+    let mut row = fixture_bounds(div().w_full().min_w_0().flex().items_center()
+        .gap(px(6.)).py(px(6.)).text_size(px(11.))
+        .text_color(cx.theme().muted_foreground)
+        .child(icon).child(div().flex_1().min_w_0().child(label.clone())),
+        format!("context-compaction-{id}-{state}"))
+        .id(SharedString::from(format!("context-compaction-{id}")))
+        .role(Role::Label).aria_label(label);
+    if let Some(time) = events.last().and_then(event_time) {
+        row = row.child(div().ml_auto().flex_shrink_0()
+            .font_family(crate::design::FONT_MONO).text_size(px(9.)).child(time));
+    }
+    Some(row.into_any_element())
 }
 
 fn reasoning_time(event: &Value, cx: &Context<RunActivityRow>) -> Option<AnyElement> {
@@ -1048,6 +1088,7 @@ impl Render for RunActivityRow {
 
 impl RunActivityRow {
     fn render_single(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if let Some(compaction) = context_compaction_row(&self.events, false, cx) { return compaction; }
         let is_reasoning = self.kind == "reasoning";
         let presentation_event = self.events.first().unwrap_or(&Value::Null);
         let presentation = self.presentation_cache.with_loaded_detail(
@@ -1288,6 +1329,7 @@ impl RunActivityRow {
     }
 
     fn render_group(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if let Some(compaction) = context_compaction_row(&self.events, self.group_running, cx) { return compaction; }
         if self.mode == GroupMode::Reasoning
             && !self.events.is_empty()
             && self
@@ -1541,6 +1583,17 @@ mod activity_disclosure_tests;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[::core::prelude::v1::test]
+    fn context_compaction_uses_concise_lifecycle_labels_and_no_tool_count() {
+        use crate::transcript::ContextCompaction;
+        assert_eq!(context_compaction_label(&ContextCompaction {active:true,completed:false,duration_ms:None}), "Compacting context…");
+        assert_eq!(context_compaction_label(&ContextCompaction {active:false,completed:true,duration_ms:Some(65_000)}), "Context compacted · 1m 5s");
+        assert_eq!(context_compaction_label(&ContextCompaction {active:false,completed:false,duration_ms:None}), "Context compaction");
+        let event = json!({"kind":"tool","title":"ContextCompaction","detail":json!({"type":"contextCompaction","id":"native","monitterPhase":"started"}).to_string()});
+        assert_eq!(tool_count(&[event.clone()]), 0);
+        assert_eq!(process_tool_preview(&[event]), None);
+    }
 
     #[::core::prelude::v1::test]
     fn disclosure_presentation_cache_reuses_projection_and_invalidates_changed_detail() {

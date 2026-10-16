@@ -495,6 +495,10 @@ pub fn open_if_requested(cx: &mut App) -> bool {
         return false;
     };
     let option = option.to_string_lossy().into_owned();
+    if option == "surface" {
+        crate::surface_preview::open(cx);
+        return true;
+    }
     let (scenario, invalid_option) = match option.as_str() {
         "static" | "active" => (Scenario::Static, None),
         "idle" => (Scenario::Idle, None),

@@ -225,10 +225,14 @@ pub(crate) fn render(
                 ),
         );
     if expanded {
+        let content_selector = format!("exchange-content-{id}");
         let mut content = div()
             .w_full()
             .min_w_0()
-            .py(px(10.)).pr(px(10.))
+            .px(px(12.))
+            .pt(px(10.))
+            .pb(px(12.))
+            .debug_selector(move || content_selector.clone())
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -368,6 +372,30 @@ pub(crate) fn render_group(
     )
     .debug_selector(move || format!("exchange-group-{id}"))
 }
+/// The group owns the rail so member gaps and nested tool turns cannot break it.
+/// Its 12px marker column also centers the native Turn icon on the same axis.
+pub(crate) fn timeline(id: &str) -> Div {
+    let timeline_selector = format!("exchange-timeline-{id}");
+    let rail_selector = format!("exchange-rail-{id}");
+    div()
+        .relative()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .debug_selector(move || timeline_selector.clone())
+        .child(
+            div()
+                .absolute()
+                .left(px(5.5))
+                .top(px(9.))
+                .bottom(px(0.))
+                .w(px(1.))
+                .bg(rgb(0x6594db).opacity(0.25))
+                .debug_selector(move || rail_selector.clone()),
+        )
+}
 /// Each member keeps its own direction, observed label and second-resolution time.
 pub(crate) fn render_step(
     exchange: Exchange,
@@ -385,6 +413,8 @@ pub(crate) fn render_step(
         .timestamp
         .and_then(crate::timestamps::local_datetime)
         .map(|v| v.format("%H:%M:%S").to_string());
+    let dot_selector = format!("exchange-member-dot-{id}");
+    let heading_selector = format!("exchange-member-heading-{id}");
     div()
         .w_full()
         .min_w_0()
@@ -393,11 +423,19 @@ pub(crate) fn render_step(
         .debug_selector(move || format!("exchange-member-{id}"))
         .child(
             div()
-                .w(px(10.))
+                .relative()
+                .w(px(12.))
                 .flex_shrink_0()
-                .border_l_1()
-                .border_color(rgb(0x6594db).opacity(0.25))
-                .child(div().size(px(6.)).rounded_full().bg(rgb(0x6594db))),
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(3.))
+                        .top(px(6.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(0x6594db))
+                        .debug_selector(move || dot_selector.clone()),
+                ),
         )
         .child(
             div()
@@ -418,7 +456,9 @@ pub(crate) fn render_step(
                                 .min_w_0()
                                 .flex_1()
                                 .whitespace_normal()
+                                .line_height(px(18.))
                                 .text_color(rgb(palette.muted))
+                                .debug_selector(move || heading_selector.clone())
                                 .child(format!("{arrow} {} · {}", exchange.peer, exchange.status)),
                         )
                         .when_some(time, |row, time| {

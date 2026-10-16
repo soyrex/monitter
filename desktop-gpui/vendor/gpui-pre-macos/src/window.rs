@@ -11,8 +11,8 @@ use cocoa::{
     appkit::{
         NSApplication, NSBackingStoreBuffered, NSColor, NSEvent, NSEventModifierFlags, NSEventType,
         NSFilenamesPboardType, NSPasteboard, NSRequestUserAttentionType, NSScreen, NSView,
-        NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial, NSVisualEffectState,
-        NSVisualEffectView, NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState,
+        NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+        NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState,
         NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
     },
     base::{id, nil},
@@ -301,10 +301,6 @@ unsafe fn build_classes() {
             decl.add_method(
                 sel!(initWithFrame:),
                 blurred_view_init_with_frame as extern "C" fn(&Object, Sel, NSRect) -> id,
-            );
-            decl.add_method(
-                sel!(updateLayer),
-                blurred_view_update_layer as extern "C" fn(&Object, Sel),
             );
             decl.register()
         };
@@ -3754,72 +3750,13 @@ fn display_id_for_screen(screen: id) -> Option<CGDirectDisplayID> {
 extern "C" fn blurred_view_init_with_frame(this: &Object, _: Sel, frame: NSRect) -> id {
     unsafe {
         let view = msg_send![super(this, class!(NSVisualEffectView)), initWithFrame: frame];
-        // Use a colorless semantic material. The default value `AppearanceBased`, though not
-        // manually set, is deprecated.
-        NSVisualEffectView::setMaterial_(view, NSVisualEffectMaterial::Selection);
+        // Let AppKit own the material and its compositor layer tree. Mutating
+        // private CAChameleonLayer/filter internals depends on undocumented
+        // compositor details that can change across macOS releases.
+        NSVisualEffectView::setMaterial_(view, NSVisualEffectMaterial::UnderWindowBackground);
+        NSVisualEffectView::setBlendingMode_(view, NSVisualEffectBlendingMode::BehindWindow);
         NSVisualEffectView::setState_(view, NSVisualEffectState::Active);
         view
-    }
-}
-
-extern "C" fn blurred_view_update_layer(this: &Object, _: Sel) {
-    unsafe {
-        let _: () = msg_send![super(this, class!(NSVisualEffectView)), updateLayer];
-        let layer: id = msg_send![this, layer];
-        if !layer.is_null() {
-            remove_layer_background(layer);
-        }
-    }
-}
-
-unsafe fn remove_layer_background(layer: id) {
-    unsafe {
-        let _: () = msg_send![layer, setBackgroundColor:nil];
-
-        let class_name: id = msg_send![layer, className];
-        if class_name.isEqualToString("CAChameleonLayer") {
-            // Remove the desktop tinting effect.
-            let _: () = msg_send![layer, setHidden: YES];
-            return;
-        }
-
-        let filters: id = msg_send![layer, filters];
-        if !filters.is_null() {
-            // Remove the increased saturation.
-            // The effect of a `CAFilter` or `CIFilter` is determined by its name, and the
-            // `description` reflects its name and some parameters. Currently `NSVisualEffectView`
-            // uses a `CAFilter` named "colorSaturate". If one day they switch to `CIFilter`, the
-            // `description` will still contain "Saturat" ("... inputSaturation = ...").
-            let test_string: id = ns_string("Saturat");
-            let count = NSArray::count(filters);
-            for i in 0..count {
-                let description: id = msg_send![filters.objectAtIndex(i), description];
-                let hit: BOOL = msg_send![description, containsString: test_string];
-                if hit == NO {
-                    continue;
-                }
-
-                let all_indices = NSRange {
-                    location: 0,
-                    length: count,
-                };
-                let indices: id = msg_send![class!(NSMutableIndexSet), indexSet];
-                let _: () = msg_send![indices, addIndexesInRange: all_indices];
-                let _: () = msg_send![indices, removeIndex:i];
-                let filtered: id = msg_send![filters, objectsAtIndexes: indices];
-                let _: () = msg_send![layer, setFilters: filtered];
-                break;
-            }
-        }
-
-        let sublayers: id = msg_send![layer, sublayers];
-        if !sublayers.is_null() {
-            let count = NSArray::count(sublayers);
-            for i in 0..count {
-                let sublayer = sublayers.objectAtIndex(i);
-                remove_layer_background(sublayer);
-            }
-        }
     }
 }
 

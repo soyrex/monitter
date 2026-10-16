@@ -2918,6 +2918,13 @@ impl Render for ChatPane {
             // retained process tree. Reconcile only committed projection changes.
             if let Some(service) = self.service.clone().filter(|_| activity_changed) {
                 let git_owner = cx.weak_entity();
+                let latest_input_at = timeline_rows.iter().flat_map(|item| item.leaves())
+                    .filter_map(|item| match item {
+                        transcript::ConversationItem::Message(message)
+                            if field(message, "taskId") == task_id =>
+                            transcript::context_compaction_boundary_at(message),
+                        _ => None,
+                    }).max();
                 for (index, item) in source_rows.iter().copied() {
                     let events: Vec<Rc<Value>> = match item {
                         transcript::ConversationItem::Activity(event) => vec![event.clone()],
@@ -2964,7 +2971,9 @@ impl Render for ChatPane {
                         _ => None,
                     };
                     if let Some((events, mode)) = group {
-                        let running = field(task, "status") == "running";
+                        let running = transcript::context_compaction_running(
+                            field(task, "status") == "running", events, latest_input_at,
+                        );
                         let entity = if let Some(entity) = self.grouped_rows.get(&key) {
                             entity.clone()
                         } else {
@@ -3773,7 +3782,7 @@ impl Render for ChatPane {
                         let disclosure=first.exchange_disclosure_key();
                         let disclosure_ids:Vec<_>=members.iter().map(|member|member.exchange_disclosure_key()).collect();
                         let expanded=disclosure_ids.iter().any(|id|peer_details_expanded.borrow().contains(id))||preview;
-                        let mut details=div().w_full().min_w_0().flex().flex_col().gap(px(12.));
+                        let mut details=agent_exchange::timeline(&disclosure);
                         let mut exchanges=Vec::new();
                         for member in members {
                             let (row,is_event)=match member{transcript::ConversationItem::Message(row)=>(row,false),transcript::ConversationItem::Activity(row)=>(row,true),_=>{if expanded {details=details.child(render_item(member,true,cx));} continue;}};

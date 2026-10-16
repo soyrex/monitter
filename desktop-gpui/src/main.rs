@@ -152,6 +152,8 @@ mod visual_export;
 mod performance_metrics;
 #[cfg(feature = "performance-profiling")]
 mod performance_scenario;
+#[cfg(feature = "performance-profiling")]
+mod surface_preview;
 mod workspace;
 use transcript::TranscriptState;
 use workspace::WorkspacePane;

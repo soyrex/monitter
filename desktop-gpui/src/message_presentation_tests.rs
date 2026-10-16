@@ -143,7 +143,7 @@ fn assert_grouped_exchange_presentation(cx: &mut TestAppContext, theme: &str, ac
     let base=1_760_000_000_000_i64;
     let snapshot=Rc::new(json!({"settings":{"theme":theme},
         "tasks":[{"id":"group-task","agentId":"main","title":"Grouped exchanges","provider":"codex","status":"idle","queue":[]},{"id":"peer-task","agentId":"peer","title":"Real recorded peer","status":"idle"}],
-        "agents":[{"id":"main","name":"Main","provider":"codex"},{"id":"peer","name":"Codex","provider":"codex"}],
+        "agents":[{"id":"main","name":"Main","provider":"codex"},{"id":"peer","name":"Codex recorded peer","provider":"codex"}],
         "messages":[
             {"id":"first","taskId":"group-task","role":"user","senderAgentId":"peer","collaborationId":"c1","createdAt":base,"text":"First **recorded** delivery.","attachments":[{"id":"file","name":"Recorded.txt","mimeType":"text/plain","size":42}]},
             {"id":"second","taskId":"group-task","role":"system","collaborationId":"c2","createdAt":base+2000,"text":"Second recorded reply."},
@@ -206,7 +206,7 @@ fn assert_grouped_exchange_presentation(cx: &mut TestAppContext, theme: &str, ac
         assert!((dot.left() - assistant.left()).abs() <= px(0.5), "assistant bubble aligns with first circle pixel");
         assert!((dot.left() - origin.left()).abs() <= px(0.5), "assistant avatar/name row shares dot inset");
         assert!(visual.debug_bounds(if activity {"exchange-direction-tool-group:cluster-tool-mixed"}else{"exchange-direction-first-mixed"}).is_some());
-        let label=if activity {"exchange-peer-tool-group:cluster-tool-Agent activity · 1 tool · 2 exchanges"}else{"exchange-peer-first-Codex · 2 exchanges"};
+        let label=if activity {"exchange-peer-tool-group:cluster-tool-Agent activity · 1 tool · 2 exchanges"}else{"exchange-peer-first-Codex recorded peer · 2 exchanges"};
         assert!(visual.debug_bounds(label).is_some(),"cluster summary reports observed activity without assigning tools to a peer");
         assert!(visual.debug_bounds("message-body-first").is_none());
         let toggle=visual.debug_bounds(toggle_selector).unwrap();
@@ -223,12 +223,37 @@ fn assert_grouped_exchange_presentation(cx: &mut TestAppContext, theme: &str, ac
             let body=visual.debug_bounds(selector).unwrap_or_else(||panic!("{theme}/{width}: recorded content missing: {selector}"));
             assert!(body.size.height>px(0.));assert!(body.left()>=px(0.)&&body.right()<=px(width));
         }
+        let expanded_group = visual.debug_bounds(group_selector).unwrap();
+        let timeline = visual.debug_bounds(if activity {"exchange-timeline-tool-group:cluster-tool"} else {"exchange-timeline-first"}).expect("one shared timeline container");
+        let rail = visual.debug_bounds(if activity {"exchange-rail-tool-group:cluster-tool"} else {"exchange-rail-first"}).expect("one uninterrupted group rail");
+        let expanded_toggle = visual.debug_bounds(toggle_selector).unwrap();
+        let inset = design::ui_scaled_px(12.);
+        assert!(timeline.left() - expanded_group.left() >= inset, "{theme}/{width}: expanded contents need left breathing room");
+        assert!(expanded_group.right() - timeline.right() >= inset, "{theme}/{width}: expanded contents need right breathing room");
+        assert!(timeline.top() - expanded_toggle.bottom() >= design::ui_scaled_px(10.), "{theme}/{width}: timeline clears the summary");
+        assert!(expanded_group.bottom() - timeline.bottom() >= inset, "{theme}/{width}: final content clears the box bottom");
+        assert!((rail.bottom() - timeline.bottom()).abs() <= px(0.5), "{theme}/{width}: shared rail continues through member bodies and gaps");
+        for (id, member_selector, heading_selector, dot_selector) in [
+            ("first", "exchange-member-first", "exchange-member-heading-first", "exchange-member-dot-first"),
+            ("route", "exchange-member-route", "exchange-member-heading-route", "exchange-member-dot-route"),
+            ("second", "exchange-member-second", "exchange-member-heading-second", "exchange-member-dot-second"),
+        ] {
+            let member = visual.debug_bounds(member_selector).unwrap();
+            let heading = visual.debug_bounds(heading_selector).expect("rendered first-line heading");
+            let dot = visual.debug_bounds(dot_selector).expect("rendered timeline dot");
+            assert!((dot.center().x - rail.center().x).abs() <= px(0.5), "{theme}/{width}: {id} dot stays centered on rail");
+            assert!((dot.center().y - heading.top() - design::ui_scaled_px(9.)).abs() <= px(0.5), "{theme}/{width}: {id} dot aligns with the first heading line, including wrapped headings");
+            assert!(rail.top() <= dot.center().y && rail.bottom() >= member.bottom(), "{theme}/{width}: rail spans every member without a gap");
+            assert!(member.left() >= timeline.left() && member.right() <= timeline.right() + px(0.5), "{theme}/{width}: timeline preserves member width inside the inset");
+            if width == 360. && id == "first" {
+                assert!(heading.size.height > design::ui_scaled_px(18.), "narrow fixture exercises an actual wrapped heading");
+            }
+        }
         if activity {
             let turn=visual.debug_bounds("run-group-cluster-tool").expect("real nested tool turn is mounted");
-            let dot = visual.debug_bounds("exchange-leading-dot-tool-group:cluster-tool").unwrap();
             let leading = visual.debug_bounds("run-leading-cluster-tool").expect("nested tool-turn icon");
             let caret = visual.debug_bounds("run-caret-cluster-tool").expect("nested trailing caret");
-            assert!((leading.left() - dot.left()).abs() <= px(0.5), "nested tool icon aligns with outer activity circle: {leading:?} vs {dot:?}");
+            assert!((leading.center().x - rail.center().x).abs() <= px(0.5), "nested tool icon centers on the inset activity rail: {leading:?} vs {rail:?}");
             assert!(caret.left() > leading.right(), "nested disclosure caret is on the right");
             assert!((caret.right() - turn.right()).abs() <= px(0.5), "nested caret stays at row's right edge");
             visual.simulate_click(gpui_kit::point(turn.left()+px(20.),turn.top()+px(12.)),Default::default());draw(visual);

@@ -120,8 +120,15 @@ Popup headers use a concise title, a muted explanatory subtitle, and one
 full-width divider before the content. Use the shared `.header(title, subtitle)`
 API; keep the divider outside body padding and action-list scrolling.
 Transparent menus also blur underlying in-app text; capture once before opening,
-share it across nested popups, and release it after the last popup closes. Native
-window vibrancy blurs the desktop behind translucent panes.
+share it across nested popups, and release it after the last popup closes. The
+current captured in-app backdrop and renderer blur paths are macOS-only; other
+renderers retain the popup tint. Behind-window blur is a separate native effect:
+both translucent window modes request GPUI `Blurred` on every platform. macOS
+uses AppKit vibrancy, Windows requests acrylic on supported Windows versions,
+and Wayland requests blur only when the compositor advertises the KWin blur
+protocol. X11 and Wayland without that protocol retain alpha transparency without
+a blur guarantee. System/compositor settings can further limit native effects.
+Windows and Linux blur behavior has not been runtime verified.
 
 ## Buttons and menus
 

@@ -1965,7 +1965,7 @@ fn handle_notification_with_trace(
                     }
                 }
                 control.observe_runtime_command(item);
-                let parsed = parse_item(item, true);
+                let parsed = parse_item_in_turn(item, true, turn_id);
                 if parsed
                     .event
                     .as_ref()
@@ -2131,7 +2131,7 @@ fn handle_notification_with_trace(
                         item.clone()
                     };
                     control.observe_runtime_command(item);
-                    let parsed = parse_item(&safe_item, false);
+                    let parsed = parse_item_in_turn(&safe_item, false, turn_id);
                     if parsed
                         .event
                         .as_ref()
@@ -2306,6 +2306,24 @@ fn finish_request(lifecycle: &Mutex<RequestLifecycle>, rpc_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The notification's fenced provider turn is authoritative; item IDs may be
+/// reused in a later turn. Keep that scope with compaction's durable lifecycle.
+fn parse_item_in_turn(item: &Value, started: bool, turn_id: &str) -> Parsed {
+    let mut parsed = parse_item(item, started);
+    if item.get("type").and_then(Value::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("ContextCompaction"))
+        && !turn_id.trim().is_empty()
+    {
+        if let Some((_, _, detail)) = parsed.event.as_mut() {
+            if let Ok(mut value) = serde_json::from_str::<Value>(detail) {
+                value["monitterTurnId"] = json!(turn_id);
+                *detail = value.to_string();
+            }
+        }
+    }
+    parsed
+}
+
 fn parse_item(item: &Value, started: bool) -> Parsed {
     let ty = item.get("type").and_then(Value::as_str).unwrap_or("");
     if let Some(redacted) = crate::mail_triage::redacted_tool_event(item) {
@@ -2371,15 +2389,7 @@ fn parse_item(item: &Value, started: bool) -> Parsed {
             };
         }
     }
-    let title = item
-        .get("tool")
-        .or_else(|| item.get("command"))
-        .and_then(Value::as_str)
-        .unwrap_or(ty)
-        .to_owned();
-    // Context compaction arrives as separate lifecycle items. Preserve that
-    // phase so the UI never has to infer success from a task becoming idle.
-    let detail = if ty.eq_ignore_ascii_case("ContextCompaction") {
+    if ty.eq_ignore_ascii_case("ContextCompaction") {
         let mut detail = item.clone();
         if let Some(object) = detail.as_object_mut() {
             object.insert(
@@ -2387,10 +2397,25 @@ fn parse_item(item: &Value, started: bool) -> Parsed {
                 Value::String(if started { "started" } else { "completed" }.into()),
             );
         }
-        detail.to_string()
-    } else {
-        item.to_string()
-    };
+        return Parsed {
+            native_session_id: None,
+            assistant: None,
+            // Keep the existing wire kind for mobile/shared clients. Native
+            // presentation treats this lifecycle separately from tool work.
+            event: Some((
+                "tool".into(),
+                if started { "Compacting context" } else { "Context compacted" }.into(),
+                detail.to_string(),
+            )),
+            failed: false,
+        };
+    }
+    let title = item
+        .get("tool")
+        .or_else(|| item.get("command"))
+        .and_then(Value::as_str)
+        .unwrap_or(ty)
+        .to_owned();
     Parsed {
         native_session_id: None,
         assistant: None,
@@ -2402,7 +2427,7 @@ fn parse_item(item: &Value, started: bool) -> Parsed {
             }
             .into(),
             title,
-            detail,
+            item.to_string(),
         )),
         failed: false,
     }
@@ -3412,15 +3437,19 @@ mod tests {
 
     #[test]
     fn context_compaction_keeps_its_native_id_and_lifecycle_phase() {
-        let item = json!({"type":"ContextCompaction","id":"compact-1"});
-        for (started, phase) in [(true, "started"), (false, "completed")] {
-            let parsed = parse_item(&item, started);
-            let event = parsed.event.expect("compaction is activity");
-            assert_eq!(event.0, "tool");
-            assert_eq!(event.1, "ContextCompaction");
-            let detail: Value = serde_json::from_str(&event.2).expect("JSON detail");
-            assert_eq!(detail["id"], "compact-1");
-            assert_eq!(detail["monitterPhase"], phase);
+        for item_type in ["ContextCompaction", "contextCompaction"] {
+            let item = json!({"type":item_type,"id":"compact-1"});
+            for (started, phase) in [(true, "started"), (false, "completed")] {
+                let parsed = parse_item_in_turn(&item, started, "turn-1");
+                let event = parsed.event.expect("compaction is activity");
+                assert_eq!(event.0, "tool");
+                assert_eq!(event.1, if started { "Compacting context" } else { "Context compacted" });
+                let detail: Value = serde_json::from_str(&event.2).expect("JSON detail");
+                assert_eq!(detail["id"], "compact-1");
+                assert_eq!(detail["monitterPhase"], phase);
+                assert_eq!(detail["type"], item_type);
+                assert_eq!(detail["monitterTurnId"], "turn-1");
+            }
         }
     }
 

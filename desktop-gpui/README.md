@@ -57,8 +57,13 @@ Current host verification: 352 GUI tests and five isolation tests passed, and
 Svelte/TypeScript checking completed with zero errors (24 warnings). The latest
 portable-startup changes also pass macOS Cargo checking. Linux compilation and a
 live Omarchy run have not yet been verified. Embedded browser and native microphone
-capture remain macOS-only; Hyprland wallpaper capture and macOS-native blur/edge
-features are not implemented on Linux. Older package/PID reports below are historical.
+capture remain macOS-only; Hyprland wallpaper capture, captured in-app blur,
+and macOS-native edge features are not implemented on Linux. The shared window
+surface mapping requests native blur on every platform: AppKit vibrancy on macOS,
+acrylic on supported Windows versions, and KWin blur on Wayland when the compositor
+advertises that protocol. X11 and Wayland without that protocol retain alpha
+transparency without a blur guarantee. Windows/Linux runtime blur remains
+unverified. Older package/PID reports below are historical.
 
 ## Shared design language and chat refinement (2026-10-07, partial native review)
 

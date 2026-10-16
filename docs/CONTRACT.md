@@ -1381,9 +1381,27 @@ explicitly imported outcomes by case and repeat IDs with caller-supplied evidenc
 observed quality, cost and latency. Synthetic fixtures establish code behavior, not live model quality.
 The ACP route receipt also distinguishes a requested model from an acknowledged model change,
 an already active model, and unsupported, rejected, or unconfirmed model requests.
-Codex `ContextCompaction` tool detail preserves its native `id` plus
-`monitterPhase:"started"|"completed"`. The UI may show a duration only for a matching pair;
-an interrupted or legacy lone record remains neutral rather than being described as completed.
+Codex `ContextCompaction` remains a `tool` wire event for client compatibility,
+with readable `Compacting context` / `Context compacted` titles. Its detail preserves
+the native `type`, `id`, and `monitterPhase:"started"|"completed"`; new live
+notifications also retain `monitterTurnId` from the fenced provider turn. Both
+lifecycle records remain durable with their original event IDs. GPUI matches by
+task, provider turn and native item ID, allowing a lifecycle to cross mid-turn
+steering input. Older unscoped records are partitioned by conversation input
+boundaries instead, including peer user deliveries; a new start after a completed
+legacy lifecycle starts a separate group. Reused native item IDs cannot join
+records across those scopes. Context rows stay outside ordinary tool counts and
+process blocks, and older raw `ContextCompaction` titles/details remain readable.
+The GUI has no authoritative active-provider-turn DTO: animation conservatively
+requires a running task and an explicit start strictly after the latest same-task
+person/peer user input, local system boundary, or completed local final answer.
+Missing or equal-timestamp boundary evidence stays neutral; peer result/output
+notices are not new inputs. Mid-turn steering can therefore neutralize animation
+without preventing an explicit provider-turn start/completion match. Completion
+requires an explicit completed phase, and duration requires matching scope and a
+nonnegative start-to-completion pair; duplicate notifications do not extend it.
+Interrupted or phase-less legacy records remain neutral. This fallback cannot
+identify a new automatic provider turn with no retained input/final boundary.
 
 `get_task_goal` performs only the Codex app-server initialize/initialized/thread/goal/get handshake,
 with bounded cleanup. It neither resumes nor changes a thread. A null result hides the panel; API

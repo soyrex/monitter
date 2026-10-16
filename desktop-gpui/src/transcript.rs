@@ -12,7 +12,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
 };
-pub(crate) use transcript_grouping::reasoning_summary;
+pub(crate) use transcript_grouping::{ContextCompaction, context_compaction, context_compaction_boundary_at, context_compaction_running, is_context_compaction, reasoning_summary};
 pub use transcript_grouping::{
     ApprovalRow, ConversationItem, NestedGroup, project as project_conversation,
     project_with_options as project_conversation_with_options,

@@ -358,7 +358,32 @@ fn context_compaction_id(event: &Value) -> Option<String> {
     Some(id.to_owned())
 }
 
-fn is_context_compaction(event: &Value) -> bool {
+fn context_compaction_turn(event: &Value) -> Option<String> {
+    parse_detail(&field(event, "detail"))
+        .and_then(|detail| detail["monitterTurnId"].as_str().map(str::to_owned))
+        .filter(|turn| !turn.trim().is_empty())
+}
+
+fn context_compaction_phase(event: &Value) -> Option<String> {
+    parse_detail(&field(event, "detail"))
+        .and_then(|detail| detail["monitterPhase"].as_str().map(str::to_owned))
+}
+
+/// Person and peer user inputs may start/steer a run. Local system notices
+/// and finished local answers are conservative boundaries too: the UI has no
+/// authoritative active-turn DTO. Peer result/output notices do not start turns.
+pub(crate) fn context_compaction_boundary_at(message: &Value) -> Option<i64> {
+    let local = field(message, "senderAgentId").is_empty()
+        && field(message, "collaborationId").is_empty();
+    (field(message, "role") == "user"
+        || (local && field(message, "role") == "system")
+        || (local && field(message, "role") == "assistant"
+            && field(message, "phase") == "final_answer"
+            && field(message, "streamStatus") != "streaming"))
+        .then(|| message["createdAt"].as_i64()).flatten()
+}
+
+pub(crate) fn is_context_compaction(event: &Value) -> bool {
     if normalize_compaction_label(&field(event, "title")) == "contextcompaction" {
         return true;
     }
@@ -370,6 +395,53 @@ fn is_context_compaction(event: &Value) -> bool {
         .map(normalize_compaction_label)
         .map(|label| label == "contextcompaction")
         .unwrap_or(false)
+}
+
+/// Explicit provider lifecycle, independent of a task later becoming idle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContextCompaction {
+    pub active: bool,
+    pub completed: bool,
+    pub duration_ms: Option<i64>,
+}
+
+pub(crate) fn context_compaction(events: &[Value], running: bool) -> Option<ContextCompaction> {
+    let first = events.first()?;
+    if !events.iter().all(is_context_compaction) { return None; }
+    let identity = context_compaction_id(first);
+    let same_identity = identity.is_some() && events.iter().all(|event|
+        field(event, "taskId") == field(first, "taskId")
+            && context_compaction_id(event) == identity
+            && context_compaction_turn(event) == context_compaction_turn(first));
+    let phase = context_compaction_phase;
+    let completed = events.iter().any(|event| phase(event).as_deref() == Some("completed"));
+    let started = events.iter().any(|event| phase(event).as_deref() == Some("started"));
+    let start = events.iter().filter(|event| phase(event).as_deref() == Some("started"))
+        .filter_map(|event| event["createdAt"].as_i64()).min();
+    // Repeated start/completion notifications do not inflate elapsed time.
+    // An inverted pair cannot establish a duration.
+    let end = start.and_then(|start| events.iter()
+        .filter(|event| phase(event).as_deref() == Some("completed"))
+        .filter_map(|event| event["createdAt"].as_i64())
+        .filter(|end| *end >= start).min());
+    Some(ContextCompaction {
+        active: running && same_identity && started && !completed,
+        completed,
+        duration_ms: if same_identity { start.zip(end).map(|(start, end)| end - start) } else { None },
+    })
+}
+
+/// Historical unmatched starts must not animate after later conversation input
+/// (including peer delivery) or a completed final answer. Missing scope is neutral.
+pub(crate) fn context_compaction_running(
+    running: bool,
+    events: &[Rc<Value>],
+    latest_input_at: Option<i64>,
+) -> bool {
+    running && (!events.iter().any(|event| is_context_compaction(event))
+        || latest_input_at.is_some_and(|input_at| events.first()
+            .and_then(|event| event["createdAt"].as_i64())
+            .is_some_and(|event_at| event_at > input_at)))
 }
 
 /// Displayable summary text for a reasoning event. Reasoning summaries may be
@@ -534,7 +606,7 @@ impl ConversationItem {
             Self::ToolGroup(values) | Self::ReasoningGroup(values) | Self::ProcessGroup { values, .. } => values,
             _ => return HashSet::new(),
         };
-        values.iter().filter(|row| matches!(field(row,"kind").as_str(),"tool" | "subagent"))
+        values.iter().filter(|row| matches!(field(row,"kind").as_str(),"tool" | "subagent") && !is_context_compaction(row))
             .filter(|row| !failed_only || parse_detail(&field(row,"detail")).is_some_and(|d| d["update"]["status"].as_str().or_else(||d["status"].as_str()) == Some("failed")))
             .map(|row| {
                 let detail = parse_detail(&field(row,"detail"));
@@ -828,8 +900,40 @@ pub fn projection_with_options<'a>(
     let display_ordered = reorder_final_answer(ordered);
 
     let mut grouped: Vec<ConversationItem> = Vec::new();
+    let mut compaction_positions: HashMap<(String, String, Option<String>, String), usize> = HashMap::new();
+    let mut compaction_boundaries: HashMap<String, String> = HashMap::new();
     for item in display_ordered {
+        if let OrderedItem::Message(message) = &item {
+            if context_compaction_boundary_at(message).is_some() {
+                compaction_boundaries.insert(field(message, "taskId"), field(message, "id"));
+            }
+        }
         match item {
+            OrderedItem::Activity(value) if is_context_compaction(&value) => {
+                let task_id = field(&value, "taskId");
+                let key = context_compaction_id(&value).map(|id| (
+                    task_id.clone(), id, context_compaction_turn(&value),
+                    if context_compaction_turn(&value).is_some() { String::new() }
+                    else { compaction_boundaries.get(&task_id).cloned().unwrap_or_default() },
+                ));
+                let existing = key.as_ref().and_then(|key| compaction_positions.get(key)).copied()
+                    .filter(|index| {
+                        // A new start after a completed legacy item is another
+                        // lifecycle even if the provider reused its native ID.
+                        context_compaction_turn(&value).is_some()
+                            || context_compaction_phase(&value).as_deref() != Some("started")
+                            || !matches!(&grouped[*index], ConversationItem::ToolGroup(values)
+                                if values.iter().any(|event| context_compaction_phase(event).as_deref() == Some("completed")))
+                    });
+                if let Some(index) = existing {
+                    if let Some(ConversationItem::ToolGroup(values)) = grouped.get_mut(index) {
+                        values.push(value);
+                    }
+                } else {
+                    if let Some(key) = key { compaction_positions.insert(key, grouped.len()); }
+                    grouped.push(ConversationItem::ToolGroup(vec![value]));
+                }
+            }
             OrderedItem::Activity(value) if field(&value, "kind") == "reasoning" => {
                 let previous = grouped.last();
                 if let Some(ConversationItem::ReasoningGroup(values)) = previous {
@@ -1073,6 +1177,10 @@ fn combine_process_groups(
                     builder.groups.push(NestedGroup::Reasoning(values.clone()));
                     builder.values.extend(values);
                 }
+            }
+            ConversationItem::ToolGroup(values) if values.iter().any(|event| is_context_compaction(event)) => {
+                flush(&mut pending, &mut result, compress_tools);
+                result.push(ConversationItem::ToolGroup(values));
             }
             ConversationItem::ToolGroup(values) => {
                 let task_id = first_task(&values);
@@ -2024,6 +2132,164 @@ mod tests {
                 );
             }
             other => panic!("expected tool-group, found {other:?}"),
+        }
+    }
+
+    fn compaction_event(id: &str, native: &str, phase: Option<&str>, at: i64) -> Value {
+        event(id, "tool", "task-1", at, "ContextCompaction",
+            &json!({"type":"contextCompaction","id":native,"monitterPhase":phase}).to_string())
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_is_separate_from_tool_processes_in_both_compression_modes() {
+        for compress in [true, false] {
+            let rows = vec![
+                row_event(event("reason", "reasoning", "task-1", 1, "Thinking", "Planning")),
+                row_event(event("tool", "tool", "task-1", 2, "Read", "{\"kind\":\"read\"}")),
+                row_event(compaction_event("start", "c1", Some("started"), 3)),
+                row_event(compaction_event("end", "c1", Some("completed"), 4)),
+                row_event(event("next", "tool", "task-1", 5, "Read", "{\"kind\":\"read\"}")),
+            ];
+            let items = projection_with_options(&rows, &[], compress);
+            assert_eq!(items.len(), 3);
+            assert!(matches!(&items[0], ConversationItem::ProcessGroup { .. }));
+            assert!(matches!(&items[1], ConversationItem::ToolGroup(values) if values.len() == 2));
+            assert!(items[1].activity_tool_keys().is_empty());
+            assert_eq!(visible_event_ids(&items).len(), 5);
+            assert_eq!(items[1].stable_key(), "tool-group:start");
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_completion_matches_across_intervening_activity_with_stable_ids() {
+        let rows = vec![
+            row_event(compaction_event("start", "c1", Some("started"), 1_000)),
+            row_event(event("tool", "tool", "task-1", 2_000, "Read", "{}")),
+            row_event(compaction_event("end", "c1", Some("completed"), 4_000)),
+        ];
+        let items = projection_with_options(&rows, &[], false);
+        assert_eq!(items.len(), 2);
+        let ConversationItem::ToolGroup(values) = &items[0] else { panic!("compaction group"); };
+        assert_eq!(values.iter().map(|event| field(event, "id")).collect::<Vec<_>>(), vec!["start", "end"]);
+        let values: Vec<_> = values.iter().map(|event| (**event).clone()).collect();
+        assert!(!context_compaction(&values, true).unwrap().active);
+        assert_eq!(items[0].stable_key(), "tool-group:start");
+        assert_eq!(visible_event_ids(&items).len(), 3);
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_lifecycle_handles_duplicates_and_out_of_order_notifications() {
+        let start = compaction_event("s1", "c1", Some("started"), 1_000);
+        assert_eq!(context_compaction(&[start.clone()], true), Some(ContextCompaction {
+            active: true, completed: false, duration_ms: None,
+        }));
+        let end = compaction_event("e1", "c1", Some("completed"), 4_000);
+        let duplicate_start = compaction_event("s2", "c1", Some("started"), 2_000);
+        let duplicate_end = compaction_event("e2", "c1", Some("completed"), 5_000);
+        assert_eq!(context_compaction(&[end.clone(), duplicate_start, start.clone(), duplicate_end], true), Some(ContextCompaction {
+            active: false, completed: true, duration_ms: Some(3_000),
+        }));
+        let inverted_end = compaction_event("early", "c1", Some("completed"), 500);
+        assert_eq!(context_compaction(&[inverted_end, start.clone()], true).unwrap().duration_ms, None);
+        assert_eq!(context_compaction(&[end], false).unwrap(), ContextCompaction {
+            active: false, completed: true, duration_ms: None,
+        });
+        assert_eq!(context_compaction(&[start], false).unwrap(), ContextCompaction {
+            active: false, completed: false, duration_ms: None,
+        });
+        let legacy = compaction_event("legacy", "c1", None, 1_000);
+        assert_eq!(context_compaction(&[legacy], true).unwrap(), ContextCompaction {
+            active: false, completed: false, duration_ms: None,
+        });
+        let mismatch = compaction_event("other", "c2", Some("completed"), 4_000);
+        assert_eq!(context_compaction(&[compaction_event("s", "c1", Some("started"), 1_000), mismatch], true).unwrap().duration_ms, None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_animation_requires_the_current_user_turn() {
+        let events = vec![Rc::new(compaction_event("s", "c1", Some("started"), 1_000))];
+        assert!(context_compaction_running(true, &events, Some(900)));
+        assert!(!context_compaction_running(true, &events, Some(1_001)));
+        assert!(!context_compaction_running(true, &events, None));
+        assert!(!context_compaction_running(false, &events, Some(900)));
+        let tool = vec![Rc::new(event("tool", "tool", "task-1", 1, "Read", "{}"))];
+        assert!(context_compaction_running(true, &tool, Some(2_000)));
+    }
+
+    fn scoped_compaction(id: &str, phase: &str, at: i64, turn: &str) -> Value {
+        let mut event = compaction_event(id, "reused-item", Some(phase), at);
+        let mut detail = parse_detail(&field(&event, "detail")).unwrap();
+        detail["monitterTurnId"] = json!(turn);
+        event["detail"] = json!(detail.to_string());
+        event
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_peer_input_starts_current_scope_and_retires_prior_peer_scope() {
+        let peer = json!({"role":"user","senderAgentId":"peer","collaborationId":"delivery-1","createdAt":100});
+        let old_start = vec![Rc::new(compaction_event("old", "native-1", Some("started"), 110))];
+        assert_eq!(context_compaction_boundary_at(&peer), Some(100));
+        assert!(context_compaction_running(true, &old_start, context_compaction_boundary_at(&peer)));
+        let next_peer = json!({"role":"user","senderAgentId":"peer","collaborationId":"delivery-2","createdAt":200});
+        assert!(!context_compaction_running(true, &old_start, context_compaction_boundary_at(&next_peer)));
+        let current = vec![Rc::new(compaction_event("current", "native-2", Some("started"), 210))];
+        assert!(context_compaction_running(true, &current, context_compaction_boundary_at(&next_peer)));
+        assert!(!context_compaction_running(true, &old_start, Some(110)), "timestamp ties cannot prove ordering");
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_local_final_is_boundary_but_peer_output_is_not() {
+        let local_final = json!({"role":"assistant","phase":"final_answer","streamStatus":"complete","createdAt":200});
+        assert_eq!(context_compaction_boundary_at(&local_final), Some(200));
+        let old_start = vec![Rc::new(compaction_event("old", "native", Some("started"), 110))];
+        assert!(!context_compaction_running(true, &old_start, context_compaction_boundary_at(&local_final)));
+        for role in ["assistant", "system"] {
+            let output = json!({"role":role,"phase":"final_answer","streamStatus":"complete","senderAgentId":"peer","collaborationId":"delivery","createdAt":200});
+            assert_eq!(context_compaction_boundary_at(&output), None);
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_native_item_reuse_is_partitioned_by_provider_turn_or_legacy_input() {
+        let scoped_rows = vec![
+            row_event(scoped_compaction("old", "started", 10, "turn-1")),
+            row_event(scoped_compaction("new", "completed", 20, "turn-2")),
+        ];
+        let items = projection(&scoped_rows, &[]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].stable_key(), "tool-group:old");
+        assert_eq!(items[1].stable_key(), "tool-group:new");
+        let legacy_rows = vec![
+            row_event(compaction_event("old", "reused", Some("started"), 10)),
+            TimelineRow::Message(Rc::new(json!({"id":"next-input","taskId":"task-1","role":"user","senderAgentId":"peer","createdAt":15}))),
+            row_event(compaction_event("new", "reused", Some("completed"), 20)),
+        ];
+        let items = projection(&legacy_rows, &[]);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].stable_key(), "tool-group:old");
+        assert_eq!(items[2].stable_key(), "tool-group:new");
+        let rows = vec![
+            row_event(compaction_event("s1", "reused", Some("started"), 10)),
+            row_event(compaction_event("e1", "reused", Some("completed"), 20)),
+            row_event(compaction_event("s2", "reused", Some("started"), 30)),
+        ];
+        assert_eq!(projection(&rows, &[]).len(), 2, "a completed legacy lifecycle cannot swallow a new start");
+    }
+
+    #[::core::prelude::v1::test]
+    fn compaction_scoped_lifecycle_pairs_across_person_or_peer_steering() {
+        for sender in [Value::Null, json!("peer")] {
+            let rows = vec![
+                row_event(scoped_compaction("start", "started", 10, "turn-1")),
+                TimelineRow::Message(Rc::new(json!({"id":"steering","taskId":"task-1","role":"user","senderAgentId":sender,"createdAt":15}))),
+                row_event(scoped_compaction("end", "completed", 20, "turn-1")),
+            ];
+            let items = projection(&rows, &[]);
+            assert_eq!(items.len(), 2);
+            let ConversationItem::ToolGroup(values) = &items[0] else { panic!("compaction group"); };
+            assert_eq!(values.len(), 2);
+            let events: Vec<_> = values.iter().map(|event| (**event).clone()).collect();
+            assert_eq!(context_compaction(&events, false).unwrap().duration_ms, Some(10));
         }
     }
 
